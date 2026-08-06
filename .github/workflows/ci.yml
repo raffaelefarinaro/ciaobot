@@ -83,6 +83,16 @@ jobs:
         targets: aarch64-apple-darwin,x86_64-apple-darwin
         components: rustfmt,clippy
 
+    - name: Build native sidecar
+      working-directory: desktop
+      # Must run before any cargo invocation: tauri.conf.json declares the
+      # sidecar as an externalBin, so the build script fails with "resource
+      # path ... doesn't exist" if the binary is absent. `npm run tauri build`
+      # below builds it via the pretauri hook, but clippy/fmt/test call cargo
+      # directly and would never trigger it. The binaries are gitignored
+      # because they are build output.
+      run: npm run build:native
+
     - name: Check desktop Rust formatting
       working-directory: desktop/src-tauri
       run: cargo fmt --check

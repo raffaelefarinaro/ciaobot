@@ -624,18 +624,12 @@ def rollback_legacy_companion(
             original_app.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(backup_app), str(original_app))
 
-        resolved_uid = os.getuid() if uid is None else uid
-        enabled = _launchctl(
-            ["enable", f"gui/{resolved_uid}/{LEGACY_MENUBAR_LABEL}"],
-            runner=runner,
-        )
-        if enabled.returncode != 0:
-            raise OSError(_command_error(enabled) or "launchctl enable failed")
-        if original_plist is not None and original_plist.is_file():
-            _launchctl(
-                ["bootstrap", f"gui/{resolved_uid}", str(original_plist)],
-                runner=runner,
-            )
+        # Deliberately not re-registering the menu-bar LaunchAgent. Its
+        # ProgramArguments exec `ciao menubar`, and both that subcommand and the
+        # rumps helper behind it were deleted in this release -- bootstrapping
+        # it would leave launchd retrying a command that exits non-zero forever.
+        # Rollback still restores the files from the backup so nothing is lost;
+        # only the agent is left unloaded.
     except OSError as exc:
         return ServiceResult(False, "rollback", str(exc), asdict(runtime))
     return ServiceResult(

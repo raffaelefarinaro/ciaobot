@@ -12,7 +12,7 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. When the real Tauri `Ciaobot.app` is installed, setup does not generate or load the legacy rumps agent or `Ciaobot Server.app`; package-only installs retain those assets for the migration/rollback window. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
+`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. Setup no longer generates the retired rumps agent or `Ciaobot Server.app`; it removes them when an older install left them behind. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
 Provider settings for custom compatible endpoints are persisted in the tracked workspace file `.ciao/custom_providers.json`; bearer tokens are kept separately in the gitignored `.runtime/custom_provider_tokens.json` and are never committed or returned by the API. Focused provider tests belong in `tests/test_custom_providers.py`.
 
@@ -104,13 +104,23 @@ npm run build        # typecheck + Vite build, outputs to ciao/web/static/
 
 ## macOS desktop development
 
-The Tauri 2 shell requires macOS 13+, Node 22.x, and Rust 1.90.0 with
-`aarch64-apple-darwin` and `x86_64-apple-darwin` targets:
+The Tauri 2 shell requires macOS 13+, Node 22.x, Rust 1.90.0 with
+`aarch64-apple-darwin` and `x86_64-apple-darwin` targets, and `swiftc` from the
+Xcode Command Line Tools (it builds the `ciaobot-native` sidecar).
+
+`./scripts/check-desktop.sh` runs the whole gate — the same commands CI's
+`build-desktop` job does — and asserts the sidecar ends up bundled, universal,
+signed, and runnable inside the built app. Run it after any change under
+`desktop/`; `--fast` skips the bundle build when you have not touched
+`desktop/native/` or `tauri.conf.json`. `prepare-release` runs it too.
+
+The individual steps, if you need them separately:
 
 ```bash
 cd desktop
 npm ci
-npm run build
+npm run build            # desktop frontend (vite) only
+npm run build:native     # Swift sidecar -> src-tauri/binaries/ (also runs via pretauri)
 cd src-tauri
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings

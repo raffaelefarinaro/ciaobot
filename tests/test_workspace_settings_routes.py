@@ -385,31 +385,30 @@ def test_provider_config_status_and_write_only_patch(tmp_path, monkeypatch):
     monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
     env_path = tmp_path / ".env"
     env_path.write_text(
-        "PWA_AUTH_TOKEN=t\nCIAO_PUSH_CONTACT=mailto:owner@example.com\nANTHROPIC_API_KEY=sk-anthropic\nOPENAI_API_KEY=old\n",
+        "PWA_AUTH_TOKEN=t\nCIAO_PUSH_CONTACT=mailto:owner@example.com\nANTHROPIC_API_KEY=sk-anthropic\n",
         encoding="utf-8",
     )
     client, _config, _pcm = _client(
         tmp_path,
         {
             "ANTHROPIC_API_KEY": "sk-anthropic",
-            "OPENAI_API_KEY": "old",
             "CIAO_OLLAMA_API_KEY": "",
         },
     )
 
     data = client.get("/api/settings/providers").json()
     assert "ANTHROPIC_API_KEY" not in data["keys"]
-    assert data["service_keys"]["OPENAI_API_KEY"]["configured"] is True
+    # service_keys is empty since voice moved on-device: OPENAI_API_KEY was
+    # the only entry, and nothing in the app reads it any more.
+    assert data["service_keys"] == {}
     assert data["keys"]["CIAO_OLLAMA_API_KEY"]["configured"] is False
     assert data["auto_update_github_skills"] is False
     assert "sk-anthropic" not in json.dumps(data)
-    assert "OPENAI_API_KEY=old" not in json.dumps(data)
 
     resp = client.patch(
         "/api/settings/providers",
         json={
             "keys": {
-                "OPENAI_API_KEY": "",
                 "CIAO_OLLAMA_API_KEY": "sk-ollama",
                 "UNSUPPORTED_KEY": "nope",
             }
@@ -421,13 +420,12 @@ def test_provider_config_status_and_write_only_patch(tmp_path, monkeypatch):
     resp = client.patch(
         "/api/settings/providers",
         json={
-            "keys": {"OPENAI_API_KEY": "", "CIAO_OLLAMA_API_KEY": "sk-ollama"},
+            "keys": {"CIAO_OLLAMA_API_KEY": "sk-ollama"},
             "auto_update_github_skills": False
         },
     )
     assert resp.status_code == 200
     env_text = env_path.read_text(encoding="utf-8")
-    assert "OPENAI_API_KEY=" not in env_text
     assert "CIAO_OLLAMA_API_KEY=sk-ollama" in env_text
     assert "CIAO_AUTO_UPDATE_GITHUB_SKILLS=false" in env_text
     assert "sk-ollama" not in json.dumps(resp.json())

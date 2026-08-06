@@ -309,6 +309,28 @@ describe('client host connection failures', () => {
     expect(store.hostConnectionUnavailable).toBe(false)
   })
 
+  test('a successful poll clears the host-unreachable banner', async () => {
+    // The banner was only cleared from a chat WebSocket frame. If the socket
+    // stayed down (or no chat was open) after the host came back, "Can't reach
+    // the host" sat on screen over a working connection until a page reload.
+    // syncLatest is proxied to the host, so a 200 is proof it is reachable.
+    const store = useProjectStore()
+    const chatId = 'c-recovers'
+    store.activeChatId = chatId
+    store.messages[chatId] = []
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'host_unreachable' }),
+    })
+    expect(store.hostConnectionUnavailable).toBe(true)
+
+    apiGet.mockResolvedValueOnce([])   // /api/chats answered by the host
+    await store.syncLatest()
+
+    expect(store.hostConnectionUnavailable).toBe(false)
+  })
+
   test('treats the legacy generic event as the same single connection state', () => {
     const store = useProjectStore()
     const chatId = 'c-client-legacy'

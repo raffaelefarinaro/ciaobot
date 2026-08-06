@@ -19,32 +19,72 @@ class FakeProcess:
 
 
 @pytest.mark.asyncio
-async def test_generate_chat_title_via_apfel_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that _generate_chat_title succeeds when apfel is installed and works."""
-    monkeypatch.setattr(shutil, "which", lambda cmd: "/opt/homebrew/bin/apfel" if cmd == "apfel" else None)
+@pytest.mark.parametrize("model", ["apple", "apfel"])
+async def test_generate_chat_title_on_device_success(
+    monkeypatch: pytest.MonkeyPatch, model: str
+) -> None:
+    """The on-device model titles the chat when it is the selected engine.
 
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        assert args[0] == "apfel"
-        assert "-q" in args
-        assert "-s" in args
-        return FakeProcess(0, b"   Test Title Generated   \n", b"")
+    Both ids are accepted: "apfel" is the legacy value still stored in settings
+    saved before titles moved off the apfel CLI to FoundationModels.
+    """
+    from ciao import native_sidecar
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
 
-    # apfel is opt-in: it only runs when explicitly selected as the title model.
-    title = await _generate_chat_title("hello world", assistant_text="", model="apfel")
+    captured: dict[str, str] = {}
+
+    async def fake_respond(prompt, *, instructions="", timeout=0):
+        captured["prompt"] = prompt
+        captured["instructions"] = instructions
+        return "   Test Title Generated   \n"
+
+    monkeypatch.setattr(native_sidecar, "respond", fake_respond)
+
+    title = await _generate_chat_title("hello world", assistant_text="", model=model)
     assert title == "Test Title Generated"
+    assert "hello world" in captured["prompt"]
+    # The titling system prompt has to reach the model, or it answers the
+    # excerpt instead of naming it.
+    assert "titling function" in captured["instructions"]
 
 
 @pytest.mark.asyncio
-async def test_generate_chat_title_via_apfel_failure_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that _generate_chat_title falls back when apfel exits with non-zero."""
-    monkeypatch.setattr(shutil, "which", lambda cmd: "/opt/homebrew/bin/apfel" if cmd == "apfel" else None)
+async def test_generate_chat_title_skips_on_device_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apple Intelligence off / older macOS: fall through, never call the sidecar."""
+    from ciao import native_sidecar
 
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        return FakeProcess(1, b"", b"Model not ready")
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: False)
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    async def explode(*args, **kwargs):
+        raise AssertionError("must not run the sidecar when it is unavailable")
+
+    monkeypatch.setattr(native_sidecar, "respond", explode)
+
+    async def fake_oneshot(*args, **kwargs):
+        return "Cloud Title"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    title = await _generate_chat_title("hello world", assistant_text="", model="apple")
+    assert title == "Cloud Title"
+
+
+@pytest.mark.asyncio
+async def test_generate_chat_title_on_device_failure_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sidecar that errors mid-generation must not lose the title."""
+    from ciao import native_sidecar
+
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+
+    async def failing_respond(*args, **kwargs):
+        raise native_sidecar.SidecarError("the on-device model failed")
+
+    monkeypatch.setattr(native_sidecar, "respond", failing_respond)
 
     # Fail the provider one-shot too so it goes to deterministic fallback.
     async def fake_oneshot(*args, **kwargs):
@@ -52,41 +92,53 @@ async def test_generate_chat_title_via_apfel_failure_fallback(monkeypatch: pytes
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
-    title = await _generate_chat_title("This is a very long user message that should be truncated to some words", assistant_text="")
+    title = await _generate_chat_title(
+        "This is a very long user message that should be truncated to some words",
+        assistant_text="",
+        model="apple",
+    )
     # Deterministic fallback takes first ~6 words
     assert title == "This is a very long user"
 
 
 @pytest.mark.asyncio
-async def test_generate_chat_title_via_apfel_exception_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that _generate_chat_title falls back when apfel raise Exception."""
-    monkeypatch.setattr(shutil, "which", lambda cmd: "/opt/homebrew/bin/apfel" if cmd == "apfel" else None)
+async def test_generate_chat_title_on_device_crash_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even an unexpected exception (not SidecarError) must not escape."""
+    from ciao import native_sidecar
 
-    async def fake_create_subprocess_exec(*args, **kwargs):
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+
+    async def exploding_respond(*args, **kwargs):
         raise OSError("Permission denied")
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(native_sidecar, "respond", exploding_respond)
 
     async def fake_oneshot(*args, **kwargs):
         raise RuntimeError("provider unavailable")
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
-    title = await _generate_chat_title("How do I write Python unit tests?", assistant_text="")
+    title = await _generate_chat_title(
+        "How do I write Python unit tests?", assistant_text="", model="apple"
+    )
     assert title == "How do I write Python unit"
 
 
 @pytest.mark.asyncio
-async def test_generate_chat_title_apfel_selected_but_not_installed_falls_back_to_haiku(
+async def test_generate_chat_title_sentinel_never_reaches_the_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """"apfel" is a routing sentinel from the Settings picker (provider=apple),
-    not a real Claude/Ollama model id. When the binary isn't actually
-    installed, run_oneshot must never receive "apfel" literally — that always
-    fails with "There's an issue with the selected model (apfel)" and drops
-    straight to the raw-text truncated fallback title.
+    """"apple"/"apfel" are routing sentinels from the Settings picker, not real
+    Claude/Ollama model ids. When the on-device model is unavailable,
+    run_oneshot must never receive the sentinel literally — that always fails
+    with "There's an issue with the selected model" and drops straight to the
+    raw-text truncated fallback title.
     """
-    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    from ciao import native_sidecar
+
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: False)
 
     captured_model: list[str] = []
 

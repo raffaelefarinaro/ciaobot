@@ -14,7 +14,6 @@ from ciao.upgrade import (
     upgrade_claude_code,
     upgrade_codex,
     upgrade_gws,
-    upgrade_apfel,
     upgrade_root_npm,
     upgrade_scrapling,
     upgrade_web_npm,
@@ -143,7 +142,6 @@ async def test_upgrade_all_returns_none_when_nothing_changed(monkeypatch, tmp_pa
     monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_scrapling", AsyncMock(return_value=_UNCHANGED))
 
@@ -171,7 +169,6 @@ async def test_upgrade_all_reports_changes(monkeypatch, tmp_path, caplog) -> Non
     monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_scrapling", AsyncMock(return_value=_UNCHANGED))
 
@@ -203,7 +200,6 @@ async def test_upgrade_all_surfaces_silent_failures(monkeypatch, tmp_path, caplo
     monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_scrapling", AsyncMock(return_value=_UNCHANGED))
 
@@ -213,55 +209,6 @@ async def test_upgrade_all_surfaces_silent_failures(monkeypatch, tmp_path, caplo
     assert result is not None
     assert "claude: install failed" in result
     assert "claude upgrade failed" in caplog.text
-
-
-def test_upgrade_apfel_skips_when_brew_missing(monkeypatch) -> None:
-    monkeypatch.setattr("ciao.upgrade.shutil.which", lambda cmd: None)
-    result = asyncio.run(upgrade_apfel())
-    assert result.success is False
-    assert result.changed is False
-    assert "brew not found" in result.stderr
-
-
-def test_upgrade_apfel_runs_install_when_not_installed(monkeypatch) -> None:
-    # brew is found but apfel is not on PATH
-    monkeypatch.setattr("ciao.upgrade.shutil.which", lambda cmd: "/usr/local/bin/brew" if cmd == "brew" else None)
-    
-    async def mock_run_upgrade(install_command, version_command):
-        assert install_command == ["/usr/local/bin/brew", "install", "apfel"]
-        assert version_command == ["apfel", "--version"]
-        return UpgradeResult(
-            command=install_command, changed=True, success=True,
-            stdout="", stderr="", before_version="", after_version="1.5.2"
-        )
-    
-    monkeypatch.setattr("ciao.upgrade.run_upgrade", mock_run_upgrade)
-    result = asyncio.run(upgrade_apfel())
-    assert result.success is True
-    assert result.changed is True
-    assert result.after_version == "1.5.2"
-
-
-def test_upgrade_apfel_runs_upgrade_when_installed(monkeypatch) -> None:
-    # brew and apfel are both found on PATH
-    monkeypatch.setattr(
-        "ciao.upgrade.shutil.which",
-        lambda cmd: "/usr/local/bin/brew" if cmd == "brew" else ("/opt/homebrew/bin/apfel" if cmd == "apfel" else None)
-    )
-    
-    async def mock_run_upgrade(install_command, version_command):
-        assert install_command == ["/usr/local/bin/brew", "upgrade", "apfel"]
-        assert version_command == ["apfel", "--version"]
-        return UpgradeResult(
-            command=install_command, changed=False, success=True,
-            stdout="", stderr="", before_version="1.5.2", after_version="1.5.2"
-        )
-    
-    monkeypatch.setattr("ciao.upgrade.run_upgrade", mock_run_upgrade)
-    result = asyncio.run(upgrade_apfel())
-    assert result.success is True
-    assert result.changed is False
-    assert result.before_version == "1.5.2"
 
 
 def test_upgrade_scrapling_skips_when_not_installed(monkeypatch) -> None:

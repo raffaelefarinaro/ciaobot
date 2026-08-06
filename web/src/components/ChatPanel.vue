@@ -3184,6 +3184,22 @@ function handleKeydown(e: KeyboardEvent) {
       return
     }
   }
+  // Esc closes the chat from the composer. ChatLayout also binds Esc globally,
+  // but that handler is gated on the route, so closing from here means it works
+  // wherever the composer does. Losing the half-typed message is fine: drafts
+  // are persisted per chat and restored when it reopens. The slash-command
+  // picker above claims Esc first (and stops propagation) so it can dismiss
+  // itself without also closing the chat.
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    // Claim it: ChatLayout's global handler would otherwise close the chat a
+    // second time off the same press. Arrow keys already taught us what two
+    // listeners on one key costs.
+    e.stopPropagation()
+    emit('close')
+    return
+  }
+
   // Cmd+Enter (mac) / Ctrl+Enter (linux/win) sends the message. Bare Enter
   // inserts a newline: this avoids accidental sends, especially on phones
   // where Enter is the default virtual-keyboard action. Mid-stream sends are
