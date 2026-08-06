@@ -41,8 +41,7 @@ from ciao import desktop_build
 from ciao.package_version import (
     _github_repo,
     _release_page_request,
-    _tag_from_url,
-    latest_release_redirect_url,
+    package_status,
 )
 
 APP_BUNDLE_NAME = desktop_build.APP_BUNDLE_NAME
@@ -194,23 +193,20 @@ def resolve_latest_version(
     opener: Callable[..., AbstractContextManager[Any]] = urllib.request.urlopen,
     timeout: float = 10.0,
 ) -> str:
-    """Latest stable release version, via the same redirect the updater uses.
+    """Latest stable release version, via the same check the updater uses.
 
-    Follows github.com's ``/releases/latest`` rather than the REST API so this
-    is not subject to the unauthenticated per-IP rate limit.
+    Delegates to ``package_version.package_status``, which follows github.com's
+    ``/releases/latest`` redirect rather than the REST API (no unauthenticated
+    per-IP rate limit) and already turns 403/429 into a rate-limit message.
     """
 
-    source = latest_release_redirect_url(repo)
-    try:
-        with opener(_release_page_request(source), timeout=timeout) as response:
-            final_url = getattr(response, "url", "") or source
-            if hasattr(response, "geturl"):
-                final_url = response.geturl()
-    except (OSError, urllib.error.URLError, ValueError) as exc:
-        raise InstallError(f"could not reach GitHub to find the latest release: {exc}") from exc
-    version = _tag_from_url(final_url)
+    status = package_status(repo=repo, opener=opener, timeout=timeout)
+    error = str(status.get("error") or "").strip()
+    version = str(status.get("latest_version") or "").strip()
+    if error:
+        raise InstallError(f"could not find the latest release: {error}")
     if not version:
-        raise InstallError(f"could not determine the latest release from {final_url}")
+        raise InstallError("could not determine the latest release")
     return version
 
 

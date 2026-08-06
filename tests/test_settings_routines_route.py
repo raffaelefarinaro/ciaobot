@@ -57,7 +57,7 @@ def _make_client(tmp_path, env_extra: dict[str, str] | None = None):
 
 
 def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
-    monkeypatch.setattr("shutil.which", lambda cmd: None)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
     assert data["title_model"] == ""  # no override stored
@@ -98,7 +98,7 @@ def test_get_title_effective_is_haiku_not_apfel_when_no_override(monkeypatch, tm
     # apfel is opt-in, not the Automatic default: even with the binary on PATH,
     # Automatic resolves to the workspace haiku tier (apfel fails when Apple
     # Intelligence is disabled). See issue: "Automatic: apfel" mislabel.
-    monkeypatch.setattr("shutil.which", lambda cmd: "/opt/homebrew/bin/apfel" if cmd == "apfel" else None)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
     assert data["title_model"] == ""  # no override stored
@@ -107,7 +107,7 @@ def test_get_title_effective_is_haiku_not_apfel_when_no_override(monkeypatch, tm
 
 
 def test_get_title_effective_is_apfel_when_explicitly_chosen(monkeypatch, tmp_path):
-    monkeypatch.setattr("shutil.which", lambda cmd: "/opt/homebrew/bin/apfel" if cmd == "apfel" else None)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
     resp = client.patch("/api/settings/routines", json={"title_model": "apfel"})
     assert resp.status_code == 200
@@ -236,7 +236,7 @@ def test_automatic_routines_report_every_workspace_not_just_the_primary(
     so *_effective (the primary workspace's answer) is wrong for every other
     workspace. The UI needs the whole map to say so.
     """
-    monkeypatch.setattr("shutil.which", lambda cmd: None)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
 
     data = client.get("/api/settings/routines").json()
@@ -254,7 +254,7 @@ def test_automatic_routines_report_every_workspace_not_just_the_primary(
 
 def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
     """With an explicit override one model really does apply everywhere."""
-    monkeypatch.setattr("shutil.which", lambda cmd: None)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, _config = _make_client(tmp_path)
 
     client.patch(

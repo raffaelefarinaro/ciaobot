@@ -123,12 +123,13 @@ func runProbe() async {
     var hear: [String: Any] = ["available": false, "reason": "requires macOS 26 or newer"]
 
     if #available(macOS 26.0, *) {
+        // Only installedLocales: supportedLocales is a second framework call
+        // whose result no caller reads, and it is awaited serially so its
+        // latency lands on every probe.
         let installed = await DictationTranscriber.installedLocales.map { $0.identifier(.bcp47) }
-        let supported = await DictationTranscriber.supportedLocales.map { $0.identifier(.bcp47) }
         hear = [
             "available": !installed.isEmpty,
             "installed_locales": installed.sorted(),
-            "supported_locales": supported.sorted(),
         ]
         if installed.isEmpty {
             hear["reason"] = "no dictation languages are installed; add one in System Settings > Keyboard > Dictation"
@@ -147,10 +148,10 @@ func runProbe() async {
                 "quality": qualityName(voice.quality),
             ]
         }
+    // best_quality is derivable from voices[0] and nothing asks for it.
     let speak: [String: Any] = [
         "available": !voices.isEmpty,
         "voices": voices,
-        "best_quality": voices.first?["quality"] ?? "none",
     ]
 
     var model: [String: Any] = ["available": false, "reason": "requires macOS 26 or newer"]
@@ -172,20 +173,22 @@ func runProbe() async {
     FileHandle.standardOutput.write(data)
 }
 
-func qualityRank(_ quality: AVSpeechSynthesisVoiceQuality) -> Int {
+/// Rank and label for a voice tier, in one place so they cannot drift apart.
+/// Rank drives "best installed voice"; the label is what Settings shows.
+func qualityTier(_ quality: AVSpeechSynthesisVoiceQuality) -> (rank: Int, name: String) {
     switch quality {
-    case .premium: return 3
-    case .enhanced: return 2
-    default: return 1
+    case .premium: return (3, "premium")
+    case .enhanced: return (2, "enhanced")
+    default: return (1, "default")
     }
 }
 
+func qualityRank(_ quality: AVSpeechSynthesisVoiceQuality) -> Int {
+    qualityTier(quality).rank
+}
+
 func qualityName(_ quality: AVSpeechSynthesisVoiceQuality) -> String {
-    switch quality {
-    case .premium: return "premium"
-    case .enhanced: return "enhanced"
-    default: return "default"
-    }
+    qualityTier(quality).name
 }
 
 // MARK: - hear

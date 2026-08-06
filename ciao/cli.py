@@ -352,11 +352,14 @@ def _remove_legacy_app_shortcuts(app_dir: Path) -> bool:
 def _app_search_roots() -> tuple[Path, ...]:
     """Directories macOS installs app bundles into, per-user first.
 
-    A single definition so the launcher search and the desktop-app check can
-    never disagree about where to look; tests point it at a temporary tree.
+    Delegates to native_sidecar, which needs the same list to find the bundled
+    helper -- one definition so the two can never disagree. Tests monkeypatch
+    this name, which still works because callers here look it up by name.
     """
 
-    return (Path.home() / "Applications", Path("/Applications"))
+    from ciao.native_sidecar import app_bundle_roots
+
+    return app_bundle_roots()
 
 
 def _desktop_app_installed(app_dir: Path | None = None) -> bool:
@@ -423,30 +426,6 @@ _LSREGISTER = (
     "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
     "LaunchServices.framework/Support/lsregister"
 )
-
-
-def _register_app_with_launchservices(app_root: Path) -> None:
-    """Register the launcher bundle with LaunchServices.
-
-    macOS attributes a LaunchAgent's "App Background Activity" entry to the
-    app named by the plist's ``AssociatedBundleIdentifiers``. That mapping is
-    resolved through LaunchServices, which does not always index a freshly
-    written bundle before the agent loads — so the background item shows the
-    raw executable name ("python") instead of "Ciaobot Server". Registering the
-    bundle up front makes the association resolve immediately. Best-effort:
-    non-macOS or a missing lsregister is a silent skip.
-    """
-
-    if sys.platform != "darwin" or not os.path.exists(_LSREGISTER):
-        return
-    try:
-        subprocess.run(
-            [_LSREGISTER, "-f", str(app_root)],
-            check=False,
-            capture_output=True,
-        )
-    except OSError:
-        pass
 
 
 def _unregister_app_with_launchservices(app_root: Path) -> None:
@@ -968,7 +947,7 @@ def setup_workspace(
     # GitHub. Failure here is not a setup failure — the legacy launcher branch
     # below is still a working install.
     if install_desktop_app and not desktop_installed and app_dir is None:
-        desktop_installed = _install_desktop_app_quietly(app_root_dir)
+        _install_desktop_app_quietly(app_root_dir)
     # The rumps menu-bar launcher that used to stand in for the desktop app is
     # gone: Ciaobot.app is the menu bar now, and setup installs it above. When
     # that could not happen (offline, non-macOS) the engine still runs under
@@ -1099,11 +1078,10 @@ def _setup_command(args: argparse.Namespace) -> int:
             "Open Ciaobot with the login URL below and change it in "
             "Settings -> PWA password."
         )
-    plists = [
-        Path(args.launch_agents_dir).expanduser() / name
-        for name in ("com.ciao.server.plist", "com.ciao.menubar.plist")
-        if (Path(args.launch_agents_dir).expanduser() / name).is_file()
-    ]
+    # One agent now: setup deletes the retired com.ciao.menubar plist rather
+    # than writing it, so there is nothing else here to load.
+    server_plist = Path(args.launch_agents_dir).expanduser() / "com.ciao.server.plist"
+    plists = [server_plist] if server_plist.is_file() else []
     if args.load_launchd:
         rc = 0
         for plist in plists:

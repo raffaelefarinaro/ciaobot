@@ -9,9 +9,9 @@ This module owns finding the binary, probing what the machine supports, and
 running one subcommand. The callers on top of it are ``ciao/voice.py`` (hear /
 speak) and ``respond`` below (chat titles, replacing the ``apfel`` CLI).
 
-Everything here fails soft. The probe is called on every Settings load and from
-availability checks all over the app, so a missing binary, an old macOS, or a
-broken sidecar must resolve to "not available" rather than an exception.
+Everything here fails soft. The probe backs availability checks all over the
+app, so a missing binary, an old macOS, or a broken sidecar must resolve to
+"not available" rather than an exception.
 """
 
 from __future__ import annotations
@@ -20,10 +20,8 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -59,8 +57,14 @@ class SidecarError(Exception):
     """The sidecar could not produce a result."""
 
 
-def _app_bundle_roots() -> tuple[Path, ...]:
-    """Where Ciaobot.app may live, per-user first (mirrors cli._app_search_roots)."""
+def app_bundle_roots() -> tuple[Path, ...]:
+    """Directories macOS installs app bundles into, per-user first.
+
+    A single definition so the sidecar lookup, the launcher search, and the
+    desktop-app check can never disagree about where to look; tests point it at
+    a temporary tree. Lives here rather than in cli.py because this module is a
+    leaf -- cli imports it, not the other way round.
+    """
     return (Path.home() / "Applications", Path("/Applications"))
 
 
@@ -75,15 +79,26 @@ def sidecar_path() -> Path | None:
     if override:
         candidate = Path(override).expanduser()
         return candidate if candidate.is_file() else None
-    for root in _app_bundle_roots():
+    for root in app_bundle_roots():
         candidate = root / "Ciaobot.app" / "Contents" / "MacOS" / SIDECAR_NAME
         if candidate.is_file():
             return candidate
-    found = shutil.which(SIDECAR_NAME)
+    # resolve_tool, not shutil.which: the engine runs under launchd with a
+    # stripped PATH, which is exactly the case this helper exists for.
+    from ciao.tool_path import resolve_tool
+
+    found = resolve_tool(SIDECAR_NAME)
     return Path(found) if found else None
 
 
-@lru_cache(maxsize=1)
+# Cached probe, keyed on the resolved binary. `ciao desktop install` runs in a
+# separate CLI process, so a server that started before Ciaobot.app existed
+# would otherwise answer "not installed" until it was restarted -- a cache miss
+# on the path appearing is what lets the install be picked up live. Locating the
+# binary is a couple of stat calls; the subprocess is what the cache is for.
+_probe_cache: dict[str | None, dict[str, Any]] = {}
+
+
 def probe() -> dict[str, Any]:
     """Ask the sidecar what this machine supports. Cached: it shells out."""
     if sys.platform != "darwin":
@@ -91,6 +106,10 @@ def probe() -> dict[str, Any]:
     binary = sidecar_path()
     if binary is None:
         return _EMPTY_PROBE
+    key = str(binary)
+    cached = _probe_cache.get(key)
+    if cached is not None:
+        return cached
     try:
         result = subprocess.run(
             [str(binary), "probe"], capture_output=True, timeout=30, text=True
@@ -104,12 +123,17 @@ def probe() -> dict[str, Any]:
         parsed = json.loads(result.stdout or "{}")
     except json.JSONDecodeError:
         return _EMPTY_PROBE
-    return parsed if isinstance(parsed, dict) else _EMPTY_PROBE
+    # Only a good answer is cached. A transient failure (spawn error, non-zero
+    # exit, bad JSON) stays uncached so the next caller retries instead of
+    # inheriting the failure for the life of the process.
+    resolved = parsed if isinstance(parsed, dict) else _EMPTY_PROBE
+    _probe_cache[key] = resolved
+    return resolved
 
 
 def reset_probe_cache() -> None:
     """Forget the cached probe, for tests and after installing the app."""
-    probe.cache_clear()
+    _probe_cache.clear()
 
 
 def section(name: str) -> dict[str, Any]:

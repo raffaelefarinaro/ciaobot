@@ -3192,6 +3192,10 @@ function handleKeydown(e: KeyboardEvent) {
   // itself without also closing the chat.
   if (e.key === 'Escape') {
     e.preventDefault()
+    // Claim it: ChatLayout's global handler would otherwise close the chat a
+    // second time off the same press. Arrow keys already taught us what two
+    // listeners on one key costs.
+    e.stopPropagation()
     emit('close')
     return
   }

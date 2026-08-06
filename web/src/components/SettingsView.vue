@@ -5737,12 +5737,6 @@ a.btn-secondary {
   gap: var(--space-2);
   margin-top: var(--space-3);
 }
-.voice-install-btn {
-  flex: 0 0 auto;
-  margin-top: 1px;
-  padding: 4px 10px;
-  font-size: var(--text-xs);
-}
 .critique-model-picker {
   width: 100%;
   min-width: 0;

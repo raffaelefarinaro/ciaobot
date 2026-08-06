@@ -25,6 +25,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import subagent_tracking
+from ciao import desktop_build
 from ciao.config import (
     WorkspaceConfig,
     CLAUDE_AI_CONNECTORS,
@@ -4724,7 +4725,6 @@ async def list_models(request: Request) -> JSONResponse:
 
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
-    import shutil
     from ciao import native_sidecar
     from ciao.voice import (
         apple_dictation_available,
@@ -4911,7 +4911,10 @@ async def settings_routines(request: Request) -> JSONResponse:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         app_settings.apply_to_config(config)
-    return JSONResponse(_routines_payload(config, app_settings))
+    # _routines_payload probes the native sidecar, which spawns a subprocess on
+    # first call. Off the event loop: the availability checks it replaced were
+    # in-process find_spec/which calls, so this used to be free.
+    return JSONResponse(await asyncio.to_thread(_routines_payload, config, app_settings))
 
 
 # ── Status ───────────────────────────────────────────────────────────────
@@ -5582,27 +5585,6 @@ async def admin_snapshot(request: Request) -> JSONResponse:
 
 
 
-def _run_step(args: list[str], *, cwd: str, timeout: int) -> subprocess.CompletedProcess:
-    """Run a deploy step, turning missing-binary and timeout errors into a
-    failed CompletedProcess so the handler reports a structured error instead
-    of crashing with a 500. Under launchd the server PATH may omit Homebrew,
-    so a bare ``npm`` can raise FileNotFoundError before ``run`` returns."""
-    try:
-        return subprocess.run(
-            args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-        )
-    except FileNotFoundError as exc:
-        return subprocess.CompletedProcess(
-            args=args, returncode=127, stdout="",
-            stderr=f"{args[0]} not found on PATH: {exc}",
-        )
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
-            args=args, returncode=124, stdout="",
-            stderr=f"{args[0]} timed out after {timeout}s",
-        )
-
-
 def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
@@ -5640,7 +5622,7 @@ def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
             stdout="skipped: no root package.json",
             stderr="",
         )
-    return _run_step(args, cwd=str(codebase_root), timeout=180)
+    return desktop_build.run_step(args, cwd=str(codebase_root), timeout=180)
 
 
 async def admin_deploy(request: Request) -> JSONResponse:
@@ -5715,7 +5697,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 2. pip install
     import sys
     result = await asyncio.to_thread(
-        _run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
+        desktop_build.run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
         cwd=str(codebase_root), timeout=120,
     )
     steps.append(_record("pip install", result))
@@ -5736,7 +5718,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 3. npm build
     web_dir = codebase_root / "web"
     result = await asyncio.to_thread(
-        _run_step, ["npm", "run", "build"],
+        desktop_build.run_step, ["npm", "run", "build"],
         cwd=str(web_dir), timeout=120,
     )
     steps.append(_record("npm build", result))
@@ -5751,7 +5733,6 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # restart below. Released installs skip this: no checkout, no cargo. The
     # rebuild is minutes long, hence the staleness check rather than doing it on
     # every restart.
-    from ciao import desktop_build
 
     relaunch_desktop = False
     if getattr(config, "dev_mode", False):
@@ -5761,7 +5742,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
         else:
             steps.append({"step": "desktop app", "ok": True, "output": f"rebuilding: {reason}"})
             desktop_steps, relaunch_desktop = await asyncio.to_thread(
-                desktop_build.build_and_stage, codebase_root, runner=_run_step,
+                desktop_build.build_and_stage, codebase_root, runner=desktop_build.run_step,
             )
             steps.extend(desktop_steps)
             failed = next((s for s in desktop_steps if not s["ok"]), None)
@@ -5789,7 +5770,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
         if relaunch_desktop:
             try:
                 installed = await asyncio.to_thread(
-                    desktop_build.install_staged_and_relaunch, runner=_run_step,
+                    desktop_build.install_staged_and_relaunch, runner=desktop_build.run_step,
                 )
                 for step in installed:
                     if step["ok"]:

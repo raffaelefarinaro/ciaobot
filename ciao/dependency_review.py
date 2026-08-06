@@ -78,7 +78,6 @@ KNOWN_REPOS = {
     "python-pptx": "https://github.com/scanny/python-pptx/releases",
     "pytest": "https://github.com/pytest-dev/pytest/releases",
     "pytest-asyncio": "https://github.com/pytest-dev/pytest-asyncio/releases",
-    "mlx-whisper": "https://github.com/ml-explore/mlx-examples/releases",
     "vue": "https://github.com/vuejs/core/releases",
     "vue-router": "https://github.com/vuejs/router/releases",
     "pinia": "https://github.com/vuejs/pinia/releases",
