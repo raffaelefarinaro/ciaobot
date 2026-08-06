@@ -580,7 +580,13 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
-  if (viewMode.value !== 'chat') return
+  // Only the full-screen views own the keyboard. `viewMode` is 'project' on
+  // /project/:projectId -- the same ChatLayout, same sidebar, same open chat --
+  // so gating on `=== 'chat'` silently killed Esc and the arrow keys for anyone
+  // who reached a chat through a project. That looked like "Esc only works
+  // after I click somewhere else", because clicking a chat in the sidebar
+  // navigates to /chat/:id and revives the handler.
+  if (viewMode.value === 'settings' || viewMode.value === 'schedules') return
   if (pendingConfirm.value) return
 
   if (e.key.startsWith('Arrow')) {
@@ -604,7 +610,8 @@ function onUnreservedKeydown(e: KeyboardEvent) {
 
 function onShortcutKeydown(e: KeyboardEvent) {
   // Defer to full-screen views (settings, schedules) and the confirm dialog.
-  if (viewMode.value !== 'chat') return
+  // Project routes render the same chat surface, so they keep the shortcuts.
+  if (viewMode.value === 'settings' || viewMode.value === 'schedules') return
   if (pendingConfirm.value) return
 
   // Arrow keys and Esc are handled by onUnreservedKeydown, which is bound in
