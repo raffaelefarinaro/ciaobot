@@ -255,9 +255,31 @@ def test_install_refuses_to_overwrite_an_existing_bundle(tmp_path: Path) -> None
     assert (existing / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME).read_text() == "old"
 
 
-def test_install_refuses_a_missing_app_directory(tmp_path: Path) -> None:
-    with pytest.raises(InstallError, match="does not exist"):
-        _install(tmp_path, tmp_path / "nope")
+def test_install_creates_a_missing_app_directory(tmp_path: Path) -> None:
+    """macOS does not create ~/Applications, and that is where a non-admin
+    account installs. The launcher this replaced made it with mkdir(parents);
+    without that, install failed on exactly those accounts."""
+    app_dir = tmp_path / "Applications"
+    assert not app_dir.exists()
+
+    result, _release, _calls = _install(tmp_path, app_dir)
+
+    assert app_dir.is_dir()
+    assert Path(result["path"]).is_dir()
+
+
+def test_install_names_a_browser_pwa_collision(tmp_path: Path) -> None:
+    """A Safari/Chrome "Add to Dock" writes Ciaobot.app too. Telling the user to
+    run `ciao desktop uninstall` was a dead end: that command refuses to delete
+    a bundle it did not create, so the advice has to name the real remedy."""
+    app_dir = tmp_path / "Applications"
+    pwa = app_dir / desktop_install.APP_BUNDLE_NAME / "Contents" / "MacOS"
+    pwa.mkdir(parents=True)
+    (pwa / "app_mode_loader").write_text("chrome pwa")
+
+    with pytest.raises(InstallError, match="not the Ciaobot desktop app"):
+        _install(tmp_path, app_dir)
+    assert (pwa / "app_mode_loader").exists()
 
 
 def test_install_reports_a_tarball_without_the_app_bundle(tmp_path: Path) -> None:

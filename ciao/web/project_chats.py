@@ -11,6 +11,7 @@ import copy
 import os
 import re
 import shutil
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -7154,7 +7155,7 @@ class ProjectChatManager:
         )
 
         if self._config.transcription_engine == "local":
-            if apple_dictation_available():
+            if await asyncio.to_thread(apple_dictation_available):
                 try:
                     transcriber = AppleDictationTranscriber(
                         self._config.transcription_locale
@@ -7207,7 +7208,7 @@ class ProjectChatManager:
             raise ValueError("Nothing to read aloud in this message")
 
         if self._config.tts_engine == "local":
-            if apple_speech_available():
+            if await asyncio.to_thread(apple_speech_available):
                 try:
                     speaker = SystemSpeaker(
                         self._config.tts_local_voice,
@@ -7221,6 +7222,14 @@ class ProjectChatManager:
                         "Change the engine to Cloud in Settings → Models to use OpenAI instead."
                     ) from exc
             else:
+                # `ciao desktop install` installs a macOS app bundle, so it is
+                # not advice a Linux or Windows user can act on -- and local
+                # read-aloud used to work there via Kokoro.
+                if sys.platform != "darwin":
+                    raise ValueError(
+                        "On-device speech synthesis is macOS-only. "
+                        "Change the engine to Cloud in Settings → Models."
+                    )
                 raise ValueError(
                     "System speech synthesis is selected but unavailable. "
                     "Install the desktop app with `ciao desktop install`, "

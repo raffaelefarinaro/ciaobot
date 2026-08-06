@@ -2803,7 +2803,14 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function transcribeVoice(chatId: string, audioBlob: Blob): Promise<string> {
     const form = new FormData()
-    form.append('audio', audioBlob, 'voice.webm')
+    // Name the part after what the blob actually is: the server derives the
+    // saved file's extension from it, and on-device dictation can only read
+    // the containers CoreAudio understands (wav, m4a), not WebM.
+    const ext = audioBlob.type.includes('wav') ? 'wav'
+      : audioBlob.type.includes('mp4') || audioBlob.type.includes('m4a') ? 'm4a'
+        : audioBlob.type.includes('ogg') ? 'ogg'
+          : 'webm'
+    form.append('audio', audioBlob, `voice.${ext}`)
     const res = await fetch(`/api/chats/${chatId}/voice`, {
       method: 'POST',
       body: form,

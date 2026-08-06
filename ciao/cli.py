@@ -380,13 +380,37 @@ def _desktop_app_installed(app_dir: Path | None = None) -> bool:
     )
 
 
+def _open_desktop_app(app_dir: Path) -> None:
+    """Open the freshly installed app so the menu bar appears without a hunt.
+
+    Best effort and quiet: a failure here costs the user one double-click, and
+    setup has already succeeded by this point.
+    """
+
+    bundle = Path(app_dir) / "Ciaobot.app"
+    if sys.platform != "darwin" or not bundle.is_dir():
+        return
+    try:
+        subprocess.run(
+            ["/usr/bin/open", "-a", str(bundle)],
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Costs the user one double-click; setup has already succeeded.
+        pass
+
+
 def _install_desktop_app_quietly(app_dir: Path) -> bool:
     """Install ``Ciaobot.app`` during setup. Returns whether it is now present.
 
     Best effort by design: setup runs on a laptop that may be offline or behind
-    a proxy, and a failed download must not cost the user their workspace. Every
-    failure prints the manual command and falls through to the launcher bundle,
-    which is a working install without the native window.
+    a proxy, and a failed download must not cost the user their workspace. On
+    failure the workspace and the engine LaunchAgent are still set up and the
+    PWA is reachable at localhost -- there is simply no menu bar until
+    `ciao desktop install` succeeds. (There is no launcher fallback any more:
+    the rumps bundle that used to fill that gap was removed.)
 
     Skipped on non-macOS, when ``CIAO_SKIP_DESKTOP_APP`` is set (release smoke
     tests install the cask instead), and in dev mode, where the bundle is built
@@ -946,8 +970,9 @@ def setup_workspace(
     # means tests, CI, or a headless install, none of which should reach out to
     # GitHub. Failure here is not a setup failure — the legacy launcher branch
     # below is still a working install.
+    installed_now = False
     if install_desktop_app and not desktop_installed and app_dir is None:
-        _install_desktop_app_quietly(app_root_dir)
+        installed_now = _install_desktop_app_quietly(app_root_dir)
     # The rumps menu-bar launcher that used to stand in for the desktop app is
     # gone: Ciaobot.app is the menu bar now, and setup installs it above. When
     # that could not happen (offline, non-macOS) the engine still runs under
@@ -969,6 +994,14 @@ def setup_workspace(
     # a previous version; remove them rather than leaving orphans behind.
     _remove_legacy_app_shortcuts(app_root_dir)
     _disable_legacy_menubar_agent(launch_dir)
+
+    # Launch the app once setup is otherwise done. The retired menu-bar agent
+    # had RunAtLoad, so the tray used to appear immediately and at every login;
+    # installing the bundle without opening it left a fresh setup with no tray
+    # at all until the user found it in Finder. Opening it here, after the
+    # LaunchAgent exists, also lets the app register its own login item.
+    if installed_now:
+        _open_desktop_app(app_root_dir)
 
     ensure_workspace_git(root)
     # A vault outside the workspace (existing notes folder) gets its own

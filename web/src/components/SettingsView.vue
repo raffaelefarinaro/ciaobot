@@ -607,10 +607,16 @@
                   :disabled="routinesSaving"
                   @change="saveRoutines({ transcription_engine: ($event.target as HTMLSelectElement).value })"
                 >
-                  <!-- Hidden rather than disabled where it cannot run: on-device
-                       dictation needs macOS 26+ and the desktop app, and there is
-                       nothing the user can install to change that. -->
-                  <option v-if="routines.transcription.local_available" value="local">On-device (free)</option>
+                  <!-- Disabled, not hidden. Hiding it while :value still points
+                       at 'local' leaves the browser with selectedIndex -1 and a
+                       blank control, so a user whose saved engine became
+                       unavailable could not see what was selected. -->
+                  <option
+                    value="local"
+                    :disabled="!routines.transcription.local_available"
+                  >
+                    On-device (free){{ routines.transcription.local_available ? '' : ' — unavailable' }}
+                  </option>
                   <option value="cloud" :disabled="!routines.transcription.cloud_available">Cloud (OpenAI)</option>
                 </select>
                 <span class="routine-model-hint">
@@ -649,7 +655,12 @@
                   :disabled="routinesSaving"
                   @change="saveRoutines({ tts_engine: ($event.target as HTMLSelectElement).value })"
                 >
-                  <option v-if="routines.speech.local_available" value="local">On-device (free)</option>
+                  <option
+                    value="local"
+                    :disabled="!routines.speech.local_available"
+                  >
+                    On-device (free){{ routines.speech.local_available ? '' : ' — unavailable' }}
+                  </option>
                   <option value="cloud" :disabled="!routines.speech.cloud_available">Cloud (OpenAI)</option>
                 </select>
                 <span class="routine-model-hint">

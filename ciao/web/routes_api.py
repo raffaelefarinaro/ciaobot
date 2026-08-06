@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import mimetypes
@@ -5295,19 +5296,25 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    written = setup_workspace(
-        workspace,
-        auth_token=password,
-        auth_required=True,
-        push_contact=push_contact,
-        vault_root=str(body.get("vault_root", "")).strip() or None,
-        vault_mode=vault_mode,
-        workspace_name=workspace_name,
-        default_provider=default_provider,
-        python_path=str(body.get("python", "")).strip() or None,
-        port=port,
-        launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
-        app_dir=str(body.get("app_dir", "")).strip() or None,
+    # setup_workspace installs Ciaobot.app, which downloads ~13 MB with a
+    # 300s timeout. On the loop that freezes the wizard's own polling and
+    # every open chat socket for the duration.
+    written = await asyncio.to_thread(
+        functools.partial(
+            setup_workspace,
+            workspace,
+            auth_token=password,
+            auth_required=True,
+            push_contact=push_contact,
+            vault_root=str(body.get("vault_root", "")).strip() or None,
+            vault_mode=vault_mode,
+            workspace_name=workspace_name,
+            default_provider=default_provider,
+            python_path=str(body.get("python", "")).strip() or None,
+            port=port,
+            launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
+            app_dir=str(body.get("app_dir", "")).strip() or None,
+        )
     )
     # Hand the chosen workspace to the relaunched process. A foreground
     # `ciao run` restarts by re-execing itself with the current environment,

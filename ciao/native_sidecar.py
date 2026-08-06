@@ -22,6 +22,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -96,7 +97,14 @@ def sidecar_path() -> Path | None:
 # would otherwise answer "not installed" until it was restarted -- a cache miss
 # on the path appearing is what lets the install be picked up live. Locating the
 # binary is a couple of stat calls; the subprocess is what the cache is for.
-_probe_cache: dict[str | None, dict[str, Any]] = {}
+_probe_cache: dict[str | None, tuple[float, dict[str, Any]]] = {}
+
+# A negative answer is re-checked: "Apple Intelligence is off" and "no dictation
+# language installed" are both things the user fixes in System Settings while
+# the engine keeps running, and caching them for the process lifetime meant the
+# fix never took effect without a restart. A positive answer cannot go stale in
+# a way that matters, so it is kept.
+_NEGATIVE_PROBE_TTL_S = 60.0
 
 
 def probe() -> dict[str, Any]:
@@ -109,7 +117,14 @@ def probe() -> dict[str, Any]:
     key = str(binary)
     cached = _probe_cache.get(key)
     if cached is not None:
-        return cached
+        cached_at, payload = cached
+        usable = all(
+            bool(section.get("available"))
+            for section in payload.values()
+            if isinstance(section, dict)
+        )
+        if usable or (time.monotonic() - cached_at) < _NEGATIVE_PROBE_TTL_S:
+            return payload
     try:
         result = subprocess.run(
             [str(binary), "probe"], capture_output=True, timeout=30, text=True
@@ -127,7 +142,7 @@ def probe() -> dict[str, Any]:
     # exit, bad JSON) stays uncached so the next caller retries instead of
     # inheriting the failure for the life of the process.
     resolved = parsed if isinstance(parsed, dict) else _EMPTY_PROBE
-    _probe_cache[key] = resolved
+    _probe_cache[key] = (time.monotonic(), resolved)
     return resolved
 
 

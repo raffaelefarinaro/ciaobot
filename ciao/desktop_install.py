@@ -253,13 +253,33 @@ def install_desktop_app(
     # approval, so an overwrite would either raise a TCC prompt or fail partway
     # through and leave a gutted bundle. Updates belong to the in-app updater.
     if destination.exists():
+        # Distinguish our app from a browser-installed PWA of the same name.
+        # Both Safari and Chrome write "Ciaobot.app" when the user adds the PWA
+        # to the Dock, and telling them to run `ciao desktop uninstall` was a
+        # dead end: that command refuses to delete a bundle it did not create.
+        ours = (
+            destination / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME
+        ).is_file()
+        if ours:
+            raise InstallError(
+                f"{destination} already exists. Update it from the app "
+                "(menu bar -> Update) rather than reinstalling over it, or run "
+                "`ciao desktop uninstall` first."
+            )
         raise InstallError(
-            f"{destination} already exists. Update it from the app "
-            "(menu bar -> Update) rather than reinstalling over it, or run "
-            "`ciao desktop uninstall` first."
+            f"{destination} exists but is not the Ciaobot desktop app -- most "
+            "likely a browser-installed shortcut of the same name. Move it to "
+            "the Trash in Finder (or pass --app-dir to install elsewhere), "
+            "then run `ciao desktop install` again."
         )
-    if not app_dir.is_dir():
-        raise InstallError(f"{app_dir} does not exist")
+    # macOS does not create ~/Applications, and _default_app_dir() falls back to
+    # it on a non-admin account. The launcher this replaced made it with
+    # mkdir(parents=True); without that, install failed on exactly the accounts
+    # that cannot write /Applications.
+    try:
+        app_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise InstallError(f"could not create {app_dir}: {exc}") from exc
 
     version = (version or "").strip().removeprefix("v")
     if not version:
