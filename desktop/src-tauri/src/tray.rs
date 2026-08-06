@@ -113,6 +113,7 @@ pub fn build_menu(
     notifications_enabled: bool,
     notifications_denied: bool,
     start_at_login: bool,
+    hide_dock_icon: bool,
 ) -> tauri::Result<TrayMenu> {
     let menu = Menu::new(app)?;
     let mut working_items = Vec::new();
@@ -196,6 +197,11 @@ pub fn build_menu(
     advanced.append(
         &CheckMenuItemBuilder::with_id("start-at-login", "Start at Login")
             .checked(start_at_login)
+            .build(app)?,
+    )?;
+    advanced.append(
+        &CheckMenuItemBuilder::with_id("hide-dock-icon", "Hide Dock Icon")
+            .checked(hide_dock_icon)
             .build(app)?,
     )?;
     advanced.append(&PredefinedMenuItem::separator(app)?)?;

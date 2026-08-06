@@ -104,7 +104,7 @@ def test_render_launchd_plist_keeps_non_cellar_python(tmp_path: Path) -> None:
 
 
 def test_run_step_reports_missing_binary_as_failed_step() -> None:
-    from ciao.web.routes_api import _run_step
+    from ciao.desktop_build import run_step as _run_step
 
     result = _run_step(["definitely-not-a-real-binary-xyz"], cwd="/tmp", timeout=5)
     assert result.returncode == 127
@@ -113,7 +113,7 @@ def test_run_step_reports_missing_binary_as_failed_step() -> None:
 
 
 def test_run_step_passes_through_success(tmp_path) -> None:
-    from ciao.web.routes_api import _run_step
+    from ciao.desktop_build import run_step as _run_step
 
     result = _run_step(["true"], cwd=str(tmp_path), timeout=5)
     assert result.returncode == 0

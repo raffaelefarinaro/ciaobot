@@ -37,8 +37,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant (local node only) |
 | GET | `/api/chats` | List all chats |
-| GET | `/api/menubar-chats` | Compact chat list for the macOS tray / menubar |
-| GET | `/api/menubar-notifications` | Notification feed for the macOS tray (`?after=<epoch>`, inclusive; proxied to the host in client mode) |
+| GET | `/api/menubar-chats` | Compact chat list for the `Ciaobot.app` tray |
+| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; proxied to the host in client mode) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
@@ -62,7 +62,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-binary` | Read allowed binary file |
 | GET | `/api/libreoffice-status` | Whether LibreOffice (`soffice`) is available to render `.pptx` previews |
 | POST | `/api/libreoffice-install` | Install LibreOffice via Homebrew Cask (macOS); no restart needed |
-| POST | `/api/apfel/install` | Install apfel (Apple Intelligence CLI) via Homebrew (macOS); no restart needed |
 | POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao |
 | GET | `/api/file-history` | List snapshots for a `(chat_id, file_path)` |
 | GET | `/api/file-content` | Read one snapshot's content |
@@ -106,8 +105,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/device/package-status` | Same as `/api/package/status`, but never proxied: in client mode this reports *this* machine's install while `/api/package/status` reports the host's |
 | GET | `/api/device/changelog` | Commits between this machine's installed version and the latest release (never proxied) |
 | POST | `/api/device/update` | Upgrade and restart *this* machine, not the host it mirrors (never proxied) |
-| POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
-| POST | `/api/tts/install-local` | Install local speech synthesis dependencies (kokoro-onnx) and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |

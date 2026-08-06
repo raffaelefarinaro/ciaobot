@@ -8,32 +8,35 @@ Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspac
 
 ## Install
 
-**macOS 13+ ([Homebrew](https://brew.sh))** — recommended; installs
-`Ciaobot.app` plus the engine:
+**macOS 13+ ([Homebrew](https://brew.sh))** — recommended:
 
 ```bash
 brew install raffaelefarinaro/ciaobot/ciaobot
-brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
+ciao run
 ```
 
-Installing the fully qualified formula first grants Homebrew trust only to the
-Ciaobot engine; installing the fully qualified cask grants trust only to the
-desktop app. The cask then places `Ciaobot.app` in `/Applications`.
+Then open `http://localhost:8443` and follow the setup wizard. Finishing it
+installs `Ciaobot.app` for you — into `/Applications`, or `~/Applications` on a
+non-admin account — so there is no separate app install step. (Installing the
+fully qualified formula grants Homebrew trust only to the Ciaobot engine.)
 
-The app is ad-hoc signed and not notarized, so macOS blocks the first launch
-with *"Apple could not verify Ciaobot is free of malware"*. Open `Ciaobot.app`
-once to trigger the block, then go to **System Settings → Privacy & Security**
-and scroll to **Security**:
+There is no Gatekeeper prompt on this path. macOS only assesses bundles carrying
+a download *quarantine* flag, which browsers and Homebrew casks set but a
+command-line download does not — so the ad-hoc signed app launches directly.
+Because Apple's notarization check is therefore not what guards the download,
+the installer verifies the release's minisign signature against the same key the
+in-app updater uses, and refuses to install anything that fails.
 
-<img src="docs/gatekeeper-open-anyway.png" alt="System Settings, Privacy &amp; Security, Security section, with the Open Anyway button highlighted" width="620">
+If the download fails — offline, proxy, firewall — setup says so and continues
+with the menu-bar launcher instead of failing. Install the app whenever you like:
 
-Click **Open Anyway**, authenticate, then launch the app again and confirm
-**Open**. Two things worth knowing: Control-clicking the app and choosing
-**Open** does *not* clear this dialog — Apple removed that bypass in macOS 15 —
-and the **Open Anyway** button only appears for about an hour after a blocked
-launch, so re-trigger the block if you don't see it. You may need to repeat this
-after an app update or a macOS upgrade. Do not disable Gatekeeper. First launch
-opens the setup wizard when no server is configured.
+```bash
+ciao desktop install
+```
+
+Pass `--no-desktop-app` to `ciao setup` to skip it deliberately. Later updates
+come from the app's own **Update…** action, which updates the engine and desktop
+app together.
 
 Already using the Homebrew engine from an earlier release? Move to the app
 without recreating your workspace:
@@ -42,19 +45,42 @@ without recreating your workspace:
 brew update
 brew trust --formula raffaelefarinaro/ciaobot/ciaobot
 brew upgrade ciaobot
-brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
-open -a Ciaobot
+ciao desktop install
 ```
 
-If a copy of `Ciaobot.app` is already in `/Applications` that Homebrew did not
-install — from the 0.6.0 DMG, say — the cask stops with `It seems there is
-already an App at '/Applications/Ciaobot.app'`. Quit Ciaobot and add `--force`
-so the cask adopts and replaces it; the bundle holds no user data, so your
-workspace, config, and desktop preferences survive:
+(An existing workspace has already been through setup, so the app install is the
+one step left — hence running it directly here.)
+
+If `Ciaobot.app` is already installed, `ciao desktop install` stops rather than
+writing over it — update from the app instead, or remove it first with
+`ciao desktop uninstall`. (Overwriting another app's bundle from a terminal needs
+macOS App Management permission; letting the app update itself does not.)
+
+<details>
+<summary>Installing via the Homebrew cask instead</summary>
+
+The cask still exists and pins the same release:
 
 ```bash
-brew install --cask --force raffaelefarinaro/ciaobot/ciaobot-desktop
+brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
 ```
+
+Homebrew quarantines what it downloads, so this path *does* hit the Gatekeeper
+block — the app is ad-hoc signed and not notarized, and macOS reports *"Apple
+could not verify Ciaobot is free of malware"*. Open `Ciaobot.app` once to trigger
+the block, then go to **System Settings → Privacy & Security** and scroll to
+**Security**:
+
+<img src="docs/gatekeeper-open-anyway.png" alt="System Settings, Privacy &amp; Security, Security section, with the Open Anyway button highlighted" width="620">
+
+Click **Open Anyway**, authenticate, then launch the app again and confirm
+**Open**. Control-clicking the app and choosing **Open** does *not* clear this
+dialog — Apple removed that bypass in macOS 15 — and the **Open Anyway** button
+only appears for about an hour after a blocked launch, so re-trigger the block if
+you don't see it. Do not disable Gatekeeper. `ciao desktop install` avoids all of
+this.
+
+</details>
 
 Upgrade the engine in the same sitting. The engine and app ship from one tag and
 are meant to report the same version; a split between them surfaces as an opaque
@@ -62,10 +88,9 @@ are meant to report the same version; a split between them surfaces as an opaque
 executable from fixed Homebrew paths.
 
 The first app launch reuses the existing workspace and server LaunchAgent,
-disables the legacy menu-bar helper, and moves the old `Ciaobot Server.app` to
+removes the retired menu-bar helper, and moves the old `Ciaobot Server.app` to
 the Trash once the engine is reachable. Browser-installed PWA shortcuts are
-left alone. Future releases use the app's single **Update…** action to update
-the engine and desktop app together.
+left alone.
 
 **Any platform ([PyPI](https://pypi.org/project/ciaobot/))** — or macOS without Homebrew; requires Python 3.12 or newer:
 
@@ -156,8 +181,8 @@ When your message mentions a name that appears in the vault index, the agent get
 
 **Voice — dictation and read-aloud**
 
-- Speech-to-text dictation in any chat: cloud transcription (OpenAI `gpt-transcribe`, overridable via `CIAO_TRANSCRIPTION_MODEL`) or free on-device via [mlx-whisper](https://pypi.org/project/mlx-whisper/) (Apple Silicon).
-- Text-to-speech read-aloud of replies: cloud voices or free on-device via [Kokoro](https://pypi.org/project/kokoro-onnx/); local models download on first use and are re-installed automatically after app upgrades.
+- Speech-to-text dictation in any chat, free and on-device using macOS speech recognition (macOS 26+, nothing to download, no API key).
+- Text-to-speech read-aloud of replies: cloud voices or the free on-device macOS system voice. Both on-device engines run through a small helper bundled in `Ciaobot.app`, so there is no model download and no optional package to install. For better read-aloud, [add a Premium voice](https://support.apple.com/guide/mac-help/mchlp2290/mac) in System Settings — Ciaobot uses the highest-quality voice you have installed.
 
 **Files and documents**
 
@@ -189,7 +214,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 - Claude Code or OpenAI Codex with the subscription login you already have; Ollama (cloud or local) and OpenRouter as API backends.
 - Claude shell commands stay attached to the active turn until they return a result. Background subagents remain asynchronous and visible in the chat while they run.
-- haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models ([apfel](https://github.com/Arthur-Ficial/apfel)).
+- haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models (Apple Intelligence, no install required).
 
 **Google Workspace**
 
@@ -246,7 +271,7 @@ Use the access you already have:
 - **OpenAI Codex** — `codex login`, including eligible ChatGPT subscription accounts.
 - **Ollama** — cloud or local daemon.
 - **OpenRouter** — `OPENROUTER_API_KEY`.
-- **On-device models** — for lightweight tasks where available: titles via [apfel](https://github.com/Arthur-Ficial/apfel), speech via [mlx-whisper](https://pypi.org/project/mlx-whisper/), and similar.
+- **On-device models** — for lightweight tasks where available: chat titles via Apple's on-device Foundation Model, dictation and read-aloud via the built-in macOS speech frameworks. All of it ships with macOS; none of it needs installing.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for env vars, OAuth, and per-task model routing (titles, insights, voice).
 

@@ -1213,6 +1213,13 @@ export const useProjectStore = defineStore('projects', () => {
     latestSyncInFlight = true
     try {
       const latestChats = await api.get<ChatInfo[]>('/api/chats')
+      // In client mode this request is proxied to the host, so a successful
+      // response proves the host is back. The banner was only cleared from a
+      // chat WebSocket frame, which never arrives if the socket stays down or
+      // no chat is open -- leaving "Can't reach the host" on screen over a
+      // working connection until the user reloaded. This poll is the
+      // connection-independent recovery signal.
+      hostConnectionUnavailable.value = false
       reconcileChatList(latestChats)
 
       const chatId = activeChatId.value
@@ -2796,7 +2803,14 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function transcribeVoice(chatId: string, audioBlob: Blob): Promise<string> {
     const form = new FormData()
-    form.append('audio', audioBlob, 'voice.webm')
+    // Name the part after what the blob actually is: the server derives the
+    // saved file's extension from it, and on-device dictation can only read
+    // the containers CoreAudio understands (wav, m4a), not WebM.
+    const ext = audioBlob.type.includes('wav') ? 'wav'
+      : audioBlob.type.includes('mp4') || audioBlob.type.includes('m4a') ? 'm4a'
+        : audioBlob.type.includes('ogg') ? 'ogg'
+          : 'webm'
+    form.append('audio', audioBlob, `voice.${ext}`)
     const res = await fetch(`/api/chats/${chatId}/voice`, {
       method: 'POST',
       body: form,

@@ -943,22 +943,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     if not getattr(config, "benchmark_mode", False):
         asyncio.create_task(_startup_error_triage())
 
-    # ── Voice extras self-heal ───────────────────────────────
-    # `brew upgrade` replaces the app's private venv, dropping optional
-    # local-voice packages the user installed from Settings. Reinstall
-    # them (once per version) when the saved settings still select the
-    # local engines, then restart to load them.
-    async def _heal_voice_extras() -> None:
-        try:
-            from ciao.voice_extras import heal_voice_extras
-
-            await heal_voice_extras(config, request_restart)
-        except Exception:
-            logger.exception("Voice extras self-heal failed")
-
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_heal_voice_extras())
-
     # ── Stale-install self-heal ──────────────────────────────
     # Two upgrade shapes leave this process running old code after a bare
     # `brew upgrade ciaobot` / `pip install -U` outside the app's own Update
@@ -998,27 +982,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         asyncio.create_task(_watch_installed_version())
 
     # ── App bundle refresh on upgrade ────────────────────────
-    # `brew upgrade` swaps the Python package but doesn't rewrite Ciaobot Server.app,
-    # so its double-click launcher and menu-bar helper keep running the old
-    # version's scripts until `ciao setup` is re-run by hand. When restarted
-    # onto a new version (by the stale-install self-heal above), regenerate the
-    # bundle once so upgrades are self-contained. App bundle only — never the
-    # LaunchAgent plists (they use the stable opt/ symlink).
-    async def _refresh_app_bundle() -> None:
-        try:
-            from ciao.cli import refresh_app_bundle_if_stale
-
-            refreshed = await asyncio.to_thread(
-                refresh_app_bundle_if_stale, config.workspace_root, config.pwa_port
-            )
-            if refreshed is not None:
-                logger.info("Refreshed %s for the current version.", refreshed)
-        except Exception:
-            logger.exception("App bundle refresh failed")
-
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_refresh_app_bundle())
-
     async def _shutdown_providers() -> None:
         # Disconnect every active provider before uvicorn finishes its
         # lifespan shutdown. Otherwise the Claude SDK subprocess transports

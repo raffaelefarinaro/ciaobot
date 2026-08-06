@@ -234,13 +234,16 @@ describe('ChatLayout home arrow navigation', () => {
     vi.restoreAllMocks()
   })
 
-  async function mountHome() {
+  async function mountHome(startPath = '/') {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/project/:projectId', component: EmptyStub },
+      ],
     })
-    await router.push('/')
+    await router.push(startPath)
     await router.isReady()
 
     const store = useProjectStore()
@@ -332,6 +335,28 @@ describe('ChatLayout home arrow navigation', () => {
     // the composer first. Widgets that own Esc claim it with stopPropagation.
     window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = 'chat-1'
+    await nextTick()
+
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await nextTick()
+
+    expect(store.activeChatId).toBeNull()
+    textarea.remove()
+    wrapper.unmount()
+  })
+
+  it('closes the chat with Esc on a project route too', async () => {
+    // viewMode is 'project' on /project/:projectId, but it is the same layout
+    // with the same open chat. Gating the shortcut on viewMode === 'chat' made
+    // Esc (and the arrow keys) dead for anyone who opened a chat through a
+    // project, which read as "Esc only works after I click somewhere else".
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome('/project/project-1')
     const store = useProjectStore()
     store.activeChatId = 'chat-1'
     await nextTick()

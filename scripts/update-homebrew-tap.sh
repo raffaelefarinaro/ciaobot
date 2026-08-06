@@ -87,11 +87,13 @@ class Ciaobot < Formula
     <<~CAVEATS
       Finish setup with \`ciao run\`, then open http://localhost:8443 and
       follow the wizard: it asks for a workspace folder and a model
-      provider, then installs the background engine.
+      provider, then installs the background engine and Ciaobot.app
+      (the native window, menu bar, and notifications).
 
-      For the native window, menu bar, and notifications:
+      The app install verifies the release signature and needs no
+      Gatekeeper approval. If it is skipped or fails, add it later with:
 
-        brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
+        ciao desktop install
 
       Scripted or headless setups can skip the wizard:
 
@@ -126,6 +128,10 @@ cask "ciaobot-desktop" do
   uninstall quit: "local.ciaobot.app"
 
   caveats <<~EOS
+    \`ciao desktop install\` installs the same app without this first-launch
+    block, because Homebrew quarantines what it downloads and a command-line
+    download does not. Prefer it unless you specifically want the cask.
+
     Ciaobot is ad-hoc signed and is not notarized, so macOS blocks the first
     launch with "Apple could not verify Ciaobot is free of malware".
 

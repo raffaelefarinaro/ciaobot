@@ -68,15 +68,20 @@ vi.mock('../../lib/api', () => {
     },
     transcription: {
       engine: 'local',
-      local_model: 'mlx-community/whisper-small',
+      cloud_model: 'gpt-transcribe',
+      locale: 'en-US',
       local_available: true,
+      local_unavailable_reason: '',
       cloud_available: true,
     },
     speech: {
       engine: 'cloud',
       cloud_voice: 'nova',
-      local_voice: 'af_heart',
-      local_available: false,
+      local_voice: '',
+      local_available: true,
+      local_voices: [
+        { id: 'com.apple.voice.compact.en-US.Samantha', name: 'Samantha', locale: 'en-US', quality: 'default' },
+      ],
       cloud_available: true,
     },
     model_options: {
