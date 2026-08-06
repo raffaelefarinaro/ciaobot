@@ -88,7 +88,7 @@ are meant to report the same version; a split between them surfaces as an opaque
 executable from fixed Homebrew paths.
 
 The first app launch reuses the existing workspace and server LaunchAgent,
-disables the legacy menu-bar helper, and moves the old `Ciaobot Server.app` to
+removes the retired menu-bar helper, and moves the old `Ciaobot Server.app` to
 the Trash once the engine is reachable. Browser-installed PWA shortcuts are
 left alone.
 

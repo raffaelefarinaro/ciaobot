@@ -37,8 +37,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant (local node only) |
 | GET | `/api/chats` | List all chats |
-| GET | `/api/menubar-chats` | Compact chat list for the macOS tray / menubar |
-| GET | `/api/menubar-notifications` | Notification feed for the macOS tray (`?after=<epoch>`, inclusive; proxied to the host in client mode) |
+| GET | `/api/menubar-chats` | Compact chat list for the `Ciaobot.app` tray |
+| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; proxied to the host in client mode) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |

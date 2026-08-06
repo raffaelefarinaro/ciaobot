@@ -289,9 +289,10 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert (notes / "MEMORY.md").is_file()
     assert not (workspace / "memory-vault" / "MEMORY.md").exists()
     assert (launch_agents / "com.ciao.server.plist").is_file()
-    assert (
-        apps / "Ciaobot Server.app" / "Contents" / "MacOS" / "CiaobotServer"
-    ).is_file()
+    # The wizard no longer writes the retired rumps launcher bundle or its
+    # LaunchAgent; Ciaobot.app is the menu bar.
+    assert not (apps / "Ciaobot Server.app").exists()
+    assert not (launch_agents / "com.ciao.menubar.plist").exists()
 
 
 def _finish_client(tmp_path) -> TestClient:

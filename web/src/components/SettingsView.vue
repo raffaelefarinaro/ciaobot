@@ -485,6 +485,9 @@
                 <span class="routine-model-hint">
                   <template v-if="routineProviderValue('title_model') === 'apple'">
                     Runs on-device for free using Apple Intelligence. Nothing to install.
+                    <!-- The on-device model does not honour "reply in the same language";
+                         it returns English titles regardless of the chat's language. -->
+                    Titles are written in English.
                     <!-- Nothing to offer when it is unavailable: it needs macOS 26+,
                          the desktop app, and Apple Intelligence switched on, none of
                          which a button here can fix. Say why and let the user choose. -->

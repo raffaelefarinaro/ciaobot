@@ -25,9 +25,6 @@ dependencies = [
   "httpx==0.28.1",
   "python-pptx==1.0.2",
   "notebooklm-py==0.7.3",
-  # macOS menu bar companion (`ciao menubar`): installed automatically on
-  # macOS so a plain wheel install includes the status-bar app.
-  "rumps==0.4.0; platform_system == 'Darwin'",
 ]
 
 [project.optional-dependencies]
@@ -44,11 +41,6 @@ test = [
 # with `scrapling install`, keeping the base install light.
 scraping = [
   "scrapling[fetchers]==0.4.11",
-]
-# macOS menu bar companion (`ciao menubar`). Kept for compatibility: the same
-# pin ships in the main dependencies with a Darwin platform marker.
-menubar = [
-  "rumps==0.4.0",
 ]
 
 [project.scripts]
