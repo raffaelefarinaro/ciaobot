@@ -5315,29 +5315,14 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # bootstrap process would outrank the password just written to .env.
     os.environ["PWA_AUTH_TOKEN"] = password
     os.environ["PWA_AUTH_REQUIRED"] = "true"
-    # Best-effort: bring the menu bar companion up right away so setup ends
-    # with the icon visible instead of waiting for the next login. Only for
-    # the real per-user LaunchAgents dir — scripted/test setups pass a custom
-    # dir and must not register anything with launchd.
+    # Only the real per-user LaunchAgents dir may be registered with launchd —
+    # scripted/test setups pass a custom dir and must not touch it. Nothing
+    # menu-bar related happens here any more: Ciaobot.app is the menu bar, and
+    # setup_workspace above has just retired the old `com.ciao.menubar` agent.
     real_launch_agents = (
         sys.platform == "darwin"
         and not str(body.get("launch_agents_dir", "")).strip()
     )
-    if real_launch_agents:
-        menubar_plist = Path.home() / "Library" / "LaunchAgents" / "com.ciao.menubar.plist"
-        if menubar_plist.exists():
-            try:
-                loaded = subprocess.run(
-                    ["launchctl", "kickstart", f"gui/{os.getuid()}/com.ciao.menubar"],
-                    capture_output=True, timeout=10,
-                )
-                if loaded.returncode != 0:
-                    subprocess.run(
-                        ["launchctl", "load", "-w", str(menubar_plist)],
-                        capture_output=True, timeout=10,
-                    )
-            except (OSError, subprocess.SubprocessError):
-                logger.info("Could not start the menu bar agent; it will load at next login.")
 
     restart = bool(body.get("restart", True))
     # An interactive foreground `ciao run` (the documented install flow) hands

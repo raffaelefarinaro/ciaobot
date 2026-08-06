@@ -55,6 +55,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - **Rich previews**: images inline; PDFs in the viewer; `.pptx` slides rendered as PDF (LibreOffice on the server).
 - **CSV tables**: `.csv` files render as an editable table in the viewer, and you can attach comments to individual cells (anchored by row and column) the same way you annotate document lines.
 - **Backlinks**: the markdown viewer has a Backlinks tab listing other vault notes that link to the open note via wikilinks (`[[Note]]`) — the incoming half of the wikilink graph.
+- **Keyboard shortcuts** work in the browser as well as the desktop app, on whichever modifier is actually free: new chat, dictation, and archive are `Cmd+T` / `Cmd+D` / `Cmd+A` in the app, and `Option+N` / `Option+D` / `Option+A` in the PWA, where the browser has already claimed the Cmd versions for new-tab, bookmark, and select-all. Arrow keys roam the home screen's recent chats and Esc closes the open chat in both. **Settings → Shortcuts** lists the set with the labels for how you are running it.
 
 ### 5. Skills, subagents, and commands (extensibility)
 
@@ -69,7 +70,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - **Custom providers**: any OpenAI- or Anthropic-compatible endpoint can be added by the user in **Settings → Providers** — give it a name, a URL, a token, and whether it runs through the Claude or Codex runner. Ciaobot can probe the endpoint to discover its model ids, and those models then appear in the normal chat, workspace, and routine model pickers alongside the built-in backends. Tokens are stored separately in the gitignored runtime directory and are never returned by the API; only whether a token is set is exposed.
 - Per-workspace default model and model bucket (which controls how aliases like `opus`/`sonnet` resolve), per-chat override in the picker.
 - Beyond per-chat routing, one chat can **reach another model without leaving the conversation**: `adversarial_review` for an inline multi-model second opinion, or a delegate (see §1) for writable work on a different model.
-- **Voice dictation model**: cloud transcription runs on an OpenAI transcription model, shown with its per-minute price in **Settings → Models** and overridable via `CIAO_TRANSCRIPTION_MODEL` or the runtime settings store. Local `mlx-whisper` dictation is a separate path and needs no key.
+- **Voice** is on-device and free — one engine each, with no API key, no per-minute billing, and no engine picker: dictation uses Apple's dictation models and speech uses `AVSpeechSynthesizer`, both through the `ciaobot-native` sidecar bundled in `Ciaobot.app`. It needs a **macOS 26+ host with the desktop app installed**; on Linux, Windows, older macOS, or a package-only install there is no voice, and Settings says so instead of failing when you press record. The constraint is on the *host* only — a phone or iPad talking to a Mac host gets voice, because the PWA uploads the audio to the host to transcribe.
 
 ### 7. Google Workspace (`gws`)
 

@@ -574,18 +574,18 @@ function closeChat() {
 }
 
 // ── Global keyboard shortcuts ───────────────────────────────────────
-// Desktop-only (the PWA in a browser would fight the OS for Cmd+T etc.).
-// These run inside the Tauri webview, where those combos are free.
+// Bound in both the PWA and the desktop app, but on different modifiers: the
+// Tauri webview owns Cmd+T / Cmd+D / Cmd+A, while a browser tab has already
+// spent them on new-tab / bookmark / select-all, so the PWA uses Option
+// instead. See onShortcutKeydown for the pairs.
 function isTypingTarget(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
 }
 
-// Keys the browser does not reserve, so they can be bound in the PWA as well
-// as the desktop app: arrow keys roam the home recent-chat grid (Enter opens
-// the focused card natively) and Esc closes the open chat. Anything with a
-// modifier stays in onShortcutKeydown, which is desktop-only because a browser
-// tab owns Cmd+T / Cmd+A.
+// Unmodified keys, which no browser reserves: arrow keys roam the home
+// recent-chat grid (Enter opens the focused card natively) and Esc closes the
+// open chat. Anything carrying a modifier stays in onShortcutKeydown.
 //
 // These must live in exactly ONE listener. They were previously handled here
 // AND again in onShortcutKeydown; in the desktop app both listeners are bound,
