@@ -329,6 +329,11 @@ def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
     if "reached your session usage limit" in low:
         return True
+    # Codex reports temporary model saturation as a capacity error rather
+    # than a 429/quota error. Treat it as hourly retryable so the user does
+    # not have to keep the chat open and press Retry manually.
+    if "at capacity" in low:
+        return True
     if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
         return True
     if "429" not in low and "too many requests" not in low:
