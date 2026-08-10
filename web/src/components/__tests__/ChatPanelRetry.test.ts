@@ -249,4 +249,22 @@ describe('ChatPanel retry from error bubble', () => {
     expect(args.context).toBe('Check the video')
     wrapper.unmount()
   })
+
+  it('suppresses scroll anchoring only while pinned at the bottom', async () => {
+    const { wrapper } = await mountPanel()
+    const messages = wrapper.find('.messages').element as HTMLElement
+
+    expect(messages.style.overflowAnchor).toBe('none')
+
+    Object.defineProperty(messages, 'scrollHeight', { configurable: true, value: 200 })
+    Object.defineProperty(messages, 'clientHeight', { configurable: true, value: 100 })
+    messages.scrollTop = 0
+    await wrapper.find('.messages').trigger('scroll')
+    expect(messages.style.overflowAnchor).toBe('auto')
+
+    messages.scrollTop = 100
+    await wrapper.find('.messages').trigger('scroll')
+    expect(messages.style.overflowAnchor).toBe('none')
+    wrapper.unmount()
+  })
 })
