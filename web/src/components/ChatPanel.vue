@@ -6,7 +6,7 @@
     <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
       <template #title>
         <div class="header-left">
-          <button class="close-btn desktop-only" @click="$emit('close')" title="Close chat">&times;</button>
+          <button class="close-btn" @click="$emit('close')" title="Close chat">&times;</button>
           <div class="header-breadcrumb" ref="breadcrumbRef">
             <span
               v-if="project && project.name !== 'General'"
@@ -539,7 +539,6 @@
         >
           <span class="trace-chevron">{{ liveTraceOpen ? '\u25BE' : '\u25B8' }}</span>
           <span class="activity-spinner"></span>
-          <span class="trace-icon">&#129504;</span>
           <span class="trace-label">{{ liveTraceLabel }}</span>
           <span v-if="liveTraceMetaParts.length" class="trace-meta">
             <span
