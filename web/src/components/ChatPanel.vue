@@ -3940,7 +3940,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, archiveActiveChat })
+defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
 </script>
 
 <style scoped>

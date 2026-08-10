@@ -10,12 +10,13 @@ import { useTaskStore } from '../../stores/tasks'
 import { useFontScale } from '../../composables/useFontScale'
 
 const toggleDictation = vi.fn()
+const toggleModelPicker = vi.fn()
 
 const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
   emits: ['close'],
   setup(_, { emit, expose }) {
-    expose({ toggleDictation })
+    expose({ toggleDictation, toggleModelPicker })
     return () => h('button', {
       'data-testid': 'close-chat',
       onClick: () => emit('close'),
@@ -58,6 +59,7 @@ describe('ChatLayout', () => {
   afterEach(() => {
     window.__CIAOBOT_DESKTOP__ = undefined
     toggleDictation.mockReset()
+    toggleModelPicker.mockReset()
     vi.restoreAllMocks()
   })
 
@@ -294,6 +296,69 @@ describe('ChatLayout', () => {
     await nextTick()
     expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
 
+    wrapper.unmount()
+  })
+
+  // The model picker follows the same split: Cmd+M in the desktop app,
+  // Option+M in the PWA, because a browser has already spent Cmd+M on
+  // Minimize Window on macOS. Needs an active chat, like dictation.
+  it.each([
+    ['the desktop app', true, { key: 'm', metaKey: true }],
+    ['the web PWA', undefined, { key: 'm', altKey: true }],
+  ] as const)('opens the model picker in %s', async (_label, desktopFlag, keyInit) => {
+    window.__CIAOBOT_DESKTOP__ = desktopFlag
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { ...keyInit, cancelable: true })
+    window.dispatchEvent(event)
+
+    expect(toggleModelPicker).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
     wrapper.unmount()
   })
 

@@ -665,6 +665,18 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
+  // Model picker: Cmd+M (Desktop) or Option+M (Web/PWA), where Cmd+M is the
+  // browser's Minimize Window on macOS and cannot be intercepted from a page.
+  // Not gated on the typing target, like dictation: opening the picker is the
+  // useful reading of the key even mid-compose, and the picker is a popover,
+  // not a text mutation.
+  if ((isDesktop && mod && (e.key === 'm' || e.key === 'M')) || (!isDesktop && alt && (e.key === 'm' || e.key === 'M'))) {
+    if (!store.activeChat) return
+    e.preventDefault()
+    chatPanelRef.value?.toggleModelPicker()
+    return
+  }
+
   // Font zoom: Cmd+Shift+= (increase) and Cmd+Shift+- (decrease). Uses the
   // platform's primary modifier (Cmd on Mac, Ctrl on Linux/Windows) whether
   // we are inside the desktop app or the PWA — this is the conventional
