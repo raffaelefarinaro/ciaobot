@@ -654,6 +654,17 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
+  // Sidebar: Cmd+S (Desktop) or Option+S (Web/PWA), where Cmd+S is the
+  // browser's Save Page. Skipped while typing for the same reason as archive:
+  // in a text field Option+S is how you type ß, and stealing it would break
+  // text entry for the sake of a view toggle.
+  if ((isDesktop && mod && (e.key === 's' || e.key === 'S')) || (!isDesktop && alt && (e.key === 's' || e.key === 'S'))) {
+    if (isTypingTarget(e.target)) return
+    e.preventDefault()
+    sidebarCollapsed.value = !sidebarCollapsed.value
+    return
+  }
+
   // Font zoom: Cmd+Shift+= (increase) and Cmd+Shift+- (decrease). Uses the
   // platform's primary modifier (Cmd on Mac, Ctrl on Linux/Windows) whether
   // we are inside the desktop app or the PWA — this is the conventional

@@ -78,6 +78,19 @@
               <kbd v-else>&#8224;A</kbd>
               <span>Archive the open chat (asks to confirm)</span>
             </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;S</kbd>
+              <kbd v-else>&#8224;S</kbd>
+              <span>Show or hide the sidebar</span>
+            </li>
+            <li>
+              <kbd>&#8984;&#8679;=</kbd>
+              <span>Increase the font size</span>
+            </li>
+            <li>
+              <kbd>&#8984;&#8679;-</kbd>
+              <span>Decrease the font size</span>
+            </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
             <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
             <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>

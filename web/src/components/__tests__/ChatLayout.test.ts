@@ -235,6 +235,122 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+  // The sidebar toggle follows the same split as the other modifier
+  // shortcuts: Cmd+S in the desktop app, Option+S in the PWA, because a
+  // browser has already spent Cmd+S on Save Page.
+  it.each([
+    ['the desktop app', true, { key: 's', metaKey: true }],
+    ['the web PWA', undefined, { key: 's', altKey: true }],
+  ] as const)('toggles the sidebar in %s', async (_label, desktopFlag, keyInit) => {
+    window.__CIAOBOT_DESKTOP__ = desktopFlag
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    // Starts expanded, so the first press collapses and the second restores —
+    // asserting both directions, since "opens and closes" is the whole point.
+    expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
+
+    const collapse = new KeyboardEvent('keydown', { ...keyInit, cancelable: true })
+    window.dispatchEvent(collapse)
+    await nextTick()
+    expect(wrapper.find('.chat-layout').classes()).not.toContain('sidebar-open')
+    expect(collapse.defaultPrevented).toBe(true)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { ...keyInit, cancelable: true }))
+    await nextTick()
+    expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
+
+    wrapper.unmount()
+  })
+
+  it('leaves the sidebar alone when the shortcut fires inside a text field', async () => {
+    // Option+S is how you type ß, so stealing it mid-composition would break
+    // text entry for the sake of a view toggle.
+    window.__CIAOBOT_DESKTOP__ = undefined
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+
+    const event = new KeyboardEvent('keydown', { key: 's', altKey: true, cancelable: true })
+    input.dispatchEvent(event)
+    await nextTick()
+
+    expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
+    expect(event.defaultPrevented).toBe(false)
+
+    input.remove()
+    wrapper.unmount()
+  })
+
   it('increments --font-scale by the shared step on Cmd/Ctrl+Shift+=', async () => {
     // The shortcut should be available in both the desktop app and the PWA:
     // it is the platform's primary modifier. The step, bounds, and
