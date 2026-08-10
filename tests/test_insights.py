@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from ciao import insights
+from ciao import insights, native_sidecar
 from ciao.providers.ollama import OllamaSettings
 
 
@@ -369,6 +369,83 @@ def test_call_model_uses_oneshot_runner(
     assert captured["timeout_s"] == insights._DEFAULT_TIMEOUT_S
 
 
+def test_call_model_uses_apple_intelligence_for_the_local_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr("ciao.native_sidecar.apple_model_available", lambda: True)
+
+    async def fake_respond(prompt: str, *, instructions: str, timeout: float) -> str:
+        captured["prompt"] = prompt
+        captured["instructions"] = instructions
+        return "## Decisions\n- kept the local path"
+
+    monkeypatch.setattr("ciao.native_sidecar.respond", fake_respond)
+    result = asyncio.run(insights._call_model('{"idx": 1}', "apple", {}))
+
+    assert '{"idx": 1}' in captured["prompt"]
+    assert result.startswith("## Decisions")
+    assert captured["instructions"] == insights._INSIGHTS_SYSTEM_PROMPT
+
+
+def test_compare_apple_insights_does_not_modify_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    archive = config.vault_root / "Logs" / "Chats" / "personal" / "claude" / "chat.md"
+    archive.parent.mkdir(parents=True)
+    archive.write_text(
+        "# Chat\n\nUser: choose local\n\n## Session insights\n\n"
+        "## Decisions\n- chose local\n",
+        encoding="utf-8",
+    )
+    before = archive.read_text(encoding="utf-8")
+    monkeypatch.setattr("ciao.native_sidecar.apple_model_available", lambda: True)
+    monkeypatch.setattr("ciao.native_sidecar.apple_model_unavailable_reason", lambda: "")
+
+    async def fake_respond(*args, **kwargs) -> str:
+        return "## Decisions\n- chose local\n## Open loops\n- verify later\n"
+
+    monkeypatch.setattr("ciao.native_sidecar.respond", fake_respond)
+    result = asyncio.run(insights.compare_apple_insights(config, limit=1))
+
+    assert result["available"] is True
+    assert result["results"][0]["shared_sections"] == ["Decisions"]
+    assert result["results"][0]["apple_only"] == ["Open loops"]
+    assert archive.read_text(encoding="utf-8") == before
+
+
+def test_compare_apple_insights_reports_runtime_failure_as_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    archive = config.vault_root / "Logs" / "Chats" / "personal" / "claude" / "chat.md"
+    archive.parent.mkdir(parents=True)
+    archive.write_text(
+        "# Chat\n\nUser: choose local\n\n## Session insights\n\n"
+        "## Decisions\n- chose local\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ciao.native_sidecar.apple_model_available", lambda: True)
+    monkeypatch.setattr(
+        "ciao.native_sidecar.apple_model_unavailable_reason",
+        lambda: "Apple FoundationModels is unavailable right now: ModelManagerError 1008",
+    )
+
+    async def failing_respond(*args, **kwargs) -> str:
+        raise RuntimeError("ModelManagerError 1008")
+
+    monkeypatch.setattr("ciao.native_sidecar.respond", failing_respond)
+    result = asyncio.run(insights.compare_apple_insights(config, limit=1))
+
+    assert result["available"] is False
+    assert "ModelManagerError 1008" in result["reason"]
+    assert result["results"][0]["error"] == "ModelManagerError 1008"
+
+
 def test_run_oneshot_error_handling(monkeypatch: pytest.MonkeyPatch) -> None:
     from ciao.providers.oneshot import run_oneshot
     from claude_agent_sdk import ResultMessage
@@ -611,6 +688,19 @@ def test_fit_transcript_leaves_a_small_payload_untouched() -> None:
     fitted, dropped = insights._fit_transcript(payload)
     assert fitted == payload
     assert dropped == 0
+
+
+def test_fit_apple_input_keeps_newest_lines_with_small_budget() -> None:
+    payload = "\n".join(f"line-{i}" for i in range(20))
+    fitted, dropped = native_sidecar.fit_apple_input(payload, max_chars=30)
+    assert fitted.splitlines() == ["line-17", "line-18", "line-19"]
+    assert dropped == 17
+    assert len(fitted) <= 30
+
+
+def test_insight_section_names_accept_mac_line_endings() -> None:
+    output = "## Decisions\r- chose local\r\r## Open loops\r- verify later"
+    assert insights._insight_section_names(output) == ["Decisions", "Open loops"]
 
 
 def test_fit_transcript_drops_oldest_lines_and_keeps_the_newest(

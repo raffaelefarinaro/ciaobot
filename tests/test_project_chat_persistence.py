@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
+from ciao import native_sidecar
 from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.web.chat_broker import ChatStream
 from ciao.web.project_chats import ProjectChatManager
 
 
@@ -152,3 +155,53 @@ def test_chat_control_surface_round_trips_through_registry(tmp_path: Path) -> No
     assert reloaded is not None
     assert reloaded.control_surface == "mcp"
     assert reloaded.to_dict()["control_surface"] == "mcp"
+
+
+def test_reentry_summary_is_cached_bounded_and_invalidated_by_queue(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Summary cache", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="Summary cache chat")
+    chat.session_id = "session-summary"
+    manager._save()
+
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+    monkeypatch.setattr(
+        manager._transcripts,
+        "current_filtered_jsonl",
+        lambda *_args: '{"type":"user","content":"keep working"}',
+    )
+    calls = 0
+
+    async def fake_respond(*_args, **_kwargs) -> str:
+        nonlocal calls
+        calls += 1
+        return "\n".join(
+            f"- point {index} " + ("x" * 130)
+            for index in range(6)
+        )
+
+    monkeypatch.setattr(native_sidecar, "respond", fake_respond)
+
+    first = asyncio.run(manager.generate_reentry_summary(chat.chat_id))
+    second = asyncio.run(manager.generate_reentry_summary(chat.chat_id))
+
+    assert first == second
+    assert calls == 1
+    assert len(first) <= 600
+    assert len(first.splitlines()) <= 4
+
+    reloaded = _make_manager(tmp_path).get_chat(chat.chat_id)
+    assert reloaded is not None
+    assert reloaded.reentry_summary == first
+
+    stream = ChatStream(prompt_text="new message")
+    manager._broker.register(chat.chat_id, stream)
+    assert manager.queue_message(chat.chat_id, "new message") is True
+    assert chat.reentry_summary == ""
+    manager._broker.clear(chat.chat_id, stream)
+
+    after_message = _make_manager(tmp_path).get_chat(chat.chat_id)
+    assert after_message is not None
+    assert after_message.reentry_summary == ""

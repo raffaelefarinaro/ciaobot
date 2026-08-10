@@ -3360,6 +3360,24 @@ async def chat_speak(request: Request) -> Response:
     )
 
 
+async def chat_reentry_summary(request: Request) -> JSONResponse:
+    """Return an ephemeral Apple Intelligence summary for a reopened chat."""
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "chat not found"}, status_code=404)
+    if chat.archived:
+        return JSONResponse({"available": True, "summary": ""})
+
+    try:
+        summary = await pcm.generate_reentry_summary(chat_id)
+    except Exception as exc:  # noqa: BLE001 — orientation aid must never block chat use
+        logger.info("Re-entry summary failed for %s: %s", chat_id, exc)
+        return JSONResponse({"available": False, "summary": ""})
+    return JSONResponse({"available": bool(summary), "summary": summary})
+
+
 # ── Images ───────────────────────────────────────────────────────────────
 
 async def chat_images(request: Request) -> JSONResponse:
@@ -4280,6 +4298,23 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
     return JSONResponse({"status": "started", "model": model}, status_code=202)
 
 
+async def compare_apple_insights_route(request: Request) -> JSONResponse:
+    """Compare Apple Intelligence with a small sample of existing insights."""
+    from ciao.insights import compare_apple_insights
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — empty body uses the default sample size
+        body = {}
+    raw_limit = (body or {}).get("limit", 2) if isinstance(body, dict) else 2
+    try:
+        limit = max(1, min(int(raw_limit), 5))
+    except (TypeError, ValueError):
+        limit = 2
+    result = await compare_apple_insights(request.app.state.config, limit=limit)
+    return JSONResponse(result)
+
+
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     state = request.app.state.state_store
@@ -4846,9 +4881,9 @@ def _routines_payload(config, app_settings) -> dict:
                 for provider in load_custom_providers(config)
             },
         },
-        # The "apple" title option needs macOS 26+, the desktop app, and Apple
-        # Intelligence switched on; the Chat titles row explains which is
-        # missing instead of silently falling back to a cloud model.
+        # The "apple" title/insights options need macOS 26+, the desktop app,
+        # and Apple Intelligence switched on; the routine rows explain which
+        # prerequisite is missing instead of silently hiding the option.
         "apple_model_available": native_sidecar.apple_model_available(),
         "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
         "transcription": {

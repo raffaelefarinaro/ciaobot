@@ -111,6 +111,28 @@ def test_get_title_effective_is_apfel_when_explicitly_chosen(monkeypatch, tmp_pa
     assert resp.json()["title_model_effective"] == "apfel"
 
 
+def test_get_insights_effective_is_sonnet_not_apfel_when_no_override(
+    monkeypatch, tmp_path,
+):
+    # Apple Intelligence is an explicit option, never the Automatic default.
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
+    client, config = _make_client(tmp_path)
+    data = client.get("/api/settings/routines").json()
+    assert data["insights_model"] == ""
+    assert data["insights_model_effective"] != "apfel"
+    assert data["insights_model_effective"] == config.sonnet_model_for_workspace("personal")
+
+
+def test_get_insights_effective_is_apfel_when_explicitly_chosen(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
+    client, config = _make_client(tmp_path)
+    resp = client.patch("/api/settings/routines", json={"insights_model": "apfel"})
+    assert resp.status_code == 200
+    assert resp.json()["insights_model_effective"] == "apfel"
+
+
 def test_patch_applies_to_live_config_and_persists(tmp_path):
     client, config = _make_client(tmp_path)
     resp = client.patch(

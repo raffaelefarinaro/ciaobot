@@ -54,6 +54,7 @@ from ciao.web.routes_api import (
     chat_images,
     chat_mark_read,
     chat_messages,
+    chat_reentry_summary,
     chat_retry,
     chat_prompt,
     chat_new_session,
@@ -99,6 +100,7 @@ from ciao.web.routes_api import (
     setup_status_endpoint,
     list_automation,
     trigger_backfill_insights,
+    compare_apple_insights_route,
     list_completed_projects,
     list_projects,
     list_loops,
@@ -236,6 +238,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/retry", chat_retry, methods=["POST"]),
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
         Route("/api/chats/{chat_id}/messages", chat_messages, methods=["GET"]),
+        Route("/api/chats/{chat_id}/reentry-summary", chat_reentry_summary, methods=["POST"]),
         Route("/api/chats/{chat_id}/subagents", chat_subagents, methods=["GET"]),
         Route("/api/chats/{chat_id}/voice", chat_voice, methods=["POST"]),
         Route("/api/chats/{chat_id}/speak", chat_speak, methods=["POST"]),
@@ -269,6 +272,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Automation status (read-only) — Settings → Automation page
         Route("/api/automation", list_automation, methods=["GET"]),
         Route("/api/automation/backfill-insights", trigger_backfill_insights, methods=["POST"]),
+        Route("/api/automation/compare-apple-insights", compare_apple_insights_route, methods=["POST"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
         Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)
