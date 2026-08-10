@@ -144,16 +144,36 @@ _GWS_BUILTIN_PROFILES = ("personal", "work")
 _GWS_PROFILE_META = {
     "personal": {
         "label": "Personal Google account",
-        "purpose": "Private Gmail, Calendar, and Tasks. Keep this separate from company systems.",
+        "purpose": "Private Google account. Keep this separate from company systems.",
+        # Shown for accounts connected before scopes were recorded. Their
+        # credentials.json has no `scopes` key and re-consent is the only way
+        # to get one, so without this an upgrading user's connected account
+        # silently loses every chip it used to show.
         "examples": ["Gmail", "Calendar", "Tasks"],
     },
     "work": {
         "label": "Work Google account",
-        "purpose": "Company Drive, Docs, Sheets, Slides, Gmail, Calendar, and Tasks.",
+        "purpose": "Company Google account used for work Drive, Docs, Sheets, and Slides.",
         "examples": ["Drive", "Docs", "Sheets", "Slides", "Gmail", "Calendar"],
     },
 }
 _GWS_AUTH_FILES = ("credentials.json", "credentials.enc")
+
+
+def _gws_purpose_with_chips(purpose: str, chips: list[str]) -> str:
+    """Append the granted services to the profile's standing description.
+
+    The description is not replaced: for the personal profile it carries the
+    "keep this separate from company systems" guidance, which matters most
+    once an account is actually connected.
+    """
+    if len(chips) == 1:
+        joined = chips[0]
+    elif len(chips) == 2:
+        joined = f"{chips[0]} and {chips[1]}"
+    else:
+        joined = f"{', '.join(chips[:-1])}, and {chips[-1]}"
+    return f"{purpose} Connected to {joined}."
 
 
 def _known_workspace_names(pcm: object) -> set[str]:
@@ -1384,7 +1404,6 @@ def _gws_profile_payload(
         {
             "label": f"{profile} Google profile",
             "purpose": "Custom Google Workspace profile configured outside the built-in personal/work wrapper.",
-            "examples": [],
         },
     )
     config_dir = _gws_profile_config_dir(config, profile)
@@ -1398,7 +1417,10 @@ def _gws_profile_payload(
         setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
         headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
 
+    from ciao import gws_auth
+
     email = ""
+    chips: list[str] = []
     if config_dir:
         creds_path = config_dir / "credentials.json"
         if creds_path.is_file():
@@ -1406,8 +1428,17 @@ def _gws_profile_payload(
                 with open(creds_path, "r", encoding="utf-8") as f:
                     creds_data = json.load(f)
                 email = creds_data.get("email") or ""
+                # gws_auth owns both the shape tolerance and the label
+                # catalogue, so a scope added to its scope sets cannot show up
+                # here as a raw URL without someone naming it there first.
+                chips = gws_auth.scope_labels(creds_data.get("scopes"))
             except Exception:
                 pass
+
+    # Connections made before scopes were recorded have none, and keep the
+    # profile's standing description and curated chip list.
+    examples = chips or list(meta.get("examples") or [])
+    purpose = _gws_purpose_with_chips(meta["purpose"], chips) if chips else meta["purpose"]
 
     # Cached token-health snapshot from the periodic monitor (issue #145).
     # Read-only and cheap — never runs the `auth status` subprocess here.
@@ -1422,8 +1453,8 @@ def _gws_profile_payload(
     return {
         "name": profile,
         "label": meta["label"],
-        "purpose": meta["purpose"],
-        "examples": meta["examples"],
+        "purpose": purpose,
+        "examples": examples,
         "configured": credentials_present,
         "credentials_present": credentials_present,
         "client_secret_present": client_secret_present,

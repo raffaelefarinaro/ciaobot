@@ -78,6 +78,19 @@
               <kbd v-else>&#8224;A</kbd>
               <span>Archive the open chat (asks to confirm)</span>
             </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;S</kbd>
+              <kbd v-else>&#8224;S</kbd>
+              <span>Show or hide the sidebar</span>
+            </li>
+            <li>
+              <kbd>&#8984;&#8679;=</kbd>
+              <span>Increase the font size</span>
+            </li>
+            <li>
+              <kbd>&#8984;&#8679;-</kbd>
+              <span>Decrease the font size</span>
+            </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
             <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
             <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
@@ -366,9 +379,9 @@
             </div>
             <div class="settings-control">
               <div class="font-scale-row">
-                <button class="btn-small" @click="adjustFontScale(-0.05)" :disabled="fontScale <= 0.8">Decrease</button>
+                <button class="btn-small" @click="adjustFontScale(-FONT_SCALE_STEP)" :disabled="fontScale <= MIN_FONT_SCALE">Decrease</button>
                 <span class="font-scale-display">{{ fontScalePercent }}%</span>
-                <button class="btn-small" @click="adjustFontScale(0.05)" :disabled="fontScale >= 1.5">Increase</button>
+                <button class="btn-small" @click="adjustFontScale(FONT_SCALE_STEP)" :disabled="fontScale >= MAX_FONT_SCALE">Increase</button>
                 <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
               </div>
             </div>
@@ -2153,6 +2166,13 @@ import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatTime, formatDuration } from '../lib/time'
 import { isDesktopApp } from '../lib/desktop'
+import {
+  DEFAULT_FONT_SCALE,
+  FONT_SCALE_STEP,
+  MAX_FONT_SCALE,
+  MIN_FONT_SCALE,
+  useFontScale,
+} from '../composables/useFontScale'
 import type {
   AgentAssetsResponse,
   AutomationProcess,
@@ -2549,20 +2569,16 @@ async function deleteCustomMcpServer(name: string) {
 
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
-// The font scale is anchored to the pre-rescale UI: DEFAULT_FONT_SCALE (1.2)
-// displays as "100%". The raw multiplier still drives --font-scale; only the
-// displayed percentage is rescaled.
-const DEFAULT_FONT_SCALE = 1.2
-const fontScale = ref(DEFAULT_FONT_SCALE)
+// The scale itself, its bounds, its step and its persistence live in
+// useFontScale, shared with the global zoom shortcuts. Only the displayed
+// percentage is Settings' own: the scale is anchored to the pre-rescale UI, so
+// DEFAULT_FONT_SCALE (1.2) reads as "100%".
+const { fontScale, adjust: adjustFontScale, reset: resetFontScale } = useFontScale()
 const fontScalePercent = computed(() => Math.round((fontScale.value / DEFAULT_FONT_SCALE) * 100))
 
 function loadAppearanceSettings() {
   try {
     activeTheme.value = localStorage.getItem('ciao-theme') || 'system'
-    const savedScale = localStorage.getItem('ciao-font-scale')
-    if (savedScale) {
-      fontScale.value = parseFloat(savedScale) || DEFAULT_FONT_SCALE
-    }
   } catch {
     // Ignore localStorage block
   }
@@ -2588,24 +2604,6 @@ function setTheme(theme: 'dark' | 'light' | 'system') {
   }
 }
 
-function adjustFontScale(delta: number) {
-  let next = parseFloat((fontScale.value + delta).toFixed(2))
-  if (next < 0.8) next = 0.8
-  if (next > 1.5) next = 1.5
-  setFontScale(next)
-}
-
-function resetFontScale() {
-  setFontScale(DEFAULT_FONT_SCALE)
-}
-
-function setFontScale(next: number) {
-  fontScale.value = next
-  try {
-    localStorage.setItem('ciao-font-scale', next.toString())
-  } catch { /* localStorage blocked */ }
-  document.documentElement.style.setProperty('--font-scale', next.toString())
-}
 function isSkillExpanded(name: string) {
   return expandedSkills.value[name] || false
 }

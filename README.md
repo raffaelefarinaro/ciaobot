@@ -257,7 +257,7 @@ Recurring schedules that ship enabled ([ciao/stock/schedules.json](ciao/stock/sc
 
 | Routine | Cadence | What it does |
 |---|---|---|
-| Memory curation | Daily | Reviews recent archived chats, memory proposals, and learnings; updates vault pages and `Workspace/Learnings.md`. Removes bounded-memory entries after a valid `[expires: YYYY-MM-DD]` date and reports malformed expiration tags without guessing. |
+| Memory curation | Daily | Reviews recent archived chats, memory proposals, and learnings; updates vault pages and `Workspace/Learnings.md`. Removes bounded-memory entries after a valid `[expires: YYYY-MM-DD]` date and reports malformed expiration tags without guessing. Then runs `ciao memory-audit --json` and repairs rot in the always-loaded regions: entries that record a chat event instead of a current value move to `Workspace/Learnings.md`, entries citing a path that no longer exists get corrected or dropped, and a subject holding two competing values gets collapsed to the current one. |
 | Workspace hygiene | Weekly (Sun) | Regenerates the vault index with `ciao vault-index --write`, then runs `ciao os-audit --json`. It can repair low-risk link and index drift, then verifies the remaining findings. |
 | Skill evolution | Weekly (Sun) | Drafts skill-improvement proposals from recent usage; never applies them automatically. |
 

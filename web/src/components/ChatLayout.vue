@@ -188,6 +188,7 @@ import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
 import { isDesktopApp } from '../lib/desktop'
+import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
 
 const store = useProjectStore()
 
@@ -203,6 +204,11 @@ const store = useProjectStore()
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
 // Ref into HomeRecentChats for arrow-key navigation on the home screen.
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
+
+// Reactive handle on the global font scale. Used by the Cmd/Ctrl+Shift+= and
+// Cmd/Ctrl+Shift+- shortcuts (below); the same composable is consumed by
+// Settings → Appearance so the +/- buttons and the shortcuts stay in sync.
+const fontScale = useFontScale()
 
 const DEFAULT_SIDEBAR_WIDTH = 280
 const MIN_SIDEBAR_WIDTH = 180
@@ -645,6 +651,36 @@ function onShortcutKeydown(e: KeyboardEvent) {
     if (isTypingTarget(e.target) || !store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
+    return
+  }
+
+  // Sidebar: Cmd+S (Desktop) or Option+S (Web/PWA), where Cmd+S is the
+  // browser's Save Page. Skipped while typing for the same reason as archive:
+  // in a text field Option+S is how you type ß, and stealing it would break
+  // text entry for the sake of a view toggle.
+  if ((isDesktop && mod && (e.key === 's' || e.key === 'S')) || (!isDesktop && alt && (e.key === 's' || e.key === 'S'))) {
+    if (isTypingTarget(e.target)) return
+    e.preventDefault()
+    sidebarCollapsed.value = !sidebarCollapsed.value
+    return
+  }
+
+  // Font zoom: Cmd+Shift+= (increase) and Cmd+Shift+- (decrease). Uses the
+  // platform's primary modifier (Cmd on Mac, Ctrl on Linux/Windows) whether
+  // we are inside the desktop app or the PWA — this is the conventional
+  // browser/macOS zoom shortcut, so it should behave the same regardless of
+  // host. Step, bounds, and persistence match the Settings +/- buttons so
+  // the two surfaces stay in lockstep. Shift is required to avoid hijacking
+  // plain Cmd+= / Cmd+- (the latter is Cmd+Minus on US layouts), which we
+  // may want for other shortcuts later.
+  if (mod && e.shiftKey && !alt && (e.key === '=' || e.key === '+')) {
+    e.preventDefault()
+    fontScale.adjust(FONT_SCALE_STEP)
+    return
+  }
+  if (mod && e.shiftKey && !alt && (e.key === '-' || e.key === '_')) {
+    e.preventDefault()
+    fontScale.adjust(-FONT_SCALE_STEP)
     return
   }
 }

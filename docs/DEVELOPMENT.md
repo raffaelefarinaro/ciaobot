@@ -200,6 +200,7 @@ ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
+ciao memory-audit --json # Bounded-memory rot only (regions, no vault scan)
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
@@ -266,6 +267,44 @@ The status and process exit code are a stable contract:
 | `error` | 2 | Required evidence could not be inspected reliably. Findings may still be present, but the report is not a clean bill of health. |
 
 The weekly `system-workspace-hygiene` schedule runs `ciao vault-index --write` before `ciao os-audit --json`. A failed index rebuild blocks link and index repairs and prevents a healthy/no-op claim. The prompt treats audit exit 1 as findings and continues, but treats exit 2 as an unreliable scan and reports the errors without claiming success.
+
+### Bounded-memory rot audit
+
+`ciao/memory_audit.py` checks whether the content of the always-loaded
+`ciao:memory` / `ciao:profile` regions has rotted, as opposed to the mechanical
+checks (caps, expiry, exact duplicates) that `audit_memory` already ran. It rests
+on one rule: a remembered fact is either **state**, a current value that gets
+replaced when it changes, or an **event**, a thing that happened which gets
+appended to a log and never edited. The regions are a state surface.
+
+Three detectors, all model-free, because a model asked to tally a few hundred
+entries returns a confident number and a different one tomorrow:
+
+| Detector | Finds | Counted as actionable |
+|---|---|---|
+| `event_shaped_entries` | Transcript residue: `User said ... -> assistant ...`, leftover `[idx=]` citations. Belongs in `Workspace/Learnings.md`. | Yes |
+| `stale_path_entries` | A cited path that does not exist. The only detector with hard evidence. | Yes |
+| `superseded_state_candidates` | Two entries asserting state about one subject, meaning a value was appended instead of replaced. | No |
+
+The detectors are tuned for precision over recall: one that cries wolf trains
+the reader to skip the report. Two consequences worth knowing before you widen
+them. A file extension alone does not make a token a path, because the engine
+and vault live in sibling repos and a correct entry may cite `ciao/cli.py` from
+the vault repo, where no `ciao/` exists; a token must be explicitly rooted
+(`~/`, `/`, `./`) or start at a directory that exists in this workspace. And a
+path outside both the workspace and `$HOME` is counted as unverifiable rather
+than stale, since it may belong to another machine. `paths_checked` and
+`paths_unverifiable` are reported so an empty finding list is never mistaken for
+full coverage.
+
+`superseded_state_candidates` is deliberately excluded from `total_issues`,
+matching `rule_overlaps_found`. It is a judgement the user may legitimately
+decline, and a finding that can never be cleared would pin the whole audit at
+`needs_attention` until people stop reading it.
+
+`ciao memory-audit` reads one file and skips the vault scan, so the daily
+`system-memory-curation` schedule can afford to call it and fix what it finds.
+Exit 0 clean, 1 findings, 2 a region could not be read.
 
 ## Skills, subagents, and slash commands
 

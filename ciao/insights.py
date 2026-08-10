@@ -740,39 +740,59 @@ async def backfill_insights_task(
     """
     stats = _empty_backfill_stats()
     vault_root = config.vault_root
-    base = vault_root / "memory-vault" / "Logs" / "Chats"
+    # Archives live at <vault_root>/Logs/Chats (see main.py:transcript_root),
+    # NOT <vault_root>/memory-vault/Logs/Chats — vault_root is already the
+    # container that holds Logs/, MEMORY.md, etc.
+    base = vault_root / "Logs" / "Chats"
+
+    project_dir = _claude_projects_dir(config.workspace_root)
+
+    def _discover() -> tuple[list[tuple[Path, str, bool]], int, int]:
+        """Walk the archive tree and decide what needs backfilling.
+
+        Runs off the loop: this globs the whole archive directory and reads
+        every candidate transcript to check for an existing insights section,
+        which is hundreds of files on an aged vault. It used to be reachable
+        only through a path that never existed, so the blocking never showed;
+        both callers (startup and the Automations button) drive it from the
+        event loop, where it would stall every request for its duration.
+        """
+        found: list[tuple[Path, str, bool]] = []
+        # Sorted for a deterministic order (oldest first / alphabetic).
+        archives = sorted(base.glob("*/claude/*.md"))
+        done = 0
+        for md in archives:
+            # Cheap filters first. _has_insights_section reads the whole file,
+            # so a workspace-scoped run must not pay for every archive in the
+            # vault before discarding it.
+            if workspace and md.parent.parent.name != workspace:
+                continue
+
+            match = UUID_RE.search(md.name)
+            session_id = match.group(0) if match else None
+            if not session_id:
+                continue
+
+            if _has_insights_section(md):
+                done += 1
+                continue
+
+            has_jsonl = (project_dir / f"{session_id}.jsonl").exists()
+
+            # Decide if we keep this one based on mode filter
+            if has_jsonl and mode in {"both", "full"}:
+                found.append((md, session_id, True))
+            elif (not has_jsonl) and mode in {"both", "text"}:
+                found.append((md, session_id, False))
+        return found, len(archives), done
+
     if not base.exists():
         logger.info("Vault directory %s does not exist, skipping backfill", base)
         return stats
 
-    project_dir = _claude_projects_dir(config.workspace_root)
-
-    todo = []
-    # Loop over sorted files to ensure deterministic order (oldest first or alphabetic)
-    archives = sorted(base.glob("*/claude/*.md"))
-    stats["total_discovered"] = len(archives)
-    for md in archives:
-        if _has_insights_section(md):
-            stats["already_done"] += 1
-            continue
-
-        # Filter by workspace/context if requested
-        context = md.parent.parent.name
-        if workspace and context != workspace:
-            continue
-
-        match = UUID_RE.search(md.name)
-        session_id = match.group(0) if match else None
-        if not session_id:
-            continue
-
-        has_jsonl = bool(session_id and (project_dir / f"{session_id}.jsonl").exists())
-        
-        # Decide if we keep this one based on mode filter
-        if has_jsonl and mode in {"both", "full"}:
-            todo.append((md, session_id, True))
-        elif (not has_jsonl) and mode in {"both", "text"}:
-            todo.append((md, session_id, False))
+    todo, discovered, already_done = await asyncio.to_thread(_discover)
+    stats["total_discovered"] = discovered
+    stats["already_done"] = already_done
 
     stats["eligible"] = len(todo)
     if limit > 0:

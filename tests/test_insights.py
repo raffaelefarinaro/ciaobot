@@ -521,7 +521,10 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     vault_root = tmp_path / "vault"
     workspace_root = tmp_path / "ws"
     
-    chats_dir = vault_root / "memory-vault" / "Logs" / "Chats" / "chat-123" / "claude"
+    # Matches production: main.py builds transcript_root as
+    # config.vault_root / "Logs" / "Chats". vault_root is already the
+    # memory-vault container, so there is no second "memory-vault" level.
+    chats_dir = vault_root / "Logs" / "Chats" / "chat-123" / "claude"
     chats_dir.mkdir(parents=True)
     
     # 1. Archive already done
