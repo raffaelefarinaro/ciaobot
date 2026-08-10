@@ -4672,7 +4672,7 @@ async function doDeploy(confirmWarnings = false) {
       actionResult.value = 'Restart complete. Waiting for server to come back, then reloading...'
       projectStore.beginServerRestart('Deploy complete. Restarting Ciaobot…')
     } else {
-      actionResult.value = 'Restart failed. See steps above.'
+      actionResult.value = 'Restart failed. See steps below.'
     }
   } catch (e) {
     const payload = errorPayload(e)
@@ -4691,6 +4691,12 @@ async function doDeploy(confirmWarnings = false) {
         return doDeploy(true)
       }
       actionResult.value = 'Cancelled by user due to warnings.'
+    } else if (deploySteps.value.some(s => !s.ok)) {
+      // The failed-step cards below already show the step name and its full
+      // output. Repeating the server's error string here rendered the same
+      // failure twice: once as an unstyled truncated wall of red text, once in
+      // the readable card. Keep the headline, drop the duplicate.
+      actionResult.value = 'Restart failed. See steps below.'
     } else {
       actionResult.value = `Error: ${errorMessage(e, 'unknown error')}`
     }

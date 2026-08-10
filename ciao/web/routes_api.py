@@ -5596,6 +5596,61 @@ async def admin_snapshot(request: Request) -> JSONResponse:
 
 
 
+# Enough of a failing step's tail to carry a traceback or a pip resolver
+# error. The old 500 was not enough for either.
+_DEPLOY_STEP_OUTPUT_CHARS = 4000
+
+
+def _record_step(step: str, result: subprocess.CompletedProcess) -> dict:
+    """Capture a step's output, keeping the part that says what went wrong.
+
+    Two things this must not do, both of which hid real failures:
+
+    * Truncate from the *head*. Build tools put progress chatter first and
+      the diagnosis last, so `[:500]` on a failed `pip install` showed
+      "Preparing editable metadata..." and cut off before the error.
+    * Take ``stdout or stderr``. pip writes progress to stdout and errors
+      to stderr, so stdout is never empty and stderr was always discarded.
+
+    The full output is logged regardless: the response is the only other
+    copy, and a truncated card was previously the sole record of a failure.
+    """
+    parts = [p for p in (result.stdout.strip(), result.stderr.strip()) if p]
+    combined = "\n".join(parts)
+    out = combined[-_DEPLOY_STEP_OUTPUT_CHARS:]
+    if len(combined) > _DEPLOY_STEP_OUTPUT_CHARS:
+        out = f"[earlier output trimmed]\n{out}"
+    ok = result.returncode == 0
+    if not ok:
+        logger.error(
+            "deploy step %r failed (exit %s):\n%s", step, result.returncode, combined
+        )
+    return {"step": step, "ok": ok, "output": out}
+
+
+def _pip_install_hint(output: str) -> str:
+    """Turn pip's "cannot uninstall" wall of text into an actionable sentence.
+
+    Restart reinstalls the checkout with the *running server's* interpreter. When
+    that server is the Homebrew build, its `ciaobot` dist-info ships without a
+    RECORD file, so pip cannot work out which files belong to it and refuses to
+    uninstall — which it must do before installing the editable copy. Nothing
+    about the checkout is wrong, so the raw pip output sends people to debug the
+    wrong thing.
+    """
+    lowered = output.lower()
+    if "cannot uninstall" in lowered or "no record file" in lowered:
+        return (
+            "The engine is running from the Homebrew install, which pip cannot "
+            "replace in place: that install has no RECORD file, so pip refuses "
+            "to uninstall it before installing this checkout. Restart-from-source "
+            "needs an engine started from a source install — run `ciao run` from "
+            "a venv with `pip install -e .` — or use `brew upgrade ciaobot` to "
+            "move the Homebrew copy forward instead."
+        )
+    return ""
+
+
 def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
@@ -5664,10 +5719,6 @@ async def admin_deploy(request: Request) -> JSONResponse:
     codebase_root = _resolve_codebase_root(config)
     steps = []
 
-    def _record(step: str, result: subprocess.CompletedProcess) -> dict:
-        out = (result.stdout.strip() or result.stderr.strip())[:500]
-        return {"step": step, "ok": result.returncode == 0, "output": out}
-
     problem = _checkout_problem(codebase_root)
     if problem:
         hint = (
@@ -5711,10 +5762,15 @@ async def admin_deploy(request: Request) -> JSONResponse:
         desktop_build.run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
         cwd=str(codebase_root), timeout=120,
     )
-    steps.append(_record("pip install", result))
+    steps.append(_record_step("pip install", result))
     if result.returncode != 0:
+        hint = _pip_install_hint(steps[-1]["output"])
+        if hint:
+            steps[-1]["output"] = f"{hint}\n\n{steps[-1]['output']}"
+        # The step card renders the full output; the top-level error is the
+        # one-line headline above it, not a second copy of the same text.
         return JSONResponse(
-            {"steps": steps, "ok": False, "error": f"pip install failed: {steps[-1]['output']}"},
+            {"steps": steps, "ok": False, "error": hint or "pip install failed."},
             status_code=500,
         )
 
@@ -5724,7 +5780,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     result = await asyncio.to_thread(
         _run_root_npm_install, codebase_root,
     )
-    steps.append(_record("npm install (root)", result))
+    steps.append(_record_step("npm install (root)", result))
 
     # 3. npm build
     web_dir = codebase_root / "web"
@@ -5732,7 +5788,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
         desktop_build.run_step, ["npm", "run", "build"],
         cwd=str(web_dir), timeout=120,
     )
-    steps.append(_record("npm build", result))
+    steps.append(_record_step("npm build", result))
     if result.returncode != 0:
         return JSONResponse(
             {"steps": steps, "ok": False, "error": f"npm build failed: {steps[-1]['output']}"},
