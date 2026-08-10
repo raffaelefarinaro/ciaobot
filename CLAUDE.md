@@ -25,6 +25,8 @@ Verification:
   Rust (`brew install rustup && rustup default 1.90.0`) and `swiftc`
   (`xcode-select --install`).
 - For UI changes, verify keyboard focus, browser zoom, and mobile touch targets.
+- Workspace shortcuts map unmodified `1`–`9` to the visible sidebar order and
+  must remain inert while a text field is focused.
 
 Use plain, factual engineering notes in commits and pull requests.
 

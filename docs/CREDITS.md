@@ -7,7 +7,6 @@ Ciaobot is glue around a lot of excellent open tools.
 - [Claude Code](https://github.com/anthropics/claude-code) and the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python)
 - [OpenAI Codex CLI](https://developers.openai.com/codex/cli/)
 - [Ollama](https://ollama.com) and [OpenRouter](https://openrouter.ai)
-- [OpenAI](https://openai.com) — cloud voice transcription
 
 ## Integrations and CLIs
 

@@ -72,12 +72,14 @@ opencli list   # see available adapters
 
 Note: many adapters require the Browser Bridge Chrome extension and an logged-in Chrome session.
 
-### Apple Intelligence (on-device chat titles)
+### Apple Intelligence (on-device titles and session insights)
 
-Nothing to install. Selecting **Apple** as the Chat titles model in Settings →
-Models generates titles with Apple's on-device Foundation Model through the
-`ciaobot-native` sidecar bundled in `Ciaobot.app` — no API key, no network, no
-per-title cost.
+Nothing to install. Selecting **Apple** as the Chat titles or Session insights
+model in Settings → Models uses Apple's on-device Foundation Model through the
+`ciaobot-native` sidecar bundled in `Ciaobot.app` — no API key, no network, and
+no per-task cost. Settings also includes a comparison action that re-runs the
+text-only extraction against a small sample of existing processed archives
+without modifying them.
 
 This replaced the `apfel` Homebrew CLI, which did the same job through the same
 Apple models but had to be installed and kept up to date separately. Ciaobot
@@ -88,6 +90,14 @@ macOS 26.
 Requires macOS 26+, the desktop app, and Apple Intelligence switched on in
 System Settings → Apple Intelligence & Siri. When any of those is missing,
 Settings says which one and titles fall back to the configured cloud model.
+
+### PWA workspace keyboard navigation
+
+The PWA has no integration or environment setting for workspace shortcuts. In the
+chat and automations views, unmodified `1`–`9` keys select the first through
+ninth workspace in the sidebar's displayed order; the sidebar shows the assigned
+number on each workspace button. Number keys remain available for normal typing
+inside text fields.
 
 
 ### Python 3 + `google-cloud-bigquery`
@@ -168,7 +178,7 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **OpenRouter:** `OPENROUTER_API_KEY` (optional). When set, OpenRouter is available as a model backend: the Anthropic-compatible endpoint (`https://openrouter.ai/api`) is reached via `ANTHROPIC_BASE_URL` env injection, so chats and one-shot automations can route `owner/model` ids (e.g. `anthropic/claude-haiku-4.5`) through OpenRouter. The picker exposes the per-tier alias defaults plus dynamically discovered anthropic-family models. The `adversarial_review` MCP tool (`ciao.critique`) defaults to an OpenRouter panel when this key is set.
 
-**Provider connections and direct keys.** Settings → Providers launches, verifies, and logs out Claude Code and Codex through their own CLIs; Ciaobot does not store their credentials. Keys Ciaobot calls directly remain editable: Ollama Cloud and OpenRouter under Providers, and the OpenAI cloud voice key under Settings → Models. Saving a direct key patches `.env` and restarts the server.
+**Provider connections and direct keys.** Settings → Providers launches, verifies, and logs out Claude Code and Codex through their own CLIs; Ciaobot does not store their credentials. Keys Ciaobot calls directly remain editable: Ollama Cloud and OpenRouter under Providers. Voice and Apple Intelligence are on-device and need no provider key. Saving a direct key patches `.env` and restarts the server.
 
 **Custom compatible providers.** Settings → Providers can register any local or hosted endpoint compatible with the selected CLI (for example Ollama, LM Studio, or an Unsloth server). Enter a name, base URL, optional bearer token, and choose `Claude Code` or `Codex` as the runner. Models are discovered when the endpoint supports the OpenAI-style `/v1/models` catalog, or can be entered manually. Claude Code endpoints must implement the Anthropic-compatible chat API; Codex endpoints must implement the OpenAI-compatible API. Provider definitions are tracked in `.ciao/custom_providers.json`, while bearer tokens remain in the gitignored `.runtime/custom_provider_tokens.json`. The resulting custom models are available in chat, workspace defaults, model routing, title generation, insights, schedules, and critique selectors. Claude Code receives `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`; Codex receives `OPENAI_BASE_URL`/`OPENAI_API_KEY`.
 
@@ -245,7 +255,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_OLLAMA_AUTO_CLASSIFIER`: **removed**. Auto mode is now always live for Ollama-routed chats because the bundled `claude` CLI's permission classifier resolves to an Ollama-served model. Previously this was an opt-in flag because the classifier targeted Anthropic's server-side gate, which ollama.com and local daemons do not expose; the tier-remap env now injected on Ollama routes (`ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL`, `CLAUDE_CODE_BG_CLASSIFIER_MODEL`) fixes that. Delete `CIAO_OLLAMA_AUTO_CLASSIFIER` from your `.env` if it is still there.
 - `CIAO_INSIGHTS_DISABLED`: set to `true`/`yes`/`on` to disable post-archive session insights extraction. Default is enabled (false). When enabled, after a chat is archived, raw JSONL is filtered and run through a model to extract errors, dead ends, new entities, decisions, and reusable code, then appended as a `## Session insights` section to the archive markdown.
 - `CIAO_INSIGHTS_MIN_TURNS`: minimum number of turns in a session before insights extraction runs. Default `2` (single-shot chats are skipped, multi-turn chats are included). Override with any positive integer; set to `1` to include single-shot chats too.
-- `CIAO_INSIGHTS_MODEL`: model ID for insights extraction, routed through the Ollama Anthropic-compatible API. Default `deepseek-v4-flash:0731-cloud`. This model is fixed at the server level and bypasses the Ollama models allowlist. Uses existing `CIAO_OLLAMA_*` config (base URL, API key) through the Claude Agent SDK one-shot path.
+- `CIAO_INSIGHTS_MODEL`: model ID for insights extraction, routed through the Ollama Anthropic-compatible API. Default `deepseek-v4-flash:0731-cloud`. Set it to `apple` (or choose Apple in Settings) to use the on-device Foundation Model; if Apple Intelligence is unavailable, Ciaobot falls back to the configured automatic model. Cloud models use existing `CIAO_OLLAMA_*` config (base URL, API key) through the Claude Agent SDK one-shot path.
 - `CIAO_INSIGHTS_BACKFILL_ON_STARTUP`: set to `true`/`yes`/`on` to asynchronously scan for and backfill missing session insights on server startup. Default is disabled (false). Helps regenerate missing insights if the model call failed during chat archive due to budget or network issues.
 - `CIAO_INSIGHTS_TIMEOUT_S`: per-call timeout (seconds) for the insights and text-fallback model calls. Default `600`. The insights model is operator-selectable, and a slow local or cloud GGUF can take 214–253s end to end; the previous flat 120s budget turned tail latency into a `TimeoutError` and failed the job. Lower it if you route insights at a fast model and want to fail sooner.
 - `CIAO_INSIGHTS_MAX_INPUT_CHARS`: ceiling (characters) on the filtered transcript sent to the insights model. Default `320000`, roughly 90k tokens, which leaves headroom for the system prompt inside a 128k-token context window. Oldest transcript lines are dropped first so the newest turns and their `[idx=N]` citations survive; the trim is logged. Raise it for a large-context model, lower it if you still see `400 Message too long`. An oversized-input rejection is not retried, since the identical payload would fail again.

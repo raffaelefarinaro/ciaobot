@@ -182,7 +182,7 @@ When your message mentions a name that appears in the vault index, the agent get
 **Voice — dictation and read-aloud**
 
 - Speech-to-text dictation in any chat, free and on-device using macOS speech recognition (macOS 26+, nothing to download, no API key).
-- Text-to-speech read-aloud of replies: cloud voices or the free on-device macOS system voice. Both on-device engines run through a small helper bundled in `Ciaobot.app`, so there is no model download and no optional package to install. For better read-aloud, [add a Premium voice](https://support.apple.com/guide/mac-help/mchlp2290/mac) in System Settings — Ciaobot uses the highest-quality voice you have installed.
+- Text-to-speech read-aloud of replies uses the free on-device macOS system voice through a small helper bundled in `Ciaobot.app`. There is no cloud voice, model download, or optional package to install. For better read-aloud, [add a Premium voice](https://support.apple.com/guide/mac-help/mchlp2290/mac) in System Settings — Ciaobot refreshes the installed voice list and uses the highest-quality voice you have installed.
 
 **Files and documents**
 
