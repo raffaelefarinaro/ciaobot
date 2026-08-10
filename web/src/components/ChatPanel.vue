@@ -233,6 +233,21 @@
     <div class="chat-with-sidebar">
     <div class="messages" ref="messagesEl" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
+      <!-- Ephemeral orientation aid shown after reopening a chat. It lives in
+           the transcript as a normal assistant-shaped bubble, but the tag
+           makes it clear that it is generated context rather than a reply. -->
+      <div v-if="reentrySummary" class="message-wrap assistant reentry-summary-wrap">
+        <div class="message-row">
+          <div class="message assistant reentry-summary-message" role="status" aria-label="Apple Intelligence summary">
+            <div class="reentry-summary-header">
+              <span class="reentry-summary-badge">Summary</span>
+              <span class="reentry-summary-source">Apple Intelligence</span>
+            </div>
+            <div class="message-content" v-html="renderMarkdown(reentrySummary)"></div>
+          </div>
+        </div>
+      </div>
+
       <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
@@ -1285,6 +1300,7 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
+const reentrySummary = computed(() => store.reentrySummaries[chat.value.chat_id] || '')
 watch(() => chat.value.provider, () => {
   void loadSlashCommands()
 })
@@ -6414,6 +6430,44 @@ details[open] > .activity-summary::before {
   0%   { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
   25%  { background: rgba(234, 179, 8, 0.7);  box-shadow: 0 0 0 6px rgba(234, 179, 8, 0.18); }
   100% { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
+}
+
+/* ── Ephemeral re-entry summary ── */
+.reentry-summary-message {
+  background: color-mix(in srgb, var(--accent2) 12%, var(--bg2));
+  border-color: color-mix(in srgb, var(--accent2) 45%, var(--border));
+  border-left-color: var(--accent2);
+}
+.reentry-summary-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.reentry-summary-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent2) 70%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent2) 18%, transparent);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+.reentry-summary-source {
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+}
+.reentry-summary-message .message-content {
+  color: var(--fg);
 }
 
 /* ── Loop banner ── */
