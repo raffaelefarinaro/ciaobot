@@ -161,13 +161,10 @@ def save_credentials(
     }
     if email:
         creds["email"] = email
-    if scopes:
-        if isinstance(scopes, str):
-            cleaned = sorted({s for s in scopes.split() if s})
-        else:
-            cleaned = sorted({s for s in scopes if s})
-        if cleaned:
-            creds["scopes"] = cleaned
+    # Same normalization the in-app exchange uses, so both consent paths write
+    # the file in one shape and Settings has a single format to read.
+    if cleaned := sorted(set(scopes.split())):
+        creds["scopes"] = cleaned
     path = config_dir / "credentials.json"
     with open(path, "w") as f:
         json.dump(creds, f, indent=2)

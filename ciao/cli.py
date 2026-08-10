@@ -1396,7 +1396,7 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
     ``os-audit`` covers this too, but it also lints the whole vault, which is
     far too slow to run from a daily routine. This entry point reads one file.
     """
-    from ciao.os_audit import audit_memory
+    from ciao.os_audit import audit_memory, memory_actionable_count
 
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
@@ -1411,16 +1411,9 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         vault_root=vault if vault.exists() else None,
         workspace_dir=workspace,
     )
-    findings = (
-        len(report["event_shaped_entries"])
-        + len(report["stale_path_entries"])
-        + report["expired_memory_entries"]
-        + report["expired_profile_entries"]
-        + report["invalid_expiration_entries"]
-        + len(report["over_cap"])
-        + len(report["duplicate_entries"])
-        + len(report["marker_errors"])
-    )
+    # Same definition os-audit exits on, so the two commands cannot disagree
+    # about whether these regions are clean.
+    findings = memory_actionable_count(report)
 
     if args.json:
         print(json.dumps(report, indent=2))

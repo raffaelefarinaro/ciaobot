@@ -171,6 +171,33 @@ def test_run_os_audit_counts_rot_but_not_superseded_candidates(tmp_path: Path) -
     assert with_event["total_issues"] == baseline["total_issues"] + 1
 
 
+def test_memory_actionable_count_covers_the_mechanical_findings(tmp_path: Path) -> None:
+    """`ciao memory-audit` and `ciao os-audit` must agree on "clean".
+
+    The CLI used to sum its own subset of the report and omitted
+    `oversize_entries`, `invisible_unicode` and `pending_memory_proposals`, so
+    it exited 0 on a region that os-audit failed. Both now call this function,
+    and this test fails if a new key is counted in one place only.
+    """
+    from ciao.os_audit import memory_actionable_count
+
+    # A zero-width space is invisible Unicode: os-audit has always failed on it.
+    (tmp_path / "memory-vault").mkdir()
+    _seed_guide(
+        tmp_path / "CLAUDE.md",
+        memory=["Prefers concise​ answers."],
+        profile=[],
+    )
+
+    report = run_os_audit(workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault")
+    memory = report["memory_hygiene"]
+
+    assert len(memory["invisible_unicode"]) == 1
+    assert memory_actionable_count(memory) >= 1
+    # The whole-audit status agrees, which is the contract the CLI relies on.
+    assert report["total_issues"] >= 1
+
+
 def test_format_audit_markdown_renders_rot_findings(tmp_path: Path) -> None:
     (tmp_path / "memory-vault").mkdir()
     _seed_guide(

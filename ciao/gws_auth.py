@@ -226,7 +226,7 @@ def exchange_code(
         raise ValueError(f"Token exchange failed: {exc}") from None
 
 
-def _normalize_scopes(scopes: Sequence[str] | str | None) -> list[str]:
+def normalize_scopes(scopes: Sequence[str] | str | None) -> list[str]:
     """Return a sorted, deduped list of OAuth scope URLs.
 
     Accepts the typical shapes: a list/tuple of scope URLs, a single
@@ -242,6 +242,50 @@ def _normalize_scopes(scopes: Sequence[str] | str | None) -> list[str]:
             if s:
                 parts.extend(s.split())
     return sorted({p for p in parts if p})
+
+
+# Scope URL → the name a user would recognise, and the order chips render in.
+# This lives next to the scope sets above deliberately: adding a scope there
+# without naming it here means Settings shows a raw googleapis.com URL to the
+# user, which is how `openid` and the two `userinfo.*` scopes — requested by
+# every profile — ended up rendered verbatim in the profile description.
+_SCOPE_LABELS: dict[str, str] = {
+    "https://www.googleapis.com/auth/gmail.modify": "Gmail",
+    "https://www.googleapis.com/auth/gmail.readonly": "Gmail (read)",
+    "https://www.googleapis.com/auth/calendar": "Calendar",
+    "https://www.googleapis.com/auth/drive": "Drive",
+    "https://www.googleapis.com/auth/documents": "Docs",
+    "https://www.googleapis.com/auth/spreadsheets": "Sheets",
+    "https://www.googleapis.com/auth/presentations": "Slides",
+    "https://www.googleapis.com/auth/tasks": "Tasks",
+    "https://www.googleapis.com/auth/contacts": "Contacts",
+    "https://www.googleapis.com/auth/forms.body": "Forms",
+}
+
+# Granted to every profile purely to identify the account. Naming them in the
+# UI would be noise ("Connected to ... and openid"), so they are dropped rather
+# than labelled — but they must be listed, or they fall through as raw URLs.
+_SIGN_IN_SCOPES = frozenset({
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+})
+
+
+def scope_labels(scopes: Sequence[str] | str | None) -> list[str]:
+    """Map granted scope URLs to display names, in a stable render order.
+
+    Sign-in scopes are dropped. An unrecognised scope is kept as its verbatim
+    URL rather than silently vanishing — an ugly chip is a bug report; a
+    missing one is invisible.
+    """
+    granted = set(normalize_scopes(scopes))
+    chips = [label for url, label in _SCOPE_LABELS.items() if url in granted]
+    chips += sorted(
+        url for url in granted
+        if url not in _SCOPE_LABELS and url not in _SIGN_IN_SCOPES
+    )
+    return chips
 
 
 def store_credentials(
@@ -269,7 +313,7 @@ def store_credentials(
     }
     if email:
         creds["email"] = email
-    normalized_scopes = _normalize_scopes(scopes)
+    normalized_scopes = normalize_scopes(scopes)
     if normalized_scopes:
         creds["scopes"] = normalized_scopes
 

@@ -7,6 +7,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import { useFontScale } from '../../composables/useFontScale'
 
 const toggleDictation = vi.fn()
 
@@ -359,9 +360,10 @@ describe('ChatLayout', () => {
     // is persisted to localStorage.
     window.__CIAOBOT_DESKTOP__ = true
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
-    // Pre-seed localStorage so the read at mount time is deterministic and
-    // unrelated to whatever the previous test left in the CSS variable.
-    try { localStorage.setItem('ciao-font-scale', '1.2') } catch { /* ignore */ }
+    // Seed through the composable, not localStorage: the scale ref is
+    // module-scoped and shared, so writing storage after import would not
+    // move it. Driving the real API is also what the app does.
+    useFontScale().set(1.2)
 
     const router = createRouter({
       history: createMemoryHistory(),
@@ -410,7 +412,7 @@ describe('ChatLayout', () => {
     // pre-seeded value so the assertion is deterministic regardless of
     // any cross-test CSS-variable carryover.
     window.__CIAOBOT_DESKTOP__ = true
-    try { localStorage.setItem('ciao-font-scale', '1.2') } catch { /* ignore */ }
+    useFontScale().set(1.2)
 
     const router = createRouter({
       history: createMemoryHistory(),
@@ -458,7 +460,7 @@ describe('ChatLayout', () => {
     // 0.75 and persist, breaking the "reset back to default" workflow
     // because the slider/buttons would have nowhere to go down.
     window.__CIAOBOT_DESKTOP__ = true
-    try { localStorage.setItem('ciao-font-scale', '0.8') } catch { /* ignore */ }
+    useFontScale().set(0.8)
 
     const router = createRouter({
       history: createMemoryHistory(),

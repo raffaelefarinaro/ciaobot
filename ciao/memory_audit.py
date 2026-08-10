@@ -37,7 +37,12 @@ EXCERPT_CHARS = 160
 _EVENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("quoted-user-turn", re.compile(r"\bUser\s+(?:said|asked|wrote|replied)\b", re.IGNORECASE)),
     ("quoted-user-turn", re.compile(r"\bUser\s*:\s*[\"“'']")),
-    ("assistant-action", re.compile(r"(?:->|→|—|--)\s*assistant\b", re.IGNORECASE)),
+    # Only real arrows. An em dash or `--` before "assistant" is ordinary prose
+    # punctuation — "Prefers terse replies — assistant should skip preamble" is
+    # durable state, and flagging it pins the audit at needs-attention with no
+    # way to clear it short of rewriting a correct entry. A genuine event
+    # written with an em dash still matches the verb pattern below.
+    ("assistant-action", re.compile(r"(?:->|→)\s*assistant\b", re.IGNORECASE)),
     (
         "assistant-action",
         re.compile(
@@ -53,6 +58,20 @@ _EVENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 # Trailing characters that come from the surrounding sentence, not the path.
 _PATH_TRAILING = ".,;:!?)]}>\"'`"
+
+
+def _trim_path_token(raw: str) -> str:
+    """Trim prose punctuation from the end of a path token only.
+
+    Must not use ``str.strip(_PATH_TRAILING)``: that trims both ends, and the
+    set contains ``.``, so ``./scripts/x.sh`` became ``/scripts/x.sh`` (now
+    absolute, so it resolved outside the workspace and was written off as
+    unverifiable) and ``.claude/settings.json`` became ``claude/settings.json``
+    (no longer path-shaped, so it was dropped). Either way the stale-path
+    detector silently stopped checking exactly the paths it should.
+    """
+    return raw.strip().rstrip(_PATH_TRAILING)
+
 
 # A `path.py:12` or `path.py:12:5` source reference.
 _LINE_SUFFIX_RE = re.compile(r":\d+(?::\d+)?$")
@@ -99,7 +118,7 @@ def _candidate_paths(entry: str) -> list[str]:
     seen: set[str] = set()
 
     def add(raw: str) -> None:
-        token = raw.strip().strip(_PATH_TRAILING)
+        token = _trim_path_token(raw)
         # A bare `~` or `/` carries no information. Globs and `<placeholder>`
         # segments are patterns, not paths that could be checked for existence.
         if len(token) < 3 or any(ch in token for ch in "*?[]{}<>"):
@@ -212,7 +231,7 @@ def _subjects(entry: str, workspace_dir: Path) -> set[str]:
     """Distinctive things an entry makes a claim about."""
     subjects: set[str] = set()
     for match in _BACKTICK_RE.finditer(entry):
-        token = match.group(1).strip().strip(_PATH_TRAILING)
+        token = _trim_path_token(match.group(1))
         if len(token) >= _MIN_SUBJECT_CHARS and not any(ch.isspace() for ch in token):
             subjects.add(token.lower())
     for match in _SNAKE_RE.finditer(entry):

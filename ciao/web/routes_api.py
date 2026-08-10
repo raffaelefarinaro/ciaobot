@@ -145,65 +145,35 @@ _GWS_PROFILE_META = {
     "personal": {
         "label": "Personal Google account",
         "purpose": "Private Google account. Keep this separate from company systems.",
-        "examples": [],
+        # Shown for accounts connected before scopes were recorded. Their
+        # credentials.json has no `scopes` key and re-consent is the only way
+        # to get one, so without this an upgrading user's connected account
+        # silently loses every chip it used to show.
+        "examples": ["Gmail", "Calendar", "Tasks"],
     },
     "work": {
         "label": "Work Google account",
         "purpose": "Company Google account used for work Drive, Docs, Sheets, and Slides.",
-        "examples": [],
+        "examples": ["Drive", "Docs", "Sheets", "Slides", "Gmail", "Calendar"],
     },
 }
-# OAuth scope URL → short chip name. Order here is the order the chips render.
-_GWS_SCOPE_LABELS: list[tuple[str, str]] = [
-    ("https://www.googleapis.com/auth/gmail.modify", "Gmail"),
-    ("https://www.googleapis.com/auth/gmail.readonly", "Gmail (read)"),
-    ("https://www.googleapis.com/auth/calendar", "Calendar"),
-    ("https://www.googleapis.com/auth/drive", "Drive"),
-    ("https://www.googleapis.com/auth/documents", "Docs"),
-    ("https://www.googleapis.com/auth/spreadsheets", "Sheets"),
-    ("https://www.googleapis.com/auth/presentations", "Slides"),
-    ("https://www.googleapis.com/auth/tasks", "Tasks"),
-    ("https://www.googleapis.com/auth/contacts", "Contacts"),
-    ("https://www.googleapis.com/auth/forms.body", "Forms"),
-    ("https://www.googleapis.com/auth/keep", "Keep"),
-    ("https://www.googleapis.com/auth/chat.messages", "Chat"),
-    ("https://www.googleapis.com/auth/classroom", "Classroom"),
-    ("https://www.googleapis.com/auth/admin.reports.audit.readonly", "Admin Audit"),
-]
 _GWS_AUTH_FILES = ("credentials.json", "credentials.enc")
 
 
-def _gws_short_scopes(scopes: list[str]) -> list[str]:
-    """Map stored OAuth scope URLs to a stable, ordered chip list.
+def _gws_purpose_with_chips(purpose: str, chips: list[str]) -> str:
+    """Append the granted services to the profile's standing description.
 
-    Unknown scopes are kept at the end as their verbatim URL so the user can
-    still see something granted, instead of silently dropping it.
+    The description is not replaced: for the personal profile it carries the
+    "keep this separate from company systems" guidance, which matters most
+    once an account is actually connected.
     """
-    chips: list[str] = []
-    seen: set[str] = set()
-    for url, label in _GWS_SCOPE_LABELS:
-        if url in scopes and label not in seen:
-            chips.append(label)
-            seen.add(label)
-    for url in scopes:
-        if url in seen:
-            continue
-        if url not in {u for u, _ in _GWS_SCOPE_LABELS}:
-            chips.append(url)
-            seen.add(url)
-    return chips
-
-
-def _gws_purpose_from_chips(label: str, chips: list[str]) -> str:
-    """Compose a short, user-facing description from the granted scope chips."""
-    if not chips:
-        return label
     if len(chips) == 1:
-        return f"{label}. Connected to {chips[0]}."
-    if len(chips) == 2:
-        return f"{label}. Connected to {chips[0]} and {chips[1]}."
-    head = ", ".join(chips[:-1])
-    return f"{label}. Connected to {head}, and {chips[-1]}."
+        joined = chips[0]
+    elif len(chips) == 2:
+        joined = f"{chips[0]} and {chips[1]}"
+    else:
+        joined = f"{', '.join(chips[:-1])}, and {chips[-1]}"
+    return f"{purpose} Connected to {joined}."
 
 
 def _known_workspace_names(pcm: object) -> set[str]:
@@ -1434,7 +1404,6 @@ def _gws_profile_payload(
         {
             "label": f"{profile} Google profile",
             "purpose": "Custom Google Workspace profile configured outside the built-in personal/work wrapper.",
-            "examples": [],
         },
     )
     config_dir = _gws_profile_config_dir(config, profile)
@@ -1448,8 +1417,10 @@ def _gws_profile_payload(
         setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
         headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
 
+    from ciao import gws_auth
+
     email = ""
-    granted_scopes: list[str] = []
+    chips: list[str] = []
     if config_dir:
         creds_path = config_dir / "credentials.json"
         if creds_path.is_file():
@@ -1457,19 +1428,17 @@ def _gws_profile_payload(
                 with open(creds_path, "r", encoding="utf-8") as f:
                     creds_data = json.load(f)
                 email = creds_data.get("email") or ""
-                raw_scopes = creds_data.get("scopes") or []
-                if isinstance(raw_scopes, str):
-                    granted_scopes = [s for s in raw_scopes.split() if s]
-                elif isinstance(raw_scopes, list):
-                    granted_scopes = [s for s in raw_scopes if isinstance(s, str) and s]
+                # gws_auth owns both the shape tolerance and the label
+                # catalogue, so a scope added to its scope sets cannot show up
+                # here as a raw URL without someone naming it there first.
+                chips = gws_auth.scope_labels(creds_data.get("scopes"))
             except Exception:
                 pass
 
-    examples = _gws_short_scopes(granted_scopes) or list(meta.get("examples") or [])
-    if granted_scopes:
-        purpose = _gws_purpose_from_chips(meta["label"], _gws_short_scopes(granted_scopes))
-    else:
-        purpose = meta["purpose"]
+    # Connections made before scopes were recorded have none, and keep the
+    # profile's standing description and curated chip list.
+    examples = chips or list(meta.get("examples") or [])
+    purpose = _gws_purpose_with_chips(meta["purpose"], chips) if chips else meta["purpose"]
 
     # Cached token-health snapshot from the periodic monitor (issue #145).
     # Read-only and cheap — never runs the `auth status` subprocess here.

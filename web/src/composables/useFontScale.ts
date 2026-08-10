@@ -10,18 +10,17 @@ import { ref, type Ref } from 'vue'
  * range so the UI stays usable at the extremes.
  *
  * Settings has +/- buttons that adjust by ±0.05; the global keyboard shortcuts
- * (Cmd/Ctrl+Shift+= and Cmd/Ctrl+Shift+-) do the same so both surfaces stay in
- * lockstep. The percentage that Settings displays (100% at DEFAULT) is a UI
- * detail of Settings, not of the underlying scale — callers that need it
- * should divide by `DEFAULT_FONT_SCALE` themselves.
+ * (Cmd/Ctrl+Shift+= and Cmd/Ctrl+Shift+-) do the same. The percentage that
+ * Settings displays (100% at DEFAULT) is a UI detail of Settings, not of the
+ * underlying scale — callers that need it should divide by
+ * `DEFAULT_FONT_SCALE` themselves.
  *
- * The composable is intentionally cheap and stateless across callers: each
- * `useFontScale()` call returns a ref seeded from `localStorage`, and every
- * write goes through the same CSS variable + storage key, so any caller in
- * the running tab stays in sync via the CSS variable (which Vue cannot miss).
- * The ref a caller holds is only as fresh as its last `set`/`adjust`/`reset`;
- * that is enough for the Settings +/-/Reset disable checks, which is the only
- * place we render the value to the user.
+ * The ref is module-scoped, so every caller shares one value. A per-caller ref
+ * seeded from localStorage looks equivalent and is not: ChatLayout reads the
+ * scale once at app mount and lives for the whole session, so after Settings
+ * moved the scale, the shortcut's `adjust(+0.05)` added its delta to
+ * ChatLayout's stale copy and the font jumped *backwards*. Sharing the ref is
+ * what actually makes the two surfaces agree.
  */
 
 export const DEFAULT_FONT_SCALE = 1.2
@@ -61,10 +60,28 @@ function writePersistedScale(value: number): void {
   } catch { /* localStorage blocked (private mode, quota): keep the in-memory value */ }
 }
 
+// One ref for the whole tab — see the note above on why this is not per-caller.
+const fontScale = ref(readPersistedScale())
+
+function set(next: number) {
+  const clamped = clampScale(next)
+  fontScale.value = clamped
+  applyFontScale(clamped)
+  writePersistedScale(clamped)
+}
+
+function adjust(delta: number) {
+  // Round to 2dp so the 0.05 step does not drift.
+  set(parseFloat((fontScale.value + delta).toFixed(2)))
+}
+
+function reset() {
+  set(DEFAULT_FONT_SCALE)
+}
+
 /**
- * Returns a reactive `fontScale` ref seeded from the persisted value. The ref
- * mirrors the CSS variable for the lifetime of the caller. `set(next)`
- * mutates both the variable and localStorage; `adjust(delta)` adds `delta`
+ * Returns the shared reactive `fontScale` plus its mutators. `set(next)`
+ * updates the CSS variable and localStorage; `adjust(delta)` adds `delta`
  * clamped to `[MIN_FONT_SCALE, MAX_FONT_SCALE]`; `reset()` returns to
  * `DEFAULT_FONT_SCALE`.
  */
@@ -74,24 +91,5 @@ export function useFontScale(): {
   adjust: (delta: number) => void
   reset: () => void
 } {
-  const fontScale = ref(readPersistedScale())
-
-  function set(next: number) {
-    const clamped = clampScale(next)
-    fontScale.value = clamped
-    applyFontScale(clamped)
-    writePersistedScale(clamped)
-  }
-
-  function adjust(delta: number) {
-    // Mirror SettingsView: round to 2dp so the 0.05 step does not drift.
-    const next = parseFloat((fontScale.value + delta).toFixed(2))
-    set(next)
-  }
-
-  function reset() {
-    set(DEFAULT_FONT_SCALE)
-  }
-
   return { fontScale, set, adjust, reset }
 }

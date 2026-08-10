@@ -896,6 +896,37 @@ def audit_upgrade_notices(config: Any | None) -> dict[str, Any]:
     return {"notices": notices, "notices_found": len(notices), "errors": errors}
 
 
+def memory_actionable_count(memory_result: dict[str, Any]) -> int:
+    """Findings in a memory report that a user can actually act on.
+
+    One definition, shared by `run_os_audit`'s exit status and the standalone
+    `ciao memory-audit` command. They previously each summed their own subset,
+    and `memory-audit` omitted `oversize_entries`, `invisible_unicode` and
+    `pending_memory_proposals` — so it reported "clean" (exit 0) for a region
+    that `ciao os-audit` failed on, and the daily curation routine that reads
+    the weaker verdict saw nothing to fix.
+
+    `superseded_state_candidates` is deliberately excluded: it is a judgement
+    the user may decline, and a finding that can never be cleared would hold
+    the audit at needs_attention until people stop reading it.
+    """
+    return (
+        memory_result["expired_memory_entries"]
+        + memory_result["expired_profile_entries"]
+        + memory_result["invalid_expiration_entries"]
+        + len(memory_result["over_cap"])
+        + len(memory_result["oversize_entries"])
+        + len(memory_result["duplicate_entries"])
+        + len(memory_result["invisible_unicode"])
+        + len(memory_result["marker_errors"])
+        + memory_result["pending_memory_proposals"]
+        # Both concretely fixable: move the entry to Learnings.md, or correct
+        # the path.
+        + len(memory_result["event_shaped_entries"])
+        + len(memory_result["stale_path_entries"])
+    )
+
+
 def run_os_audit(
     workspace_dir: Path | None = None,
     vault_root: Path | None = None,
@@ -972,22 +1003,7 @@ def run_os_audit(
         + len(vault_result.get("broken_markdown_links", []))
         + len(skill_result["issues"])
         + rule_result["rule_clashes_found"]
-        + memory_result["expired_memory_entries"]
-        + memory_result["expired_profile_entries"]
-        + memory_result["invalid_expiration_entries"]
-        + len(memory_result["over_cap"])
-        + len(memory_result["oversize_entries"])
-        + len(memory_result["duplicate_entries"])
-        + len(memory_result["invisible_unicode"])
-        + len(memory_result["marker_errors"])
-        + memory_result["pending_memory_proposals"]
-        # Both are concretely fixable: move the entry to Learnings.md, or
-        # correct the path. `superseded_state_candidates` is deliberately left
-        # out, like `rule_overlaps_found` above: it is a judgement the user may
-        # decline, and a finding that can never be cleared would hold the whole
-        # audit at needs_attention until people stop reading it.
-        + len(memory_result["event_shaped_entries"])
-        + len(memory_result["stale_path_entries"])
+        + memory_actionable_count(memory_result)
         + job_result["failed_runs"]
         + upgrade_result["notices_found"]
     )

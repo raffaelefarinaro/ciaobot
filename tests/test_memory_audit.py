@@ -43,6 +43,25 @@ def test_event_shaped_flags_em_dash_assistant_correction() -> None:
     assert len(findings) == 1
 
 
+def test_event_shaped_ignores_em_dash_as_prose_punctuation() -> None:
+    """An em dash before "assistant" is punctuation, not an event arrow.
+
+    The arrow alternation used to accept `—` and `--`, so ordinary durable
+    state matched and the audit sat at needs_attention with nothing the user
+    could correct. A real event written with an em dash still matches, via the
+    verb pattern — see the test above.
+    """
+    findings = find_event_shaped(
+        "memory",
+        [
+            "Prefers terse replies — assistant should skip preamble.",
+            "Tone: direct -- assistant avoids hedging.",
+        ],
+    )
+
+    assert findings == []
+
+
 def test_event_shaped_ignores_durable_state() -> None:
     """Precision guard: a fact *about* the user is state, not a chat event."""
     findings = find_event_shaped(
@@ -81,6 +100,48 @@ def test_stale_paths_flags_missing_file_under_existing_dir(tmp_path: Path) -> No
     assert len(findings) == 1
     assert findings[0]["path"] == "memory-vault/personal/Gone.md"
     assert "does not exist" in findings[0]["message"]
+
+
+def test_stale_paths_keeps_leading_dots(tmp_path: Path) -> None:
+    """`./`, `../` and dotfile paths must survive punctuation trimming.
+
+    Trimming used `str.strip(_PATH_TRAILING)`, which trims *both* ends over a
+    set containing `.`. So `./x` became `/x` — absolute, resolving outside the
+    workspace, and written off as unverifiable — and `.claude/x` became
+    `claude/x`, which is not path-shaped and was dropped entirely. Both made
+    the detector silently stop checking the paths it exists to check.
+    """
+    workspace = _workspace(tmp_path)
+    (workspace / ".claude").mkdir()
+
+    findings, checked, unverifiable = find_stale_paths(
+        "memory",
+        [
+            "Run `./memory-vault/personal/gone.sh` first.",
+            "Settings live in `.claude/absent.json`.",
+        ],
+        workspace_dir=workspace,
+    )
+
+    assert unverifiable == 0
+    assert checked == 2
+    assert {f["path"] for f in findings} == {
+        "./memory-vault/personal/gone.sh",
+        ".claude/absent.json",
+    }
+
+
+def test_stale_paths_still_trims_trailing_sentence_punctuation(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+
+    findings, checked, _ = find_stale_paths(
+        "memory",
+        ["Notes moved to memory-vault/personal/Gone.md."],
+        workspace_dir=workspace,
+    )
+
+    assert checked == 1
+    assert findings[0]["path"] == "memory-vault/personal/Gone.md"
 
 
 def test_stale_paths_accepts_existing_file(tmp_path: Path) -> None:
