@@ -1021,6 +1021,12 @@ import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
+import {
+  cleanCommentSelection,
+  commentTextMatches,
+  commentTextOccurrenceIndex,
+  highlightCommentText,
+} from '../lib/commentHighlight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import {
   useMentionPicker,
@@ -2101,24 +2107,8 @@ function getSelectionStartOffsetInElement(container: HTMLElement, range: Range):
 function computeOccurrenceIndex(contentEl: HTMLElement, range: Range, selection: string): number {
   const fullText = contentEl.textContent || ''
   const startOffset = getSelectionStartOffsetInElement(contentEl, range)
-  const needle = selection.trim()
-  if (startOffset === -1 || !needle) return 0
-
-  let occurrence = 0
-  let pos = 0
-  while (pos < fullText.length) {
-    const idx = fullText.indexOf(needle, pos)
-    if (idx === -1) break
-    if (idx === startOffset) {
-      return occurrence
-    }
-    if (idx > startOffset) {
-      break
-    }
-    occurrence++
-    pos = idx + 1
-  }
-  return Math.max(0, occurrence)
+  if (startOffset === -1) return 0
+  return commentTextOccurrenceIndex(fullText, selection, startOffset)
 }
 
 function computeParagraphIndex(contentEl: HTMLElement, range: Range): number {
@@ -2215,7 +2205,7 @@ function onChatSelectionChange(): void {
     selectionAnchor.value = null
     return
   }
-  const text = sel.toString().trim()
+  const text = cleanCommentSelection(sel.toString().trim())
   if (!text) {
     lastChatSelectionRange = null
     selectionAnchor.value = null
@@ -2391,130 +2381,12 @@ function clearHighlights(root: HTMLElement): void {
   }
 }
 
-function highlightInElement(root: HTMLElement, selection: string, commentId: string, occurrenceIndex?: number): boolean {
-  const text = selection.trim()
-  if (!text) return false
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-  const nodes: Text[] = []
-  let node: Node | null
-  while ((node = walker.nextNode())) nodes.push(node as Text)
-  if (!nodes.length) return false
-
-  let fullText = ''
-  const offsets: { node: Text; start: number; end: number }[] = []
-  for (const n of nodes) {
-    const start = fullText.length
-    fullText += n.textContent || ''
-    offsets.push({ node: n, start, end: fullText.length })
-  }
-
-  let matchStart = -1
-  let matchEnd = -1
-
-  // Match the specific occurrence index if specified
-  const targetOccurrence = occurrenceIndex ?? 0
-  let currentOccurrence = 0
-  let pos = 0
-  while (pos < fullText.length) {
-    const idx = fullText.indexOf(text, pos)
-    if (idx === -1) break
-    if (currentOccurrence === targetOccurrence) {
-      matchStart = idx
-      matchEnd = idx + text.length
-      break
-    }
-    currentOccurrence++
-    pos = idx + 1
-  }
-
-  // Fallback if target occurrence was not found (e.g. text changed): pick first exact match
-  if (matchStart === -1) {
-    const exactIdx = fullText.indexOf(text)
-    if (exactIdx !== -1) {
-      matchStart = exactIdx
-      matchEnd = exactIdx + text.length
-    }
-  }
-
-  if (matchStart === -1) {
-    // Fallback: whitespace-normalized match for selections that span
-    // <br>, block boundaries, or have extra whitespace from rendering.
-    const normFull = fullText.replace(/\s+/g, '')
-    const normText = text.replace(/\s+/g, '')
-    const normIdx = normFull.indexOf(normText)
-    if (normIdx !== -1) {
-      // Map normalized start index back to original text position
-      let charCount = 0
-      for (let i = 0; i < fullText.length; i++) {
-        if (!/\s/.test(fullText[i])) {
-          if (charCount === normIdx) {
-            matchStart = i
-            break
-          }
-          charCount++
-        }
-      }
-      // Map normalized end index back to original text position
-      if (matchStart !== -1) {
-        charCount = 0
-        for (let i = 0; i < fullText.length; i++) {
-          if (!/\s/.test(fullText[i])) {
-            charCount++
-            if (charCount === normIdx + normText.length) {
-              matchEnd = i + 1
-              break
-            }
-          }
-        }
-        if (matchEnd === -1) matchEnd = fullText.length
-      }
-    }
-  }
-
-  if (matchStart === -1 || matchEnd === -1) {
-    console.warn('Comment highlight not found:', commentId, text.slice(0, 80))
-    return false
-  }
-
-  let success = false
-  for (let i = offsets.length - 1; i >= 0; i--) {
-    const o = offsets[i]
-    if (o.end <= matchStart || o.start >= matchEnd) continue
-    const localStart = Math.max(0, matchStart - o.start)
-    const localEnd = Math.min(o.end - o.start, matchEnd - o.start)
-    if (localStart >= localEnd) continue
-
-    const textNode = o.node
-    const slice = textNode.textContent?.slice(localStart, localEnd) || ''
-    if (!slice.trim()) continue
-
-    try {
-      // Split off the tail after the match so the slice we want to wrap
-      // becomes its own text node. Order matters: split the end first so
-      // `localStart` still references valid offsets in the original node.
-      textNode.splitText(localEnd)
-      const mid = textNode.splitText(localStart)
-      const span = document.createElement('span')
-      span.className = 'comment-highlight'
-      span.dataset.commentId = commentId
-      mid.parentNode?.replaceChild(span, mid)
-      span.appendChild(mid)
-      success = true
-    } catch {
-      // Skip this node; other nodes may still wrap successfully.
-    }
-  }
-  return success
-}
-
 function findBubbleForComment(root: HTMLElement, c: { id: string; selection: string; messageId?: string; messageIndex?: number; messageRole?: string }): HTMLElement | null {
   const stored = commentBubbleById.get(c.id)
   if (stored && root.contains(stored)) {
     const content = stored.querySelector('.message-content')
     const text = content?.textContent || ''
-    const normText = text.replace(/\s+/g, '')
-    const normSelection = c.selection.replace(/\s+/g, '')
-    if (text.includes(c.selection) || normText.includes(normSelection)) {
+    if (commentTextMatches(text, c.selection)) {
       return stored
     }
   }
@@ -2539,9 +2411,7 @@ function findBubbleForComment(root: HTMLElement, c: { id: string; selection: str
     const content = el.querySelector('.message-content')
     if (!content) continue
     const text = content.textContent || ''
-    const normText = text.replace(/\s+/g, '')
-    const normSelection = c.selection.replace(/\s+/g, '')
-    if (text.includes(c.selection) || normText.includes(normSelection)) {
+    if (commentTextMatches(text, c.selection)) {
       return el
     }
   }
@@ -2556,7 +2426,7 @@ function applyHighlights(): void {
   for (const c of store.pendingChatComments) {
     const bubble = findBubbleForComment(root, c)
     if (bubble) {
-      highlightInElement(bubble, c.selection, c.id, c.occurrenceIndex)
+      highlightCommentText(bubble, c.selection, c.id, c.occurrenceIndex)
     } else {
       console.warn('Bubble not found for comment', c.id, c.selection.slice(0, 80))
     }
@@ -2566,7 +2436,7 @@ function applyHighlights(): void {
   // they're commenting on while they type, not only after saving.
   const draft = commentDraft.value
   if (draft && draftBubbleEl && root.contains(draftBubbleEl)) {
-    highlightInElement(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID, draft.occurrenceIndex)
+    highlightCommentText(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID, draft.occurrenceIndex)
   }
 }
 
