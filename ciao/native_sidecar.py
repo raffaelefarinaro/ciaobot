@@ -27,7 +27,10 @@ import asyncio
 import json
 import logging
 import os
+import shlex
+import shutil
 import subprocess
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -111,10 +114,34 @@ _probe_cache: dict[str | None, tuple[float, dict[str, Any]]] = {}
 # the automatic voice selector see it without requiring an app restart.
 _PROBE_TTL_S = 60.0
 
+# ...but `probe()` is a blocking subprocess that loads Speech, AVFoundation and
+# FoundationModels and enumerates every installed voice, and
+# `apple_model_available()` is called from sync helpers on hot paths (every
+# chat title, three times per archived insight). Putting those on a 60s TTL
+# meant a periodic multi-hundred-millisecond stall of the event loop for an
+# answer that, once true, does not go back to false on its own — the one way it
+# can is a runtime failure, which `_model_failure` already tracks with its own
+# TTL. So a positive model answer is remembered for the process, and only the
+# voice-bearing sections keep paying the TTL.
+_model_available_latch = False
+
 # Foundation Models has a much smaller context window than the cloud models
 # used by the rest of the app. Keep enough of the newest transcript for a
 # useful summary while leaving room for the prompt and instructions.
 APPLE_MAX_INPUT_CHARS = 8_000
+
+# Routing sentinels for "use Apple's on-device model". "apfel" is the legacy id
+# from when this shelled out to the apfel Homebrew CLI; settings saved before
+# that change still carry it, so it keeps working rather than falling through
+# to a cloud model without explanation. Lives here, with the rest of the Apple
+# contract, because insights, chat titles and re-entry summaries all route on
+# it — it was previously declared once per consumer.
+APPLE_MODEL_IDS = frozenset({"apple", "apfel"})
+
+
+def is_apple_model(model: str | None) -> bool:
+    """Whether a configured model id means "the on-device model"."""
+    return (model or "").strip().lower() in APPLE_MODEL_IDS
 
 # `SystemLanguageModel.Availability` can report `.available` while the first
 # session still fails in ModelManagerServices (for example while the model
@@ -124,21 +151,12 @@ APPLE_MAX_INPUT_CHARS = 8_000
 _MODEL_FAILURE_TTL_S = 60.0
 _model_failure: tuple[float, str] | None = None
 
-_USER_SESSION_RESPOND_SCRIPT = "\n".join(
-    (
-        "on run argv",
-        "set helperPath to item 1 of argv",
-        "set promptText to item 2 of argv",
-        "set instructionsText to item 3 of argv",
-        'set shellCommand to "printf %s " & quoted form of promptText & '
-        '" | " & quoted form of helperPath & " respond"',
-        'if instructionsText is not "" then',
-        'set shellCommand to shellCommand & " --instructions " & quoted form of instructionsText',
-        "end if",
-        "return do shell script shellCommand",
-        "end run",
-    )
-)
+# `do shell script` reports a non-zero exit only as a generic AppleScript
+# error, which flattens the helper's exit codes into osascript's rc 1. Those
+# codes are the protocol `respond` decodes to tell "needs macOS 26" from
+# "model unavailable" from "empty result", so the command ends by printing the
+# real status and we parse it back out.
+_EXIT_MARKER = "__ciao_exit__"
 
 
 def probe() -> dict[str, Any]:
@@ -177,9 +195,10 @@ def probe() -> dict[str, Any]:
 
 def reset_probe_cache() -> None:
     """Forget the cached probe, for tests and after installing the app."""
-    global _model_failure
+    global _model_failure, _model_available_latch
     _probe_cache.clear()
     _model_failure = None
+    _model_available_latch = False
 
 
 def section(name: str) -> dict[str, Any]:
@@ -224,36 +243,81 @@ async def _run_process(
     return process.returncode or 0, out, (err or b"").decode("utf-8", "replace").strip()
 
 
-async def _run_respond_in_user_session(
-    args: list[str], *, binary: Path, stdin: bytes | None, timeout: float
+def _applescript_string(value: str) -> str:
+    """Quote a Python string as an AppleScript string literal."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+async def _respond_in_user_session(
+    prompt: str, instructions: str, *, binary: Path, timeout: float
 ) -> tuple[int, bytes, str]:
-    """Launch the FM sidecar from the logged-in macOS user session.
+    """Run the FM helper from the logged-in macOS user session.
 
     launchd agents can invoke the helper and read its capability probe, but
     FoundationModels' generation service rejects direct daemon-context calls
-    with ModelManagerServices error 1008. ``do shell script`` runs as the same
-    logged-in user while keeping the prompt in argv, where AppleScript's
-    ``quoted form of`` safely shell-quotes arbitrary user text.
+    with ModelManagerServices error 1008, so generation has to cross into the
+    user session. ``do shell script`` does that.
+
+    The prompt goes through a 0600 temp file, never the command line. It is a
+    chat transcript, and a shell command line is world-readable through ``ps``
+    for as long as the process lives — every local user on the machine would
+    see it.
     """
-    if stdin is None:
-        raise SidecarError("respond expects the prompt on stdin")
-    instructions = ""
-    if len(args) == 3 and args[1] == "--instructions":
-        instructions = args[2]
-    elif len(args) != 1:
-        raise SidecarError("invalid native respond arguments")
-    return await _run_process(
-        [
-            "/usr/bin/osascript",
-            "-e",
-            _USER_SESSION_RESPOND_SCRIPT,
-            "--",
-            str(binary),
-            stdin.decode("utf-8", "replace"),
-            instructions,
-        ],
-        timeout=timeout,
-    )
+    tmp_dir = tempfile.mkdtemp(prefix="ciao-fm-")
+    prompt_path = Path(tmp_dir) / "prompt"
+    stderr_path = Path(tmp_dir) / "stderr"
+    try:
+        prompt_path.write_text(prompt, encoding="utf-8")
+        prompt_path.chmod(0o600)
+
+        command = f"{shlex.quote(str(binary))} respond"
+        if instructions:
+            command += f" --instructions {shlex.quote(instructions)}"
+        command += (
+            f" < {shlex.quote(str(prompt_path))} 2> {shlex.quote(str(stderr_path))}"
+            f'; printf "{_EXIT_MARKER}%s" "$?"'
+        )
+        # `with timeout of N seconds` bounds the Apple event itself. Without it
+        # the run is governed by AppleScript's own default (two minutes), not
+        # by what the caller asked for, so a long generation would be killed
+        # early and a short leash would not be honoured.
+        script = (
+            f"with timeout of {max(1, int(timeout))} seconds\n"
+            f"do shell script {_applescript_string(command)}\n"
+            "end timeout"
+        )
+        code, out, osa_err = await _run_process(
+            ["/usr/bin/osascript", "-e", script],
+            timeout=timeout,
+        )
+
+        # `do shell script` hands back stdout with newlines rewritten to lone
+        # carriage returns. That text is appended verbatim into the vault's
+        # archive markdown and rendered in Settings, where a lone CR is a
+        # control character rather than a line break — the whole insights
+        # section arrived as one physical line.
+        text = out.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+        marker = text.rfind(_EXIT_MARKER)
+        if marker == -1:
+            # osascript itself failed (permissions, no user session): there is
+            # no helper status to recover, so report its own.
+            err = osa_err or "could not reach the logged-in user session"
+            return code or EXIT_FAILURE, b"", err
+        helper_code = text[marker + len(_EXIT_MARKER):].strip()
+        stdout = text[:marker].encode("utf-8")
+        try:
+            status = int(helper_code)
+        except ValueError:
+            status = EXIT_FAILURE
+        stderr = ""
+        try:
+            stderr = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            pass
+        return status, stdout, stderr or osa_err
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 async def run(
@@ -265,15 +329,6 @@ async def run(
         raise SidecarError(
             "the ciaobot-native helper is not installed; "
             "install the desktop app with `ciao desktop install`"
-        )
-    if (
-        sys.platform == "darwin"
-        and args
-        and args[0] == "respond"
-        and Path("/usr/bin/osascript").is_file()
-    ):
-        return await _run_respond_in_user_session(
-            args, binary=binary, stdin=stdin, timeout=timeout
         )
     return await _run_process(
         [str(binary), *args], stdin=stdin, timeout=timeout
@@ -288,8 +343,20 @@ def apple_model_available() -> bool:
 
     False on non-macOS, without the app bundle, before macOS 26, when Apple
     Intelligence is switched off, and while the model is still downloading.
+
+    Latches on success: see `_model_available_latch`. A machine that has the
+    model keeps it, so re-probing on a timer only bought a periodic blocking
+    subprocess on the title and insights paths.
     """
-    return not _model_failure_reason() and bool(section("model").get("available"))
+    global _model_available_latch
+    if _model_failure_reason():
+        return False
+    if _model_available_latch:
+        return True
+    if bool(section("model").get("available")):
+        _model_available_latch = True
+        return True
+    return False
 
 
 def apple_model_unavailable_reason() -> str:
@@ -372,10 +439,26 @@ async def respond(
     if cached_reason:
         raise SidecarError(cached_reason)
 
-    args = ["respond"]
-    if instructions:
-        args += ["--instructions", instructions]
-    code, out, err = await run(args, stdin=prompt.encode("utf-8"), timeout=timeout)
+    binary = sidecar_path()
+    if binary is None:
+        raise SidecarError(
+            "the ciaobot-native helper is not installed; "
+            "install the desktop app with `ciao desktop install`"
+        )
+    # Generation is the one subcommand that has to cross into the user
+    # session; hear/speak work fine from the agent. Keeping the hop here
+    # rather than inside run() leaves run() a generic subcommand runner.
+    if sys.platform == "darwin" and Path("/usr/bin/osascript").is_file():
+        code, out, err = await _respond_in_user_session(
+            prompt, instructions, binary=binary, timeout=timeout
+        )
+    else:
+        args = ["respond"]
+        if instructions:
+            args += ["--instructions", instructions]
+        code, out, err = await _run_process(
+            [str(binary), *args], stdin=prompt.encode("utf-8"), timeout=timeout
+        )
     if code == EXIT_UNSUPPORTED_OS:
         raise SidecarError("the on-device model requires macOS 26 or newer")
     if code == EXIT_MODEL_UNAVAILABLE:

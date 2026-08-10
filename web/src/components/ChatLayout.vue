@@ -174,6 +174,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
@@ -191,6 +192,7 @@ import { isDesktopApp } from '../lib/desktop'
 import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
 
 const store = useProjectStore()
+const fileViewer = useFileViewerStore()
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
 // reach composer-owned actions (dictation, archive).
@@ -407,10 +409,17 @@ const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings'>(() => {
 // click somewhere else", because clicking a chat in the sidebar navigates to
 // /chat/:id and revived the handler. One predicate, so the next view mode
 // added has a single place to declare itself.
-const shortcutsActive = computed(() =>
+// Split in two so the number-key workspace shortcut, which is useful on the
+// schedules view, does not have to restate the rest of the gate and drift
+// from it. Anything that owns the screen — a confirm dialog, the file viewer
+// modal — belongs in the base predicate, so a new overlay is declared once.
+const viewShortcutsActive = computed(() =>
   viewMode.value !== 'settings'
-  && viewMode.value !== 'schedules'
-  && !pendingConfirm.value,
+  && !pendingConfirm.value
+  && !fileViewer.isOpen,
+)
+const shortcutsActive = computed(() =>
+  viewShortcutsActive.value && viewMode.value !== 'schedules',
 )
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
@@ -605,17 +614,16 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // Workspace navigation is also useful from the automations view, where the
   // chat-only shortcuts are disabled. Match the visible workspace order and
   // keep the shortcut out of text fields so numbers remain typeable.
-  if (viewMode.value !== 'settings' && !pendingConfirm.value && !isTypingTarget(e.target)
+  if (viewShortcutsActive.value && !isTypingTarget(e.target)
     && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
     && /^[1-9]$/.test(e.key)) {
     const workspace = store.workspaceOptions[Number(e.key) - 1]
     if (workspace) {
       e.preventDefault()
-      if (viewMode.value === 'schedules') {
-        void store.switchWorkspace(workspace.name, { transition: false })
-      } else {
-        void store.switchWorkspace(workspace.name)
-      }
+      // The schedules view has no chat to transition into.
+      void store.switchWorkspace(workspace.name, {
+        transition: viewMode.value !== 'schedules',
+      })
       return
     }
   }

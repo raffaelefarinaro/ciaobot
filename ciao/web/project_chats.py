@@ -395,11 +395,9 @@ def _uuid8() -> str:
     return uuid.uuid4().hex[:8]
 
 
-# Routing sentinels for "title this with Apple's on-device model". "apfel" is
-# the legacy id from when this shelled out to the apfel Homebrew CLI; settings
-# saved before that change still carry it, so it keeps working rather than
-# falling through to a cloud model without explanation.
-APPLE_TITLE_MODELS = frozenset({"apple", "apfel"})
+# Re-exported for callers that still import it from here; the definition and
+# the reasoning live in native_sidecar alongside the rest of the Apple contract.
+APPLE_TITLE_MODELS = native_sidecar.APPLE_MODEL_IDS
 
 _TITLE_SYSTEM_PROMPT = (
     "You are a titling function, not an assistant. The text you receive is a "
@@ -2818,6 +2816,15 @@ class ProjectChatManager:
         self._events.publish({"type": "chat_created", "chat": chat.to_dict(local=True)})
         return chat
 
+    def is_empty_chat(self, chat_id: str) -> bool:
+        """Public form of `_is_empty_chat`, for the conditional-delete route.
+
+        The PWA needs this verdict to discard an abandoned draft on close, and
+        cannot compute it: `user_turn_count` is not in any payload it receives.
+        """
+        chat = self._chats.get(chat_id)
+        return chat is not None and self._is_empty_chat(chat)
+
     def _is_empty_chat(self, chat: ChatInfo) -> bool:
         """An empty chat is one the user abandoned before sending anything.
 
@@ -4485,9 +4492,17 @@ class ProjectChatManager:
         return self._broker.get(chat_id)
 
     @staticmethod
-    def _invalidate_reentry_summary(chat: ChatInfo) -> None:
+    def _invalidate_reentry_summary(chat: ChatInfo) -> bool:
+        """Drop any cached orientation summary. Returns whether one existed.
+
+        The revision always advances, so an in-flight generation still loses
+        the race, but the caller only needs to persist when there was actually
+        a summary to clear — which is the rare case.
+        """
+        had_summary = bool(chat.reentry_summary)
         chat.reentry_summary = ""
         chat.reentry_summary_revision += 1
+        return had_summary
 
     def queue_message(
         self,
@@ -4507,8 +4522,11 @@ class ProjectChatManager:
             # the caller starts a real turn instead (which cancels the drain).
             return False
         chat = self._chats.get(chat_id)
-        if chat is not None:
-            self._invalidate_reentry_summary(chat)
+        if chat is not None and self._invalidate_reentry_summary(chat):
+            # Only when there was a summary on disk to clear. _save rewrites
+            # and re-merges the whole chat store, so doing it per queued
+            # message cost a full synchronous disk round-trip to persist
+            # nothing in the common case.
             self._save()
         image_refs: list[str] = []
         for img in images or []:
@@ -4562,7 +4580,7 @@ class ProjectChatManager:
         ok = await provider.steer(request)
         if not ok:
             return False
-        self._invalidate_reentry_summary(chat)
+        dirty = self._invalidate_reentry_summary(chat)
         image_refs: list[str] = []
         for img in images or []:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
@@ -4577,7 +4595,9 @@ class ProjectChatManager:
             now = _now_iso()
             chat.last_activity_at = now
             chat.last_read_at = now  # user sending = implicitly read
-        self._save()
+            dirty = True
+        if dirty:
+            self._save()
         stream.publish({
             "type": "steered",
             "text": text,
@@ -7263,8 +7283,15 @@ class ProjectChatManager:
 
         if not await asyncio.to_thread(native_sidecar.apple_model_available):
             return ""
-        filtered = self._transcripts.current_filtered_jsonl(
-            ChatContext.for_web(chat_id), chat.provider
+        # Off the loop: this reads the whole current transcript, parses it, and
+        # re-serializes every turn — multi-megabyte on a long chat — and it
+        # runs on every chat open. Doing it inline froze streaming and every
+        # other request for the duration. (The availability probe above is
+        # already threaded for the same reason.)
+        filtered = await asyncio.to_thread(
+            self._transcripts.current_filtered_jsonl,
+            ChatContext.for_web(chat_id),
+            chat.provider,
         )
         if not filtered.strip():
             return ""

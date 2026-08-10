@@ -169,7 +169,9 @@ describe('ChatLayout', () => {
     window.dispatchEvent(event)
     await flushPromises()
 
-    expect(switchWorkspace).toHaveBeenCalledWith('work')
+    // The chat view transitions into the target workspace's chat; only the
+    // schedules view passes transition: false.
+    expect(switchWorkspace).toHaveBeenCalledWith('work', { transition: true })
     expect(store.activeWorkspace).toBe('work')
     expect(event.defaultPrevented).toBe(true)
     wrapper.unmount()

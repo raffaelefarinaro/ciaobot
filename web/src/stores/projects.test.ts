@@ -622,12 +622,44 @@ describe('chat closing and re-entry orientation', () => {
     }]
     store.messages[chatId] = []
     store.activeChatId = chatId
-    apiDel.mockResolvedValue({})
+    apiDel.mockResolvedValue({ ok: true, deleted: true })
 
     await store.closeChat()
 
-    expect(apiDel).toHaveBeenCalledWith(`/api/chats/${chatId}`)
+    // only_if_empty makes the server re-apply its own _is_empty_chat rule.
+    // The client cannot see user_turn_count, so it must not be the one
+    // deciding whether a chat is disposable.
+    expect(apiDel).toHaveBeenCalledWith(`/api/chats/${chatId}?only_if_empty=1`)
     expect(store.chats).toHaveLength(0)
+    expect(store.activeChatId).toBeNull()
+    expect(routerPush).toHaveBeenCalledWith('/')
+  })
+
+  test('keeps a chat the server declines to delete', async () => {
+    // The client cannot see user_turn_count, so its "is this a draft" guess
+    // can be wrong — a chat whose messages are not loaded, or one that just
+    // got a fresh session, looks empty locally. The server has the real rule
+    // and says no; closing must then be an ordinary close, not a deletion.
+    const store = useProjectStore()
+    const chatId = 'chat-looks-empty'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'New Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    store.messages[chatId] = []
+    store.activeChatId = chatId
+    apiDel.mockResolvedValue({ ok: false, deleted: false, reason: 'not empty' })
+
+    await store.closeChat()
+
+    expect(store.chats).toHaveLength(1)
     expect(store.activeChatId).toBeNull()
     expect(routerPush).toHaveBeenCalledWith('/')
   })

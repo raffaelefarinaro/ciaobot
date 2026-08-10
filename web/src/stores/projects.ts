@@ -49,6 +49,10 @@ export function isHostConnectionUnavailableMessage(message: string): boolean {
   return message.trim().toLowerCase().startsWith('host ws unreachable')
 }
 
+// Must match `_DEFAULT_CHAT_TITLE` on the server: `_is_empty_chat` uses it to
+// tell an abandoned draft from a chat the user deliberately named.
+const DEFAULT_CHAT_TITLE = 'New Chat'
+
 export const useProjectStore = defineStore('projects', () => {
   const projects = ref<ProjectInfo[]>([])
   const chats = ref<ChatInfo[]>([])
@@ -1111,9 +1115,12 @@ export const useProjectStore = defineStore('projects', () => {
       if (urlChatId && chatExistsInList(urlChatId, c)) {
         await ensureWorkspaceForChat(urlChatId)
         activeChatId.value = urlChatId
-      } else {
-        // Clear the restored selection for the next launch as well, so a
-        // later fetchAll cannot bring it back after the user has landed home.
+      } else if (!bootstrapped.value) {
+        // Boot only. fetchAll is also a refresh — SchedulePanel and
+        // SchedulesView call it while the app is running — and clearing the
+        // selection there dropped the user's open chat just because the
+        // current route was /schedules, sending them to the home screen when
+        // they navigated back.
         activeChatId.value = null
       }
       persistState()
@@ -1476,7 +1483,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Chat actions ────────────────────────────────────────────────────
 
-  async function createChat(projectId: string, title = 'New Chat') {
+  async function createChat(projectId: string, title = DEFAULT_CHAT_TITLE) {
     creatingChatProjectIds.value[projectId] = true
     try {
       const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
@@ -1557,9 +1564,16 @@ export const useProjectStore = defineStore('projects', () => {
     return c
   }
 
-  async function deleteChat(chatId: string, options?: { selectNext?: boolean }) {
+  async function deleteChat(
+    chatId: string,
+    options?: { selectNext?: boolean; onlyIfEmpty?: boolean },
+  ): Promise<boolean> {
     disconnectWs(chatId)
-    await api.del(`/api/chats/${chatId}`)
+    // `only_if_empty` makes the server apply its own `_is_empty_chat` rule and
+    // decline otherwise, so closing a draft can never delete a real chat.
+    const query = options?.onlyIfEmpty ? '?only_if_empty=1' : ''
+    const result = await api.del<{ deleted?: boolean }>(`/api/chats/${chatId}${query}`)
+    if (options?.onlyIfEmpty && result?.deleted === false) return false
     chats.value = chats.value.filter(c => c.chat_id !== chatId)
     delete messages.value[chatId]
     delete reentrySummaries.value[chatId]
@@ -1568,12 +1582,25 @@ export const useProjectStore = defineStore('projects', () => {
     if (options?.selectNext !== false && activeChatId.value === chatId) {
       await transitionToFirstChat()
     }
+    return true
   }
 
+  // Mirrors the server's `_is_empty_chat` (project_chats.py). It must not be
+  // more eager than the server: this deletes the chat outright, and the two
+  // rules disagreeing means deleting something the server would have kept.
+  //
+  // The client cannot see `user_turn_count`, so it substitutes the loaded
+  // messages — which is only sound when they are actually loaded. `messages`
+  // is undefined for a chat that was never opened, and reading that as "no
+  // user turns" made a real conversation look like a discarded draft.
   function isEmptyDraft(chatId: string): boolean {
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat || chat.archived || chat.session_id) return false
-    return !(messages.value[chatId] || []).some(message => message.role === 'user')
+    // A renamed chat is a deliberate act, not an abandoned draft.
+    if (chat.title !== DEFAULT_CHAT_TITLE) return false
+    const loaded = messages.value[chatId]
+    if (!loaded) return false
+    return !loaded.some(message => message.role === 'user')
   }
 
   async function closeChat(chatId = activeChatId.value): Promise<void> {
@@ -1589,21 +1616,33 @@ export const useProjectStore = defineStore('projects', () => {
         activeChatId.value = null
         persistState()
       }
-      await deleteChat(chatId, { selectNext: false })
-    } else {
-      // Warm the persistent per-chat summary cache while the user is away.
-      // The request is intentionally detached so closing the chat stays
-      // immediate; switchChat still requests it as a fallback if this call
-      // has not finished by the time the user returns.
-      void requestReentrySummary(chatId)
-      disconnectWs(chatId)
+      // onlyIfEmpty: the server re-checks with the full rule and declines if
+      // this is not actually a discardable draft. Closing a chat must never
+      // be able to destroy one.
+      try {
+        await deleteChat(chatId, { selectNext: false, onlyIfEmpty: true })
+      } finally {
+        // The view is already cleared. A failed DELETE must not also strand
+        // the router on /chat/<id> with no active chat behind it.
+        await leaveChatView(wasActive)
+      }
+      return
     }
-    if (wasActive) {
-      activeChatId.value = null
-      persistState()
-      const { router } = await import('../router')
-      await router.push('/')
-    }
+    // Warm the persistent per-chat summary cache while the user is away.
+    // The request is intentionally detached so closing the chat stays
+    // immediate; switchChat still requests it as a fallback if this call
+    // has not finished by the time the user returns.
+    void requestReentrySummary(chatId)
+    disconnectWs(chatId)
+    await leaveChatView(wasActive)
+  }
+
+  async function leaveChatView(wasActive: boolean): Promise<void> {
+    if (!wasActive) return
+    activeChatId.value = null
+    persistState()
+    const { router } = await import('../router')
+    await router.push('/')
   }
 
   async function requestReentrySummary(chatId: string): Promise<void> {

@@ -2354,8 +2354,16 @@ async def chat_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     if request.method == "DELETE":
+        # `only_if_empty` is how closing a chat discards a never-used draft.
+        # The check has to happen here: "empty" means default title, no user
+        # turns, no session and no live stream, and `user_turn_count` is not
+        # in any payload the PWA receives — a client-side approximation of the
+        # rule deletes chats the server would have kept.
+        if request.query_params.get("only_if_empty") in {"1", "true"}:
+            if not pcm.is_empty_chat(chat_id):
+                return JSONResponse({"ok": False, "deleted": False, "reason": "not empty"})
         ok = pcm.delete_chat(chat_id)
-        return JSONResponse({"ok": ok})
+        return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
     if "control_surface" in body:
