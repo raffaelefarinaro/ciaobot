@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 import ciao.voice as voice
+from ciao import native_sidecar
 from ciao.config import CiaoConfig
 
 
@@ -41,7 +42,9 @@ def test_availability_probes_return_bools():
 
 
 def test_probe_is_empty_without_a_sidecar(monkeypatch):
-    monkeypatch.setattr(voice, "sidecar_path", lambda: None)
+    # Voice keeps a compatibility alias, but the shared probe resolves the
+    # sidecar through native_sidecar directly.
+    monkeypatch.setattr(native_sidecar, "sidecar_path", lambda: None)
     voice.reset_voice_probe_cache()
     try:
         assert voice.apple_dictation_available() is False

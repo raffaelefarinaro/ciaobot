@@ -277,8 +277,19 @@ func bestVoice(locale requested: String, explicit: String) -> AVSpeechSynthesisV
         let id = voice.language.lowercased()
         return id == wanted || id.hasPrefix(language)
     }
-    return candidates.max { qualityRank($0.quality) < qualityRank($1.quality) }
-        ?? AVSpeechSynthesisVoice(language: requested)
+    let ranked = candidates.sorted { lhs, rhs in
+        // Prefer an exact locale before a language-family fallback, then the
+        // highest installed quality. The old max-by-quality comparison could
+        // pick a different regional voice when both tiers were equal.
+        let lhsExact = lhs.language.lowercased() == wanted
+        let rhsExact = rhs.language.lowercased() == wanted
+        if lhsExact != rhsExact { return lhsExact }
+        let lhsQuality = qualityRank(lhs.quality)
+        let rhsQuality = qualityRank(rhs.quality)
+        if lhsQuality != rhsQuality { return lhsQuality > rhsQuality }
+        return lhs.identifier < rhs.identifier
+    }
+    return ranked.first ?? AVSpeechSynthesisVoice(language: requested)
 }
 
 /// Little-endian 16-bit mono WAV around raw PCM frames.
@@ -433,8 +444,12 @@ func runRespond(instructions: String) async {
     let session = instructions.isEmpty
         ? LanguageModelSession()
         : LanguageModelSession(instructions: instructions)
+    let options = GenerationOptions(
+        samplingMode: .greedy,
+        maximumResponseTokens: 512
+    )
     do {
-        let response = try await session.respond(to: prompt)
+        let response = try await session.respond(to: prompt, options: options)
         let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty {
             fail(.emptyResult, "the model returned no text")
