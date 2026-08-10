@@ -30,12 +30,28 @@ const EmptyStub = defineComponent({
 })
 
 describe('ChatLayout', () => {
+  // Vitest 4's default jsdom env does not provide localStorage, and a few
+  // shortcuts (font zoom) round-trip through it. Wire a tiny in-memory
+  // shim that mirrors the bits of Storage our shortcuts touch.
+  class MemoryStorage {
+    private values = new Map<string, string>()
+    getItem(key: string): string | null { return this.values.get(key) ?? null }
+    setItem(key: string, value: string): void { this.values.set(key, value) }
+    removeItem(key: string): void { this.values.delete(key) }
+    clear(): void { this.values.clear() }
+  }
+
   beforeEach(() => {
     setActivePinia(createPinia())
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,
       value: 390,
     })
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: new MemoryStorage(),
+    })
+    localStorage.clear()
   })
 
   afterEach(() => {
@@ -215,6 +231,158 @@ describe('ChatLayout', () => {
     window.dispatchEvent(event)
 
     expect(toggleDictation).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('increments --font-scale by the shared step on Cmd/Ctrl+Shift+=', async () => {
+    // The shortcut should be available in both the desktop app and the PWA:
+    // it is the platform's primary modifier. The step, bounds, and
+    // persistence key must match Settings → Appearance so the two surfaces
+    // stay in sync. Asserts both: the CSS variable is bumped and the value
+    // is persisted to localStorage.
+    window.__CIAOBOT_DESKTOP__ = true
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    // Pre-seed localStorage so the read at mount time is deterministic and
+    // unrelated to whatever the previous test left in the CSS variable.
+    try { localStorage.setItem('ciao-font-scale', '1.2') } catch { /* ignore */ }
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Test chat' }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub, ProjectSidebar: EmptyStub, ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub, SettingsView: EmptyStub, FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub, PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: '=', metaKey: true, shiftKey: true, cancelable: true })
+    window.dispatchEvent(event)
+
+    // The composable writes the live value to both the CSS variable and
+    // localStorage on every adjust; both must agree.
+    const cssValue = parseFloat(document.documentElement.style.getPropertyValue('--font-scale'))
+    expect(cssValue).toBe(1.25)
+    expect(localStorage.getItem('ciao-font-scale')).toBe('1.25')
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('decrements --font-scale on Cmd/Ctrl+Shift+- (matches the shared step)', async () => {
+    // Mirror of the increment case above, exercising the minus path with a
+    // pre-seeded value so the assertion is deterministic regardless of
+    // any cross-test CSS-variable carryover.
+    window.__CIAOBOT_DESKTOP__ = true
+    try { localStorage.setItem('ciao-font-scale', '1.2') } catch { /* ignore */ }
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Test chat' }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub, ProjectSidebar: EmptyStub, ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub, SettingsView: EmptyStub, FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub, PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: '-', metaKey: true, shiftKey: true, cancelable: true })
+    window.dispatchEvent(event)
+
+    const cssValue = parseFloat(document.documentElement.style.getPropertyValue('--font-scale'))
+    expect(cssValue).toBe(1.15)
+    expect(localStorage.getItem('ciao-font-scale')).toBe('1.15')
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('clamps Cmd+Ctrl+Shift+- at the lower font-scale bound', async () => {
+    // Start at exactly the floor (0.8) and confirm the shortcut does not
+    // underflow past the bound. Without clamp, --font-scale would become
+    // 0.75 and persist, breaking the "reset back to default" workflow
+    // because the slider/buttons would have nowhere to go down.
+    window.__CIAOBOT_DESKTOP__ = true
+    try { localStorage.setItem('ciao-font-scale', '0.8') } catch { /* ignore */ }
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Test chat' }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub, ProjectSidebar: EmptyStub, ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub, SettingsView: EmptyStub, FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub, PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: '-', metaKey: true, shiftKey: true, cancelable: true })
+    window.dispatchEvent(event)
+
+    // Both writes must land at the floor. We do not read the CSS variable
+    // before dispatch because jsdom carries it across tests; the localStorage
+    // seed is the authoritative pre-state for this test.
+    const afterValue = parseFloat(document.documentElement.style.getPropertyValue('--font-scale'))
+    expect(afterValue).toBe(0.8)
+    expect(localStorage.getItem('ciao-font-scale')).toBe('0.8')
     expect(event.defaultPrevented).toBe(true)
     wrapper.unmount()
   })
