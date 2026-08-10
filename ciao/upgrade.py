@@ -94,7 +94,7 @@ async def upgrade_project_deps(project_root: str) -> dict[str, tuple[str, str]]:
     Returns a dict of ``{package: (before, after)}`` for packages whose version changed.
     """
     # Packages we care about tracking individually
-    tracked = ["openai", "claude-agent-sdk", "notebooklm-py"]
+    tracked = ["claude-agent-sdk", "notebooklm-py"]
 
     async def _get_versions() -> dict[str, str]:
         versions: dict[str, str] = {}

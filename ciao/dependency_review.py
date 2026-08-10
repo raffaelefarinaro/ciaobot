@@ -254,7 +254,6 @@ def compile_tracked_tools(workspace_root: Path) -> list[dict[str, str]]:
 
 # Fallback base list for non-workspace context / static references
 DEFAULT_TRACKED_TOOLS = (
-    {"key": "openai", "repo": "https://github.com/openai/openai-python/releases"},
     {"key": "claude-agent-sdk", "repo": "https://github.com/anthropics/claude-agent-sdk-python/releases"},
     {"key": "notebooklm-py", "repo": "https://github.com/teng-lin/notebooklm-py/releases"},
     {"key": "gws", "repo": "https://github.com/googleworkspace/cli/releases"},

@@ -457,13 +457,13 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "build", marker = "extra == 'test'", specifier = "==1.5.0" },
-    { name = "claude-agent-sdk", specifier = "==0.2.131" },
+    { name = "claude-agent-sdk", specifier = "==0.2.134" },
     { name = "cryptography", specifier = "==49.0.0" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "itsdangerous", specifier = "==2.2.0" },
     { name = "mcp", specifier = ">=1.29.0,<2.0" },
     { name = "mypy", marker = "extra == 'test'", specifier = ">=1.10.0" },
-    { name = "notebooklm-py", specifier = "==0.7.3" },
+    { name = "notebooklm-py", specifier = "==0.8.0" },
     { name = "pip-audit", marker = "extra == 'test'", specifier = ">=2.7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = "==8.4.2" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = "==0.26.0" },
@@ -480,20 +480,20 @@ provides-extras = ["test", "scraping"]
 
 [[package]]
 name = "claude-agent-sdk"
-version = "0.2.131"
+version = "0.2.134"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },
     { name = "sniffio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c5/18/c9552edc105f6220e2ee2b81070e91ca1daeb92e2ffd32051e166b1f20ab/claude_agent_sdk-0.2.131.tar.gz", hash = "sha256:6b5dbc798603519adae9b5b5b240ac7244477e9dd5c536159bcddb42aca4314e", size = 312217, upload-time = "2026-08-06T01:04:55.057Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/40/4e/4aa8048367c89b9cbb64f4fac58f9f59110f77231d13e728e2844898ea32/claude_agent_sdk-0.2.134.tar.gz", hash = "sha256:acac34b8068dfeb8fceeb8e2e3b3684f146da206094e55a5d34115063f2bafba", size = 312219, upload-time = "2026-08-08T03:00:16.502Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/95/c5/1fad9b99607cf86f7ce117edc6b1416ebe9208763301f119be9876160e8b/claude_agent_sdk-0.2.131-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b38ac13f062a0b4e9ba18b790334bd650e061e746d7109e3b3499f715dd278c0", size = 78904312, upload-time = "2026-08-06T01:04:59.149Z" },
-    { url = "https://files.pythonhosted.org/packages/75/96/0f0957e1bbb1c7b5740c09bf2ec538b32f479effa3c9e6ff14a2275d6e4c/claude_agent_sdk-0.2.131-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:64350aab4136beefe0559801d283c9ec10d254a86112c8f47e992c856362dbf9", size = 84046993, upload-time = "2026-08-06T01:05:04.556Z" },
-    { url = "https://files.pythonhosted.org/packages/df/f8/8f910ee1d1ec62966d0157d69ff5d95520818625d8824d463f106b638d4f/claude_agent_sdk-0.2.131-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:db93c75c7a87642c9601db6bebd9cd86aa5460dc5a9ddde23aa60eed26e96b7b", size = 88409835, upload-time = "2026-08-06T01:05:09.104Z" },
-    { url = "https://files.pythonhosted.org/packages/7a/7e/53a718b7efa996214e652661488070b8763f9cf83c6802d8a800ce07fbbf/claude_agent_sdk-0.2.131-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:7135bdc826608fbdaa3bb4585ed499fb0573f85311b73de925ea9f160e6667b2", size = 89597220, upload-time = "2026-08-06T01:05:13.795Z" },
-    { url = "https://files.pythonhosted.org/packages/5e/5f/41c3a8e2378ca2abdb1c21a05f700c4ec9a0a1e5f37f73dc8dc6871823c4/claude_agent_sdk-0.2.131-py3-none-win_amd64.whl", hash = "sha256:9017d815f3c711c4e4161f57eec2fb758609d614e56b506519fce68599ecbf7f", size = 89157656, upload-time = "2026-08-06T01:05:19.219Z" },
+    { url = "https://files.pythonhosted.org/packages/6e/75/dc52d7f3632e9a5377487158785495ba5ce009adc292b0b61ffa9ce01e3a/claude_agent_sdk-0.2.134-py3-none-macosx_11_0_arm64.whl", hash = "sha256:5c44159a4a8640edf2634fa9653c40023ed548e24e3aaac01fc3fad85685ed0e", size = 80906236, upload-time = "2026-08-08T03:00:20.156Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/19/289b9cf3f26154084070a40d9ac54fb4f624e4a36afa76529f5bd1d112f6/claude_agent_sdk-0.2.134-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:4d4e583bdd834b05f88678948b263e57aa81f20a0817f3d25adfe9d8edb50966", size = 85996885, upload-time = "2026-08-08T03:00:24.254Z" },
+    { url = "https://files.pythonhosted.org/packages/67/b2/cb099e7b82eb43626e9dcfbf24e09cd760d59ff3b9e498642c4dffa4fa6f/claude_agent_sdk-0.2.134-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:f259671f03823e07544b52ed37e29accd295012e7d9304f5b7c1ec6a3508c758", size = 90326570, upload-time = "2026-08-08T03:00:28.544Z" },
+    { url = "https://files.pythonhosted.org/packages/88/17/59e7a9cc6ebebc9708733a03ddd2b9c90051c7de359686e1e14b1b81d2b1/claude_agent_sdk-0.2.134-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:0cba177a0f234dcdb8dfcdd46803fbe0aadd42fbc5aebba41f65f9d00d05a420", size = 91474377, upload-time = "2026-08-08T03:00:32.869Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/c6/c5dd0c41ad6822218ed5af47961ba9a70c88d82ca0f0ff1d12cb7d37a543/claude_agent_sdk-0.2.134-py3-none-win_amd64.whl", hash = "sha256:e5eb243dc62a6ea624aadb4227eb2d03d40394c9ae8a43cb5a94d8d76cd2def0", size = 90944935, upload-time = "2026-08-08T03:00:37.112Z" },
 ]
 
 [[package]]
@@ -1460,7 +1460,7 @@ wheels = [
 
 [[package]]
 name = "notebooklm-py"
-version = "0.7.3"
+version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -1468,9 +1468,9 @@ dependencies = [
     { name = "httpx" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7c/89/672857229ffb5cbb8c9efdbbe36aa8e4dcf6ceee713af16a6ffde3e2c785/notebooklm_py-0.7.3.tar.gz", hash = "sha256:918bcd67eae877ec33565d7988501a58fd582fd63f19c6480223af95f065a5e3", size = 10977414, upload-time = "2026-06-30T01:10:59.009Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/d4/ce259de7b577cfa8e4ec370b9031a867f1874c5e44c6e32d68b4ca0372eb/notebooklm_py-0.8.0.tar.gz", hash = "sha256:897a3b14ef9046080f377959de6c863c544ca21f106458f21243650d3d9a3579", size = 13756470, upload-time = "2026-08-03T10:05:16.496Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/dd/ae/0132b7ca94cf256629db96aaa99893d4aa60410ea74bf85ce82a28108cfc/notebooklm_py-0.7.3-py3-none-any.whl", hash = "sha256:65ed6cc1d8420f65b74ab3fa85aa602307a8c6bb483c6573eed903b847532128", size = 790452, upload-time = "2026-06-30T01:10:56.889Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/48/39106618d7a7dba6381519846965f670bc770d3e894f76adb981782ab006/notebooklm_py-0.8.0-py3-none-any.whl", hash = "sha256:2e3947e023494e4f561c3a86155058cfb541c5ae79da2aaeb13817f5e67bc9f1", size = 1285898, upload-time = "2026-08-03T10:05:14.723Z" },
 ]
 
 [[package]]
