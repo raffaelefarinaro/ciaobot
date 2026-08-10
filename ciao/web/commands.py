@@ -10,8 +10,10 @@ library: ``{name, description, argument_hint, source, path}``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -25,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+_PROVIDER_SKILLS_TTL_SECONDS = 60.0
+_provider_skills_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
 
 
 @dataclass(slots=True)
@@ -113,6 +117,69 @@ def list_skill_entries(workspace_root: Path, provider: str = "") -> list[Command
     return sorted(entries, key=lambda item: item.name)
 
 
+def _discover_provider_skill_names(provider: str) -> list[str]:
+    """Use the same provider-owned skill discovery shown in Settings."""
+    target = provider.strip().lower()
+    now = time.monotonic()
+    cached = _provider_skills_cache.get(target)
+    if cached is not None and now - cached[0] < _PROVIDER_SKILLS_TTL_SECONDS:
+        return list(cached[1])
+
+    if target == "claude":
+        from ciao.setup_status import discover_claude_system_skills
+
+        names = discover_claude_system_skills()
+    elif target == "codex":
+        from ciao.providers.codex import codex_system_skills
+
+        names = codex_system_skills()
+    else:
+        names = []
+
+    normalized = tuple(sorted({str(name).strip() for name in names if str(name).strip()}))
+    _provider_skills_cache[target] = (now, normalized)
+    return list(normalized)
+
+
+def list_provider_skill_entries(provider: str, names: Iterable[str]) -> list[Command]:
+    """Render provider-owned skills in the slash-picker command shape."""
+    target = provider.strip().lower()
+    provider_label = {
+        "claude": "Claude Code",
+        "codex": "OpenAI Codex",
+    }.get(target, target or "provider")
+    entries = {
+        str(name).strip(): Command(
+            name=str(name).strip(),
+            description=f"Loaded by {provider_label}",
+            argument_hint="",
+            source="skill",
+            path=f"provider:{target}",
+        )
+        for name in names
+        if str(name).strip()
+    }
+    return sorted(entries.values(), key=lambda item: item.name)
+
+
+def list_picker_entries(workspace_root: Path, provider: str) -> tuple[list[Command], list[Command]]:
+    """Return commands plus deduplicated workspace/provider skill entries."""
+    commands = list_commands(workspace_root)
+    seen = {command.name.casefold() for command in commands}
+    skills: list[Command] = []
+    candidates = [
+        *list_skill_entries(workspace_root, provider),
+        *list_provider_skill_entries(provider, _discover_provider_skill_names(provider)),
+    ]
+    for skill in candidates:
+        key = skill.name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        skills.append(skill)
+    return commands, sorted(skills, key=lambda item: item.name.casefold())
+
+
 def expand_slash_command(prompt: str, workspace_root: Path) -> str | None:
     """Expand a Ciaobot command for providers without native project commands.
 
@@ -159,13 +226,10 @@ async def list_commands_endpoint(request: Request) -> JSONResponse:
     """GET /api/commands — return available slash commands for the UI picker."""
     try:
         workspace_root = _workspace_root(request)
-        commands = list_commands(workspace_root)
-        command_names = {command.name for command in commands}
         provider = request.query_params.get("provider", "")
-        skills = [
-            skill for skill in list_skill_entries(workspace_root, provider)
-            if skill.name not in command_names
-        ]
+        commands, skills = await asyncio.to_thread(
+            list_picker_entries, workspace_root, provider
+        )
     except Exception:  # noqa: BLE001 — never 500 the picker
         logger.exception("listing commands failed")
         return JSONResponse({"commands": [], "skills": []})

@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ciao.web.commands import Command, _parse_frontmatter, list_commands, list_skill_entries
+from ciao.web import commands as commands_module
+from ciao.web.commands import (
+    Command,
+    _parse_frontmatter,
+    list_commands,
+    list_picker_entries,
+    list_skill_entries,
+)
 
 
 def _write_cmd(dir_path: Path, name: str, frontmatter: str, body: str = "body") -> None:
@@ -97,3 +104,30 @@ def test_list_skill_entries_filters_to_provider_install_target(tmp_path: Path) -
 
     assert [skill.name for skill in list_skill_entries(tmp_path, "claude")] == ["claude-only"]
     assert [skill.name for skill in list_skill_entries(tmp_path, "codex")] == ["both"]
+
+
+def test_picker_merges_provider_page_skills_and_deduplicates_workspace_skills(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_cmd(
+        tmp_path / "skills" / "shared",
+        "SKILL",
+        "---\ndescription: Workspace description\n---\n",
+    )
+    (tmp_path / ".agents" / "skills" / "shared").mkdir(parents=True)
+    (tmp_path / ".agents" / "skills" / "shared" / "SKILL.md").write_text(
+        (tmp_path / "skills" / "shared" / "SKILL.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        commands_module,
+        "_discover_provider_skill_names",
+        lambda provider: ["browser", "shared"] if provider == "codex" else [],
+    )
+
+    commands, skills = list_picker_entries(tmp_path, "codex")
+
+    assert commands == []
+    assert [skill.name for skill in skills] == ["browser", "shared"]
+    assert skills[0].description == "Loaded by OpenAI Codex"
+    assert skills[1].description == "Workspace description"
