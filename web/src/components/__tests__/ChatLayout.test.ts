@@ -118,6 +118,117 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+  it('switches to the workspace matching the displayed number', async () => {
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 1180,
+    })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+      { name: 'client', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+    ]
+    store.activeWorkspace = 'personal'
+    store.bootstrapped = true
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace')
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: '2', cancelable: true })
+    window.dispatchEvent(event)
+    await flushPromises()
+
+    expect(switchWorkspace).toHaveBeenCalledWith('work')
+    expect(store.activeWorkspace).toBe('work')
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('does not switch workspaces while typing', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+    ]
+    store.activeWorkspace = 'personal'
+    store.bootstrapped = true
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace')
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+    const event = new KeyboardEvent('keydown', { key: '2', bubbles: true, cancelable: true })
+    input.dispatchEvent(event)
+
+    expect(switchWorkspace).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+    input.remove()
+    wrapper.unmount()
+  })
+
   it('routes Cmd+D to the active chat composer in the desktop app', async () => {
     window.__CIAOBOT_DESKTOP__ = true
     Object.defineProperty(window, 'innerWidth', {
@@ -299,11 +410,11 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  // The model picker follows the same split: Cmd+M in the desktop app,
-  // Option+M in the PWA, because a browser has already spent Cmd+M on
-  // Minimize Window on macOS. Needs an active chat, like dictation.
+  // The model picker follows the same split: Cmd+Shift+M in the desktop app,
+  // Option+M in the PWA, because macOS reserves plain Cmd+M for Minimize
+  // Window. Needs an active chat, like dictation.
   it.each([
-    ['the desktop app', true, { key: 'm', metaKey: true }],
+    ['the desktop app', true, { key: 'm', metaKey: true, shiftKey: true }],
     ['the web PWA', undefined, { key: 'm', altKey: true }],
   ] as const)('opens the model picker in %s', async (_label, desktopFlag, keyInit) => {
     window.__CIAOBOT_DESKTOP__ = desktopFlag

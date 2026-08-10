@@ -60,7 +60,7 @@
         <div class="card">
           <div class="settings-card-header">
             <p class="section-title">keyboard shortcuts</p>
-            <p class="hint">Global combos that work while a chat is open. Text fields keep their normal meaning: Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
+            <p class="hint">Global shortcuts. Text fields keep their normal meaning: number keys stay typeable, Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
           </div>
           <ul class="shortcut-list">
             <li>
@@ -83,6 +83,12 @@
               <kbd v-else>&#8224;S</kbd>
               <span>Show or hide the sidebar</span>
             </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;&#8679;M</kbd>
+              <kbd v-else>&#8224;M</kbd>
+              <span>Open the model picker</span>
+            </li>
+            <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
             <li>
               <kbd>&#8984;&#8679;=</kbd>
               <span>Increase the font size</span>
@@ -541,8 +547,39 @@
                     &middot; {{ getJobLastError('insights') }}
                   </span>
                 </div>
+                <div class="routine-actions">
+                  <button
+                    type="button"
+                    class="btn-small"
+                    :disabled="insightsComparisonPending || routinesSaving"
+                    @click="compareAppleInsights"
+                  >{{ insightsComparisonPending ? 'Comparing…' : 'Compare Apple Intelligence' }}</button>
+                </div>
+                <div v-if="insightsComparison" class="routine-comparison">
+                  <span v-if="!insightsComparison.available" class="hint--warn">
+                    {{ insightsComparison.reason || 'Apple Intelligence is unavailable.' }}
+                  </span>
+                  <span v-else-if="!insightsComparison.results.length" class="hint">
+                    {{ insightsComparison.reason || 'No archived chats with Session insights were found.' }}
+                  </span>
+                  <template v-else>
+                    <span class="hint">Apple re-ran the text-only extraction on {{ insightsComparison.results.length }} existing archive(s). Shared headings show where the signal matched.</span>
+                    <div v-for="result in insightsComparison.results" :key="result.archive" class="routine-comparison-result">
+                      <strong>{{ result.archive }}</strong>
+                      <span v-if="result.error" class="hint--warn"> · {{ result.error }}</span>
+                      <span v-else> · shared: {{ result.shared_sections?.join(', ') || 'none' }}</span>
+                      <details v-if="result.apple_output">
+                        <summary>Apple output</summary>
+                        <pre>{{ result.apple_output }}</pre>
+                      </details>
+                    </div>
+                  </template>
+                </div>
               </div>
-              <div class="routine-model-controls">
+              <div
+                class="routine-model-controls"
+                :class="{ 'routine-model-controls--single': routineProviderValue('insights_model') === 'apple' }"
+              >
                 <select
                   class="routine-select routine-select--provider"
                   :value="routineProviderValue('insights_model')"
@@ -550,12 +587,14 @@
                   @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option value="automatic">Automatic</option>
+                  <option value="apple">Local (free)</option>
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
                   <option v-if="routineProviderValue('insights_model') === 'custom'" value="custom">Custom model</option>
                 </select>
                 <select
+                  v-if="routineProviderValue('insights_model') !== 'apple'"
                   class="routine-select routine-select--tier"
                   :value="routineTierValue('insights_model')"
                   :disabled="routinesSaving || !routineTierSelectable('insights_model')"
@@ -565,7 +604,16 @@
                     {{ tier.label }}
                   </option>
                 </select>
-                <span class="routine-model-hint">{{ routineModelSummary('insights_model') }}</span>
+                <span class="routine-model-hint">
+                  <template v-if="routineProviderValue('insights_model') === 'apple'">
+                    Runs on-device for free using Apple Intelligence. Nothing to install.
+                    <span v-if="routines && routines.apple_model_available === false" class="hint--warn">
+                      Unavailable: {{ routines.apple_model_unavailable_reason || 'not supported on this machine' }} —
+                      insights currently fall back to a cloud model.
+                    </span>
+                  </template>
+                  <template v-else>{{ routineModelSummary('insights_model') }}</template>
+                </span>
               </div>
             </div>
 
@@ -2672,6 +2720,20 @@ const routinesLoaded = ref(false)
 const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
+const insightsComparisonPending = ref(false)
+type InsightsComparison = {
+  available: boolean
+  reason?: string
+  results: Array<{
+    archive: string
+    shared_sections?: string[]
+    existing_only?: string[]
+    apple_only?: string[]
+    apple_output?: string
+    error?: string
+  }>
+}
+const insightsComparison = ref<InsightsComparison | null>(null)
 
 type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
 type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
@@ -2762,6 +2824,22 @@ async function saveRoutines(patch: Record<string, unknown>) {
     routinesResult.value = `Error: ${errorMessage(e)}`
   } finally {
     routinesSaving.value = false
+  }
+}
+
+async function compareAppleInsights() {
+  insightsComparisonPending.value = true
+  insightsComparison.value = null
+  try {
+    insightsComparison.value = await api.post<InsightsComparison>('/api/automation/compare-apple-insights', { limit: 2 })
+  } catch (e) {
+    insightsComparison.value = {
+      available: false,
+      reason: errorMessage(e, 'Comparison failed'),
+      results: [],
+    }
+  } finally {
+    insightsComparisonPending.value = false
   }
 }
 

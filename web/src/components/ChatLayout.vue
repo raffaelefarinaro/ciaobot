@@ -576,7 +576,9 @@ function onChatSelected() {
 }
 
 function closeChat() {
-  store.activeChatId = null
+  void store.closeChat().catch((error) => {
+    store.pushErrorToast('Could not close chat', error instanceof Error ? error.message : 'Could not close chat')
+  })
 }
 
 // ── Global keyboard shortcuts ───────────────────────────────────────
@@ -589,9 +591,10 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
 }
 
-// Unmodified keys, which no browser reserves: arrow keys roam the home
-// recent-chat grid (Enter opens the focused card natively) and Esc closes the
-// open chat. Anything carrying a modifier stays in onShortcutKeydown.
+// Unmodified keys, which no browser reserves: number keys switch to the
+// corresponding workspace, arrow keys roam the home recent-chat grid (Enter
+// opens the focused card natively), and Esc closes the open chat. Anything
+// carrying a modifier stays in onShortcutKeydown.
 //
 // These must live in exactly ONE listener. They were previously handled here
 // AND again in onShortcutKeydown; in the desktop app both listeners are bound,
@@ -599,6 +602,24 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
+  // Workspace navigation is also useful from the automations view, where the
+  // chat-only shortcuts are disabled. Match the visible workspace order and
+  // keep the shortcut out of text fields so numbers remain typeable.
+  if (viewMode.value !== 'settings' && !pendingConfirm.value && !isTypingTarget(e.target)
+    && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+    && /^[1-9]$/.test(e.key)) {
+    const workspace = store.workspaceOptions[Number(e.key) - 1]
+    if (workspace) {
+      e.preventDefault()
+      if (viewMode.value === 'schedules') {
+        void store.switchWorkspace(workspace.name, { transition: false })
+      } else {
+        void store.switchWorkspace(workspace.name)
+      }
+      return
+    }
+  }
+
   if (!shortcutsActive.value) return
 
   if (e.key.startsWith('Arrow')) {
@@ -665,12 +686,12 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
-  // Model picker: Cmd+M (Desktop) or Option+M (Web/PWA), where Cmd+M is the
-  // browser's Minimize Window on macOS and cannot be intercepted from a page.
+  // Model picker: Cmd+Shift+M (Desktop) or Option+M (Web/PWA). Plain Cmd+M is
+  // reserved by macOS for Minimize Window and cannot be intercepted reliably.
   // Not gated on the typing target, like dictation: opening the picker is the
   // useful reading of the key even mid-compose, and the picker is a popover,
   // not a text mutation.
-  if ((isDesktop && mod && (e.key === 'm' || e.key === 'M')) || (!isDesktop && alt && (e.key === 'm' || e.key === 'M'))) {
+  if ((isDesktop && mod && e.shiftKey && !alt && (e.key === 'm' || e.key === 'M')) || (!isDesktop && alt && (e.key === 'm' || e.key === 'M'))) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.toggleModelPicker()
