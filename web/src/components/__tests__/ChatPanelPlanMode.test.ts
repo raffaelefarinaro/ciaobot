@@ -122,7 +122,11 @@ function planReturnModeStorageKey(chatId: string): string {
   return `ciao-plan-return-mode:${chatId}`
 }
 
-async function mountPanel(options: { mode?: string; commandsFail?: boolean } = {}): Promise<Harness> {
+async function mountPanel(options: {
+  mode?: string
+  commandsFail?: boolean
+  skills?: Array<{ name: string; description: string; argument_hint: string; source: 'skill'; path: string }>
+} = {}): Promise<Harness> {
   const pinia = createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
@@ -138,9 +142,9 @@ async function mountPanel(options: { mode?: string; commandsFail?: boolean } = {
 
   vi.spyOn(api, 'get').mockImplementation((path: string) => {
     if (path === '/api/models') return Promise.resolve(MODELS_RESPONSE) as never
-    if (path === '/api/commands') {
+    if (path.startsWith('/api/commands')) {
       if (options.commandsFail) return Promise.reject(new Error('commands unavailable')) as never
-      return Promise.resolve({ commands: [] }) as never
+      return Promise.resolve({ commands: [], skills: options.skills || [] }) as never
     }
     return Promise.resolve([]) as never
   })
@@ -342,6 +346,26 @@ describe('ChatPanel /plan interactions', () => {
     await wrapper.get('textarea.chat-input').setValue('/')
 
     expect(wrapper.find('.commands-picker-name').text()).toBe('/plan')
+    wrapper.unmount()
+  })
+
+  it('lists provider skills in the slash picker', async () => {
+    const { wrapper } = await mountPanel({
+      skills: [{
+        name: 'research',
+        description: 'Research with the loaded skill',
+        argument_hint: '',
+        source: 'skill',
+        path: 'skills/',
+      }],
+    })
+
+    await wrapper.get('textarea.chat-input').setValue('/res')
+    const row = wrapper.get('.commands-picker-row')
+    expect(row.text()).toContain('skill')
+    expect(row.text()).toContain('/research')
+    await row.trigger('mousedown')
+    expect(textareaValue(wrapper)).toBe('/research')
     wrapper.unmount()
   })
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ciao.web.commands import Command, _parse_frontmatter, list_commands
+from ciao.web.commands import Command, _parse_frontmatter, list_commands, list_skill_entries
 
 
 def _write_cmd(dir_path: Path, name: str, frontmatter: str, body: str = "body") -> None:
@@ -71,3 +71,29 @@ def test_project_wins_over_user_on_collision(tmp_path: Path, monkeypatch) -> Non
 def test_missing_dirs_return_empty(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "nonexistent-home"))
     assert list_commands(tmp_path / "no-project") == []
+
+
+def test_list_skill_entries_filters_to_provider_install_target(tmp_path: Path) -> None:
+    _write_cmd(
+        tmp_path / "skills" / "claude-only",
+        "SKILL",
+        "---\ndescription: Claude workflow\n---\n",
+    )
+    _write_cmd(
+        tmp_path / "skills" / "both",
+        "SKILL",
+        "---\ndescription: Shared workflow\n---\n",
+    )
+    (tmp_path / ".claude" / "skills" / "claude-only").mkdir(parents=True)
+    (tmp_path / ".claude" / "skills" / "claude-only" / "SKILL.md").write_text(
+        (tmp_path / "skills" / "claude-only" / "SKILL.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (tmp_path / ".agents" / "skills" / "both").mkdir(parents=True)
+    (tmp_path / ".agents" / "skills" / "both" / "SKILL.md").write_text(
+        (tmp_path / "skills" / "both" / "SKILL.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    assert [skill.name for skill in list_skill_entries(tmp_path, "claude")] == ["claude-only"]
+    assert [skill.name for skill in list_skill_entries(tmp_path, "codex")] == ["both"]

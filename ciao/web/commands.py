@@ -19,6 +19,8 @@ from typing import Iterable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ciao.skills_inventory import build_skill_inventory
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,7 +32,7 @@ class Command:
     name: str
     description: str
     argument_hint: str
-    source: str  # "project" or "user"
+    source: str  # "project", "user", or "skill"
     path: str
 
 
@@ -80,6 +82,37 @@ def list_commands(workspace_root: Path) -> list[Command]:
     return sorted(merged.values(), key=lambda c: c.name)
 
 
+def list_skill_entries(workspace_root: Path, provider: str = "") -> list[Command]:
+    """Return skills installed for a provider in the slash-picker shape.
+
+    Skills are not commands on disk, but Claude and Codex both expose
+    provider-installed skills as user-invocable slash entries. Keep the
+    picker limited to the target that can actually load the skill.
+    """
+    target = provider.strip().lower()
+    inventory = build_skill_inventory(workspace_root, include_content=False)
+    entries: list[Command] = []
+    for skill in inventory.get("skills", []):
+        if not isinstance(skill, dict):
+            continue
+        targets = skill.get("installed_targets") or []
+        if target and target not in targets:
+            continue
+        name = str(skill.get("name") or "").strip()
+        if not name:
+            continue
+        entries.append(
+            Command(
+                name=name,
+                description=str(skill.get("description") or "").strip(),
+                argument_hint="",
+                source="skill",
+                path=str(skill.get("source") or ""),
+            )
+        )
+    return sorted(entries, key=lambda item: item.name)
+
+
 def expand_slash_command(prompt: str, workspace_root: Path) -> str | None:
     """Expand a Ciaobot command for providers without native project commands.
 
@@ -125,11 +158,21 @@ def _workspace_root(request: Request) -> Path:
 async def list_commands_endpoint(request: Request) -> JSONResponse:
     """GET /api/commands — return available slash commands for the UI picker."""
     try:
-        commands = list_commands(_workspace_root(request))
+        workspace_root = _workspace_root(request)
+        commands = list_commands(workspace_root)
+        command_names = {command.name for command in commands}
+        provider = request.query_params.get("provider", "")
+        skills = [
+            skill for skill in list_skill_entries(workspace_root, provider)
+            if skill.name not in command_names
+        ]
     except Exception:  # noqa: BLE001 — never 500 the picker
         logger.exception("listing commands failed")
-        return JSONResponse({"commands": []})
-    return JSONResponse({"commands": [asdict(c) for c in commands]})
+        return JSONResponse({"commands": [], "skills": []})
+    return JSONResponse({
+        "commands": [asdict(command) for command in commands],
+        "skills": [asdict(skill) for skill in skills],
+    })
 
 
 async def rate_limits_endpoint(request: Request) -> JSONResponse:

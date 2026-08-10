@@ -108,7 +108,7 @@ async function mountPanel(): Promise<{
 
   vi.spyOn(api, 'get').mockImplementation((path: string) => {
     if (path === '/api/models') return Promise.resolve(MODELS_RESPONSE) as never
-    if (path === '/api/commands') return Promise.resolve({ commands: [] }) as never
+    if (path.startsWith('/api/commands')) return Promise.resolve({ commands: [], skills: [] }) as never
     return Promise.resolve([]) as never
   })
 

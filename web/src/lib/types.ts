@@ -673,12 +673,13 @@ export interface SlashCommand {
   name: string
   description: string
   argument_hint: string
-  source: 'project' | 'user' | 'builtin'
+  source: 'project' | 'user' | 'builtin' | 'skill'
   path: string
 }
 
 export interface CommandsResponse {
   commands: SlashCommand[]
+  skills?: SlashCommand[]
 }
 
 // ── Settings agent assets ────────────────────────────────────────────────
