@@ -54,6 +54,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
     get_session_info,
 )
+from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk.types import PermissionMode, SystemPromptPreset
 
 from ciao.models import (
@@ -96,7 +97,7 @@ logger = logging.getLogger(__name__)
 # 35-tool paragraph into the server log per process.
 warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
 
-_CLAUDE_OP_ERRORS = (ClaudeSDKError, CLIConnectionError, ProcessError)
+_CLAUDE_OP_ERRORS = (ClaudeSDKError, CLIConnectionError, ProcessError, MessageParseError)
 
 # Shown when a turn's ``receive_response()`` ends without a terminal
 # ResultMessage. That is never a normal end-of-turn: the CLI subprocess
