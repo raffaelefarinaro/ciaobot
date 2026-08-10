@@ -63,6 +63,7 @@ ciao/                          Python backend (Starlette).
   vault_index.py               Build/query memory-vault/INDEX.md from frontmatter and wikilinks. CLI: `ciao vault-index`.
   vault_lint.py                Read-only vault health validation for frontmatter, relative Markdown links, wikilinks, orphans, and duplicate stems. CLI: `ciao vault-lint`.
   os_audit.py                  Strict AI OS health audit covering required roots, vault hygiene, skill budgets, rule clashes, bounded memory, proposals, and failed jobs. CLI: `ciao os-audit`.
+  memory_audit.py              Model-free rot detection for the always-loaded bounded-memory regions: entries recording a chat event instead of current state, entries citing a path that no longer exists, and one subject carrying two values. Consumed by os_audit.py's memory section. CLI: `ciao memory-audit`.
   trajectory_builder.py        Parse filtered session JSONL into a structured trajectory (turns, tools, skills, errors) and persist to ~/.ciao/trajectories/YYYY-MM/<session-id>.json. CLI: `python3 -m ciao.trajectory_builder --list [...]`.
   subagent_tracking.py         Track subagent dispatches/completions from session JSONL for the background-agents pill.
   subagent_loader.py           Subagent package loader supporting .md and folder-based packages.

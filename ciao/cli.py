@@ -1390,6 +1390,65 @@ def _os_audit_command(args: argparse.Namespace) -> int:
     }.get(report["status"], 2)
 
 
+def _memory_audit_command(args: argparse.Namespace) -> int:
+    """Audit only the bounded-memory regions.
+
+    ``os-audit`` covers this too, but it also lints the whole vault, which is
+    far too slow to run from a daily routine. This entry point reads one file.
+    """
+    from ciao.os_audit import audit_memory
+
+    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    workspace = Path(workspace_raw).expanduser().resolve()
+    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault = Path(vault_raw).expanduser()
+    if not vault.is_absolute():
+        vault = workspace / vault
+    vault = vault.resolve()
+
+    report = audit_memory(
+        guide_path=workspace / "CLAUDE.md",
+        vault_root=vault if vault.exists() else None,
+        workspace_dir=workspace,
+    )
+    findings = (
+        len(report["event_shaped_entries"])
+        + len(report["stale_path_entries"])
+        + report["expired_memory_entries"]
+        + report["expired_profile_entries"]
+        + report["invalid_expiration_entries"]
+        + len(report["over_cap"])
+        + len(report["duplicate_entries"])
+        + len(report["marker_errors"])
+    )
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"Bounded memory: {report['memory_entries']} memory / "
+              f"{report['profile_entries']} profile entries")
+        print(f"Event-shaped entries: {len(report['event_shaped_entries'])}")
+        for finding in report["event_shaped_entries"]:
+            print(f"  [{finding['region']}] {finding['entry']}")
+        print(
+            f"Entries citing a missing path: {len(report['stale_path_entries'])} "
+            f"({report['paths_checked']} checked, "
+            f"{report['paths_unverifiable']} not verifiable here)"
+        )
+        for finding in report["stale_path_entries"]:
+            print(f"  [{finding['region']}] {finding['path']} :: {finding['entry']}")
+        print(
+            "Superseded-state candidates (informational): "
+            f"{len(report['superseded_state_candidates'])}"
+        )
+        for finding in report["superseded_state_candidates"]:
+            print(f"  [{finding['region']}] {finding['subject']}")
+
+    if report["marker_errors"] or report["errors"]:
+        return 2
+    return 1 if findings else 0
+
+
 def _vault_index_command(args: argparse.Namespace) -> int:
     from ciao import vault_index
 
@@ -2070,6 +2129,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output raw JSON audit report.",
     )
     os_audit_parser.set_defaults(func=_os_audit_command)
+
+    memory_audit_parser = subparsers.add_parser(
+        "memory-audit",
+        help="Audit bounded memory for rot (events stored as state, dead paths).",
+        description=(
+            "Reads the ciao:memory and ciao:profile regions of the workspace "
+            "CLAUDE.md and reports entries that record a chat event instead of "
+            "current state, entries citing a path that no longer exists, and "
+            "subjects carrying more than one value. Read-only. Exit 0 when "
+            "clean, 1 when there are findings, 2 when a region could not be "
+            "read."
+        ),
+    )
+    memory_audit_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_audit_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_audit_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output raw JSON audit report.",
+    )
+    memory_audit_parser.set_defaults(func=_memory_audit_command)
 
     chat_parser = subparsers.add_parser(
         "create-chat",
