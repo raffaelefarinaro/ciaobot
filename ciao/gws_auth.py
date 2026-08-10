@@ -40,7 +40,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +226,24 @@ def exchange_code(
         raise ValueError(f"Token exchange failed: {exc}") from None
 
 
+def _normalize_scopes(scopes: Sequence[str] | str | None) -> list[str]:
+    """Return a sorted, deduped list of OAuth scope URLs.
+
+    Accepts the typical shapes: a list/tuple of scope URLs, a single
+    space-separated string from the token endpoint, or ``None``.
+    """
+    if not scopes:
+        return []
+    if isinstance(scopes, str):
+        parts = scopes.split()
+    else:
+        parts = []
+        for s in scopes:
+            if s:
+                parts.extend(s.split())
+    return sorted({p for p in parts if p})
+
+
 def store_credentials(
     config_dir: Path,
     *,
@@ -233,10 +251,15 @@ def store_credentials(
     client_secret: str,
     refresh_token: str,
     email: str = "",
+    scopes: Sequence[str] | str | None = None,
 ) -> None:
     """Write ``credentials.json`` (0600) and retire any stale encrypted copy.
 
     The refresh token lives only inside this file; nothing here is logged.
+
+    ``scopes`` records the OAuth scopes that were actually granted at consent
+    time so the Settings UI can show what the user connected. Accepts a
+    sequence of full scope URLs, a single space-separated string, or ``None``.
     """
     creds: dict[str, Any] = {
         "client_id": client_id,
@@ -246,6 +269,9 @@ def store_credentials(
     }
     if email:
         creds["email"] = email
+    normalized_scopes = _normalize_scopes(scopes)
+    if normalized_scopes:
+        creds["scopes"] = normalized_scopes
 
     for name in ("credentials.enc", "token_cache.json"):
         stale = config_dir / name
@@ -306,12 +332,14 @@ def exchange_and_store(
             "and try again."
         )
     email = extract_email_from_id_token(tokens.get("id_token"))
+    granted_scopes = tokens.get("scope") or ""
     store_credentials(
         config_dir,
         client_id=client_id,
         client_secret=client_secret,
         refresh_token=refresh_token,
         email=email,
+        scopes=granted_scopes,
     )
     return {"ok": True, "email": email}
 

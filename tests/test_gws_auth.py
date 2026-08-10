@@ -118,6 +118,43 @@ def test_store_credentials_writes_0600_and_retires_stale(tmp_path: Path) -> None
     assert (config_dir / "credentials.enc.old").exists()
 
 
+def test_store_credentials_persists_granted_scopes(tmp_path: Path) -> None:
+    config_dir = tmp_path / "secrets" / "gws-personal"
+    config_dir.mkdir(parents=True)
+    granted = (
+        "https://www.googleapis.com/auth/gmail.modify "
+        "https://www.googleapis.com/auth/calendar "
+        "https://www.googleapis.com/auth/gmail.modify"  # duplicate, should dedupe
+    )
+    gws_auth.store_credentials(
+        config_dir,
+        client_id="cid",
+        client_secret="csecret",
+        refresh_token="rtok",
+        scopes=granted,
+    )
+    creds = json.loads((config_dir / "credentials.json").read_text())
+    assert creds["scopes"] == sorted(
+        {
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/calendar",
+        }
+    )
+
+
+def test_store_credentials_omits_scopes_when_none_granted(tmp_path: Path) -> None:
+    config_dir = tmp_path / "secrets" / "gws-personal"
+    config_dir.mkdir(parents=True)
+    gws_auth.store_credentials(
+        config_dir,
+        client_id="cid",
+        client_secret="csecret",
+        refresh_token="rtok",
+    )
+    creds = json.loads((config_dir / "credentials.json").read_text())
+    assert "scopes" not in creds
+
+
 def test_exchange_and_store_uses_injected_exchange(tmp_path: Path, monkeypatch) -> None:
     cfg = _config(tmp_path)
     config_dir = gws_auth.profile_config_dir(cfg, "personal")

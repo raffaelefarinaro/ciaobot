@@ -708,3 +708,64 @@ def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):
         json={"profile": "personal", "code": "test-code"},
     )
     assert resp.status_code == 200
+
+
+def test_gws_profile_payload_uses_granted_scopes_for_chips_and_purpose(tmp_path):
+    client, config, _ = _client(tmp_path)
+    config_dir = config.workspace_root / "secrets" / "gws-personal"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "credentials.json").write_text(
+        json.dumps(
+            {
+                "client_id": "cid",
+                "client_secret": "csecret",
+                "refresh_token": "rtok",
+                "type": "authorized_user",
+                "email": "me@example.com",
+                "scopes": [
+                    "https://www.googleapis.com/auth/gmail.modify",
+                    "https://www.googleapis.com/auth/calendar",
+                    "https://www.googleapis.com/auth/drive",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.get("/api/integrations/gws")
+    assert resp.status_code == 200
+    payload = resp.json()
+    personal = next(p for p in payload["profiles"] if p["name"] == "personal")
+    assert personal["examples"] == ["Gmail", "Calendar", "Drive"]
+    assert "Gmail" in personal["purpose"]
+    assert "Calendar" in personal["purpose"]
+    assert "Drive" in personal["purpose"]
+    # Singular list of one scope collapses to a single-clause sentence.
+    (config_dir / "credentials.json").write_text(
+        json.dumps(
+            {
+                "client_id": "cid",
+                "client_secret": "csecret",
+                "refresh_token": "rtok",
+                "type": "authorized_user",
+                "scopes": ["https://www.googleapis.com/auth/tasks"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    resp = client.get("/api/integrations/gws")
+    personal = next(p for p in resp.json()["profiles"] if p["name"] == "personal")
+    assert personal["examples"] == ["Tasks"]
+    assert personal["purpose"].endswith("Connected to Tasks.")
+
+
+def test_gws_profile_payload_falls_back_to_static_meta_when_no_scopes(tmp_path):
+    client, config, _ = _client(tmp_path)
+    # No credentials.json on disk -> configured is false, but the static
+    # purpose should still be sent so the user sees something before connecting.
+    resp = client.get("/api/integrations/gws")
+    payload = resp.json()
+    personal = next(p for p in payload["profiles"] if p["name"] == "personal")
+    assert personal["configured"] is False
+    assert personal["examples"] == []
+    assert "Private Google account" in personal["purpose"]
