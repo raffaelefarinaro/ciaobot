@@ -908,7 +908,7 @@
       >
         <div class="commands-picker-head">
           <span class="mention-picker-kind">{{ item.kind }}</span>
-          <span class="commands-picker-name">@{{ item.insertText }}</span>
+          <span class="commands-picker-name" :title="`@${item.insertText}`">@{{ item.label }}</span>
         </div>
         <div class="commands-picker-desc">{{ item.description }}</div>
       </div>
@@ -927,6 +927,7 @@
         @mouseenter="commandHighlightIdx = i"
       >
         <div class="commands-picker-head">
+          <span v-if="cmd.source === 'skill'" class="commands-picker-kind">skill</span>
           <span class="commands-picker-name">/{{ cmd.name }}</span>
           <span v-if="cmd.argument_hint" class="commands-picker-hint">{{ cmd.argument_hint }}</span>
         </div>
@@ -1000,7 +1001,7 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
-import type { AgentAssetsResponse, Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1021,7 +1022,13 @@ import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenU
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
-import { useMentionPicker, type MentionAgent, type MentionFile } from '../composables/useMentionPicker'
+import {
+  useMentionPicker,
+  type MentionAgent,
+  type MentionChat,
+  type MentionFile,
+  type MentionProject,
+} from '../composables/useMentionPicker'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
 import {
   clearPlanReturnMode,
@@ -1226,6 +1233,20 @@ function primaryAction() {
 const slashCommands = ref<SlashCommand[]>(includeBuiltinPlanCommand([]))
 const commandHighlightIdx = ref(0)
 
+async function loadSlashCommands(): Promise<void> {
+  try {
+    const provider = encodeURIComponent(chat.value.provider || '')
+    const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}`)
+    slashCommands.value = includeBuiltinPlanCommand([
+      ...(response.commands || []),
+      ...(response.skills || []),
+    ])
+  } catch {
+    // Keep the built-in /plan entry available when asset discovery is offline.
+    slashCommands.value = includeBuiltinPlanCommand([])
+  }
+}
+
 const filteredCommands = computed<SlashCommand[]>(() => {
   const text = inputText.value
   if (!text.startsWith('/')) return []
@@ -1259,6 +1280,9 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
+watch(() => chat.value.provider, () => {
+  void loadSlashCommands()
+})
 const planModeSaving = ref(false)
 
 async function togglePlanMode(
@@ -1541,6 +1565,25 @@ const projectFilesLoading = ref(false)
 const projectFilesError = ref('')
 const showProjectFiles = computed(() => Boolean(project.value?.vault_folder))
 const mentionAgents = ref<MentionAgent[]>([])
+const mentionChats = computed<MentionChat[]>(() => {
+  const activeProjects = new Map(store.projects.map(item => [item.project_id, item]))
+  return store.chats
+    .filter(chatItem => !chatItem.archived && chatItem.local !== false && activeProjects.has(chatItem.project_id))
+    .map(chatItem => ({
+      chat_id: chatItem.chat_id,
+      title: chatItem.title,
+      project_id: chatItem.project_id,
+      project_name: activeProjects.get(chatItem.project_id)?.name,
+      workspace: activeProjects.get(chatItem.project_id)?.workspace,
+      archived: chatItem.archived,
+      local: chatItem.local,
+    }))
+})
+const mentionProjects = computed<MentionProject[]>(() => store.projects.map(projectItem => ({
+  project_id: projectItem.project_id,
+  name: projectItem.name,
+  workspace: projectItem.workspace,
+})))
 const mentionFiles = computed<MentionFile[]>(() => projectFiles.value.map(file => ({
   path: file.path,
   vault_path: file.vault_path,
@@ -1550,6 +1593,8 @@ const mentionPicker = useMentionPicker({
   input: inputEl,
   files: mentionFiles,
   agents: mentionAgents,
+  chats: mentionChats,
+  projects: mentionProjects,
 })
 const filteredMentions = mentionPicker.filteredItems
 const mentionHighlightIdx = mentionPicker.highlightIndex
@@ -2668,10 +2713,7 @@ onMounted(async () => {
     providerDefaults.value = r.provider_defaults || {}
     thinkingLevels.value = r.thinking_levels || {}
   } catch { /* use defaults */ }
-  try {
-    const r = await api.get<{ commands: SlashCommand[] }>('/api/commands')
-    slashCommands.value = includeBuiltinPlanCommand(r.commands ?? [])
-  } catch { /* keep the built-in /plan entry available */ }
+  await loadSlashCommands()
   await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
@@ -5624,6 +5666,14 @@ details[open] > .activity-summary::before {
 .commands-picker-name {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-weight: 600;
+  flex-shrink: 0;
+}
+.commands-picker-kind {
+  color: var(--accent2);
+  font-size: 0.72em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   flex-shrink: 0;
 }
 .commands-picker-hint {

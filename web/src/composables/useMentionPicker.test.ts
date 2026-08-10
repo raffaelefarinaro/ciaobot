@@ -51,6 +51,27 @@ describe('useMentionPicker', () => {
     expect(items).toHaveLength(2)
   })
 
+  it('includes active chats and projects with stable reference tokens', () => {
+    const items = buildMentionItems(
+      [],
+      [],
+      [
+        { chat_id: 'chat-1', title: 'Planning', project_id: 'project-1', project_name: 'Ciaobot', workspace: 'personal' },
+        { chat_id: 'chat-archived', title: 'Old chat', project_id: 'project-1', archived: true },
+      ],
+      [
+        { project_id: 'project-1', name: 'Ciaobot', workspace: 'personal' },
+        { project_id: 'project-completed', name: 'Done', completed: true },
+      ],
+    )
+
+    expect(items).toEqual([
+      expect.objectContaining({ kind: 'chat', label: 'Planning', insertText: 'chat/chat-1' }),
+      expect.objectContaining({ kind: 'project', label: 'Ciaobot', insertText: 'project/project-1' }),
+    ])
+    expect(filterMentionItems(items, 'ciaobot').map(item => item.kind)).toEqual(['chat', 'project'])
+  })
+
   it('inserts plain mention text and restores the caret after the token', async () => {
     const draft = ref('Review @read')
     const input = ref<HTMLTextAreaElement | undefined>(makeTextarea(draft.value))

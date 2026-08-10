@@ -1,6 +1,6 @@
 import { computed, nextTick, ref, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'
 
-export type MentionKind = 'file' | 'agent'
+export type MentionKind = 'file' | 'agent' | 'chat' | 'project'
 
 export interface MentionFile {
   path: string
@@ -10,6 +10,24 @@ export interface MentionFile {
 export interface MentionAgent {
   name: string
   description?: string
+}
+
+export interface MentionChat {
+  chat_id: string
+  title: string
+  project_id: string
+  project_name?: string
+  workspace?: string
+  archived?: boolean
+  local?: boolean
+}
+
+export interface MentionProject {
+  project_id: string
+  name: string
+  workspace?: string
+  archived?: boolean
+  completed?: boolean
 }
 
 export interface MentionItem {
@@ -43,6 +61,8 @@ export function findMentionTrigger(text: string, cursor: number): MentionTrigger
 export function buildMentionItems(
   files: MentionFile[],
   agents: MentionAgent[],
+  chats: MentionChat[] = [],
+  projects: MentionProject[] = [],
 ): MentionItem[] {
   const items: MentionItem[] = []
   const seen = new Set<string>()
@@ -58,6 +78,38 @@ export function buildMentionItems(
       label: name,
       insertText: name,
       description: agent.description?.trim() || 'Named agent',
+    })
+  }
+
+  for (const chat of chats) {
+    const title = chat.title.trim()
+    const chatId = chat.chat_id.trim()
+    if (!title || !chatId || chat.archived || chat.local === false) continue
+    const key = `chat:${chatId.toLowerCase()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const context = [chat.project_name?.trim(), chat.workspace?.trim()].filter(Boolean)
+    items.push({
+      kind: 'chat',
+      label: title,
+      insertText: `chat/${chatId}`,
+      description: context.length ? `Chat · ${context.join(' · ')}` : 'Chat',
+    })
+  }
+
+  for (const project of projects) {
+    const name = project.name.trim()
+    const projectId = project.project_id.trim()
+    if (!name || !projectId || project.archived || project.completed) continue
+    const key = `project:${projectId.toLowerCase()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const workspace = project.workspace?.trim()
+    items.push({
+      kind: 'project',
+      label: name,
+      insertText: `project/${projectId}`,
+      description: workspace ? `Project · ${workspace}` : 'Project',
     })
   }
 
@@ -84,7 +136,8 @@ export function filterMentionItems(items: MentionItem[], query: string): Mention
   return items
     .filter(item =>
       item.label.toLocaleLowerCase().includes(needle)
-      || item.insertText.toLocaleLowerCase().includes(needle),
+      || item.insertText.toLocaleLowerCase().includes(needle)
+      || item.description.toLocaleLowerCase().includes(needle),
     )
     .slice(0, MAX_MENTION_RESULTS)
 }
@@ -94,6 +147,8 @@ export interface UseMentionPickerOptions {
   input: Ref<HTMLTextAreaElement | undefined>
   files: MaybeRefOrGetter<MentionFile[]>
   agents: MaybeRefOrGetter<MentionAgent[]>
+  chats?: MaybeRefOrGetter<MentionChat[]>
+  projects?: MaybeRefOrGetter<MentionProject[]>
 }
 
 /**
@@ -109,6 +164,8 @@ export function useMentionPicker(options: UseMentionPickerOptions) {
   const allItems = computed(() => buildMentionItems(
     toValue(options.files),
     toValue(options.agents),
+    toValue(options.chats) || [],
+    toValue(options.projects) || [],
   ))
   const filteredItems = computed(() => {
     const active = trigger.value
