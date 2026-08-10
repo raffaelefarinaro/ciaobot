@@ -3271,23 +3271,37 @@ function send() {
 
 // Retry support: error messages are system bubbles whose content starts
 // with "Error:" (set in stores/projects.ts error-event handler). If the
-// prior user turn is still in the timeline, we can resend its text.
+// prior user turn is still in the timeline, we can resend its text plus
+// any images it carried — without draining the live composer.
 function isErrorMsg(content: string): boolean {
   return typeof content === 'string' && content.startsWith('Error:')
 }
-function lastUserBefore(errorIdx: number): string | null {
+function lastUserBefore(errorIdx: number): { text: string; images: string[] } | null {
   const items = renderItems.value
   for (let k = errorIdx - 1; k >= 0; k--) {
     const it = items[k]
-    if (it.kind === 'user') return it.msg.content
+    if (it.kind === 'user') {
+      const images = Array.isArray(it.msg.images) ? [...it.msg.images] : []
+      return { text: it.msg.content, images }
+    }
   }
   return null
 }
 function retryFromError(errorIdx: number) {
   if (chat.value.archived) return
-  const text = lastUserBefore(errorIdx)
-  if (!text) return
-  store.sendMessage(chat.value.chat_id, text, 'queue')
+  const prior = lastUserBefore(errorIdx)
+  if (!prior) return
+  // Build a PreparedMessage so sendMessage sends the prior turn's image
+  // refs alongside the text. We bypass prepareMessage (which would pull
+  // from the live composer) and pass `prepared` to skip the
+  // consumePreparedAttachments drain — a retry must not erase whatever
+  // the user has currently staged for a fresh send.
+  store.sendMessage(
+    chat.value.chat_id,
+    prior.text,
+    'queue',
+    { composed: prior.text, imageRefs: prior.images.length ? prior.images : undefined, fileComments: [], chatComments: [] },
+  )
 }
 
 // Open a fresh chat in the General project seeded with this error + the last
@@ -3296,7 +3310,8 @@ function retryFromError(errorIdx: number) {
 async function openFixChat(errorIdx: number) {
   const it = renderItems.value[errorIdx]
   const errorText = it && 'msg' in it ? it.msg.content : ''
-  const context = lastUserBefore(errorIdx) || undefined
+  const prior = lastUserBefore(errorIdx)
+  const context = prior ? prior.text : undefined
   try {
     await store.fixError({ errorText, context })
   } catch (e) {
@@ -4835,12 +4850,25 @@ details[open] > .activity-summary::before {
 .activity-icon { font-size: var(--text-base); }
 
 .activity-spinner {
+  position: relative;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
   animation: activity-pulse 1.1s ease-in-out infinite;
   flex-shrink: 0;
+}
+
+.activity-spinner::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.45;
+  animation: activity-ring 1.1s ease-out infinite;
+  pointer-events: none;
 }
 
 @keyframes activity-pulse {
@@ -4848,8 +4876,14 @@ details[open] > .activity-summary::before {
   50% { transform: scale(1); opacity: 1; }
 }
 
+@keyframes activity-ring {
+  0%   { transform: scale(0.7); opacity: 0.55; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .activity-spinner { animation-duration: 2.2s; }
+  .activity-spinner::before { animation-duration: 2.2s; }
 }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
