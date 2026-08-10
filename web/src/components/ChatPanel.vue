@@ -5276,8 +5276,14 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: flex-start;
   gap: 6px;
-  width: 220px;
-  max-width: min(220px, 100%);
+  /* Shrinkable basis, not a fixed 220px: with flex-wrap the line break is
+     decided on the base size, so fixed-width chips wrapped onto their own row
+     as soon as the chat pane got narrow (pinned file panel open). A small
+     basis plus grow lets two or three chips share one row and split the
+     available width, capped so a single chip does not stretch. */
+  flex: 1 1 140px;
+  min-width: 0;
+  max-width: 220px;
   height: 48px;
   padding: 6px 8px;
   background: var(--bg);
