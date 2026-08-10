@@ -285,11 +285,18 @@
                 </span>
                 <span class="file-card-chevron" aria-hidden="true">&#8599;</span>
               </button>
-              <div
-                v-else-if="step.tool_name === '_thinking'"
-                class="trace-text trace-thinking"
-                v-html="renderMarkdown(step.content)"
-              ></div>
+              <div v-else-if="step.tool_name === '_thinking'" class="thinking-block">
+                <button
+                  type="button"
+                  class="thinking-toggle"
+                  :aria-expanded="thinkingExpanded"
+                  @click.stop="toggleThinking"
+                >
+                  <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
+                  <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
+                </button>
+                <div v-if="thinkingExpanded" class="trace-text trace-thinking" v-html="renderMarkdown(step.content)"></div>
+              </div>
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
             <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" />
@@ -372,6 +379,10 @@
           <div class="message-row" @click="toggleMessageActions(`assistant-${i}`, $event)">
             <div class="message assistant" :class="{ error: item.msg.is_error }" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+              <div v-if="item.msg.is_error" class="error-attribution" role="status">
+                <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
+                <span>{{ classifyError(item.msg.content).copy }}</span>
+              </div>
               <div v-if="item.outputs?.length" class="answer-outputs" role="group" aria-label="Outputs">
                 <span class="answer-outputs-label">Outputs</span>
                 <div class="answer-output-files">
@@ -452,6 +463,10 @@
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+          <div v-if="isErrorMsg(item.msg.content)" class="error-attribution" role="status">
+            <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
+            <span>{{ classifyError(item.msg.content).copy }}</span>
+          </div>
           <div v-if="isErrorMsg(item.msg.content)" class="error-actions">
             <button
               v-if="lastUserBefore(i)"
@@ -570,11 +585,18 @@
               </span>
               <span class="file-card-chevron" aria-hidden="true">&#8599;</span>
             </button>
-            <div
-              v-else-if="entry.kind === 'thinking'"
-              class="trace-text trace-thinking"
-              v-html="renderMarkdown(entry.content)"
-            ></div>
+            <div v-else-if="entry.kind === 'thinking'" class="thinking-block">
+              <button
+                type="button"
+                class="thinking-toggle"
+                :aria-expanded="thinkingExpanded"
+                @click.stop="toggleThinking"
+              >
+                <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
+                <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
+              </button>
+              <div v-if="thinkingExpanded" class="trace-text trace-thinking" v-html="renderMarkdown(entry.content)"></div>
+            </div>
             <div
               v-else-if="entry.kind === 'status'"
               class="trace-text trace-status"
@@ -582,11 +604,18 @@
             ></div>
             <div v-else class="trace-text" v-html="renderMarkdown(entry.content)"></div>
           </template>
-          <div
-            v-if="store.currentStreamingThinking"
-            class="trace-text trace-thinking trace-streaming"
-            v-html="renderMarkdown(store.currentStreamingThinking)"
-          ></div>
+          <div v-if="store.currentStreamingThinking" class="thinking-block">
+            <button
+              type="button"
+              class="thinking-toggle"
+              :aria-expanded="thinkingExpanded"
+              @click.stop="toggleThinking"
+            >
+              <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
+              <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
+            </button>
+            <div v-if="thinkingExpanded" class="trace-text trace-thinking trace-streaming" v-html="renderMarkdown(store.currentStreamingThinking)"></div>
+          </div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
           <!-- Subagents for the in-flight turn nest in the live trace -->
           <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
@@ -865,6 +894,26 @@
       </span>
     </div>
 
+    <!-- @-mention picker (textarea version: inserts plain backend-facing text) -->
+    <div v-if="showMentionPicker" class="commands-picker mention-picker" role="listbox" aria-label="Mentions">
+      <div
+        v-for="(item, i) in filteredMentions"
+        :key="`${item.kind}:${item.insertText}`"
+        class="commands-picker-row mention-picker-row"
+        :class="{ active: i === mentionHighlightIdx }"
+        role="option"
+        :aria-selected="i === mentionHighlightIdx"
+        @mousedown.prevent="mentionPicker.select(item)"
+        @mouseenter="mentionHighlightIdx = i"
+      >
+        <div class="commands-picker-head">
+          <span class="mention-picker-kind">{{ item.kind }}</span>
+          <span class="commands-picker-name">@{{ item.insertText }}</span>
+        </div>
+        <div class="commands-picker-desc">{{ item.description }}</div>
+      </div>
+    </div>
+
     <!-- Slash-command picker (shown when the input starts with "/") -->
     <div v-if="showCommandsPicker" class="commands-picker" role="listbox" aria-label="Slash commands">
       <div
@@ -902,9 +951,10 @@
           :placeholder="inputPlaceholder"
           rows="1"
           @keydown="handleKeydown"
-          @input="autoResize"
+          @input="handleInput"
           @paste="handlePaste"
           @focus="handleInputFocus"
+          @click="mentionPicker.refresh"
         ></textarea>
         <div class="input-actions">
           <!-- Voice recording is allowed during streaming too: the user's
@@ -949,8 +999,8 @@ import SubagentPanel from './SubagentPanel.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
-import { readChatDraft, writeChatDraft } from '../lib/chatDrafts'
-import type { Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
+import type { AgentAssetsResponse, Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -965,11 +1015,14 @@ import {
   selectedModelEntry,
 } from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
+import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
+import { useMentionPicker, type MentionAgent, type MentionFile } from '../composables/useMentionPicker'
+import { useThinkingPreference } from '../composables/useThinkingPreference'
 import {
   clearPlanReturnMode,
   includeBuiltinPlanCommand,
@@ -1040,10 +1093,14 @@ const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
+const { thinkingExpanded, toggleThinking } = useThinkingPreference()
 const draftChatId = store.activeChatId
 const inputText = ref(readChatDraft(draftChatId))
 const inputRevision = ref(0)
 const inputEl = ref<HTMLTextAreaElement>()
+const promptHistoryIndex = ref(-1)
+const promptHistoryDraft = ref('')
+let settingPromptHistoryText = false
 const isContinuing = ref(false)
 const becomingHost = ref(false)
 const hostHandoverError = ref('')
@@ -1053,8 +1110,52 @@ const hostHandoverError = ref('')
 // chats immediately after typing.
 watch(inputText, (text) => {
   inputRevision.value += 1
-  writeChatDraft(draftChatId, text)
+  if (!settingPromptHistoryText) {
+    promptHistoryIndex.value = -1
+    promptHistoryDraft.value = ''
+    writeChatDraft(draftChatId, text)
+  }
 }, { flush: 'sync' })
+
+function promptHistory(): string[] {
+  return readSentPromptHistory(draftChatId)
+}
+
+function setPromptHistoryText(text: string): void {
+  settingPromptHistoryText = true
+  inputText.value = text
+  settingPromptHistoryText = false
+  nextTick(() => autoResize())
+}
+
+function handlePromptHistoryKey(e: KeyboardEvent): boolean {
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return false
+  const history = promptHistory()
+  if (!history.length) return false
+
+  if (e.key === 'ArrowUp') {
+    if (promptHistoryIndex.value < 0 && inputText.value.trim() !== '') return false
+    e.preventDefault()
+    if (promptHistoryIndex.value < 0) promptHistoryDraft.value = inputText.value
+    promptHistoryIndex.value = promptHistoryIndex.value < 0
+      ? history.length - 1
+      : Math.max(0, promptHistoryIndex.value - 1)
+    setPromptHistoryText(history[promptHistoryIndex.value])
+    return true
+  }
+
+  if (promptHistoryIndex.value < 0) return false
+  e.preventDefault()
+  if (promptHistoryIndex.value >= history.length - 1) {
+    promptHistoryIndex.value = -1
+    setPromptHistoryText(promptHistoryDraft.value)
+    promptHistoryDraft.value = ''
+  } else {
+    promptHistoryIndex.value += 1
+    setPromptHistoryText(history[promptHistoryIndex.value])
+  }
+  return true
+}
 
 async function disconnectAndBecomeHost() {
   if (becomingHost.value) return
@@ -1439,6 +1540,20 @@ const projectFiles = ref<ContextProjectFile[]>([])
 const projectFilesLoading = ref(false)
 const projectFilesError = ref('')
 const showProjectFiles = computed(() => Boolean(project.value?.vault_folder))
+const mentionAgents = ref<MentionAgent[]>([])
+const mentionFiles = computed<MentionFile[]>(() => projectFiles.value.map(file => ({
+  path: file.path,
+  vault_path: file.vault_path,
+})))
+const mentionPicker = useMentionPicker({
+  draft: inputText,
+  input: inputEl,
+  files: mentionFiles,
+  agents: mentionAgents,
+})
+const filteredMentions = mentionPicker.filteredItems
+const mentionHighlightIdx = mentionPicker.highlightIndex
+const showMentionPicker = mentionPicker.showPicker
 
 async function loadProjectFiles() {
   if (!project.value || !project.value.vault_folder) {
@@ -1480,9 +1595,19 @@ function openProjectFile(f: ContextProjectFile): void {
 
 watch(
   () => [showContext.value, project.value?.project_id, project.value?.vault_folder] as const,
-  ([open]) => { if (open) loadProjectFiles() },
+  ([open]) => { if (open || project.value?.vault_folder) loadProjectFiles() },
   { immediate: true }
 )
+
+async function loadMentionAgents(): Promise<void> {
+  try {
+    const response = await api.get<AgentAssetsResponse>('/api/agent-assets')
+    mentionAgents.value = Array.isArray(response.subagents) ? response.subagents : []
+  } catch {
+    // Mentions are an enhancement; an unavailable asset catalog leaves files usable.
+    mentionAgents.value = []
+  }
+}
 
 // Deduped list of files the agent has written/edited in this chat. Most
 // recent occurrence wins for action label; count shows how many times the
@@ -2547,6 +2672,7 @@ onMounted(async () => {
     const r = await api.get<{ commands: SlashCommand[] }>('/api/commands')
     slashCommands.value = includeBuiltinPlanCommand(r.commands ?? [])
   } catch { /* keep the built-in /plan entry available */ }
+  await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
@@ -2566,7 +2692,10 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  writeChatDraft(draftChatId, inputText.value)
+  writeChatDraft(
+    draftChatId,
+    promptHistoryIndex.value < 0 ? inputText.value : promptHistoryDraft.value,
+  )
   window.removeEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
   window.removeEventListener('ciao:native-file-drop', handleNativeFileDrop)
@@ -3155,7 +3284,16 @@ function autoResize() {
   }
 }
 
+function handleInput(): void {
+  autoResize()
+  mentionPicker.refresh()
+}
+
 function handleKeydown(e: KeyboardEvent) {
+  // Mention navigation uses the same keyboard-first picker contract as slash
+  // commands, but only consumes keys while an @ token is active.
+  if (mentionPicker.handleKeydown(e)) return
+
   // Slash-command picker navigation takes precedence over send/newline.
   if (showCommandsPicker.value) {
     if (e.key === 'ArrowDown') {
@@ -3200,6 +3338,12 @@ function handleKeydown(e: KeyboardEvent) {
     return
   }
 
+  // Recalling history is deliberately limited to the textarea's empty state
+  // so ArrowUp/ArrowDown keep their normal cursor-navigation meaning while a
+  // prompt is being edited. Once recall starts, the arrows walk that session's
+  // bounded history and Down restores the draft that was present beforehand.
+  if (handlePromptHistoryKey(e)) return
+
   // Cmd+Enter (mac) / Ctrl+Enter (linux/win) sends the message. Bare Enter
   // inserts a newline: this avoids accidental sends, especially on phones
   // where Enter is the default virtual-keyboard action. Mid-stream sends are
@@ -3239,6 +3383,7 @@ function send() {
     void handlePlanCommand(action, originChatId, returnMode, submittedText, submittedRevision)
     return
   }
+  if (text) recordSentPrompt(chat.value.chat_id, inputText.value)
   // Always "queue": when a response is in flight the backend buffers and
   // flushes on turn end; for a fresh turn this starts it.
   let sendText = text
@@ -4391,6 +4536,22 @@ defineExpose({ toggleDictation, archiveActiveChat })
   gap: 6px;
   flex-wrap: wrap;
 }
+
+.error-attribution {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  margin-top: 8px;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.error-attribution-label {
+  color: var(--error);
+  font-weight: 600;
+}
 .fix-btn { color: var(--accent); border-color: var(--accent); }
 .fix-btn:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 
@@ -4608,6 +4769,32 @@ defineExpose({ toggleDictation, archiveActiveChat })
   min-width: 0;
   overflow-wrap: break-word;
 }
+
+.thinking-block {
+  min-width: 0;
+}
+
+.thinking-toggle {
+  min-height: var(--touch);
+  padding: 4px 8px 4px 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  opacity: 0.85;
+}
+
+.thinking-toggle:hover { color: var(--fg); }
+.thinking-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .trace-text :deep(a) {
   color: var(--accent);
   text-decoration: underline;
@@ -5456,6 +5643,26 @@ details[open] > .activity-summary::before {
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.mention-picker-row {
+  min-height: var(--touch);
+  box-sizing: border-box;
+  touch-action: manipulation;
+}
+.mention-picker-kind {
+  color: var(--accent2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.mention-picker-row .commands-picker-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Input bar */
