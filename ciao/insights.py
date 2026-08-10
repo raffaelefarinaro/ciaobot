@@ -740,7 +740,10 @@ async def backfill_insights_task(
     """
     stats = _empty_backfill_stats()
     vault_root = config.vault_root
-    base = vault_root / "memory-vault" / "Logs" / "Chats"
+    # Archives live at <vault_root>/Logs/Chats (see main.py:transcript_root),
+    # NOT <vault_root>/memory-vault/Logs/Chats — vault_root is already the
+    # container that holds Logs/, MEMORY.md, etc.
+    base = vault_root / "Logs" / "Chats"
     if not base.exists():
         logger.info("Vault directory %s does not exist, skipping backfill", base)
         return stats
