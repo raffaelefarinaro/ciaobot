@@ -1047,3 +1047,94 @@ def test_create_chat_accepts_openrouter_tier_target_with_api_key(
         project.project_id, model="anthropic/claude-sonnet-latest"
     )
     assert chat.model == "anthropic/claude-sonnet-latest"
+
+
+def test_create_chat_rejects_ollama_cloud_id_in_claude_models_without_cloud_key(
+    tmp_path: Path,
+) -> None:
+    """An Ollama-shaped id in ``claude_models`` is gated on cloud availability.
+
+    ``CiaoConfig.from_env()`` merges ``CIAO_OLLAMA_MODELS`` into
+    ``claude_models``, so a cloud id can land in that fallback set even
+    when no cloud API key is set. The validator must filter the set down
+    to entries the configured backend can actually serve, otherwise the
+    id reaches a Claude provider and fails on its first turn (#259).
+    """
+    from ciao.providers.ollama import OllamaSettings
+
+    manager = _make_manager(
+        tmp_path,
+        ollama=OllamaSettings(api_key=""),
+        claude_models=["opus", "sonnet", "haiku", "minimax-m3:cloud"],
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown model 'minimax-m3:cloud'"):
+        manager.create_chat(project.project_id, model="minimax-m3:cloud")
+
+
+def test_create_chat_accepts_ollama_cloud_id_in_claude_models_with_cloud_key(
+    tmp_path: Path,
+) -> None:
+    """A cloud id in ``claude_models`` stays valid when the cloud key is set."""
+    from ciao.providers.ollama import OllamaSettings
+
+    manager = _make_manager(
+        tmp_path,
+        ollama=OllamaSettings(api_key="test-key"),
+        claude_models=["opus", "sonnet", "haiku", "minimax-m3:cloud"],
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    chat = manager.create_chat(project.project_id, model="minimax-m3:cloud")
+    assert chat.model == "minimax-m3:cloud"
+
+
+def test_create_chat_rejects_openrouter_static_model_without_api_key(
+    tmp_path: Path,
+) -> None:
+    """An OpenRouter static allowlist entry is gated on credential availability.
+
+    ``CIAO_OPENROUTER_MODELS`` populates ``openrouter.models`` even when
+    no ``OPENROUTER_API_KEY`` is set; ``openrouter_env_for_model`` returns
+    no overrides in that case, so the ``owner/model`` id would fail at
+    the Anthropic endpoint on its first turn (#259).
+    """
+    from ciao.providers.openrouter import OpenRouterSettings
+
+    manager = _make_manager(
+        tmp_path,
+        openrouter=OpenRouterSettings(
+            api_key="",
+            models=("meta-llama/llama-4-maverick",),
+        ),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(
+        ValueError, match="Unknown model 'meta-llama/llama-4-maverick'"
+    ):
+        manager.create_chat(
+            project.project_id, model="meta-llama/llama-4-maverick"
+        )
+
+
+def test_create_chat_accepts_openrouter_static_model_with_api_key(
+    tmp_path: Path,
+) -> None:
+    """A static OpenRouter model is valid when the API key is configured."""
+    from ciao.providers.openrouter import OpenRouterSettings
+
+    manager = _make_manager(
+        tmp_path,
+        openrouter=OpenRouterSettings(
+            api_key="test-key",
+            models=("meta-llama/llama-4-maverick",),
+        ),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    chat = manager.create_chat(
+        project.project_id, model="meta-llama/llama-4-maverick"
+    )
+    assert chat.model == "meta-llama/llama-4-maverick"

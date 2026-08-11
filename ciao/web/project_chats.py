@@ -4145,20 +4145,28 @@ class ProjectChatManager:
             )
         ):
             return
-        # OpenRouter: the statically configured models and tier targets stay
-        # valid even when catalog discovery failed at startup and never
-        # merged them into claude_models (#259). Tier targets are gated on
-        # ``openrouter.available`` so default values like
-        # ``anthropic/claude-sonnet-latest`` do not reach a Claude provider
-        # with no OpenRouter routing overrides when no API key is set.
-        allowed = list(self._config.claude_models)
-        allowed += list(self._config.openrouter.models)
-        if self._config.openrouter.available:
+        # Fallback set: ``claude_models`` (filtered to drop Ollama cloud-shaped
+        # entries when no cloud API key is set, since ``CiaoConfig.from_env``
+        # merges ``CIAO_OLLAMA_MODELS`` into the picker and lets a
+        # cloud-shaped id sneak in here even when the earlier Ollama checks
+        # rejected it) plus the OpenRouter static allowlist and tier
+        # targets, both gated on ``openrouter.available`` (#259).
+        openrouter = self._config.openrouter
+        claude_models = [
+            m
+            for m in self._config.claude_models
+            if cloud_available
+            or is_local_ollama_model(m, ollama)
+            or ":" not in m
+        ]
+        allowed = list(claude_models)
+        if openrouter.available:
+            allowed += list(openrouter.models)
             allowed += [
-                self._config.openrouter.haiku_model,
-                self._config.openrouter.sonnet_model,
-                self._config.openrouter.opus_model,
-                self._config.openrouter.fable_model,
+                openrouter.haiku_model,
+                openrouter.sonnet_model,
+                openrouter.opus_model,
+                openrouter.fable_model,
             ]
         if model in allowed:
             return
