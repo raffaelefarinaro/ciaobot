@@ -480,3 +480,24 @@ async def test_generate_chat_title_oneshot_empty_return_reports_detail(
     assert engine == "fallback"
     assert title == "Sketch a release checklist"
     assert detail == "upstream returned empty text"
+
+
+def test_fallback_error_message_preserves_detail_less_branch() -> None:
+    """A fallback with no upstream cause must keep the generic message.
+
+    The titler returns ``engine == "fallback"`` with ``detail is None`` for
+    intentional fallbacks (contentless prompt, reply-shaped model output).
+    The job error must not become a misleading "failed (None)" (#257).
+    """
+    from ciao.web.project_chats import _fallback_error_message
+
+    assert _fallback_error_message(None, "chat-1") == (
+        "title engine failed; used deterministic fallback"
+    )
+    assert _fallback_error_message("upstream returned empty text", "chat-1") == (
+        "title engine returned empty (chat_id=chat-1); "
+        "used deterministic fallback"
+    )
+    assert _fallback_error_message("provider unavailable", "chat-1") == (
+        "title engine failed (provider unavailable); used deterministic fallback"
+    )

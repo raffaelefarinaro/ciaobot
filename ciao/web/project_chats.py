@@ -750,6 +750,25 @@ def _titled(raw: str, user_snippet: str, engine: str) -> tuple[str | None, str]:
     return title, engine
 
 
+def _fallback_error_message(detail: str | None, chat_id: str) -> str:
+    """Compose the job error for a deterministic-fallback title.
+
+    A non-null ``detail`` names the upstream failure (Apple exception,
+    oneshot exception, or empty return) so an operator can triage it. A
+    ``None`` detail means the fallback was intentional (contentless prompt
+    or reply-shaped model output), so the generic message is kept instead of
+    recording a misleading "failed (None)" (#257).
+    """
+    if detail is None:
+        return "title engine failed; used deterministic fallback"
+    if detail == "upstream returned empty text":
+        return (
+            f"title engine returned empty (chat_id={chat_id}); "
+            "used deterministic fallback"
+        )
+    return f"title engine failed ({detail}); used deterministic fallback"
+
+
 def _safe_validate(path: Path, root: Path, allowed_ext: set[str], max_bytes: int) -> None:
     """Validate a file path is safe to use."""
     resolved = path.resolve()
@@ -6824,21 +6843,14 @@ class ProjectChatManager:
             if engine == "fallback":
                 # A title was set, but the selected engine did not produce
                 # it — surface the degradation (with the upstream detail when
-                # available) instead of reporting ok. The titler always
-                # populates a non-null detail for fallback paths now
-                # (Apple exception, oneshot exception, or empty return), so
-                # job_runs gets a real error_detail to triage from (#257).
+                # available) instead of reporting ok. The titler populates a
+                # non-null detail for genuine upstream failures (Apple
+                # exception, oneshot exception, or empty return), but a
+                # deterministic fallback from reply-shaped model output has
+                # no upstream cause, so the helper keeps the generic message
+                # there (#257).
                 run.status = "error"
-                if detail == "upstream returned empty text":
-                    run.error = (
-                        f"title engine returned empty (chat_id={chat_id}); "
-                        "used deterministic fallback"
-                    )
-                else:
-                    run.error = (
-                        f"title engine failed ({detail}); "
-                        "used deterministic fallback"
-                    )
+                run.error = _fallback_error_message(detail, chat_id)
             elif title_model in APPLE_TITLE_MODELS and engine != "apple":
                 run.extra["note"] = f"on-device model unavailable; used {engine}"
 
