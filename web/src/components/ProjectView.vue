@@ -31,24 +31,31 @@
       </template>
     </PaneHeader>
 
+    <!-- Counts only, ordered by urgency. "Created" used to sit here as a date
+         styled like a metric, while the count that matters - how many chats want
+         you - was missing entirely. Dates moved to the caption below. -->
     <div class="project-stats">
-      <div class="stat">
-        <div class="stat-value">{{ activeChats.length }}</div>
-        <div class="stat-label">Active chats</div>
+      <div class="stat" :class="{ 'stat--hot': needsInputCount > 0 }">
+        <div class="stat-value">{{ needsInputCount }}</div>
+        <div class="stat-label">Need you</div>
       </div>
       <div class="stat">
-        <div class="stat-value">{{ archivedChats.length }}</div>
-        <div class="stat-label">Archived</div>
+        <div class="stat-value">{{ workingCount }}</div>
+        <div class="stat-label">Working</div>
       </div>
       <div class="stat">
         <div class="stat-value">{{ totalUnread }}</div>
         <div class="stat-label">Unread</div>
       </div>
       <div class="stat">
-        <div class="stat-value">{{ formatDate(project.created_at) }}</div>
-        <div class="stat-label">Created</div>
+        <div class="stat-value">{{ activeChats.length }}</div>
+        <div class="stat-label">Active</div>
       </div>
     </div>
+    <p class="project-caption">
+      created {{ formatDate(project.created_at) }}
+      <template v-if="archivedChats.length"> · {{ archivedChats.length }} archived</template>
+    </p>
 
     <section class="card">
       <div class="card-header">
@@ -272,6 +279,12 @@ const archivedChats = computed(() =>
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
 )
 const totalUnread = computed(() => store.projectUnread(props.projectId))
+const needsInputCount = computed(() => store.projectNeedsInput(props.projectId))
+const workingCount = computed(() =>
+  activeChats.value.filter(c =>
+    store.isChatStreaming(c.chat_id) || store.chatHasBackgroundAgents(c.chat_id),
+  ).length,
+)
 
 // Hue follows the project's workspace so the marks here read the same as the
 // sidebar and the home lanes rather than inheriting the active accent.
@@ -624,17 +637,35 @@ watch(() => props.projectId, reloadAll)
   gap: 4px;
 }
 
+/* Only the urgent tile carries the accent, so a glance answers "does anything
+   here want me?" before any number is read. */
+.stat--hot {
+  border-left: 2px solid var(--accent);
+}
+
+.stat--hot .stat-value {
+  color: var(--accent);
+}
+
 .stat-value {
-  font-size: 18px;
+  font-size: var(--text-lg);
   font-weight: 700;
   color: var(--fg);
+  font-variant-numeric: tabular-nums;
 }
 
 .stat-label {
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.4px;
   color: var(--fg2);
+}
+
+.project-caption {
+  margin: 0 0 var(--space-4);
+  padding: 0 var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--fg3);
 }
 
 .card {
