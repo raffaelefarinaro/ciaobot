@@ -50,17 +50,31 @@ function seed() {
   const taskStore = useTaskStore()
   taskStore.loops = [] as unknown as typeof taskStore.loops
   taskStore.schedules = [] as unknown as typeof taskStore.schedules
+  // ProjectView fetches these itself so it can tell "none" from "not loaded".
+  // Stub them so the tests drive the store directly and stay deterministic.
+  vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+  vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
   return store
 }
 
-async function mountView() {
+async function mountView(options: { attach?: boolean } = {}) {
   const { default: ProjectView } = await import('../ProjectView.vue')
   const wrapper = mount(ProjectView, {
     props: { projectId: 'project-1' },
+    // Focus assertions need the tabs in the real document.
+    ...(options.attach ? { attachTo: document.body } : {}),
     global: { stubs: { PaneHeader: { template: '<div><slot name="title" /><slot name="actions" /></div>' } } },
   })
-  await nextTick()
+  // Let onMounted's reloadAll settle so the automations load state resolves.
+  await flush()
   return wrapper
+}
+
+async function flush() {
+  await nextTick()
+  await Promise.resolve()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await nextTick()
 }
 
 describe('ProjectView chat rows', () => {
@@ -216,5 +230,180 @@ describe('ProjectView chat rows', () => {
     expect(wrapper.get('.automation-card').text()).toContain('Send the chat brief')
     expect(wrapper.get('.automation-card').text()).not.toContain('Send another brief')
     expect(wrapper.get('[data-tab="schedules"]').text()).toContain('2')
+  })
+})
+
+// The tab bar shipped with role="tab" on buttons that had no enclosing
+// tablist, no aria-controls, no tabpanel to point at, and no keyboard
+// handling at all. These lock the full pattern in.
+describe('ProjectView tabs', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+  })
+
+  it('owns the tabs with a tablist', async () => {
+    seed()
+    const wrapper = await mountView()
+
+    const tablist = wrapper.get('[role="tablist"]')
+    expect(tablist.attributes('aria-label')).toBe('Project sections')
+    const tabs = tablist.findAll('[role="tab"]')
+    expect(tabs).toHaveLength(3)
+    expect(tabs.map(t => t.attributes('data-tab'))).toEqual(['overview', 'loops', 'schedules'])
+  })
+
+  it('tracks the active tab with aria-selected', async () => {
+    seed()
+    const wrapper = await mountView()
+
+    expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('[data-tab="loops"]').attributes('aria-selected')).toBe('false')
+
+    await wrapper.get('[data-tab="loops"]').trigger('click')
+
+    expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('false')
+    expect(wrapper.get('[data-tab="loops"]').attributes('aria-selected')).toBe('true')
+  })
+
+  // aria-controls must name a real tabpanel, and that panel must point back.
+  it.each(['overview', 'loops', 'schedules'])('pairs the %s tab with its panel', async (key) => {
+    seed()
+    const wrapper = await mountView()
+    await wrapper.get(`[data-tab="${key}"]`).trigger('click')
+
+    const tab = wrapper.get(`[data-tab="${key}"]`)
+    const tabId = tab.attributes('id')
+    const controls = tab.attributes('aria-controls')
+    expect(tabId).toBeTruthy()
+    expect(controls).toBeTruthy()
+
+    const panel = wrapper.get(`#${controls}`)
+    expect(panel.attributes('role')).toBe('tabpanel')
+    expect(panel.attributes('aria-labelledby')).toBe(tabId)
+    // Panels are in the tab sequence so their content is keyboard reachable.
+    expect(panel.attributes('tabindex')).toBe('0')
+  })
+
+  it('renders only the selected panel', async () => {
+    seed()
+    const wrapper = await mountView()
+    expect(wrapper.findAll('[role="tabpanel"]')).toHaveLength(1)
+
+    await wrapper.get('[data-tab="schedules"]').trigger('click')
+    expect(wrapper.findAll('[role="tabpanel"]')).toHaveLength(1)
+    expect(wrapper.get('[role="tabpanel"]').attributes('aria-labelledby'))
+      .toBe(wrapper.get('[data-tab="schedules"]').attributes('id'))
+  })
+
+  // Roving tabindex: the whole bar is one Tab stop, not three.
+  it('keeps a single tab stop', async () => {
+    seed()
+    const wrapper = await mountView()
+
+    const tabindexes = () => wrapper.findAll('[role="tab"]').map(t => t.attributes('tabindex'))
+    expect(tabindexes()).toEqual(['0', '-1', '-1'])
+
+    await wrapper.get('[data-tab="schedules"]').trigger('click')
+    expect(tabindexes()).toEqual(['-1', '-1', '0'])
+  })
+
+  it('moves right and left with the arrow keys, wrapping at the ends', async () => {
+    seed()
+    const wrapper = await mountView()
+
+    await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'ArrowRight' })
+    expect(wrapper.get('[data-tab="loops"]').attributes('aria-selected')).toBe('true')
+
+    await wrapper.get('[data-tab="loops"]').trigger('keydown', { key: 'ArrowRight' })
+    expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('true')
+
+    // Wraps forward past the last tab...
+    await wrapper.get('[data-tab="schedules"]').trigger('keydown', { key: 'ArrowRight' })
+    expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('true')
+
+    // ...and backward past the first.
+    await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'ArrowLeft' })
+    expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('true')
+  })
+
+  it('jumps to the first and last tab with Home and End', async () => {
+    seed()
+    const wrapper = await mountView()
+
+    await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'End' })
+    expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('true')
+
+    await wrapper.get('[data-tab="schedules"]').trigger('keydown', { key: 'Home' })
+    expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('true')
+  })
+
+  it('leaves other keys to the browser', async () => {
+    seed()
+    const wrapper = await mountView()
+
+    await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'ArrowDown' })
+    await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'a' })
+    expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('true')
+  })
+
+  it('moves DOM focus along with the arrow keys', async () => {
+    seed()
+    const wrapper = await mountView({ attach: true })
+    try {
+      const overview = wrapper.get('[data-tab="overview"]').element as HTMLElement
+      overview.focus()
+      expect(document.activeElement).toBe(overview)
+
+      await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'ArrowRight' })
+      expect(document.activeElement).toBe(wrapper.get('[data-tab="loops"]').element)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+})
+
+// Rule S6: an empty list must not claim absence when the fetch never resolved.
+describe('ProjectView automations load state', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+  })
+
+  it('says it is loading rather than claiming there are none', async () => {
+    seed()
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchLoops').mockReturnValue(new Promise(() => {}))
+    vi.spyOn(taskStore, 'fetchSchedules').mockReturnValue(new Promise(() => {}))
+
+    const wrapper = await mountView()
+    await wrapper.get('[data-tab="loops"]').trigger('click')
+
+    expect(wrapper.get('.automation-card').text()).toContain('loading loops')
+    expect(wrapper.get('.automation-card').text()).not.toContain('no loops send prompts')
+    // A count it cannot vouch for is omitted, not printed as 0.
+    expect(wrapper.get('[data-tab="loops"]').text()).not.toContain('0')
+  })
+
+  it('reports a failed load rather than claiming there are none', async () => {
+    seed()
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchLoops').mockRejectedValue(new Error('offline'))
+    vi.spyOn(taskStore, 'fetchSchedules').mockRejectedValue(new Error('offline'))
+
+    const wrapper = await mountView()
+    await wrapper.get('[data-tab="schedules"]').trigger('click')
+
+    expect(wrapper.get('.automation-card').text()).toContain('could not load schedules')
+    expect(wrapper.get('[data-tab="schedules"]').text()).not.toContain('0')
+  })
+
+  it('reports a real zero once the load resolves', async () => {
+    seed()
+    const wrapper = await mountView()
+    await wrapper.get('[data-tab="loops"]').trigger('click')
+
+    expect(wrapper.get('.automation-card').text()).toContain('no loops send prompts into this project')
+    expect(wrapper.get('[data-tab="loops"]').text()).toContain('0')
   })
 })

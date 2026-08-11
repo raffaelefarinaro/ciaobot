@@ -280,6 +280,7 @@ watch(showStartup, (show) => {
   --radius: 10px;
   --radius-sm: 6px;
   --radius-lg: 14px;
+  --radius-pill: 999px; /* fully rounded ends: pills, count badges, chips */
   --touch: 44px;        /* min hit area on touch devices */
   --space-1: 4px;
   --space-2: 8px;
