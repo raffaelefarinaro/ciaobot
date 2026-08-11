@@ -15,8 +15,11 @@ import { askConfirm } from '../lib/confirm'
 // Plus an editing mode that POSTs to /api/workspace-file to save user edits
 // and snapshot them via the active chat's history.
 
-export type FileViewerKind = 'text' | 'image' | 'excalidraw' | 'pdf'
+export type FileViewerKind = 'text' | 'image' | 'excalidraw' | 'pdf' | 'html'
 export type FileViewerTab = 'preview' | 'history' | 'diff' | 'backlinks'
+// Artifacts render by default and show their source on demand. Code view is
+// also the only place they can be edited, since editing needs the source.
+export type HtmlArtifactView = 'preview' | 'code'
 
 export interface SnapshotMeta {
   seq: number
@@ -31,6 +34,7 @@ export function fileViewerKindForPath(filePath: string): FileViewerKind {
   const cleaned = filePath.replace(/:\d+$/, '').toLowerCase()
   if (/\.excalidraw$/i.test(cleaned)) return 'excalidraw'
   if (/\.(pdf|pptx)$/i.test(cleaned)) return 'pdf'
+  if (/\.html?$/i.test(cleaned)) return 'html'
   return 'text'
 }
 
@@ -83,8 +87,21 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   // Markdown wikilink resolution uses a vault-wide path index from the API.
   const markdownPaths = ref<string[]>([])
 
+  // Artifact (.html) state. The source is deliberately NOT fetched on open:
+  // `error` blanks the whole viewer body, so a failed text fetch would replace
+  // a perfectly renderable page with an error string. Source loads only when
+  // the user asks for Code view, and its failures stay in `sourceError`.
+  const htmlView = ref<HtmlArtifactView>('preview')
+  const sourceLoading = ref(false)
+  const sourceError = ref('')
+  const sourceLoaded = ref(false)
+
   function _reset(): void {
     kind.value = 'text'
+    htmlView.value = 'preview'
+    sourceLoading.value = false
+    sourceError.value = ''
+    sourceLoaded.value = false
     line.value = null
     content.value = ''
     error.value = ''
@@ -175,6 +192,11 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
         if (/\.pptx$/i.test(filePath.replace(/:\d+$/, ''))) void checkLibreofficeStatus()
         return true
       }
+      if (kind.value === 'html') {
+        // The frame loads /api/workspace-html on its own, keyed off loadToken.
+        content.value = ''
+        return true
+      }
       const url = `/api/workspace-file?path=${encodeURIComponent(filePath)}`
       const [resp] = await Promise.all([
         fetch(url, { credentials: 'same-origin' }),
@@ -195,6 +217,37 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       loading.value = false
     }
     return true
+  }
+
+  // ── Artifact source (Code view) ────────────────────────────────────────
+
+  async function loadSource(force = false): Promise<void> {
+    if (!path.value || (sourceLoaded.value && !force)) return
+    sourceLoading.value = true
+    sourceError.value = ''
+    try {
+      const resp = await fetch(
+        `/api/workspace-file?path=${encodeURIComponent(path.value)}`,
+        { credentials: 'same-origin' },
+      )
+      if (!resp.ok) {
+        sourceError.value = resp.status === 413
+          ? 'Source is too large to show (>2 MB).'
+          : `Failed to load source (HTTP ${resp.status}).`
+        return
+      }
+      content.value = await resp.text()
+      sourceLoaded.value = true
+    } catch (e) {
+      sourceError.value = e instanceof Error ? e.message : String(e)
+    } finally {
+      sourceLoading.value = false
+    }
+  }
+
+  async function setHtmlView(view: HtmlArtifactView): Promise<void> {
+    htmlView.value = view
+    if (view === 'code') await loadSource()
   }
 
   async function openImage(filePath: string, chat: string = ''): Promise<boolean> {
@@ -316,7 +369,11 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   // ── Edit mode ──────────────────────────────────────────────────────────
 
   function startEditing(): void {
-    if (kind.value !== 'text' && kind.value !== 'excalidraw') return
+    if (kind.value === 'html') {
+      // Editing an artifact edits its source, so only from Code view and only
+      // once the source is actually in hand.
+      if (htmlView.value !== 'code' || !sourceLoaded.value) return
+    } else if (kind.value !== 'text' && kind.value !== 'excalidraw') return
     editing.value = true
     editBuffer.value = content.value
     editError.value = ''
@@ -353,6 +410,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       content.value = editBuffer.value
       editing.value = false
       editBuffer.value = ''
+      // Artifacts render from a URL, so adopting the buffer is not enough:
+      // bump the token or Preview keeps showing the pre-save page.
+      if (kind.value === 'html') loadToken.value++
       if (chatId.value) await loadHistory()
       return true
     } catch (e) {
@@ -384,6 +444,8 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       })(),
       loadHistory(),
     ])
+    // Same reason as saveEdits: the artifact frame reloads from its URL.
+    if (kind.value === 'html') loadToken.value++
     return true
   }
 
@@ -417,9 +479,15 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     libreofficeInstalling,
     libreofficeInstallError,
     markdownPaths,
+    htmlView,
+    sourceLoading,
+    sourceError,
+    sourceLoaded,
     // actions
     open,
     openImage,
+    loadSource,
+    setHtmlView,
     close,
     loadMarkdownPaths,
     setTab,

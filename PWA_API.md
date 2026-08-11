@@ -59,6 +59,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/images/{ref}` | Read uploaded image blob |
 | GET | `/api/workspace-file` | Read allowed text file |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
+| GET | `/api/workspace-html` | Render an `.html` artifact as `text/html` in a sandboxing CSP (panel Preview) |
 | GET | `/api/workspace-image` | Read allowed image file |
 | GET | `/api/workspace-binary` | Read allowed binary file |
 | GET | `/api/libreoffice-status` | Whether LibreOffice (`soffice`) is available to render `.pptx` previews |
@@ -622,6 +623,17 @@ Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged
 - `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Both provider readers honour this.
 - Refused or failed calls get no card. `file_touch` is attached when a call is *requested*, so a denied `Write` used to paint an Outputs chip for a file that was never created. Live: the server publishes `tool_denied {tool_use_id}` on a deny and strips the touch from the replay buffer (the permission gate keys requests by `tool_use_id`, which is the same id the `tool_use` event carries). On reload: `/messages` and the subagent renderer skip the card when that call's `tool_result` came back `is_error`. The activity row stays either way, so the attempt is still visible.
 - Card click opens `/api/workspace-file` (text/code) or `/api/workspace-image` (images by extension). The classification is advisory only. The viewer endpoints have no workspace sandbox: they serve any allowlisted-extension file on disk (relative paths anchor to `workspace_root`). The extension allowlist (no `.env`) and size caps are the only guards.
+
+**HTML artifacts (`GET /api/workspace-html`)**
+
+`.html` is in the `/api/workspace-file` text allowlist, so it already served as `text/plain` for the panel's Code view. `workspace-html` is the Preview side: the same file as `text/html`, under its own policy so the PWA can embed model-authored markup in a frame.
+
+- Query `?path=` (workspace-relative or absolute, fuzzy-resolved like its siblings), `.html`/`.htm` only (415 otherwise), capped at 2 MB (413 over it). The cap deliberately matches the text viewer and `MAX_SNAPSHOT_BYTES`, so a file cannot be renderable but unreadable, or have history but refuse to render.
+- Response headers: `_ARTIFACT_CSP` (`default-src 'none'`, `script-src 'unsafe-inline'`, `style-src 'unsafe-inline'`, `img-src data:`, `font-src data:`, `connect-src 'none'`, `form-action 'none'`, `base-uri 'none'`, `frame-ancestors 'self'`, `sandbox allow-scripts`), plus `X-Frame-Options: SAMEORIGIN` and `Cache-Control: no-cache`.
+- `script-src 'unsafe-inline'` is load-bearing: an artifact inlines its own script, so removing it breaks every artifact rather than hardening anything. Containment is `sandbox allow-scripts` without `allow-same-origin` (opaque origin: no session cookie, no `localStorage`, no parent access) plus `connect-src 'none'` and a `data:`-only `img-src`. An artifact cannot reach `/api/*` despite being same-host.
+- `X-Frame-Options` must stay explicit: `SecurityHeadersMiddleware` sets `DENY` via `setdefault`, so an unconditional assignment there would break the frame. `tests/test_workspace_html.py` guards this.
+- Client: `HtmlArtifactViewer.vue` (shared by `PinnedFilePanel` and `FileViewerModal`) frames it with `sandbox="allow-scripts"`, matching the CSP directive — the effective sandbox is the intersection of attribute and header. Source for Code view is a separate lazy fetch, because `error` blanks the viewer body and an oversized-source failure must not hide a page that renders. Artifacts are not commentable (comment anchors need markdown highlights or text lines).
+- Manual checks live in `tests/fixtures/html_artifacts/` (inline script runs, external requests blocked, API/session unreachable). Header tests pass on a blank frame, so those fixtures are the real verification.
 
 **File snapshots, history, diff, edit-in-place**
 

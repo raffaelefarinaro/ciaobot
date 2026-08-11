@@ -3501,6 +3501,123 @@ async def workspace_file(request: Request) -> Response:
     )
 
 
+# ── HTML artifacts ───────────────────────────────────────────────────────
+# An artifact is a self-contained page the model authored (a dashboard, an
+# annotated diff, a comparison) that the PWA embeds in the pinned panel.
+# It is served from this host, so it needs a policy of its own.
+
+_WORKSPACE_HTML_EXTS = frozenset({".html", ".htm"})
+
+# Read this before "hardening" it: `script-src 'unsafe-inline'` is load-bearing.
+# An artifact inlines its own <script> and <style> — that is the entire point of
+# a single self-contained file — so removing 'unsafe-inline' does not tighten
+# this policy, it breaks every artifact and leaves a blank frame with a console
+# error the user never sees.
+#
+# Containment comes from the other directives, not from script-src:
+#   - `sandbox allow-scripts` (no allow-same-origin) puts the document in an
+#     opaque origin. It cannot read the session cookie, localStorage, or the
+#     embedding page, even though it is served from the same host.
+#   - `connect-src 'none'` kills fetch, XHR, WebSocket and EventSource.
+#   - `img-src data:` (no http/https) closes the beacon-through-an-image-URL
+#     exfiltration path that a permissive img-src leaves open.
+#   - `form-action 'none'` and `base-uri 'none'` stop navigation-based leaks.
+# The net effect: an artifact can render and respond to clicks, and has no way
+# to reach /api/*, phone home, or read anything of the user's.
+#
+# Deliberately absent until a real artifact needs them: `allow-popups`,
+# `media-src`, and `blob:` sources. Add on evidence, not in advance.
+_ARTIFACT_CSP = "; ".join(
+    [
+        "default-src 'none'",
+        "script-src 'unsafe-inline'",
+        "style-src 'unsafe-inline'",
+        "img-src data:",
+        "font-src data:",
+        "connect-src 'none'",
+        "form-action 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'self'",
+        "sandbox allow-scripts",
+    ]
+)
+
+# CSP for host-rendered binary previews (PDF, and PPTX after conversion).
+# Looser than _ARTIFACT_CSP because the renderer here is the browser's own
+# viewer loading our assets, not model-authored markup.
+_EMBEDDED_PREVIEW_CSP = "; ".join(
+    [
+        "default-src 'self'",
+        "base-uri 'self'",
+        "object-src 'none'",
+        "frame-ancestors 'self'",
+        "form-action 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "img-src 'self' data: blob:",
+        "media-src 'self' blob:",
+        "font-src 'self' data: https://fonts.gstatic.com",
+        "connect-src 'self' ws: wss: https://fonts.googleapis.com https://fonts.gstatic.com",
+    ]
+)
+
+
+async def workspace_html(request: Request) -> Response:
+    """Serve a workspace ``.html`` file as a renderable page, not as source.
+
+    ``/api/workspace-file`` already serves ``.html`` but as ``text/plain``,
+    which is what the panel's Code view wants. This endpoint is the Preview
+    side: same file, ``text/html``, under ``_ARTIFACT_CSP``. See that constant
+    for why the policy is shaped the way it is.
+
+    Why a real endpoint instead of an ``srcdoc`` iframe: ``srcdoc`` and
+    ``blob:`` documents inherit the *embedder's* CSP, which is ``script-src
+    'self'`` (``ciao/web/security.py``). Inline artifact script would be
+    silently blocked. A frame loaded from a URL gets its own CSP from these
+    response headers instead.
+
+    The size cap is deliberately the same 2 MB as the text viewer and the
+    snapshot store, so there is no state where a file renders but has no
+    history, or has history but refuses to render. Over the cap the panel
+    shows a 413 and the user opens the file in a real browser instead
+    (``/api/workspace-open``).
+
+    Fuzzy resolution is kept for parity with the Code view, so the same path
+    string that shows the source also renders the page. Note that this means
+    fuzzy matching decides which document gets to execute script; the sandbox
+    above is what keeps that from mattering.
+    """
+    config = request.app.state.config
+    raw = request.query_params.get("path", "").strip()
+    roots = _allowed_roots(config)
+    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    if isinstance(result, Response):
+        return result
+    resolved = result
+
+    if resolved.suffix.lower() not in _WORKSPACE_HTML_EXTS:
+        return JSONResponse({"error": "unsupported type"}, status_code=415)
+    if resolved.stat().st_size > _WORKSPACE_FILE_MAX_BYTES:
+        return JSONResponse({"error": "file too large"}, status_code=413)
+
+    return FileResponse(
+        resolved,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Security-Policy": _ARTIFACT_CSP,
+            # SecurityHeadersMiddleware sets X-Frame-Options: DENY through
+            # setdefault, so an explicit value here wins and lets the PWA
+            # embed the frame. frame-ancestors above is the modern equivalent;
+            # both are sent because the desktop shell's webview is older.
+            "X-Frame-Options": "SAMEORIGIN",
+            # Same revalidation reasoning as workspace_file: the panel reloads
+            # the frame after the model revises an artifact, and a heuristically
+            # fresh cache entry would show the pre-edit page.
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 _VAULT_MD_EXCLUDE_DIRS = frozenset({"Logs", "Templates", ".obsidian"})
 
 
@@ -3885,21 +4002,7 @@ async def workspace_binary(request: Request) -> Response:
     headers = {
         "Content-Disposition": f'{disposition}; filename="{filename}"',
         "X-Frame-Options": "SAMEORIGIN",
-        "Content-Security-Policy": "; ".join(
-            [
-                "default-src 'self'",
-                "base-uri 'self'",
-                "object-src 'none'",
-                "frame-ancestors 'self'",
-                "form-action 'self'",
-                "script-src 'self'",
-                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-                "img-src 'self' data: blob:",
-                "media-src 'self' blob:",
-                "font-src 'self' data: https://fonts.gstatic.com",
-                "connect-src 'self' ws: wss: https://fonts.googleapis.com https://fonts.gstatic.com",
-            ]
-        ),
+        "Content-Security-Policy": _EMBEDDED_PREVIEW_CSP,
     }
     return FileResponse(
         resolved,
