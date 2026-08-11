@@ -4071,9 +4071,11 @@ class ProjectChatManager:
         ``refresh_openrouter_models``, and ``refresh_cloud_ollama_models``.
         A valid id is therefore either a configured id, a tier alias
         (``haiku``/``sonnet``/``opus``/``fable``) that ``_resolve_claude_model``
-        expands at dispatch time, a model that ``is_ollama_model`` recognises
-        (covers the local-daemon list and the cloud ``:tag``-shaped ids
-        without forcing callers to pre-merge the two sets), or a
+        expands at dispatch time, an Ollama model that is in the local
+        daemon list, the cloud allowlist / discovered catalog, or the
+        configured tier targets, an OpenRouter model from the static
+        allowlist or tier targets (valid even when catalog discovery failed
+        and never merged them into ``claude_models``), or a
         ``custom:<id>:<model>`` id routed through a configured custom
         provider. Codex is skipped because its catalog is async and the
         Codex CLI already rejects unknown ids with a clear error at the
@@ -4087,9 +4089,36 @@ class ProjectChatManager:
             return
         if is_tier(model):
             return
-        if is_ollama_model(model, self._config.ollama):
+        # Ollama: membership in the local daemon list, the cloud allowlist /
+        # discovered catalog, or the configured tier targets. Not the routing
+        # shape predicate (``is_ollama_model``), which accepts any
+        # ``:tag``-shaped id when cloud is configured and would let a typo
+        # through to a chat that fails on its first turn (#259).
+        ollama = self._config.ollama
+        if (
+            is_local_ollama_model(model, ollama)
+            or model in ollama.models
+            or model
+            in {
+                ollama.haiku_model,
+                ollama.sonnet_model,
+                ollama.opus_model,
+                ollama.fable_model,
+                ollama.title_model,
+            }
+        ):
             return
+        # OpenRouter: the statically configured models and tier targets stay
+        # valid even when catalog discovery failed at startup and never
+        # merged them into claude_models (#259).
         allowed = list(self._config.claude_models)
+        allowed += list(self._config.openrouter.models)
+        allowed += [
+            self._config.openrouter.haiku_model,
+            self._config.openrouter.sonnet_model,
+            self._config.openrouter.opus_model,
+            self._config.openrouter.fable_model,
+        ]
         if model in allowed:
             return
         sample = ", ".join(allowed[:8]) if allowed else "(none configured)"

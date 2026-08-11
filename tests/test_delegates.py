@@ -743,3 +743,57 @@ def test_delegate_spawn_preserves_non_model_errors(tmp_path: Path) -> None:
         )
     assert not isinstance(excinfo.value, ControlPlaneError)
     assert "Unknown provider 'bogus'" in str(excinfo.value)
+
+
+def test_create_chat_rejects_unknown_ollama_cloud_model(tmp_path: Path) -> None:
+    """A ``:tag``-shaped id not in the Ollama catalog must be rejected.
+
+    The routing shape predicate (``is_ollama_model``) accepts any
+    ``:tag``-shaped id when cloud is configured; validation must check
+    catalog membership instead so a typo can't create a chat that fails
+    on its first turn (#259).
+    """
+    from ciao.providers.ollama import OllamaSettings
+
+    manager = _make_manager(
+        tmp_path,
+        ollama=OllamaSettings(
+            api_key="test-key",
+            models=("kimi-k2.7-code:cloud", "minimax-m3:cloud"),
+        ),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown model 'typo-does-not-exist:cloud'"):
+        manager.create_chat(project.project_id, model="typo-does-not-exist:cloud")
+
+    # A catalog member passes.
+    chat = manager.create_chat(project.project_id, model="minimax-m3:cloud")
+    assert chat.model == "minimax-m3:cloud"
+
+
+def test_create_chat_accepts_statically_configured_openrouter_model(
+    tmp_path: Path,
+) -> None:
+    """A statically configured OpenRouter model stays valid without discovery.
+
+    ``CIAO_OPENROUTER_MODELS`` models live in ``config.openrouter.models``
+    but are only merged into ``claude_models`` when catalog discovery
+    succeeds; the validator must accept them directly so a catalog outage
+    doesn't block OpenRouter chat creation (#259).
+    """
+    from ciao.providers.openrouter import OpenRouterSettings
+
+    manager = _make_manager(
+        tmp_path,
+        openrouter=OpenRouterSettings(
+            api_key="test-key",
+            models=("anthropic/claude-sonnet-latest", "meta-llama/llama-4-maverick"),
+        ),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    chat = manager.create_chat(
+        project.project_id, model="meta-llama/llama-4-maverick"
+    )
+    assert chat.model == "meta-llama/llama-4-maverick"
