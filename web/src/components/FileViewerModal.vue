@@ -242,6 +242,16 @@
               height="100%"
               style="border: none; flex: 1; min-height: 500px; display: block; border-radius: 4px;"
             ></iframe>
+            <HtmlArtifactViewer
+              v-else-if="store.kind === 'html' && !store.editing"
+              :file-path="store.path"
+              :reload-token="store.loadToken"
+              :view="store.htmlView"
+              :source="store.content"
+              :source-loading="store.sourceLoading"
+              :source-error="store.sourceError"
+              @update:view="store.setHtmlView"
+            />
             <template v-else>
             <div v-if="frontmatter" class="fv-meta-card">
               <div class="fv-meta-row">
@@ -409,6 +419,7 @@ import { useFileComments } from '../composables/useFileComments'
 import CommentComposePopover from './CommentComposePopover.vue'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
+const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
 const store = useFileViewerStore()
 const projectsStore = useProjectStore()
@@ -443,7 +454,13 @@ async function continueFromTranscript(): Promise<void> {
 // Edit mode only makes sense for text files inside a chat-scoped flow that
 // the snapshot store can record under. Image files and chat-less viewer
 // opens (e.g. clicking a plain path in a chat trace) stay read-only.
-const canEdit = computed(() => (store.kind === 'text' || store.kind === 'excalidraw') && !!store.chatId && !store.loading && !store.error)
+const canEdit = computed(() => {
+  if (store.loading || store.error || !store.chatId) return false
+  // Editing an artifact edits its source, which only exists once Code view has
+  // fetched it. Preview view has nothing to put in the textarea.
+  if (store.kind === 'html') return store.htmlView === 'code' && store.sourceLoaded
+  return store.kind === 'text' || store.kind === 'excalidraw'
+})
 
 // History tab timestamp formatting. Snapshots store ISO 8601; we want a
 // short local form: "May 18, 14:32".
@@ -1281,6 +1298,10 @@ function downloadFile(): void {
     a.href = `/api/workspace-image?path=${encodeURIComponent(cleaned)}`
   } else if (store.kind === 'pdf') {
     a.href = `/api/workspace-binary?path=${encodeURIComponent(cleaned)}&raw=1`
+  } else if (store.kind === 'html') {
+    // Straight from the endpoint: an artifact in Preview view has never
+    // fetched its source, so an in-memory Blob would be empty.
+    a.href = `/api/workspace-file?path=${encodeURIComponent(cleaned)}`
   } else {
     const blob = new Blob([store.content], { type: 'text/plain;charset=utf-8' })
     a.href = URL.createObjectURL(blob)

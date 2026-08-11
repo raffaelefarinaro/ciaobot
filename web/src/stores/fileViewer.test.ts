@@ -16,6 +16,88 @@ describe('file viewer kind detection', () => {
     expect(fileViewerKindForPath('/tmp/readme.md')).toBe('text')
     expect(fileViewerKindForPath('docs/report.pdf')).toBe('pdf')
     expect(fileViewerKindForPath('docs/presentation.pptx')).toBe('pdf')
+    expect(fileViewerKindForPath('Workspace/dashboard.html')).toBe('html')
+    expect(fileViewerKindForPath('Workspace/legacy.HTM')).toBe('html')
+    expect(fileViewerKindForPath('Workspace/report.html:12')).toBe('html')
+  })
+})
+
+describe('html artifacts', () => {
+  test('opening an artifact does not fetch its source', async () => {
+    // The whole point of the lazy path: `error` blanks the viewer body, so a
+    // failed or oversized text fetch must not be able to take down a page that
+    // renders perfectly well.
+    const fetchMock = vi.fn(async () => new Response('', { status: 413 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const store = useFileViewerStore()
+    await store.open('Workspace/dashboard.html', null, 'chat-1')
+
+    expect(store.kind).toBe('html')
+    expect(store.htmlView).toBe('preview')
+    expect(store.error).toBe('')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test('switching to Code view loads the source once', async () => {
+    const fetchMock = vi.fn(async () => new Response('<h1>hi</h1>'))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const store = useFileViewerStore()
+    await store.open('Workspace/dashboard.html', null, 'chat-1')
+    await store.setHtmlView('code')
+
+    expect(store.content).toBe('<h1>hi</h1>')
+    expect(store.sourceLoaded).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await store.setHtmlView('preview')
+    await store.setHtmlView('code')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  test('a source failure leaves the rendered page alone', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 413 })))
+
+    const store = useFileViewerStore()
+    await store.open('Workspace/huge.html', null, 'chat-1')
+    await store.setHtmlView('code')
+
+    expect(store.sourceError).toContain('too large')
+    expect(store.error).toBe('')
+    expect(store.kind).toBe('html')
+  })
+
+  test('editing an artifact requires the source in hand', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<h1>hi</h1>')))
+
+    const store = useFileViewerStore()
+    await store.open('Workspace/dashboard.html', null, 'chat-1')
+
+    store.startEditing()
+    expect(store.editing).toBe(false)  // Preview view has no source to edit
+
+    await store.setHtmlView('code')
+    store.startEditing()
+    expect(store.editing).toBe(true)
+    expect(store.editBuffer).toBe('<h1>hi</h1>')
+  })
+
+  test('saving an artifact bumps the frame token so Preview reloads', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') return new Response('{"ok":true}')
+      return new Response('<h1>hi</h1>')
+    }))
+
+    const store = useFileViewerStore()
+    await store.open('Workspace/dashboard.html')
+    await store.setHtmlView('code')
+    store.startEditing()
+    store.editBuffer = '<h1>edited</h1>'
+
+    const before = store.loadToken
+    expect(await store.saveEdits()).toBe(true)
+    expect(store.loadToken).toBeGreaterThan(before)
   })
 })
 

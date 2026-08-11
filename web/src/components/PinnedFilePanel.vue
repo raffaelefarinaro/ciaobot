@@ -24,7 +24,7 @@
           </svg>
         </button>
         <button
-          v-if="kind === 'text' && !isEditingText"
+          v-if="(kind === 'text' || (kind === 'html' && htmlView === 'code' && sourceLoaded)) && !isEditingText"
           class="btn-icon"
           @click="startEditingText"
           title="Edit"
@@ -93,6 +93,16 @@
           height="100%"
           style="border: none; flex: 1; min-height: 500px; display: block; border-radius: 4px;"
         ></iframe>
+        <HtmlArtifactViewer
+          v-else-if="kind === 'html' && !isEditingText"
+          :file-path="cleanPath"
+          :reload-token="imageTimestamp"
+          :view="htmlView"
+          :source="content"
+          :source-loading="sourceLoading"
+          :source-error="sourceError"
+          @update:view="setHtmlView"
+        />
         <ExcalidrawViewer
           v-else-if="kind === 'excalidraw'"
           :content="content"
@@ -288,9 +298,11 @@ import { useFileComments } from '../composables/useFileComments'
 import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
-import { useFileViewerStore } from '../stores/fileViewer'
+import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
+import type { FileViewerKind, HtmlArtifactView } from '../stores/fileViewer'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
+const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
 const props = defineProps<{ filePath: string }>()
 defineEmits<{ (e: 'close'): void }>()
@@ -302,7 +314,14 @@ const fileViewer = useFileViewerStore()
 const loading = ref(false)
 const error = ref('')
 const content = ref('')
-const kind = ref<'text' | 'image' | 'excalidraw' | 'pdf'>('text')
+const kind = ref<FileViewerKind>('text')
+// Artifact state, mirroring the fileViewer store's. Source is fetched only for
+// Code view: `error` blanks the whole body, so a text-fetch failure must never
+// take down a page that renders fine.
+const htmlView = ref<HtmlArtifactView>('preview')
+const sourceLoading = ref(false)
+const sourceError = ref('')
+const sourceLoaded = ref(false)
 const refreshed = ref(false)
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
 const isEditingExcalidraw = ref(false)
@@ -521,6 +540,13 @@ async function load(): Promise<void> {
   isEditingText.value = false
   editBuffer.value = ''
   editError.value = ''
+  htmlView.value = 'preview'
+  sourceLoading.value = false
+  sourceError.value = ''
+  sourceLoaded.value = false
+  // Images are the panel's own case (the store has openImage for them);
+  // everything else comes from the shared classifier so this stays one
+  // implementation of "what kind of file is this" rather than a second copy.
   const isImg = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(props.filePath)
   if (isImg) {
     kind.value = 'image'
@@ -530,9 +556,8 @@ async function load(): Promise<void> {
     imageTimestamp.value = Date.now()
     return
   }
-  const isPdfOrPptx = /\.(pdf|pptx)$/i.test(cleanPath.value)
-  if (isPdfOrPptx) {
-    kind.value = 'pdf'
+  kind.value = fileViewerKindForPath(cleanPath.value)
+  if (kind.value === 'pdf') {
     loading.value = false
     error.value = ''
     content.value = ''
@@ -542,11 +567,15 @@ async function load(): Promise<void> {
     if (/\.pptx$/i.test(cleanPath.value)) void checkLibreofficeStatus()
     return
   }
-  const isExcalidraw = /\.excalidraw$/i.test(cleanPath.value)
-  if (isExcalidraw) {
-    kind.value = 'excalidraw'
-  } else {
-    kind.value = 'text'
+  if (kind.value === 'html') {
+    // Bumping the token here is what makes the stream-end auto-reload below
+    // refresh the frame after the model revises the artifact. Without it the
+    // panel would keep showing the pre-edit page until a manual refresh.
+    loading.value = false
+    error.value = ''
+    content.value = ''
+    imageTimestamp.value = Date.now()
+    return
   }
   loading.value = true
   error.value = ''
@@ -572,6 +601,35 @@ async function load(): Promise<void> {
   } finally {
     loading.value = false
   }
+}
+
+async function loadSource(force = false): Promise<void> {
+  if (!cleanPath.value || (sourceLoaded.value && !force)) return
+  sourceLoading.value = true
+  sourceError.value = ''
+  try {
+    const resp = await fetch(
+      `/api/workspace-file?path=${encodeURIComponent(cleanPath.value)}`,
+      { credentials: 'same-origin' },
+    )
+    if (!resp.ok) {
+      sourceError.value = resp.status === 413
+        ? 'Source is too large to show (>2 MB).'
+        : `Failed to load source (HTTP ${resp.status}).`
+      return
+    }
+    content.value = await resp.text()
+    sourceLoaded.value = true
+  } catch (e) {
+    sourceError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    sourceLoading.value = false
+  }
+}
+
+async function setHtmlView(view: HtmlArtifactView): Promise<void> {
+  htmlView.value = view
+  if (view === 'code') await loadSource()
 }
 
 function startEditingText(): void {
@@ -612,6 +670,9 @@ async function saveEdits(): Promise<void> {
     content.value = editBuffer.value
     isEditingText.value = false
     editBuffer.value = ''
+    // Artifacts render from a URL, so the frame needs a new token to pick up
+    // the save; adopting the buffer only updates Code view.
+    if (kind.value === 'html') imageTimestamp.value = Date.now()
   } catch (e) {
     editError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -639,6 +700,10 @@ function downloadFile(): void {
     a.href = `/api/workspace-image?path=${encodeURIComponent(cleaned)}`
   } else if (kind.value === 'pdf') {
     a.href = `/api/workspace-binary?path=${encodeURIComponent(cleaned)}&raw=1`
+  } else if (kind.value === 'html') {
+    // Straight from the endpoint, not from `content`: an artifact in Preview
+    // view has never fetched its source, so the in-memory blob would be empty.
+    a.href = `/api/workspace-file?path=${encodeURIComponent(cleaned)}`
   } else {
     const blob = new Blob([content.value], { type: 'text/plain;charset=utf-8' })
     a.href = URL.createObjectURL(blob)
@@ -753,9 +818,9 @@ function editFromPopover(c: { id: string; comment: string; images?: string[] }):
 // reapply on every comment list change so deleting a comment removes the
 // highlight cleanly. clearHighlights / highlightInMarkdown live in
 // useFileComments (shared with FileViewerModal); this surface keeps its own
-// kind guards (image/PDF) and feeds the shared helpers.
+// kind guards (image/PDF/artifact) and feeds the shared helpers.
 function applyHighlights(): void {
-  if (kind.value === 'image' || kind.value === 'pdf') return
+  if (kind.value === 'image' || kind.value === 'pdf' || kind.value === 'html') return
   if (isMarkdown.value) {
     const root = mdEl.value
     if (!root) return
@@ -850,7 +915,14 @@ watch(
 // Commenting stays available while the model works, matching FileViewerModal:
 // a comment is staged locally and rides along on the next message the user
 // sends (queued or steered), so there is nothing to wait for.
-const isCommentable = computed(() => !loading.value && !error.value && kind.value !== 'image' && kind.value !== 'pdf')
+// Artifacts are not commentable: a comment anchors to a markdown highlight or
+// a text line, and a rendered page in a sandboxed frame offers neither. This is
+// a real capability loss versus .md, which is why the html-artifact skill tells
+// the model to keep prose in markdown.
+const isCommentable = computed(() =>
+  !loading.value && !error.value
+  && kind.value !== 'image' && kind.value !== 'pdf' && kind.value !== 'html'
+)
 
 const comments = useFileComments({
   path: () => cleanPath.value,

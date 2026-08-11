@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Artifact check 3: API and session access blocked</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; padding: 16px; }
+  h1 { font-size: 17px; margin: 0 0 10px; }
+  .verdict { font-weight: 600; padding: 8px 10px; border-radius: 5px; margin: 6px 0; }
+  .pass { background: #d8f3dc; color: #1b4332; }
+  .fail { background: #ffd7d7; color: #7f1d1d; }
+  pre { font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Check 3: the app's own API and session</h1>
+
+<p>This is the check that matters. The artifact is served from the same host as
+the PWA, so without the sandbox it would be same-origin with the app.</p>
+
+<p id="fetchv" class="verdict">running…</p>
+<p id="cookiev" class="verdict">…</p>
+<p id="storagev" class="verdict">…</p>
+<p id="parentv" class="verdict">…</p>
+<pre id="detail"></pre>
+
+<script>
+  const detail = document.getElementById('detail')
+  function verdict(id, ok, text) {
+    const el = document.getElementById(id)
+    el.className = 'verdict ' + (ok ? 'pass' : 'fail')
+    el.textContent = (ok ? 'PASS — ' : 'FAIL — ') + text
+  }
+  function note(line) { detail.textContent += line + '\n' }
+
+  // 1. connect-src 'none' must stop this before it reaches the server.
+  fetch('/api/projects', { credentials: 'include' })
+    .then(async (r) => {
+      const body = (await r.text()).slice(0, 200)
+      verdict('fetchv', false, 'fetch("/api/projects") RETURNED HTTP ' + r.status + '. connect-src is not blocking.')
+      note('leaked body: ' + body)
+    })
+    .catch((e) => {
+      verdict('fetchv', true, 'fetch("/api/projects") was blocked (' + e.name + ').')
+      note('fetch error: ' + e.message)
+    })
+
+  // 2. Opaque origin means no cookie access, so the session cookie is invisible.
+  try {
+    const c = document.cookie
+    verdict('cookiev', c === '', c === ''
+      ? 'document.cookie is empty.'
+      : 'document.cookie EXPOSED: ' + c.slice(0, 120))
+  } catch (e) {
+    verdict('cookiev', true, 'document.cookie threw (' + e.name + '), which is also fine.')
+  }
+
+  // 3. Same for storage: an opaque origin has no access to the app's.
+  try {
+    localStorage.setItem('artifact-probe', '1')
+    const keys = Object.keys(localStorage)
+    verdict('storagev', keys.length <= 1,
+      keys.length <= 1
+        ? 'localStorage is a fresh opaque-origin store (keys: ' + keys.join(', ') + ').'
+        : "localStorage EXPOSED the app's keys: " + keys.slice(0, 8).join(', '))
+  } catch (e) {
+    verdict('storagev', true, 'localStorage threw (' + e.name + '), which is the strictest outcome.')
+  }
+
+  // 4. And no reach into the embedding page.
+  try {
+    const href = window.parent.location.href
+    verdict('parentv', false, 'read parent location: ' + href)
+  } catch (e) {
+    verdict('parentv', true, 'reading window.parent.location threw (' + e.name + ').')
+  }
+</script>
+</body>
+</html>
