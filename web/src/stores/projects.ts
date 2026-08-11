@@ -570,6 +570,20 @@ export const useProjectStore = defineStore('projects', () => {
     return Boolean(parent && !parent.archived && parent.local !== false)
   }
 
+  // A chat's active delegate subchats, as the user can actually see them.
+  //
+  // One definition, because the same filter had drifted into three copies and
+  // two of them dropped the `local !== false` guard that every other
+  // visibility computation applies — so an archive button offered to take "2
+  // subchats" while the sidebar listed 1. Counts shown to the user must match
+  // the rows they can see. The server-side cascade deliberately covers remote
+  // delegates too; that asymmetry is intentional, not a bug to paper over here.
+  function activeDelegatesFor(chatId: string): ChatInfo[] {
+    return chats.value.filter(
+      c => c.spawned_from_chat_id === chatId && !c.archived && c.local !== false,
+    )
+  }
+
   // Most recent (max 5) non-archived chats in the active workspace.
   const recentChats = computed<ChatInfo[]>(() => {
     const wsProjectIds = new Set(workspaceProjects.value.map(p => p.project_id))
@@ -4123,7 +4137,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
     chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, clearUnread, markRead, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,

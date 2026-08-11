@@ -652,6 +652,7 @@ import NotificationBell from './NotificationBell.vue'
 import ChatSignals from './ChatSignals.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
+import { archiveMenuLabel as menuLabel, archiveConfirmMessage } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
@@ -837,22 +838,15 @@ function closeChatMenus() {
 }
 
 function activeSubchatCount(chatId: string): number {
-  return store.chats.filter(
-    chat => chat.spawned_from_chat_id === chatId && !chat.archived,
-  ).length
+  return store.activeDelegatesFor(chatId).length
 }
 
 function archiveMenuLabel(chatId: string): string {
-  const count = activeSubchatCount(chatId)
-  return count
-    ? `Archive (also ${count} subchat${count === 1 ? '' : 's'})`
-    : 'Archive'
+  return menuLabel(activeSubchatCount(chatId))
 }
 
 function archiveConfirmation(chatId: string): string {
-  const count = activeSubchatCount(chatId)
-  if (!count) return 'Archive this chat? You can reopen it from the archive.'
-  return `Archive this chat and ${count} subchat${count === 1 ? '' : 's'}? You can reopen them from the archive.`
+  return archiveConfirmMessage(activeSubchatCount(chatId))
 }
 
 // Reset the submenu whenever the active chat menu changes (open, close,

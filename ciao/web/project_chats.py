@@ -3384,7 +3384,7 @@ class ProjectChatManager:
                 continue
             delegate_project = self._projects.get(delegate.project_id)
             try:
-                delegate_outcome = self._archive_single_chat(delegate_id)
+                delegate_outcome = self._archive_single_chat(delegate_id, save=False)
             except Exception:  # noqa: BLE001 — one bad subchat must not strand the rest
                 # The supervisor is already archived and saved at this point.
                 # Letting this propagate would 500 the caller, skip the
@@ -3410,6 +3410,12 @@ class ProjectChatManager:
                     "Archive postprocess failed for delegate subchat %s",
                     delegate_id,
                 )
+        # One write for every delegate archived above, which each deferred it.
+        # Unconditional: a subchat that raised out of _archive_single_chat may
+        # still have mutated the registry before it failed, and leaving that
+        # unsaved is what makes a half-archived row unrecoverable.
+        if delegate_ids:
+            self._save()
         return outcome
 
     def _delegate_descendant_ids(self, parent_chat_id: str) -> list[str]:
@@ -3420,15 +3426,32 @@ class ProjectChatManager:
         while pending:
             current_parent = pending.pop(0)
             for child in self.delegates_for_chat(current_parent):
-                if child.archived or child.chat_id in seen:
+                if child.chat_id in seen:
                     continue
                 seen.add(child.chat_id)
-                descendants.append(child.chat_id)
+                # Traverse through an already-archived delegate rather than
+                # stopping at it: pruning here left its own active children
+                # running and orphaned, which is the exact case this walk
+                # exists to cover in legacy or corrupt registries. Only the
+                # returned list skips archived rows; the walk does not.
                 pending.append(child.chat_id)
+                if child.archived:
+                    continue
+                descendants.append(child.chat_id)
         return descendants
 
-    def _archive_single_chat(self, chat_id: str) -> ArchiveOutcome | None:
-        """Archive one chat without cascading to its delegate children."""
+    def _archive_single_chat(
+        self, chat_id: str, *, save: bool = True
+    ) -> ArchiveOutcome | None:
+        """Archive one chat without cascading to its delegate children.
+
+        ``save=False`` lets the cascade defer the registry write: archiving a
+        supervisor with six delegates otherwise rewrote the whole registry seven
+        times, which is wasted IO and widens the window for a partial write to
+        land mid-cascade. The caller must ``_save()`` once when the loop ends.
+        The ``chat_archived`` event still fires per chat so the PWA updates as
+        each one completes.
+        """
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
@@ -3475,7 +3498,8 @@ class ProjectChatManager:
                 chat.archive_path = str(result.relative_to(self._config.workspace_root))
             except ValueError:
                 chat.archive_path = str(result)
-        self._save()
+        if save:
+            self._save()
         self._events.publish({
             "type": "chat_archived",
             "chat_id": chat_id,

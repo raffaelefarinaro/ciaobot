@@ -1123,6 +1123,7 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import ChatSignals from './ChatSignals.vue'
 import { colorForWorkspace } from '../lib/workspaceColors'
+import { archiveActionLabel as archiveLabel, archiveConfirmMessage } from '../lib/archiveCopy'
 import AppIcon, { type AppIconName } from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
@@ -1570,10 +1571,7 @@ const delegateParent = computed(() => {
 })
 const delegateChildren = computed(() => {
   const cid = chat.value?.chat_id
-  if (!cid) return []
-  return store.chats.filter(
-    c => c.spawned_from_chat_id === cid && !c.archived && c.local !== false,
-  )
+  return cid ? store.activeDelegatesFor(cid) : []
 })
 
 // ── Context bar ─────────────────────────────────────────────────────
@@ -1679,17 +1677,11 @@ const dockDeferred = computed<DockItem[]>(() => {
 
 const activeDelegateCount = computed(() => {
   const cid = chat.value?.chat_id
-  if (!cid) return 0
-  return store.chats.filter(
-    c => c.spawned_from_chat_id === cid && !c.archived,
-  ).length
+  // store.activeDelegatesFor is the single definition; the inline copy here
+  // dropped the local !== false guard and over-counted remote subchats.
+  return cid ? store.activeDelegatesFor(cid).length : 0
 })
-const archiveActionLabel = computed(() => {
-  const count = activeDelegateCount.value
-  return count
-    ? `Archive chat and ${count} subchat${count === 1 ? '' : 's'}`
-    : 'Archive chat'
-})
+const archiveActionLabel = computed(() => archiveLabel(activeDelegateCount.value))
 onMounted(() => {
   taskStore.fetchLoops().catch(() => {})
   taskStore.fetchSchedules().catch(() => {})
@@ -4041,10 +4033,7 @@ watch(showModelPicker, (open) => {
 })
 
 async function doArchive() {
-  const count = activeDelegateCount.value
-  const message = count
-    ? `Archive this chat and ${count} subchat${count === 1 ? '' : 's'}? You can reopen them from the archive.`
-    : 'Archive this chat? You can reopen it from the archive.'
+  const message = archiveConfirmMessage(activeDelegateCount.value)
   if (!await askConfirm(message, {
     title: 'Archive chat',
     confirmLabel: 'Archive',
