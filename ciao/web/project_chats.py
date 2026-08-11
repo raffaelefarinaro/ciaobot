@@ -3383,7 +3383,19 @@ class ProjectChatManager:
             if delegate is None or delegate.archived:
                 continue
             delegate_project = self._projects.get(delegate.project_id)
-            delegate_outcome = self._archive_single_chat(delegate_id)
+            try:
+                delegate_outcome = self._archive_single_chat(delegate_id)
+            except Exception:  # noqa: BLE001 — one bad subchat must not strand the rest
+                # The supervisor is already archived and saved at this point.
+                # Letting this propagate would 500 the caller, skip the
+                # supervisor's own post-processing, and leave the remaining
+                # subchats running, so absorb it and keep going.
+                logger.exception(
+                    "Archiving delegate subchat %s of %s failed",
+                    delegate_id,
+                    chat_id,
+                )
+                continue
             if delegate_outcome is None:
                 continue
             try:

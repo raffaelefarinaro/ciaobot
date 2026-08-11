@@ -354,6 +354,81 @@ def test_archiving_supervisor_also_archives_delegate_subchats(tmp_path: Path) ->
     assert archived_ids == [parent.chat_id, child.chat_id]
 
 
+def test_archive_cascade_reaches_nested_delegate_descendants(tmp_path: Path) -> None:
+    """Delegates cannot nest today, but the cascade walks the whole tree so a
+    registry that does contain a grandchild still archives cleanly."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-nested-archive", workspace="work")
+    parent = pcm.create_chat(project.project_id, title="supervisor")
+    child = pcm.create_chat(
+        project.project_id,
+        title="subchat",
+        spawned_from_chat_id=parent.chat_id,
+    )
+    grandchild = pcm.create_chat(
+        project.project_id,
+        title="sub-subchat",
+        spawned_from_chat_id=child.chat_id,
+    )
+    unrelated = pcm.create_chat(project.project_id, title="unrelated")
+
+    pcm.archive_chat(parent.chat_id)
+
+    assert pcm.get_chat(child.chat_id).archived is True
+    assert pcm.get_chat(grandchild.chat_id).archived is True
+    assert pcm.get_chat(unrelated.chat_id).archived is False
+
+
+def test_archive_cascade_postprocesses_each_subchat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every auto-archived subchat gets its own post-archive processing, and a
+    subchat that fails to archive neither strands its siblings nor swallows the
+    supervisor's own outcome (which is what drives the caller's post-processing).
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-cascade-postprocess", workspace="work")
+    parent = pcm.create_chat(project.project_id, title="supervisor")
+    good = pcm.create_chat(
+        project.project_id,
+        title="healthy subchat",
+        spawned_from_chat_id=parent.chat_id,
+    )
+    bad = pcm.create_chat(
+        project.project_id,
+        title="failing subchat",
+        spawned_from_chat_id=parent.chat_id,
+    )
+
+    # An empty chat archives to None, which would skip post-processing
+    # entirely; stub the transcript write so each chat yields a real outcome.
+    def fake_archive_session(*, ctx: object, **_kwargs: object) -> Path:
+        chat_id = ctx.key  # type: ignore[attr-defined]
+        if chat_id == bad.chat_id:
+            raise RuntimeError("transcript write failed")
+        return tmp_path / f"{chat_id}.md"
+
+    monkeypatch.setattr(pcm._transcripts, "archive_session", fake_archive_session)
+
+    postprocessed: list[str] = []
+    monkeypatch.setattr(
+        pcm,
+        "run_archive_postprocess",
+        lambda chat_id, outcome, chat_meta, project_meta: postprocessed.append(chat_id),
+    )
+
+    outcome = pcm.archive_chat(parent.chat_id)
+
+    assert outcome is not None
+    # The supervisor's post-processing is the caller's job, so only the
+    # cascaded subchat is handled here.
+    assert postprocessed == [good.chat_id]
+    assert pcm.get_chat(parent.chat_id).archived is True
+    assert pcm.get_chat(good.chat_id).archived is True
+    # The failure is logged and skipped, not retried and not hidden.
+    assert pcm.get_chat(bad.chat_id).archived is False
+
+
 def test_delete_and_archive_reclaim_codex_threads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
