@@ -57,24 +57,41 @@
       <template v-if="archivedChats.length"> · {{ archivedChats.length }} archived</template>
     </p>
 
-    <nav class="project-tabs" aria-label="Project sections">
+    <!-- A tablist, not a nav landmark: these switch panels in place rather than
+         navigating. role="tab" is only meaningful inside role="tablist", and
+         each tab owns the panel it names via aria-controls/aria-labelledby. -->
+    <div class="project-tabs" role="tablist" aria-label="Project sections">
       <button
         v-for="tab in projectTabs"
         :key="tab.key"
+        :id="tabId(tab.key)"
         type="button"
         class="project-tab"
         :class="{ active: activeTab === tab.key }"
-        :aria-selected="activeTab === tab.key"
-        :data-tab="tab.key"
         role="tab"
+        :aria-selected="activeTab === tab.key"
+        :aria-controls="panelId(tab.key)"
+        :tabindex="activeTab === tab.key ? 0 : -1"
+        :data-tab="tab.key"
         @click="activeTab = tab.key"
+        @keydown="onTabKeydown"
       >
         {{ tab.label }}
         <span v-if="tab.count !== undefined" class="tab-count">{{ tab.count }}</span>
       </button>
-    </nav>
+    </div>
 
-    <template v-if="activeTab === 'overview'">
+    <!-- The overview panel needs a real element to carry role="tabpanel", and
+         .project-view lays its children out with a flex gap — so this wrapper
+         re-declares the column gap or the rhythm between the cards collapses. -->
+    <div
+      v-if="activeTab === 'overview'"
+      :id="panelId('overview')"
+      class="tab-panel"
+      role="tabpanel"
+      :aria-labelledby="tabId('overview')"
+      tabindex="0"
+    >
     <section class="card">
       <div class="card-header">
         <h3>project context</h3>
@@ -245,12 +262,19 @@
         >Next</button>
       </div>
     </section>
-    </template>
+    </div>
 
-    <section v-else-if="activeTab === 'loops'" class="card automation-card">
+    <section
+      v-else-if="activeTab === 'loops'"
+      :id="panelId('loops')"
+      class="card automation-card"
+      role="tabpanel"
+      :aria-labelledby="tabId('loops')"
+      tabindex="0"
+    >
       <div class="card-header">
         <div>
-          <h3>loops ({{ projectLoops.length }})</h3>
+          <h3>loops <span v-if="loopCount !== undefined">({{ loopCount }})</span></h3>
           <p class="card-hint">Prompts that repeat inside a chat in this project.</p>
         </div>
       </div>
@@ -277,13 +301,24 @@
           </span>
         </button>
       </div>
+      <!-- Absence is only asserted once the fetch has actually resolved
+           (Rule S6): a failed or in-flight load must not read as "none". -->
+      <div v-else-if="loopsState === 'loading'" class="empty-row">// loading loops…</div>
+      <div v-else-if="loopsState === 'error'" class="empty-row">// could not load loops</div>
       <div v-else class="empty-row">// no loops send prompts into this project</div>
     </section>
 
-    <section v-else-if="activeTab === 'schedules'" class="card automation-card">
+    <section
+      v-else-if="activeTab === 'schedules'"
+      :id="panelId('schedules')"
+      class="card automation-card"
+      role="tabpanel"
+      :aria-labelledby="tabId('schedules')"
+      tabindex="0"
+    >
       <div class="card-header">
         <div>
-          <h3>schedules ({{ projectSchedules.length }})</h3>
+          <h3>schedules <span v-if="scheduleCount !== undefined">({{ scheduleCount }})</span></h3>
           <p class="card-hint">Scheduled prompts delivered to this project or one of its chats.</p>
         </div>
       </div>
@@ -310,6 +345,8 @@
           </span>
         </button>
       </div>
+      <div v-else-if="schedulesState === 'loading'" class="empty-row">// loading schedules…</div>
+      <div v-else-if="schedulesState === 'error'" class="empty-row">// could not load schedules</div>
       <div v-else class="empty-row">// no schedules deliver prompts to this project</div>
     </section>
   </div>
@@ -317,7 +354,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, useId } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
@@ -350,11 +387,44 @@ const project = computed(() => store.projects.find(p => p.project_id === props.p
 
 type ProjectTab = 'overview' | 'loops' | 'schedules'
 const activeTab = ref<ProjectTab>('overview')
+
+// Unique per mounted instance so the tab/panel id pairs stay valid even if two
+// project views are ever alive at once.
+const uid = useId()
+const tabId = (key: ProjectTab) => `${uid}-tab-${key}`
+const panelId = (key: ProjectTab) => `${uid}-panel-${key}`
+
 const projectTabs = computed(() => [
   { key: 'overview' as const, label: 'Overview' },
-  { key: 'loops' as const, label: 'Loops', count: projectLoops.value.length },
-  { key: 'schedules' as const, label: 'Schedules', count: projectSchedules.value.length },
+  { key: 'loops' as const, label: 'Loops', count: loopCount.value },
+  { key: 'schedules' as const, label: 'Schedules', count: scheduleCount.value },
 ])
+
+const TAB_KEYS = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
+
+// Roving tabindex: the bar is a single Tab stop and Left/Right/Home/End move
+// between tabs, per the ARIA tabs pattern. Selection follows focus because the
+// panels are cheap to render. Mirrors the arrow roaming in HomeRecentChats.
+function onTabKeydown(event: KeyboardEvent): void {
+  if (!TAB_KEYS.includes(event.key)) return
+  const current = event.currentTarget as HTMLElement | null
+  const bar = current?.parentElement
+  if (!current || !bar) return
+  const tabs = Array.from(bar.querySelectorAll<HTMLElement>('[role="tab"]'))
+  const index = tabs.indexOf(current)
+  if (index < 0) return
+  event.preventDefault()
+  let next = index
+  if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length
+  else if (event.key === 'ArrowRight') next = (index + 1) % tabs.length
+  else if (event.key === 'Home') next = 0
+  else next = tabs.length - 1
+  const target = tabs[next]
+  const key = target?.dataset.tab as ProjectTab | undefined
+  if (!key) return
+  activeTab.value = key
+  target.focus()
+}
 
 watch(project, (p) => {
   if (p && p.workspace && p.workspace !== store.activeWorkspace) {
@@ -373,6 +443,43 @@ const projectSchedules = computed(() =>
       || (schedule.web_chat_id !== null && projectChatIds.value.has(schedule.web_chat_id)),
   ),
 )
+
+// The task store is filled by ChatLayout's fire-and-forget fetch, so an empty
+// list here could mean "none", "still loading" or "the request failed" — three
+// different answers that all rendered as "no loops". Track the load so the
+// panel can say which, and so a tab omits a count it cannot vouch for.
+const automationLoad = ref<'loading' | 'ready' | 'error'>('loading')
+
+function automationState(count: number): 'list' | 'loading' | 'error' | 'none' {
+  if (count > 0) return 'list'
+  if (automationLoad.value === 'loading') return 'loading'
+  if (automationLoad.value === 'error') return 'error'
+  return 'none'
+}
+const loopsState = computed(() => automationState(projectLoops.value.length))
+const schedulesState = computed(() => automationState(projectSchedules.value.length))
+
+// undefined means "unknown", which renders as no count at all rather than a 0
+// that would be indistinguishable from a real zero.
+const loopCount = computed(() =>
+  loopsState.value === 'loading' || loopsState.value === 'error'
+    ? undefined
+    : projectLoops.value.length,
+)
+const scheduleCount = computed(() =>
+  schedulesState.value === 'loading' || schedulesState.value === 'error'
+    ? undefined
+    : projectSchedules.value.length,
+)
+
+async function loadAutomations(): Promise<void> {
+  try {
+    await Promise.all([taskStore.fetchLoops(), taskStore.fetchSchedules()])
+    automationLoad.value = 'ready'
+  } catch {
+    automationLoad.value = 'error'
+  }
+}
 const activeChats = computed(() =>
   allChats.value
     // Hide remote chats (session lives on another device, not openable here).
@@ -434,11 +541,21 @@ function scheduleFrequencyLabel(schedule: Schedule): string {
   return 'daily'
 }
 
+// Past timestamps go through the shared helper — this file already had a
+// private formatRelative removed once for forking the dialect (DESIGN_SYSTEM
+// §6), and the same options as formatFileTime keep the two readings identical.
+// formatRelative is past-only (it clamps negative elapsed time to zero), so a
+// future next_run would read as "just now" and gets an absolute date instead.
 function automationTimestamp(iso: string | null | undefined): string {
   if (!iso) return 'never'
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return iso
-  return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  const timestamp = Date.parse(iso)
+  if (!Number.isFinite(timestamp)) return iso
+  if (timestamp > Date.now()) {
+    return new Date(timestamp).toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    })
+  }
+  return formatRelative(iso, { suffix: true, absoluteAfterDays: 7 })
 }
 
 function openAutomation(id: string): void {
@@ -690,7 +807,7 @@ function formatFileTime(iso: string): string {
 
 async function reloadAll() {
   archivedPage.value = 0
-  await loadFiles()
+  await Promise.all([loadFiles(), loadAutomations()])
 }
 onMounted(reloadAll)
 // Re-fetch when the user navigates between projects without unmounting
@@ -822,15 +939,23 @@ watch(() => props.projectId, async () => {
 
 .project-tabs {
   display: flex;
-  gap: 4px;
+  gap: var(--space-1);
   border-bottom: 1px solid var(--border);
   margin-bottom: 0;
   overflow-x: auto;
 }
 
+/* The overview panel's own children are the cards, and .project-view spaces its
+   children with a flex gap — so the panel repeats that column layout. */
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
 .project-tab {
-  min-height: 44px;
-  padding: 8px 12px;
+  min-height: var(--touch);
+  padding: var(--space-2) var(--space-3);
   border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
@@ -848,17 +973,22 @@ watch(() => props.projectId, async () => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  margin-left: 4px;
-  padding: 0 5px;
-  border-radius: 999px;
+  /* Sized from the type token rather than a fixed 18px box, so the pill grows
+     with the Appearance font scale instead of clipping the digit. */
+  min-width: calc(var(--text-xs) + var(--space-2));
+  min-height: calc(var(--text-xs) + var(--space-1));
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
   background: var(--bg3);
   color: var(--fg2);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
-.project-tab.active .tab-count { background: var(--accent2); color: var(--fg); }
+/* Active is carried by the underline and the text colour. The pill stays
+   unfilled on purpose: a solid fill is reserved for "needs the user"
+   (Rule S1), and --fg on --accent2 is ~1.9:1 in the light theme. */
+.project-tab.active .tab-count { color: var(--fg); }
 
 .card {
   background: var(--bg2);
@@ -887,7 +1017,7 @@ watch(() => props.projectId, async () => {
 }
 
 .card-hint {
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
   color: var(--fg3);
   font-size: var(--text-xs);
 }
@@ -997,15 +1127,17 @@ watch(() => props.projectId, async () => {
   padding: 4px 0;
 }
 
+/* Raw px on purpose: keeps a mostly-empty automations card from collapsing to a
+   two-line sliver. No token expresses "minimum card body height". */
 .automation-card { min-height: 180px; }
 .automation-list { display: flex; flex-direction: column; }
 .automation-row {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1);
   width: 100%;
-  min-height: 64px;
-  padding: 10px 4px;
+  min-height: var(--touch);
+  padding: var(--space-2) var(--space-1);
   border: 0;
   border-bottom: 1px solid var(--border);
   background: transparent;
@@ -1016,13 +1148,17 @@ watch(() => props.projectId, async () => {
 }
 .automation-row:last-child { border-bottom: none; }
 .automation-row:hover { background: var(--bg3); }
+/* Tab panels carry tabindex="0" per the ARIA tabs pattern, so they need a
+   visible ring too — a focusable region with no ring is a lost keyboard user. */
 .automation-row:focus-visible,
+.tab-panel:focus-visible,
+.automation-card:focus-visible,
 .project-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .automation-row-main,
 .automation-row-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   min-width: 0;
 }
 .automation-title {
@@ -1154,6 +1290,6 @@ watch(() => props.projectId, async () => {
   .project-stats { grid-template-columns: repeat(2, 1fr); }
   .file-meta { display: none; }
   .automation-row-meta { display: block; line-height: 1.5; }
-  .automation-row-meta .dot { margin: 0 4px; }
+  .automation-row-meta .dot { margin: 0 var(--space-1); }
 }
 </style>
