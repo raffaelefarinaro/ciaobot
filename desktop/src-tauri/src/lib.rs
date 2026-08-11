@@ -787,6 +787,45 @@ fn invoke_service_action(app: AppHandle, action: &'static str, force: bool, exit
     });
 }
 
+fn disconnect_from_host(app: AppHandle) {
+    thread::spawn(move || {
+        let runtime = match app.state::<DesktopModel>().runtime.read() {
+            Ok(runtime) => runtime.clone(),
+            Err(error) => {
+                show_error(&app, "Could not disconnect from host", error.to_string());
+                return;
+            }
+        };
+        let result = tauri::async_runtime::block_on(capture::disconnect_from_host(&runtime));
+        match result {
+            Ok(()) => {
+                tray_log(&app, "client disconnect: promoted local node to host");
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.navigate(runtime.server_url);
+                }
+                let _ = refresh_tray(&app);
+            }
+            Err(error) => show_error(&app, "Could not disconnect from host", error),
+        }
+    });
+}
+
+fn prompt_disconnect_from_host(app: &AppHandle) {
+    let app_for_action = app.clone();
+    app.dialog()
+        .message("The host may be unavailable. Disconnect this device and make it the host here?")
+        .title("Disconnect from host?")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Disconnect".into(),
+            "Cancel".into(),
+        ))
+        .show(move |confirmed| {
+            if confirmed {
+                disconnect_from_host(app_for_action);
+            }
+        });
+}
+
 fn set_login_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let previous = app
         .autolaunch()
@@ -892,6 +931,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             match id {
                 "open" => show_window(app, "main"),
+                "disconnect" => prompt_disconnect_from_host(app),
                 "start" => invoke_service_action(app.clone(), "start", false, false),
                 "restart" => invoke_service_action(app.clone(), "restart", false, false),
                 "update" => {
