@@ -852,3 +852,70 @@ def test_create_chat_custom_provider_without_model_list_accepts_any(
 
     chat = manager.create_chat(project.project_id, model="custom:lm-studio:anything")
     assert chat.model == "custom:lm-studio:anything"
+
+
+def test_create_chat_rejects_ollama_tier_target_without_backend(
+    tmp_path: Path,
+) -> None:
+    """A default Ollama tier target must not pass when no backend is available.
+
+    Default tier targets like ``minimax-m3:cloud`` are filled in even when
+    no Ollama backend is configured; accepting them unconditionally would
+    let the id reach a Claude provider with no Ollama routing overrides
+    and fail on its first turn (#259).
+    """
+    from ciao.providers.ollama import OllamaSettings
+
+    manager = _make_manager(
+        tmp_path,
+        ollama=OllamaSettings(
+            # No cloud key, no local daemon: no Ollama backend at all.
+            api_key="",
+            models=(),
+        ),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown model 'minimax-m3:cloud'"):
+        manager.create_chat(project.project_id, model="minimax-m3:cloud")
+
+
+def test_create_chat_accepts_ollama_tier_target_with_backend(
+    tmp_path: Path,
+) -> None:
+    """A tier target is valid when the corresponding backend is available."""
+    from ciao.providers.ollama import OllamaSettings
+
+    manager = _make_manager(
+        tmp_path,
+        ollama=OllamaSettings(
+            api_key="test-key",
+            models=("kimi-k2.7-code:cloud",),
+            sonnet_model="kimi-k2.7-code:cloud",
+        ),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    chat = manager.create_chat(project.project_id, model="kimi-k2.7-code:cloud")
+    assert chat.model == "kimi-k2.7-code:cloud"
+
+
+def test_create_chat_rejects_unmatched_custom_codex_model(tmp_path: Path) -> None:
+    """Custom Codex models still need their provider's membership check.
+
+    The native Codex exemption must not bypass ``provider_for_model``'s
+    enumeration, else ``custom:my-provider:typo`` against a codex-routed
+    provider configured for a different model passes validation and the
+    typo reaches the endpoint on its first turn (#259).
+    """
+    _write_custom_provider(
+        tmp_path, provider_id="my-codex", models=["gpt-5.6"]
+    )
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown model 'custom:my-codex:typo'"):
+        manager.create_chat(project.project_id, model="custom:my-codex:typo")
+
+    chat = manager.create_chat(project.project_id, model="custom:my-codex:gpt-5.6")
+    assert chat.model == "custom:my-codex:gpt-5.6"

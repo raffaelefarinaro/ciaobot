@@ -4073,18 +4073,18 @@ class ProjectChatManager:
         A valid id is therefore either a configured id, a tier alias
         (``haiku``/``sonnet``/``opus``/``fable``) that ``_resolve_claude_model``
         expands at dispatch time, an Ollama model that is in the local
-        daemon list, the cloud allowlist / discovered catalog, or the
-        configured tier targets, an OpenRouter model from the static
-        allowlist or tier targets (valid even when catalog discovery failed
-        and never merged them into ``claude_models``), or a
-        ``custom:<id>:<model>`` id routed through a configured custom
-        provider. Codex is skipped because its catalog is async and the
-        Codex CLI already rejects unknown ids with a clear error at the
-        first turn.
+        daemon list, the cloud allowlist / discovered catalog, or a
+        configured tier target whose backend is actually available, an
+        OpenRouter model from the static allowlist or tier targets (valid
+        even when catalog discovery failed and never merged them into
+        ``claude_models``), or a ``custom:<id>:<model>`` id routed through
+        a configured custom provider. Native Codex ids are skipped because
+        the catalog is async and the Codex CLI already rejects unknown ids
+        with a clear error at the first turn; ``custom:``-prefixed ids
+        still flow through the custom-provider membership check before
+        that exemption fires.
         """
         if not model:
-            return
-        if provider == "codex":
             return
         custom = provider_for_model(self._config, model)
         if custom is not None:
@@ -4092,30 +4092,42 @@ class ProjectChatManager:
             # of its members, else the typo reaches the endpoint on the
             # first turn (#259). An empty list means no catalog to check
             # against (e.g. an LM Studio endpoint serving dynamic models),
-            # so any id for that provider stays valid.
+            # so any id for that provider stays valid. Custom Codex models
+            # are checked here too, so a codex-routed typo never bypasses
+            # this validator.
             if not custom.models or model in {
                 encode_model(custom.id, m) for m in custom.models
             }:
                 return
+        if provider == "codex":
+            return
         if is_tier(model):
             return
         # Ollama: membership in the local daemon list, the cloud allowlist /
-        # discovered catalog, or the configured tier targets. Not the routing
-        # shape predicate (``is_ollama_model``), which accepts any
-        # ``:tag``-shaped id when cloud is configured and would let a typo
-        # through to a chat that fails on its first turn (#259).
+        # discovered catalog, or a configured tier target whose backend is
+        # actually available. Default tier targets like ``minimax-m3:cloud``
+        # are filled in even when no Ollama backend is configured, so
+        # accepting them unconditionally lets the id reach a Claude
+        # provider with no Ollama routing overrides and fail on its first
+        # turn (#259).
         ollama = self._config.ollama
+        local_available = bool(ollama.local_models)
+        cloud_available = bool(ollama.api_key) and ollama.api_key != "ollama"
+        backend_available = local_available or cloud_available
         if (
             is_local_ollama_model(model, ollama)
             or model in ollama.models
-            or model
-            in {
-                ollama.haiku_model,
-                ollama.sonnet_model,
-                ollama.opus_model,
-                ollama.fable_model,
-                ollama.title_model,
-            }
+            or (
+                backend_available
+                and model
+                in {
+                    ollama.haiku_model,
+                    ollama.sonnet_model,
+                    ollama.opus_model,
+                    ollama.fable_model,
+                    ollama.title_model,
+                }
+            )
         ):
             return
         # OpenRouter: the statically configured models and tier targets stay
