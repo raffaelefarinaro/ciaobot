@@ -52,6 +52,13 @@ let maxViewportHeight = 0
 let listenersAttached = false
 
 function measure(): void {
+  // The settling timers below fire up to 500ms after they are scheduled, which
+  // can outlive the page — or, under vitest, the jsdom environment that owns
+  // `window`. Without this guard a component that merely called
+  // onViewportChange() could fail an unrelated test file with
+  // "ReferenceError: window is not defined" during teardown.
+  if (typeof window === 'undefined' || typeof document === 'undefined') return
+
   const h = viewportHeight()
   maxViewportHeight = Math.max(maxViewportHeight, h)
   document.documentElement.style.setProperty('--app-h', `${h}px`)
@@ -64,9 +71,20 @@ function measure(): void {
   for (const cb of subscribers) cb(h)
 }
 
+// Tracked so repeated calls (every resume, orientation change, pageshow, and
+// every lazy onViewportChange caller) cannot pile up overlapping timer sets.
+let settlingTimers: ReturnType<typeof setTimeout>[] = []
+
 function remeasureWhileSettling(): void {
   measure()
-  for (const delay of RESETTLE_DELAYS_MS) setTimeout(measure, delay)
+  for (const timer of settlingTimers) clearTimeout(timer)
+  settlingTimers = RESETTLE_DELAYS_MS.map(delay => setTimeout(measure, delay))
+}
+
+/** Cancel pending settling timers. Exported for test teardown. */
+export function stopViewportPlumbing(): void {
+  for (const timer of settlingTimers) clearTimeout(timer)
+  settlingTimers = []
 }
 
 /** Idempotent: safe to call from `main.ts` and lazily from `onViewportChange`. */
