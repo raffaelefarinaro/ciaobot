@@ -369,6 +369,27 @@ describe('ChatPanel /plan interactions', () => {
     wrapper.unmount()
   })
 
+  it('lists and inserts skills from a slash token anywhere in the draft', async () => {
+    const { wrapper } = await mountPanel({
+      skills: [{
+        name: 'research',
+        description: 'Research with the loaded skill',
+        argument_hint: '',
+        source: 'skill',
+        path: 'skills/',
+      }],
+    })
+
+    await wrapper.get('textarea.chat-input').setValue('Please use /res')
+    const row = wrapper.get('.commands-picker-row')
+    expect(row.text()).toContain('/research')
+    await row.trigger('mousedown')
+    await nextTick()
+
+    expect(textareaValue(wrapper)).toBe('Please use /research')
+    wrapper.unmount()
+  })
+
   it('restores auto after /plan enters and exits plan mode', async () => {
     const first = await mountPanel({ mode: 'auto' })
     first.updateChat.mockResolvedValue()

@@ -929,7 +929,8 @@
       </div>
     </div>
 
-    <!-- Slash-command picker (shown when the input starts with "/") -->
+    <!-- Slash-command picker. Skills can be picked from any slash token;
+         Ciao-owned commands remain start-of-message only. -->
     <div v-if="showCommandsPicker" class="commands-picker" role="listbox" aria-label="Slash commands">
       <div
         v-for="(cmd, i) in filteredCommands"
@@ -970,7 +971,7 @@
           @input="handleInput"
           @paste="handlePaste"
           @focus="handleInputFocus"
-          @click="mentionPicker.refresh"
+          @click="refreshComposerPickers"
         ></textarea>
         <div class="input-actions">
           <!-- Voice recording is allowed during streaming too: the user's
@@ -1254,6 +1255,40 @@ function primaryAction() {
 const slashCommands = ref<SlashCommand[]>(includeBuiltinPlanCommand([]))
 const commandHighlightIdx = ref(0)
 
+interface SlashCommandTrigger {
+  start: number
+  end: number
+  query: string
+}
+
+/** Find a slash token immediately before the textarea caret. */
+function findSlashCommandTrigger(text: string, cursor: number): SlashCommandTrigger | null {
+  const end = Math.max(0, Math.min(cursor, text.length))
+  const beforeCaret = text.slice(0, end)
+  const match = beforeCaret.match(/(?:^|\s)\/([^\s/]*)$/)
+  if (!match) return null
+
+  const start = end - match[0].length + match[0].lastIndexOf('/')
+  return { start, end, query: match[1] || '' }
+}
+
+const slashCommandTrigger = ref<SlashCommandTrigger | null>(null)
+
+function dismissSlashCommandPicker(): void {
+  slashCommandTrigger.value = null
+  commandHighlightIdx.value = 0
+}
+
+function refreshSlashCommandPicker(): void {
+  const el = inputEl.value
+  if (!el || el.selectionStart !== el.selectionEnd) {
+    dismissSlashCommandPicker()
+    return
+  }
+  slashCommandTrigger.value = findSlashCommandTrigger(inputText.value, el.selectionStart)
+  commandHighlightIdx.value = 0
+}
+
 async function loadSlashCommands(): Promise<void> {
   try {
     const provider = encodeURIComponent(chat.value.provider || '')
@@ -1269,14 +1304,16 @@ async function loadSlashCommands(): Promise<void> {
 }
 
 const filteredCommands = computed<SlashCommand[]>(() => {
-  const text = inputText.value
-  if (!text.startsWith('/')) return []
-  // Only show while the user is typing the command name itself — once they
-  // add a space or newline, they're typing arguments and the picker steps aside.
-  const firstToken = text.slice(1).split(/\s/, 1)[0] ?? ''
-  if (text.slice(1).includes(' ') || text.slice(1).includes('\n')) return []
-  const needle = firstToken.toLowerCase()
-  return slashCommands.value.filter(c => c.name.toLowerCase().startsWith(needle))
+  const active = slashCommandTrigger.value
+  if (!active) return []
+  const needle = active.query.toLowerCase()
+  return slashCommands.value.filter(command =>
+    // Project/user commands are expanded only when they make up the prompt.
+    // Skills are native provider entries, so they remain available alongside
+    // file, chat, and other inline references anywhere in the draft.
+    (active.start === 0 || command.source === 'skill')
+    && command.name.toLowerCase().startsWith(needle),
+  )
 })
 
 const showCommandsPicker = computed(() => filteredCommands.value.length > 0)
@@ -1286,15 +1323,36 @@ watch(filteredCommands, (list) => {
 })
 
 function applyCommand(cmd: SlashCommand) {
-  // Trailing space only when the command expects arguments, so a naked
-  // `/brief` is ready to send without requiring an extra keystroke.
-  inputText.value = cmd.argument_hint ? `/${cmd.name} ` : `/${cmd.name}`
-  commandHighlightIdx.value = 0
+  const active = slashCommandTrigger.value
+  if (!active) return
+
+  const before = inputText.value.slice(0, active.start)
+  const after = inputText.value.slice(active.end)
+  const token = `/${cmd.name}`
+  // Keep the existing separator when this replaces a token in the middle of
+  // a draft; otherwise leave room for command arguments as before.
+  const suffix = cmd.argument_hint && !(after && /^\s/.test(after)) ? ' ' : ''
+  inputText.value = before + token + suffix + after
+  const cursor = before.length + token.length + suffix.length
+  dismissSlashCommandPicker()
   nextTick(() => {
-    inputEl.value?.focus()
+    const input = inputEl.value
+    if (!input) return
+    input.setSelectionRange(cursor, cursor)
+    input.focus()
     autoResize()
   })
 }
+
+watch(inputText, () => {
+  if (!slashCommandTrigger.value) return
+  const el = inputEl.value
+  const current = el && el.selectionStart === el.selectionEnd
+    ? findSlashCommandTrigger(inputText.value, el.selectionStart)
+    : null
+  if (current) slashCommandTrigger.value = current
+  else dismissSlashCommandPicker()
+})
 const messagesEl = ref<HTMLElement>()
 const scrollAnchor = ref<HTMLElement>()
 const editingTitle = ref(false)
@@ -1621,6 +1679,11 @@ const mentionPicker = useMentionPicker({
 const filteredMentions = mentionPicker.filteredItems
 const mentionHighlightIdx = mentionPicker.highlightIndex
 const showMentionPicker = mentionPicker.showPicker
+
+function refreshComposerPickers(): void {
+  mentionPicker.refresh()
+  refreshSlashCommandPicker()
+}
 
 async function loadProjectFiles() {
   if (!project.value || !project.value.vault_folder) {
@@ -3214,7 +3277,7 @@ function autoResize() {
 
 function handleInput(): void {
   autoResize()
-  mentionPicker.refresh()
+  refreshComposerPickers()
 }
 
 function handleKeydown(e: KeyboardEvent) {
@@ -3284,6 +3347,7 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 function handleInputFocus() {
+  refreshComposerPickers()
   if (window.innerWidth < 768 && messagesEl.value) {
     // Wait for the keyboard animation, then scroll messages to the bottom
     // so the latest content sits above the input. Use direct scrollTop
