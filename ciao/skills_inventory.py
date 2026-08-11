@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 
-def build_skill_inventory(workspace_root: Path | str) -> dict[str, Any]:
+def build_skill_inventory(
+    workspace_root: Path | str,
+    *,
+    include_content: bool = True,
+) -> dict[str, Any]:
     """Return installed/known skills labelled by source.
 
     Source labels intentionally stay coarse for the Settings UI:
@@ -29,17 +33,17 @@ def build_skill_inventory(workspace_root: Path | str) -> dict[str, Any]:
         counts[label] += 1
         source = "skills/" if is_custom else str(lock.get("source") or "skills-lock.json")
         source_type = "custom" if is_custom else str(lock.get("sourceType") or "github")
-        skills.append(
-            {
-                "name": name,
-                "label": label,
-                "source": source,
-                "source_type": source_type,
-                "description": _description_for(root, name, prefer_custom=is_custom),
-                "content": _content_for(root, name, prefer_custom=is_custom),
-                "installed_targets": _installed_targets(root, name),
-            }
-        )
+        skill = {
+            "name": name,
+            "label": label,
+            "source": source,
+            "source_type": source_type,
+            "description": _description_for(root, name, prefer_custom=is_custom),
+            "installed_targets": _installed_targets(root, name),
+        }
+        if include_content:
+            skill["content"] = _content_for(root, name, prefer_custom=is_custom)
+        skills.append(skill)
 
     return {"counts": counts, "skills": skills}
 

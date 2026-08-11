@@ -174,6 +174,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
@@ -188,8 +189,10 @@ import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
 import { isDesktopApp } from '../lib/desktop'
+import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
 
 const store = useProjectStore()
+const fileViewer = useFileViewerStore()
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
 // reach composer-owned actions (dictation, archive).
@@ -203,6 +206,11 @@ const store = useProjectStore()
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
 // Ref into HomeRecentChats for arrow-key navigation on the home screen.
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
+
+// Reactive handle on the global font scale. Used by the Cmd/Ctrl+Shift+= and
+// Cmd/Ctrl+Shift+- shortcuts (below); the same composable is consumed by
+// Settings → Appearance so the +/- buttons and the shortcuts stay in sync.
+const fontScale = useFontScale()
 
 const DEFAULT_SIDEBAR_WIDTH = 280
 const MIN_SIDEBAR_WIDTH = 180
@@ -401,10 +409,17 @@ const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings'>(() => {
 // click somewhere else", because clicking a chat in the sidebar navigates to
 // /chat/:id and revived the handler. One predicate, so the next view mode
 // added has a single place to declare itself.
-const shortcutsActive = computed(() =>
+// Split in two so the number-key workspace shortcut, which is useful on the
+// schedules view, does not have to restate the rest of the gate and drift
+// from it. Anything that owns the screen — a confirm dialog, the file viewer
+// modal — belongs in the base predicate, so a new overlay is declared once.
+const viewShortcutsActive = computed(() =>
   viewMode.value !== 'settings'
-  && viewMode.value !== 'schedules'
-  && !pendingConfirm.value,
+  && !pendingConfirm.value
+  && !fileViewer.isOpen,
+)
+const shortcutsActive = computed(() =>
+  viewShortcutsActive.value && viewMode.value !== 'schedules',
 )
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
@@ -570,7 +585,9 @@ function onChatSelected() {
 }
 
 function closeChat() {
-  store.activeChatId = null
+  void store.closeChat().catch((error) => {
+    store.pushErrorToast('Could not close chat', error instanceof Error ? error.message : 'Could not close chat')
+  })
 }
 
 // ── Global keyboard shortcuts ───────────────────────────────────────
@@ -583,9 +600,10 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
 }
 
-// Unmodified keys, which no browser reserves: arrow keys roam the home
-// recent-chat grid (Enter opens the focused card natively) and Esc closes the
-// open chat. Anything carrying a modifier stays in onShortcutKeydown.
+// Unmodified keys, which no browser reserves: number keys switch to the
+// corresponding workspace, arrow keys roam the home recent-chat grid (Enter
+// opens the focused card natively), and Esc closes the open chat. Anything
+// carrying a modifier stays in onShortcutKeydown.
 //
 // These must live in exactly ONE listener. They were previously handled here
 // AND again in onShortcutKeydown; in the desktop app both listeners are bound,
@@ -593,6 +611,23 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
+  // Workspace navigation is also useful from the automations view, where the
+  // chat-only shortcuts are disabled. Match the visible workspace order and
+  // keep the shortcut out of text fields so numbers remain typeable.
+  if (viewShortcutsActive.value && !isTypingTarget(e.target)
+    && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+    && /^[1-9]$/.test(e.key)) {
+    const workspace = store.workspaceOptions[Number(e.key) - 1]
+    if (workspace) {
+      e.preventDefault()
+      // The schedules view has no chat to transition into.
+      void store.switchWorkspace(workspace.name, {
+        transition: viewMode.value !== 'schedules',
+      })
+      return
+    }
+  }
+
   if (!shortcutsActive.value) return
 
   if (e.key.startsWith('Arrow')) {
@@ -646,6 +681,56 @@ function onShortcutKeydown(e: KeyboardEvent) {
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
     return
+  }
+
+  // Sidebar: Cmd+S (Desktop) or Option+S (Web/PWA), where Cmd+S is the
+  // browser's Save Page. Skipped while typing for the same reason as archive:
+  // in a text field Option+S is how you type ß, and stealing it would break
+  // text entry for the sake of a view toggle.
+  if ((isDesktop && mod && (e.key === 's' || e.key === 'S')) || (!isDesktop && alt && (e.key === 's' || e.key === 'S'))) {
+    if (isTypingTarget(e.target)) return
+    e.preventDefault()
+    sidebarCollapsed.value = !sidebarCollapsed.value
+    return
+  }
+
+  // Model picker: Cmd+Shift+M (Desktop) or Option+M (Web/PWA). Plain Cmd+M is
+  // reserved by macOS for Minimize Window and cannot be intercepted reliably.
+  // Not gated on the typing target, like dictation: opening the picker is the
+  // useful reading of the key even mid-compose, and the picker is a popover,
+  // not a text mutation.
+  if ((isDesktop && mod && e.shiftKey && !alt && (e.key === 'm' || e.key === 'M')) || (!isDesktop && alt && (e.key === 'm' || e.key === 'M'))) {
+    if (!store.activeChat) return
+    e.preventDefault()
+    chatPanelRef.value?.toggleModelPicker()
+    return
+  }
+
+  // Font zoom: Cmd+Shift+= / Cmd+Shift+- in the desktop app, Option+= /
+  // Option+- in the PWA — the same split as every other modifier shortcut
+  // here, and for the same reason.
+  //
+  // Cmd+Shift+= cannot be used in a browser: on a US layout that chord *is*
+  // Cmd++, the browser's own zoom-in, which is handled above the page and
+  // ignores preventDefault. The page zoomed *and* the font grew, two steps at
+  // once, while Cmd+Shift+- (not a browser chord) moved one — so the two
+  // directions disagreed and browser zoom-in became unusable on its own.
+  //
+  // Skipped while typing because Option+= / Option+- type ≠ and – on macOS.
+  // Step, bounds and persistence come from useFontScale, shared with the
+  // Settings +/- buttons.
+  const zoomModifier = isDesktop ? (mod && e.shiftKey && !alt) : (alt && !mod)
+  if (zoomModifier && !isTypingTarget(e.target)) {
+    if (e.key === '=' || e.key === '+') {
+      e.preventDefault()
+      fontScale.adjust(FONT_SCALE_STEP)
+      return
+    }
+    if (e.key === '-' || e.key === '_') {
+      e.preventDefault()
+      fontScale.adjust(-FONT_SCALE_STEP)
+      return
+    }
   }
 }
 

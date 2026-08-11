@@ -71,6 +71,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - Per-workspace default model and model bucket (which controls how aliases like `opus`/`sonnet` resolve), per-chat override in the picker.
 - Beyond per-chat routing, one chat can **reach another model without leaving the conversation**: `adversarial_review` for an inline multi-model second opinion, or a delegate (see §1) for writable work on a different model.
 - **Voice** is on-device and free — one engine each, with no API key, no per-minute billing, and no engine picker: dictation uses Apple's dictation models and speech uses `AVSpeechSynthesizer`, both through the `ciaobot-native` sidecar bundled in `Ciaobot.app`. It needs a **macOS 26+ host with the desktop app installed**; on Linux, Windows, older macOS, or a package-only install there is no voice, and Settings says so instead of failing when you press record. The constraint is on the *host* only — a phone or iPad talking to a Mac host gets voice, because the PWA uploads the audio to the host to transcribe.
+- **Session insights** can use Apple Intelligence as an explicit on-device model. Settings can re-run the text-only extraction against a small sample of already-processed archives for a read-only comparison; archives are not modified by that test.
 
 ### 7. Google Workspace (`gws`)
 

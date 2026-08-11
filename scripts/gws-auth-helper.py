@@ -145,7 +145,14 @@ def extract_email_from_id_token(id_token: str | None) -> str:
     return ""
 
 
-def save_credentials(config_dir: Path, client_id: str, client_secret: str, refresh_token: str, email: str = "") -> None:
+def save_credentials(
+    config_dir: Path,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    email: str = "",
+    scopes: str = "",
+) -> None:
     creds = {
         "client_id": client_id,
         "client_secret": client_secret,
@@ -154,6 +161,10 @@ def save_credentials(config_dir: Path, client_id: str, client_secret: str, refre
     }
     if email:
         creds["email"] = email
+    # Same normalization the in-app exchange uses, so both consent paths write
+    # the file in one shape and Settings has a single format to read.
+    if cleaned := sorted(set(scopes.split())):
+        creds["scopes"] = cleaned
     path = config_dir / "credentials.json"
     with open(path, "w") as f:
         json.dump(creds, f, indent=2)
@@ -263,7 +274,15 @@ def main() -> None:
     print("Got refresh token. Saving credentials...")
     clean_stale_files(config_dir)
     email = extract_email_from_id_token(tokens.get("id_token"))
-    save_credentials(config_dir, client_id, client_secret, refresh_token, email=email)
+    granted_scopes = tokens.get("scope") or ""
+    save_credentials(
+        config_dir,
+        client_id,
+        client_secret,
+        refresh_token,
+        email=email,
+        scopes=granted_scopes,
+    )
     fix_encryption_key_permissions(config_dir)
 
     print("\nDone. Verify with:")

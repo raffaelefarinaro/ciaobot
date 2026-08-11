@@ -182,7 +182,7 @@ When your message mentions a name that appears in the vault index, the agent get
 **Voice — dictation and read-aloud**
 
 - Speech-to-text dictation in any chat, free and on-device using macOS speech recognition (macOS 26+, nothing to download, no API key).
-- Text-to-speech read-aloud of replies: cloud voices or the free on-device macOS system voice. Both on-device engines run through a small helper bundled in `Ciaobot.app`, so there is no model download and no optional package to install. For better read-aloud, [add a Premium voice](https://support.apple.com/guide/mac-help/mchlp2290/mac) in System Settings — Ciaobot uses the highest-quality voice you have installed.
+- Text-to-speech read-aloud of replies uses the free on-device macOS system voice through a small helper bundled in `Ciaobot.app`. There is no cloud voice, model download, or optional package to install. For better read-aloud, [add a Premium voice](https://support.apple.com/guide/mac-help/mchlp2290/mac) in System Settings — Ciaobot refreshes the installed voice list and uses the highest-quality voice you have installed.
 
 **Files and documents**
 
@@ -257,7 +257,7 @@ Recurring schedules that ship enabled ([ciao/stock/schedules.json](ciao/stock/sc
 
 | Routine | Cadence | What it does |
 |---|---|---|
-| Memory curation | Daily | Reviews recent archived chats, memory proposals, and learnings; updates vault pages and `Workspace/Learnings.md`. Removes bounded-memory entries after a valid `[expires: YYYY-MM-DD]` date and reports malformed expiration tags without guessing. |
+| Memory curation | Daily | Reviews recent archived chats, memory proposals, and learnings; updates vault pages and `Workspace/Learnings.md`. Removes bounded-memory entries after a valid `[expires: YYYY-MM-DD]` date and reports malformed expiration tags without guessing. Then runs `ciao memory-audit --json` and repairs rot in the always-loaded regions: entries that record a chat event instead of a current value move to `Workspace/Learnings.md`, entries citing a path that no longer exists get corrected or dropped, and a subject holding two competing values gets collapsed to the current one. |
 | Workspace hygiene | Weekly (Sun) | Regenerates the vault index with `ciao vault-index --write`, then runs `ciao os-audit --json`. It can repair low-risk link and index drift, then verifies the remaining findings. |
 | Skill evolution | Weekly (Sun) | Drafts skill-improvement proposals from recent usage; never applies them automatically. |
 

@@ -164,6 +164,13 @@ export interface ChatRow {
   isDelegate: boolean
 }
 
+// One sidebar stack. The supervisor remains the visible anchor and its
+// delegate chats can be expanded beneath it as a single group.
+export interface ChatGroup {
+  chat: ChatInfo
+  delegates: ChatInfo[]
+}
+
 export interface ChatRetryInfo {
   status: '' | 'pending' | 'stopped'
   next_at: string
@@ -673,12 +680,13 @@ export interface SlashCommand {
   name: string
   description: string
   argument_hint: string
-  source: 'project' | 'user' | 'builtin'
+  source: 'project' | 'user' | 'builtin' | 'skill'
   path: string
 }
 
 export interface CommandsResponse {
   commands: SlashCommand[]
+  skills?: SlashCommand[]
 }
 
 // ── Settings agent assets ────────────────────────────────────────────────

@@ -60,7 +60,7 @@
         <div class="card">
           <div class="settings-card-header">
             <p class="section-title">keyboard shortcuts</p>
-            <p class="hint">Global combos that work while a chat is open. Text fields keep their normal meaning: Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
+            <p class="hint">Global shortcuts. Text fields keep their normal meaning: number keys stay typeable, Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
           </div>
           <ul class="shortcut-list">
             <li>
@@ -77,6 +77,27 @@
               <kbd v-if="inDesktopApp">&#8984;A</kbd>
               <kbd v-else>&#8224;A</kbd>
               <span>Archive the open chat (asks to confirm)</span>
+            </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;S</kbd>
+              <kbd v-else>&#8224;S</kbd>
+              <span>Show or hide the sidebar</span>
+            </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;&#8679;M</kbd>
+              <kbd v-else>&#8224;M</kbd>
+              <span>Open the model picker</span>
+            </li>
+            <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;&#8679;=</kbd>
+              <kbd v-else>&#8224;=</kbd>
+              <span>Increase the font size</span>
+            </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;&#8679;-</kbd>
+              <kbd v-else>&#8224;-</kbd>
+              <span>Decrease the font size</span>
             </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
             <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
@@ -366,9 +387,9 @@
             </div>
             <div class="settings-control">
               <div class="font-scale-row">
-                <button class="btn-small" @click="adjustFontScale(-0.05)" :disabled="fontScale <= 0.8">Decrease</button>
+                <button class="btn-small" @click="adjustFontScale(-FONT_SCALE_STEP)" :disabled="fontScale <= MIN_FONT_SCALE">Decrease</button>
                 <span class="font-scale-display">{{ fontScalePercent }}%</span>
-                <button class="btn-small" @click="adjustFontScale(0.05)" :disabled="fontScale >= 1.5">Increase</button>
+                <button class="btn-small" @click="adjustFontScale(FONT_SCALE_STEP)" :disabled="fontScale >= MAX_FONT_SCALE">Increase</button>
                 <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
               </div>
             </div>
@@ -528,8 +549,39 @@
                     &middot; {{ getJobLastError('insights') }}
                   </span>
                 </div>
+                <div class="routine-actions">
+                  <button
+                    type="button"
+                    class="btn-small"
+                    :disabled="insightsComparisonPending || routinesSaving"
+                    @click="compareAppleInsights"
+                  >{{ insightsComparisonPending ? 'Comparing…' : 'Compare Apple Intelligence' }}</button>
+                </div>
+                <div v-if="insightsComparison" class="routine-comparison">
+                  <span v-if="!insightsComparison.available" class="hint--warn">
+                    {{ insightsComparison.reason || 'Apple Intelligence is unavailable.' }}
+                  </span>
+                  <span v-else-if="!insightsComparison.results.length" class="hint">
+                    {{ insightsComparison.reason || 'No archived chats with Session insights were found.' }}
+                  </span>
+                  <template v-else>
+                    <span class="hint">Apple re-ran the text-only extraction on {{ insightsComparison.results.length }} existing archive(s). Shared headings show where the signal matched.</span>
+                    <div v-for="result in insightsComparison.results" :key="result.archive" class="routine-comparison-result">
+                      <strong>{{ result.archive }}</strong>
+                      <span v-if="result.error" class="hint--warn"> · {{ result.error }}</span>
+                      <span v-else> · shared: {{ result.shared_sections?.join(', ') || 'none' }}</span>
+                      <details v-if="result.apple_output">
+                        <summary>Apple output</summary>
+                        <pre>{{ result.apple_output }}</pre>
+                      </details>
+                    </div>
+                  </template>
+                </div>
               </div>
-              <div class="routine-model-controls">
+              <div
+                class="routine-model-controls"
+                :class="{ 'routine-model-controls--single': routineProviderValue('insights_model') === 'apple' }"
+              >
                 <select
                   class="routine-select routine-select--provider"
                   :value="routineProviderValue('insights_model')"
@@ -537,12 +589,14 @@
                   @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option value="automatic">Automatic</option>
+                  <option value="apple">Local (free)</option>
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
                   <option v-if="routineProviderValue('insights_model') === 'custom'" value="custom">Custom model</option>
                 </select>
                 <select
+                  v-if="routineProviderValue('insights_model') !== 'apple'"
                   class="routine-select routine-select--tier"
                   :value="routineTierValue('insights_model')"
                   :disabled="routinesSaving || !routineTierSelectable('insights_model')"
@@ -552,7 +606,16 @@
                     {{ tier.label }}
                   </option>
                 </select>
-                <span class="routine-model-hint">{{ routineModelSummary('insights_model') }}</span>
+                <span class="routine-model-hint">
+                  <template v-if="routineProviderValue('insights_model') === 'apple'">
+                    Runs on-device for free using Apple Intelligence. Nothing to install.
+                    <span v-if="routines && routines.apple_model_available === false" class="hint--warn">
+                      Unavailable: {{ routines.apple_model_unavailable_reason || 'not supported on this machine' }} —
+                      insights currently fall back to a cloud model.
+                    </span>
+                  </template>
+                  <template v-else>{{ routineModelSummary('insights_model') }}</template>
+                </span>
               </div>
             </div>
 
@@ -2153,6 +2216,13 @@ import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatTime, formatDuration } from '../lib/time'
 import { isDesktopApp } from '../lib/desktop'
+import {
+  DEFAULT_FONT_SCALE,
+  FONT_SCALE_STEP,
+  MAX_FONT_SCALE,
+  MIN_FONT_SCALE,
+  useFontScale,
+} from '../composables/useFontScale'
 import type {
   AgentAssetsResponse,
   AutomationProcess,
@@ -2549,20 +2619,16 @@ async function deleteCustomMcpServer(name: string) {
 
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
-// The font scale is anchored to the pre-rescale UI: DEFAULT_FONT_SCALE (1.2)
-// displays as "100%". The raw multiplier still drives --font-scale; only the
-// displayed percentage is rescaled.
-const DEFAULT_FONT_SCALE = 1.2
-const fontScale = ref(DEFAULT_FONT_SCALE)
+// The scale itself, its bounds, its step and its persistence live in
+// useFontScale, shared with the global zoom shortcuts. Only the displayed
+// percentage is Settings' own: the scale is anchored to the pre-rescale UI, so
+// DEFAULT_FONT_SCALE (1.2) reads as "100%".
+const { fontScale, adjust: adjustFontScale, reset: resetFontScale } = useFontScale()
 const fontScalePercent = computed(() => Math.round((fontScale.value / DEFAULT_FONT_SCALE) * 100))
 
 function loadAppearanceSettings() {
   try {
     activeTheme.value = localStorage.getItem('ciao-theme') || 'system'
-    const savedScale = localStorage.getItem('ciao-font-scale')
-    if (savedScale) {
-      fontScale.value = parseFloat(savedScale) || DEFAULT_FONT_SCALE
-    }
   } catch {
     // Ignore localStorage block
   }
@@ -2588,24 +2654,6 @@ function setTheme(theme: 'dark' | 'light' | 'system') {
   }
 }
 
-function adjustFontScale(delta: number) {
-  let next = parseFloat((fontScale.value + delta).toFixed(2))
-  if (next < 0.8) next = 0.8
-  if (next > 1.5) next = 1.5
-  setFontScale(next)
-}
-
-function resetFontScale() {
-  setFontScale(DEFAULT_FONT_SCALE)
-}
-
-function setFontScale(next: number) {
-  fontScale.value = next
-  try {
-    localStorage.setItem('ciao-font-scale', next.toString())
-  } catch { /* localStorage blocked */ }
-  document.documentElement.style.setProperty('--font-scale', next.toString())
-}
 function isSkillExpanded(name: string) {
   return expandedSkills.value[name] || false
 }
@@ -2674,6 +2722,20 @@ const routinesLoaded = ref(false)
 const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
+const insightsComparisonPending = ref(false)
+type InsightsComparison = {
+  available: boolean
+  reason?: string
+  results: Array<{
+    archive: string
+    shared_sections?: string[]
+    existing_only?: string[]
+    apple_only?: string[]
+    apple_output?: string
+    error?: string
+  }>
+}
+const insightsComparison = ref<InsightsComparison | null>(null)
 
 type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
 type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
@@ -2764,6 +2826,22 @@ async function saveRoutines(patch: Record<string, unknown>) {
     routinesResult.value = `Error: ${errorMessage(e)}`
   } finally {
     routinesSaving.value = false
+  }
+}
+
+async function compareAppleInsights() {
+  insightsComparisonPending.value = true
+  insightsComparison.value = null
+  try {
+    insightsComparison.value = await api.post<InsightsComparison>('/api/automation/compare-apple-insights', { limit: 2 })
+  } catch (e) {
+    insightsComparison.value = {
+      available: false,
+      reason: errorMessage(e, 'Comparison failed'),
+      results: [],
+    }
+  } finally {
+    insightsComparisonPending.value = false
   }
 }
 
@@ -4674,7 +4752,7 @@ async function doDeploy(confirmWarnings = false) {
       actionResult.value = 'Restart complete. Waiting for server to come back, then reloading...'
       projectStore.beginServerRestart('Deploy complete. Restarting Ciaobot…')
     } else {
-      actionResult.value = 'Restart failed. See steps above.'
+      actionResult.value = 'Restart failed. See steps below.'
     }
   } catch (e) {
     const payload = errorPayload(e)
@@ -4693,6 +4771,12 @@ async function doDeploy(confirmWarnings = false) {
         return doDeploy(true)
       }
       actionResult.value = 'Cancelled by user due to warnings.'
+    } else if (deploySteps.value.some(s => !s.ok)) {
+      // The failed-step cards below already show the step name and its full
+      // output. Repeating the server's error string here rendered the same
+      // failure twice: once as an unstyled truncated wall of red text, once in
+      // the readable card. Keep the headline, drop the duplicate.
+      actionResult.value = 'Restart failed. See steps below.'
     } else {
       actionResult.value = `Error: ${errorMessage(e, 'unknown error')}`
     }

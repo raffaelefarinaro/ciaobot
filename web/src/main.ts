@@ -3,6 +3,7 @@ import { createPinia } from 'pinia'
 import { router } from './router'
 import App from './App.vue'
 import { installViewportPlumbing } from './lib/viewport'
+import { DEFAULT_FONT_SCALE, FONT_SCALE_STORAGE_KEY } from './composables/useFontScale'
 
 // Restore theme & font scale from localStorage as early as possible
 try {
@@ -40,7 +41,10 @@ try {
     (mediaQuery as LegacyMediaQueryList).addListener(listener)
   }
 
-  const savedFontScale = localStorage.getItem('ciao-font-scale') || '1.2'
+  // Applied before Vue mounts so the first paint is already at the user's
+  // size. useFontScale owns the key and the default; this only restores.
+  const savedFontScale = localStorage.getItem(FONT_SCALE_STORAGE_KEY)
+    || String(DEFAULT_FONT_SCALE)
   document.documentElement.style.setProperty('--font-scale', savedFontScale)
 } catch {
   // Ignore localStorage restrictions

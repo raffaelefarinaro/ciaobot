@@ -90,6 +90,7 @@ beforeEach(() => {
   apiGet.mockReset()
   apiPost.mockReset()
   apiPatch.mockReset()
+  apiDel.mockReset()
   reloadWhenServerReady.mockClear()
   const storage = {
     getItem: vi.fn((key: string) => localStorageData[key] ?? null),
@@ -601,6 +602,199 @@ describe('pinned file dismissal', () => {
 
     fakeSockets[fakeSockets.length - 1].onmessage?.({ data: JSON.stringify(surfacedEvent) })
     expect(store.pinnedFileFor(chatId)).toBe('/workspace/report.md')
+  })
+})
+
+describe('chat closing and re-entry orientation', () => {
+  test('deletes an unused draft chat instead of leaving it in the sidebar', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unused-draft'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'New Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    store.messages[chatId] = []
+    store.activeChatId = chatId
+    apiDel.mockResolvedValue({ ok: true, deleted: true })
+
+    await store.closeChat()
+
+    // only_if_empty makes the server re-apply its own _is_empty_chat rule.
+    // The client cannot see user_turn_count, so it must not be the one
+    // deciding whether a chat is disposable.
+    expect(apiDel).toHaveBeenCalledWith(`/api/chats/${chatId}?only_if_empty=1`)
+    expect(store.chats).toHaveLength(0)
+    expect(store.activeChatId).toBeNull()
+    expect(routerPush).toHaveBeenCalledWith('/')
+  })
+
+  test('keeps a chat the server declines to delete', async () => {
+    // The client cannot see user_turn_count, so its "is this a draft" guess
+    // can be wrong — a chat whose messages are not loaded, or one that just
+    // got a fresh session, looks empty locally. The server has the real rule
+    // and says no; closing must then be an ordinary close, not a deletion.
+    const store = useProjectStore()
+    const chatId = 'chat-looks-empty'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'New Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    store.messages[chatId] = []
+    store.activeChatId = chatId
+    apiDel.mockResolvedValue({ ok: false, deleted: false, reason: 'not empty' })
+
+    await store.closeChat()
+
+    expect(store.chats).toHaveLength(1)
+    expect(store.activeChatId).toBeNull()
+    expect(routerPush).toHaveBeenCalledWith('/')
+  })
+
+  test('starts the summary when a completed chat closes and reuses it on reopen', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-reentry'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'A completed chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.messages[chatId] = [{ role: 'user', content: 'Continue this later', timestamp: '' }]
+    store.activeChatId = chatId
+    apiGet.mockResolvedValue([])
+    apiPost.mockImplementation((path: string) => {
+      if (path.endsWith('/reentry-summary')) return Promise.resolve({ summary: '• Continue the open task' })
+      return Promise.resolve({})
+    })
+
+    await store.closeChat()
+    expect(apiDel).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(store.reentrySummaries[chatId]).toBe('• Continue the open task'))
+    const summaryCalls = apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary')).length
+    await store.switchChat(chatId)
+    await vi.waitFor(() => expect(store.reentrySummaries[chatId]).toBe('• Continue the open task'))
+    expect(apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary')).length).toBe(summaryCalls)
+  })
+
+  test('requests a summary when selecting any existing chat, without an explicit close', async () => {
+    const store = useProjectStore()
+    const firstChatId = 'chat-first'
+    const secondChatId = 'chat-second'
+    store.chats = [firstChatId, secondChatId].map(chat_id => ({
+      chat_id,
+      project_id: 'p1',
+      title: chat_id,
+      model: 'sonnet',
+      provider: 'claude' as const,
+      mode: 'auto',
+      session_id: `${chat_id}-session`,
+      created_at: '',
+      archived: false,
+    }))
+    apiGet.mockResolvedValue([])
+    apiPost.mockImplementation((path: string) => {
+      if (path.endsWith('/reentry-summary')) {
+        return Promise.resolve({ summary: `• Summary for ${path.includes(firstChatId) ? 'first' : 'second'}` })
+      }
+      return Promise.resolve({})
+    })
+
+    await store.switchChat(firstChatId)
+    await vi.waitFor(() => expect(store.reentrySummaries[firstChatId]).toBe('• Summary for first'))
+
+    await store.switchChat(secondChatId)
+    await vi.waitFor(() => expect(store.reentrySummaries[secondChatId]).toBe('• Summary for second'))
+  })
+})
+
+describe('re-entry summary invalidation', () => {
+  test('clears the summary when a new user message arrives over the chat socket', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-user'
+    store.reentrySummaries[chatId] = 'Old orientation'
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'A new prompt',
+        turn_index: 4,
+      }),
+    })
+
+    expect(store.reentrySummaries[chatId]).toBeUndefined()
+  })
+
+  test('clears the summary when a new assistant result arrives', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-result'
+    store.reentrySummaries[chatId] = 'Old orientation'
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'The new answer',
+        is_error: false,
+        effective_model: 'claude-test',
+        usage: {},
+        session_id: 'session-1',
+      }),
+    })
+
+    expect(store.reentrySummaries[chatId]).toBeUndefined()
+  })
+
+  test('does not restore a stale summary after a new message arrives', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-race'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Summary race',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+
+    let resolveSummary!: (value: { summary: string }) => void
+    apiPost.mockReturnValue(new Promise(resolve => { resolveSummary = resolve }))
+    const request = store.requestReentrySummary(chatId)
+
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'A newer prompt',
+        turn_index: 5,
+      }),
+    })
+    resolveSummary({ summary: 'Stale orientation' })
+    await request
+
+    expect(store.reentrySummaries[chatId]).toBeUndefined()
   })
 })
 
@@ -1680,14 +1874,42 @@ describe('workspace and chat transitions', () => {
 
     expect(store.workspaceOptions.map(w => w.name)).toEqual(['home', 'client'])
     expect(store.activeWorkspace).toBe('client')
-    expect(store.activeChatId).toBe('c-client')
+    expect(store.activeChatId).toBeNull()
     expect(store.bootstrapped).toBe(true)
+  })
+
+  test('fetchAll starts on home instead of restoring the last open chat', async () => {
+    window.localStorage.setItem('ciao-active-chat', 'c-saved')
+    const store = useProjectStore()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') {
+        return Promise.resolve({ workspaces: [], active: 'home', provider_options: [] })
+      }
+      if (path === '/api/projects') {
+        return Promise.resolve([
+          { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
+        ])
+      }
+      if (path === '/api/chats') {
+        return Promise.resolve([
+          { chat_id: 'c-saved', project_id: 'p1', title: 'Last open', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+        ])
+      }
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+
+    expect(store.activeChatId).toBeNull()
+    expect(window.localStorage.getItem('ciao-active-chat')).toBeNull()
+    expect(apiGet).not.toHaveBeenCalledWith('/api/chats/c-saved/messages')
   })
 
   // The app shell renders once fetchAll resolves, so it must not wait on the
   // active chat's message history — a long transcript would otherwise delay the
   // whole home page behind parsing one chat.
   test('fetchAll resolves without waiting for the active chat history', async () => {
+    window.history.replaceState({}, '', '/chat/c1')
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
     const store = useProjectStore()
     let releaseMessages: (value: unknown) => void = () => {}
@@ -1724,16 +1946,17 @@ describe('workspace and chat transitions', () => {
     expect(store.messages['c1'] ?? []).toEqual([])
 
     releaseMessages([])
+    window.history.replaceState({}, '', '/')
   })
 
-  // A fetchAll while nothing is on screen (the desktop app launching at login,
-  // or a background tab) used to mark the active chat read unconditionally,
-  // wiping a just-finished chat's unread — and with it the tray badge and the
-  // in-app marker.
+  // A fetchAll on an explicit chat route must only mark that chat read when it
+  // is actually visible. This protects unread state for background tabs while
+  // keeping direct chat links read as soon as they are displayed.
   test.each([
     ['visible', true],
     ['hidden', false],
   ])('fetchAll marks the active chat read only when %s', async (visibility, shouldMark) => {
+    window.history.replaceState({}, '', '/chat/c1')
     Object.defineProperty(document, 'visibilityState', { value: visibility, configurable: true })
     const store = useProjectStore()
     apiGet.mockImplementation((path: string) => {
@@ -1758,9 +1981,10 @@ describe('workspace and chat transitions', () => {
     expect(store.activeChatId).toBe('c1')
     const markedRead = apiPost.mock.calls.some(([path]) => path === '/api/chats/c1/read')
     expect(markedRead).toBe(shouldMark)
+    window.history.replaceState({}, '', '/')
   })
 
-  test('restoreState runs at store init so active chat is known before fetchAll', () => {
+  test('restoreState loads the saved selection before fetchAll resolves the launch route', () => {
     window.localStorage.setItem('ciao-active-chat', 'saved-chat')
     const store = useProjectStore()
     expect(store.activeChatId).toBe('saved-chat')
@@ -2064,6 +2288,22 @@ describe('projectChatRows (delegate grouping)', () => {
     expect(rows.map(r => r.isDelegate)).toEqual([false, true, true, false])
   })
 
+  test('returns one collapsible group for a supervisor and its delegates', () => {
+    const store = useProjectStore()
+    seed(store, [
+      { chat_id: 'boss', title: 'Supervisor' },
+      { chat_id: 'd1', title: 'First task', spawned_from_chat_id: 'boss' },
+      { chat_id: 'd2', title: 'Second task', spawned_from_chat_id: 'boss' },
+      { chat_id: 'other', title: 'Other' },
+    ])
+
+    const groups = store.projectChatGroups('p1')
+
+    expect(groups.map(group => group.chat.chat_id)).toEqual(['boss', 'other'])
+    expect(groups[0].delegates.map(chat => chat.chat_id)).toEqual(['d1', 'd2'])
+    expect(groups[1].delegates).toEqual([])
+  })
+
   test('an orphaned delegate stays top-level instead of disappearing', () => {
     const store = useProjectStore()
     // Supervisor archived, so it is not in the visible list at all.
@@ -2142,5 +2382,39 @@ describe('activeChatsAll (hide nested delegates)', () => {
     ])
 
     expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['orphan'])
+  })
+})
+
+describe('delegate unread notifications', () => {
+  test('internal delegate activity is not reported as unread', () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
+    ]
+    store.chats = [
+      {
+        chat_id: 'boss',
+        project_id: 'p1',
+        title: 'Supervisor',
+        archived: false,
+        local: true,
+        created_at: '2026-07-31T00:00:00Z',
+        last_activity_at: '2026-07-31T01:00:00Z',
+        last_read_at: '2026-07-31T01:00:00Z',
+      },
+      {
+        chat_id: 'child',
+        project_id: 'p1',
+        title: 'Internal task',
+        archived: false,
+        local: true,
+        spawned_from_chat_id: 'boss',
+        created_at: '2026-07-31T00:00:00Z',
+        last_activity_at: '2026-07-31T02:00:00Z',
+        last_read_at: '2026-07-31T01:00:00Z',
+      },
+    ] as unknown as ChatInfo[]
+
+    expect(store.chatUnread('child')).toBe(0)
   })
 })

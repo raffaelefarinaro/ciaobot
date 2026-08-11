@@ -1,6 +1,7 @@
 import { computed, nextTick, ref, type ComputedRef, type Ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { formatCommentLocation } from '../lib/commentContext'
+import { cleanCommentSelection, findCommentTextMatch, highlightCommentText } from '../lib/commentHighlight'
 import type { CsvCellComment, CsvCellRef } from '../components/CsvViewer.vue'
 
 // Shared file-comment subsystem for FileViewerModal and PinnedFilePanel.
@@ -242,6 +243,12 @@ export function useFileComments(options: UseFileCommentsOptions) {
     // Markdown branch: best-effort substring lookup.
     const trimmed = selectionText.trim()
     if (!trimmed) return null
+    const sourceMatch = findCommentTextMatch(src, trimmed)
+    if (sourceMatch) {
+      const start = lineAt(src, sourceMatch.start)
+      const end = lineAt(src, Math.max(sourceMatch.start, sourceMatch.end - 1))
+      return { start, end: Math.max(end, start) }
+    }
     const head = trimmed.slice(0, 60)
     let startIdx = src.indexOf(head)
     if (startIdx === -1) {
@@ -329,7 +336,7 @@ export function useFileComments(options: UseFileCommentsOptions) {
       selectionAnchor.value = null
       return
     }
-    const text = sel.toString().trim()
+    const text = cleanCommentSelection(sel.toString().trim())
     if (!text) {
       lastSelectionRange = null
       selectionAnchor.value = null
@@ -350,73 +357,6 @@ export function useFileComments(options: UseFileCommentsOptions) {
       parent.replaceChild(document.createTextNode(el.textContent || ''), el)
       parent.normalize()
     }
-  }
-
-  function highlightInMarkdown(root: HTMLElement, selection: string, commentId: string): boolean {
-    const text = selection.trim()
-    if (!text) return false
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-    const nodes: Text[] = []
-    let node: Node | null
-    while ((node = walker.nextNode())) nodes.push(node as Text)
-    if (!nodes.length) return false
-
-    let fullText = ''
-    const offsets: { node: Text; start: number; end: number }[] = []
-    for (const n of nodes) {
-      const start = fullText.length
-      fullText += n.textContent || ''
-      offsets.push({ node: n, start, end: fullText.length })
-    }
-
-    const idx = fullText.indexOf(text)
-    if (idx === -1) return false
-
-    // Wrap the matching slice of each overlapping text node in its own span.
-    // Using one Range across multiple nodes fails with range.surroundContents
-    // when the range spans structural boundaries (table cells, paragraphs,
-    // list items) or inline element boundaries (<strong>, <a>, etc.).
-    //
-    // Instead, we split each text node at the match boundaries using
-    // splitText(), then replace the middle portion with a highlight span.
-    // This avoids the common-ancestor restriction and works across any
-    // element boundary because we only ever manipulate text nodes.
-    //
-    // We also skip whitespace-only text nodes so highlights don't bleed
-    // into empty gaps between paragraphs or list items.
-    //
-    // Iterate in reverse so DOM mutations don't shift the offsets we still
-    // need to act on.
-    const matchStart = idx
-    const matchEnd = idx + text.length
-    let success = false
-    for (let i = offsets.length - 1; i >= 0; i--) {
-      const o = offsets[i]
-      if (o.end <= matchStart || o.start >= matchEnd) continue
-      const localStart = Math.max(0, matchStart - o.start)
-      const localEnd = Math.min(o.end - o.start, matchEnd - o.start)
-      if (localStart >= localEnd) continue
-
-      const textNode = o.node
-      const slice = textNode.textContent?.slice(localStart, localEnd) || ''
-      if (!slice.trim()) continue  // Skip whitespace-only gaps
-
-      try {
-        // splitText mutates the tree, which is the point; the tail node itself
-        // is not needed here.
-        textNode.splitText(localEnd)
-        const mid = textNode.splitText(localStart)
-        const span = document.createElement('span')
-        span.className = 'comment-highlight'
-        span.dataset.commentId = commentId
-        mid.parentNode?.replaceChild(span, mid)
-        span.appendChild(mid)
-        success = true
-      } catch {
-        // Skip this node; the others may still wrap successfully.
-      }
-    }
-    return success
   }
 
   function commentLineLabel(c: {
@@ -641,7 +581,7 @@ export function useFileComments(options: UseFileCommentsOptions) {
     charOffsetFrom,
     lineAt,
     clearHighlights,
-    highlightInMarkdown,
+    highlightInMarkdown: highlightCommentText,
     commentLineLabel,
     computeSelectionLines,
     updateSelectionAnchorFromRange,

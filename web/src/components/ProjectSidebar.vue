@@ -96,9 +96,12 @@
           :key="workspace.name"
           :class="{ active: store.activeWorkspace === workspace.name }"
           :aria-pressed="store.activeWorkspace === workspace.name"
+          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
           :data-workspace-color="colorForWorkspace(workspace)"
+          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
           @click="selectAutomationWorkspace(workspace.name)"
         >
+          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
           {{ workspaceLabel(workspace.name) }}
           <span
             v-if="missedCountFor(workspace.name) > 0"
@@ -301,9 +304,12 @@
           :key="workspace.name"
           :class="{ active: store.activeWorkspace === workspace.name }"
           :aria-pressed="store.activeWorkspace === workspace.name"
+          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
           :data-workspace-color="colorForWorkspace(workspace)"
+          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
           @click="store.switchWorkspace(workspace.name)"
         >
+          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
           {{ workspaceLabel(workspace.name) }}
           <span v-if="store.workspaceIsStreaming(workspace.name)" class="spinner-dot" title="A chat is working" />
           <span v-else-if="store.workspaceUnread(workspace.name) > 0" class="badge">{{ store.workspaceUnread(workspace.name) }}</span>
@@ -991,6 +997,11 @@ function workspaceLabel(name: string): string {
     .join(' ')
 }
 
+function workspaceShortcut(name: string): string {
+  const index = store.workspaceOptions.findIndex(workspace => workspace.name === name) + 1
+  return index >= 1 && index <= 9 ? String(index) : ''
+}
+
 // ── Completed (archived) projects ──────────────────────────────────────
 type CompletedProject = { stem: string; name: string; context: string; workspace: string; vault_doc_path?: string }
 const archiveOpen = ref(false)
@@ -1538,6 +1549,22 @@ async function confirmDeleteChat(chatId: string) {
   gap: 6px;
   overflow-wrap: anywhere;
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.workspace-shortcut {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg3);
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+  flex: 0 0 auto;
 }
 
 .workspace-toggle button:hover {

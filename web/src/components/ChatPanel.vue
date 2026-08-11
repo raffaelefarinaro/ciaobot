@@ -6,7 +6,7 @@
     <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
       <template #title>
         <div class="header-left">
-          <button class="close-btn desktop-only" @click="$emit('close')" title="Close chat">&times;</button>
+          <button class="close-btn" @click="$emit('close')" title="Close chat">&times;</button>
           <div class="header-breadcrumb" ref="breadcrumbRef">
             <span
               v-if="project && project.name !== 'General'"
@@ -231,7 +231,7 @@
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" ref="messagesEl" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
+    <div class="messages" ref="messagesEl" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
       <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
@@ -285,11 +285,18 @@
                 </span>
                 <span class="file-card-chevron" aria-hidden="true">&#8599;</span>
               </button>
-              <div
-                v-else-if="step.tool_name === '_thinking'"
-                class="trace-text trace-thinking"
-                v-html="renderMarkdown(step.content)"
-              ></div>
+              <div v-else-if="step.tool_name === '_thinking'" class="thinking-block">
+                <button
+                  type="button"
+                  class="thinking-toggle"
+                  :aria-expanded="thinkingExpanded"
+                  @click.stop="toggleThinking"
+                >
+                  <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
+                  <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
+                </button>
+                <div v-if="thinkingExpanded" class="trace-text trace-thinking" v-html="renderMarkdown(step.content)"></div>
+              </div>
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
             <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" />
@@ -372,6 +379,10 @@
           <div class="message-row" @click="toggleMessageActions(`assistant-${i}`, $event)">
             <div class="message assistant" :class="{ error: item.msg.is_error }" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+              <div v-if="item.msg.is_error" class="error-attribution" role="status">
+                <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
+                <span>{{ classifyError(item.msg.content).copy }}</span>
+              </div>
               <div v-if="item.outputs?.length" class="answer-outputs" role="group" aria-label="Outputs">
                 <span class="answer-outputs-label">Outputs</span>
                 <div class="answer-output-files">
@@ -452,6 +463,10 @@
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+          <div v-if="isErrorMsg(item.msg.content)" class="error-attribution" role="status">
+            <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
+            <span>{{ classifyError(item.msg.content).copy }}</span>
+          </div>
           <div v-if="isErrorMsg(item.msg.content)" class="error-actions">
             <button
               v-if="lastUserBefore(i)"
@@ -465,6 +480,22 @@
           </div>
         </div>
       </template>
+
+      <!-- Ephemeral orientation aid shown after reopening a chat. Keep it
+           after the rendered transcript so it reads as the latest message,
+           while the tag makes it clear that it is generated context rather
+           than a reply. -->
+      <div v-if="reentrySummary" class="message-wrap assistant reentry-summary-wrap">
+        <div class="message-row">
+          <div class="message assistant reentry-summary-message" role="status" aria-label="Apple Intelligence summary">
+            <div class="reentry-summary-header">
+              <span class="reentry-summary-badge">Summary</span>
+              <span class="reentry-summary-source">Apple Intelligence</span>
+            </div>
+            <div class="message-content" v-html="renderMarkdown(reentrySummary)"></div>
+          </div>
+        </div>
+      </div>
 
       <div
         v-if="store.hostConnectionUnavailable"
@@ -524,7 +555,6 @@
         >
           <span class="trace-chevron">{{ liveTraceOpen ? '\u25BE' : '\u25B8' }}</span>
           <span class="activity-spinner"></span>
-          <span class="trace-icon">&#129504;</span>
           <span class="trace-label">{{ liveTraceLabel }}</span>
           <span v-if="liveTraceMetaParts.length" class="trace-meta">
             <span
@@ -570,11 +600,18 @@
               </span>
               <span class="file-card-chevron" aria-hidden="true">&#8599;</span>
             </button>
-            <div
-              v-else-if="entry.kind === 'thinking'"
-              class="trace-text trace-thinking"
-              v-html="renderMarkdown(entry.content)"
-            ></div>
+            <div v-else-if="entry.kind === 'thinking'" class="thinking-block">
+              <button
+                type="button"
+                class="thinking-toggle"
+                :aria-expanded="thinkingExpanded"
+                @click.stop="toggleThinking"
+              >
+                <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
+                <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
+              </button>
+              <div v-if="thinkingExpanded" class="trace-text trace-thinking" v-html="renderMarkdown(entry.content)"></div>
+            </div>
             <div
               v-else-if="entry.kind === 'status'"
               class="trace-text trace-status"
@@ -582,11 +619,18 @@
             ></div>
             <div v-else class="trace-text" v-html="renderMarkdown(entry.content)"></div>
           </template>
-          <div
-            v-if="store.currentStreamingThinking"
-            class="trace-text trace-thinking trace-streaming"
-            v-html="renderMarkdown(store.currentStreamingThinking)"
-          ></div>
+          <div v-if="store.currentStreamingThinking" class="thinking-block">
+            <button
+              type="button"
+              class="thinking-toggle"
+              :aria-expanded="thinkingExpanded"
+              @click.stop="toggleThinking"
+            >
+              <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
+              <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
+            </button>
+            <div v-if="thinkingExpanded" class="trace-text trace-thinking trace-streaming" v-html="renderMarkdown(store.currentStreamingThinking)"></div>
+          </div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
           <!-- Subagents for the in-flight turn nest in the live trace -->
           <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
@@ -865,7 +909,28 @@
       </span>
     </div>
 
-    <!-- Slash-command picker (shown when the input starts with "/") -->
+    <!-- @-mention picker (textarea version: inserts plain backend-facing text) -->
+    <div v-if="showMentionPicker" class="commands-picker mention-picker" role="listbox" aria-label="Mentions">
+      <div
+        v-for="(item, i) in filteredMentions"
+        :key="`${item.kind}:${item.insertText}`"
+        class="commands-picker-row mention-picker-row"
+        :class="{ active: i === mentionHighlightIdx }"
+        role="option"
+        :aria-selected="i === mentionHighlightIdx"
+        @mousedown.prevent="mentionPicker.select(item)"
+        @mouseenter="mentionHighlightIdx = i"
+      >
+        <div class="commands-picker-head">
+          <span class="mention-picker-kind">{{ item.kind }}</span>
+          <span class="commands-picker-name" :title="`@${item.insertText}`">@{{ item.label }}</span>
+        </div>
+        <div class="commands-picker-desc">{{ item.description }}</div>
+      </div>
+    </div>
+
+    <!-- Slash-command picker. Skills can be picked from any slash token;
+         Ciao-owned commands remain start-of-message only. -->
     <div v-if="showCommandsPicker" class="commands-picker" role="listbox" aria-label="Slash commands">
       <div
         v-for="(cmd, i) in filteredCommands"
@@ -878,6 +943,7 @@
         @mouseenter="commandHighlightIdx = i"
       >
         <div class="commands-picker-head">
+          <span v-if="cmd.source === 'skill'" class="commands-picker-kind">skill</span>
           <span class="commands-picker-name">/{{ cmd.name }}</span>
           <span v-if="cmd.argument_hint" class="commands-picker-hint">{{ cmd.argument_hint }}</span>
         </div>
@@ -902,9 +968,10 @@
           :placeholder="inputPlaceholder"
           rows="1"
           @keydown="handleKeydown"
-          @input="autoResize"
+          @input="handleInput"
           @paste="handlePaste"
           @focus="handleInputFocus"
+          @click="refreshComposerPickers"
         ></textarea>
         <div class="input-actions">
           <!-- Voice recording is allowed during streaming too: the user's
@@ -949,8 +1016,8 @@ import SubagentPanel from './SubagentPanel.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
-import { readChatDraft, writeChatDraft } from '../lib/chatDrafts'
-import type { Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
+import type { AgentAssetsResponse, CommandsResponse, Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -965,11 +1032,26 @@ import {
   selectedModelEntry,
 } from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
+import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
+import {
+  cleanCommentSelection,
+  commentTextMatches,
+  commentTextOccurrenceIndex,
+  highlightCommentText,
+} from '../lib/commentHighlight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
+import {
+  useMentionPicker,
+  type MentionAgent,
+  type MentionChat,
+  type MentionFile,
+  type MentionProject,
+} from '../composables/useMentionPicker'
+import { useThinkingPreference } from '../composables/useThinkingPreference'
 import {
   clearPlanReturnMode,
   includeBuiltinPlanCommand,
@@ -1040,10 +1122,14 @@ const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
+const { thinkingExpanded, toggleThinking } = useThinkingPreference()
 const draftChatId = store.activeChatId
 const inputText = ref(readChatDraft(draftChatId))
 const inputRevision = ref(0)
 const inputEl = ref<HTMLTextAreaElement>()
+const promptHistoryIndex = ref(-1)
+const promptHistoryDraft = ref('')
+let settingPromptHistoryText = false
 const isContinuing = ref(false)
 const becomingHost = ref(false)
 const hostHandoverError = ref('')
@@ -1053,8 +1139,52 @@ const hostHandoverError = ref('')
 // chats immediately after typing.
 watch(inputText, (text) => {
   inputRevision.value += 1
-  writeChatDraft(draftChatId, text)
+  if (!settingPromptHistoryText) {
+    promptHistoryIndex.value = -1
+    promptHistoryDraft.value = ''
+    writeChatDraft(draftChatId, text)
+  }
 }, { flush: 'sync' })
+
+function promptHistory(): string[] {
+  return readSentPromptHistory(draftChatId)
+}
+
+function setPromptHistoryText(text: string): void {
+  settingPromptHistoryText = true
+  inputText.value = text
+  settingPromptHistoryText = false
+  nextTick(() => autoResize())
+}
+
+function handlePromptHistoryKey(e: KeyboardEvent): boolean {
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return false
+  const history = promptHistory()
+  if (!history.length) return false
+
+  if (e.key === 'ArrowUp') {
+    if (promptHistoryIndex.value < 0 && inputText.value.trim() !== '') return false
+    e.preventDefault()
+    if (promptHistoryIndex.value < 0) promptHistoryDraft.value = inputText.value
+    promptHistoryIndex.value = promptHistoryIndex.value < 0
+      ? history.length - 1
+      : Math.max(0, promptHistoryIndex.value - 1)
+    setPromptHistoryText(history[promptHistoryIndex.value])
+    return true
+  }
+
+  if (promptHistoryIndex.value < 0) return false
+  e.preventDefault()
+  if (promptHistoryIndex.value >= history.length - 1) {
+    promptHistoryIndex.value = -1
+    setPromptHistoryText(promptHistoryDraft.value)
+    promptHistoryDraft.value = ''
+  } else {
+    promptHistoryIndex.value += 1
+    setPromptHistoryText(history[promptHistoryIndex.value])
+  }
+  return true
+}
 
 async function disconnectAndBecomeHost() {
   if (becomingHost.value) return
@@ -1125,15 +1255,65 @@ function primaryAction() {
 const slashCommands = ref<SlashCommand[]>(includeBuiltinPlanCommand([]))
 const commandHighlightIdx = ref(0)
 
+interface SlashCommandTrigger {
+  start: number
+  end: number
+  query: string
+}
+
+/** Find a slash token immediately before the textarea caret. */
+function findSlashCommandTrigger(text: string, cursor: number): SlashCommandTrigger | null {
+  const end = Math.max(0, Math.min(cursor, text.length))
+  const beforeCaret = text.slice(0, end)
+  const match = beforeCaret.match(/(?:^|\s)\/([^\s/]*)$/)
+  if (!match) return null
+
+  const start = end - match[0].length + match[0].lastIndexOf('/')
+  return { start, end, query: match[1] || '' }
+}
+
+const slashCommandTrigger = ref<SlashCommandTrigger | null>(null)
+
+function dismissSlashCommandPicker(): void {
+  slashCommandTrigger.value = null
+  commandHighlightIdx.value = 0
+}
+
+function refreshSlashCommandPicker(): void {
+  const el = inputEl.value
+  if (!el || el.selectionStart !== el.selectionEnd) {
+    dismissSlashCommandPicker()
+    return
+  }
+  slashCommandTrigger.value = findSlashCommandTrigger(inputText.value, el.selectionStart)
+  commandHighlightIdx.value = 0
+}
+
+async function loadSlashCommands(): Promise<void> {
+  try {
+    const provider = encodeURIComponent(chat.value.provider || '')
+    const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}`)
+    slashCommands.value = includeBuiltinPlanCommand([
+      ...(response.commands || []),
+      ...(response.skills || []),
+    ])
+  } catch {
+    // Keep the built-in /plan entry available when asset discovery is offline.
+    slashCommands.value = includeBuiltinPlanCommand([])
+  }
+}
+
 const filteredCommands = computed<SlashCommand[]>(() => {
-  const text = inputText.value
-  if (!text.startsWith('/')) return []
-  // Only show while the user is typing the command name itself — once they
-  // add a space or newline, they're typing arguments and the picker steps aside.
-  const firstToken = text.slice(1).split(/\s/, 1)[0] ?? ''
-  if (text.slice(1).includes(' ') || text.slice(1).includes('\n')) return []
-  const needle = firstToken.toLowerCase()
-  return slashCommands.value.filter(c => c.name.toLowerCase().startsWith(needle))
+  const active = slashCommandTrigger.value
+  if (!active) return []
+  const needle = active.query.toLowerCase()
+  return slashCommands.value.filter(command =>
+    // Project/user commands are expanded only when they make up the prompt.
+    // Skills are native provider entries, so they remain available alongside
+    // file, chat, and other inline references anywhere in the draft.
+    (active.start === 0 || command.source === 'skill')
+    && command.name.toLowerCase().startsWith(needle),
+  )
 })
 
 const showCommandsPicker = computed(() => filteredCommands.value.length > 0)
@@ -1143,21 +1323,46 @@ watch(filteredCommands, (list) => {
 })
 
 function applyCommand(cmd: SlashCommand) {
-  // Trailing space only when the command expects arguments, so a naked
-  // `/brief` is ready to send without requiring an extra keystroke.
-  inputText.value = cmd.argument_hint ? `/${cmd.name} ` : `/${cmd.name}`
-  commandHighlightIdx.value = 0
+  const active = slashCommandTrigger.value
+  if (!active) return
+
+  const before = inputText.value.slice(0, active.start)
+  const after = inputText.value.slice(active.end)
+  const token = `/${cmd.name}`
+  // Keep the existing separator when this replaces a token in the middle of
+  // a draft; otherwise leave room for command arguments as before.
+  const suffix = cmd.argument_hint && !(after && /^\s/.test(after)) ? ' ' : ''
+  inputText.value = before + token + suffix + after
+  const cursor = before.length + token.length + suffix.length
+  dismissSlashCommandPicker()
   nextTick(() => {
-    inputEl.value?.focus()
+    const input = inputEl.value
+    if (!input) return
+    input.setSelectionRange(cursor, cursor)
+    input.focus()
     autoResize()
   })
 }
+
+watch(inputText, () => {
+  if (!slashCommandTrigger.value) return
+  const el = inputEl.value
+  const current = el && el.selectionStart === el.selectionEnd
+    ? findSlashCommandTrigger(inputText.value, el.selectionStart)
+    : null
+  if (current) slashCommandTrigger.value = current
+  else dismissSlashCommandPicker()
+})
 const messagesEl = ref<HTMLElement>()
 const scrollAnchor = ref<HTMLElement>()
 const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
+const reentrySummary = computed(() => store.reentrySummaries[chat.value.chat_id] || '')
+watch(() => chat.value.provider, () => {
+  void loadSlashCommands()
+})
 const planModeSaving = ref(false)
 
 async function togglePlanMode(
@@ -1439,6 +1644,46 @@ const projectFiles = ref<ContextProjectFile[]>([])
 const projectFilesLoading = ref(false)
 const projectFilesError = ref('')
 const showProjectFiles = computed(() => Boolean(project.value?.vault_folder))
+const mentionAgents = ref<MentionAgent[]>([])
+const mentionChats = computed<MentionChat[]>(() => {
+  const activeProjects = new Map(store.projects.map(item => [item.project_id, item]))
+  return store.chats
+    .filter(chatItem => !chatItem.archived && chatItem.local !== false && activeProjects.has(chatItem.project_id))
+    .map(chatItem => ({
+      chat_id: chatItem.chat_id,
+      title: chatItem.title,
+      project_id: chatItem.project_id,
+      project_name: activeProjects.get(chatItem.project_id)?.name,
+      workspace: activeProjects.get(chatItem.project_id)?.workspace,
+      archived: chatItem.archived,
+      local: chatItem.local,
+    }))
+})
+const mentionProjects = computed<MentionProject[]>(() => store.projects.map(projectItem => ({
+  project_id: projectItem.project_id,
+  name: projectItem.name,
+  workspace: projectItem.workspace,
+})))
+const mentionFiles = computed<MentionFile[]>(() => projectFiles.value.map(file => ({
+  path: file.path,
+  vault_path: file.vault_path,
+})))
+const mentionPicker = useMentionPicker({
+  draft: inputText,
+  input: inputEl,
+  files: mentionFiles,
+  agents: mentionAgents,
+  chats: mentionChats,
+  projects: mentionProjects,
+})
+const filteredMentions = mentionPicker.filteredItems
+const mentionHighlightIdx = mentionPicker.highlightIndex
+const showMentionPicker = mentionPicker.showPicker
+
+function refreshComposerPickers(): void {
+  mentionPicker.refresh()
+  refreshSlashCommandPicker()
+}
 
 async function loadProjectFiles() {
   if (!project.value || !project.value.vault_folder) {
@@ -1480,9 +1725,19 @@ function openProjectFile(f: ContextProjectFile): void {
 
 watch(
   () => [showContext.value, project.value?.project_id, project.value?.vault_folder] as const,
-  ([open]) => { if (open) loadProjectFiles() },
+  ([open]) => { if (open || project.value?.vault_folder) loadProjectFiles() },
   { immediate: true }
 )
+
+async function loadMentionAgents(): Promise<void> {
+  try {
+    const response = await api.get<AgentAssetsResponse>('/api/agent-assets')
+    mentionAgents.value = Array.isArray(response.subagents) ? response.subagents : []
+  } catch {
+    // Mentions are an enhancement; an unavailable asset catalog leaves files usable.
+    mentionAgents.value = []
+  }
+}
 
 // Deduped list of files the agent has written/edited in this chat. Most
 // recent occurrence wins for action label; count shows how many times the
@@ -1931,24 +2186,8 @@ function getSelectionStartOffsetInElement(container: HTMLElement, range: Range):
 function computeOccurrenceIndex(contentEl: HTMLElement, range: Range, selection: string): number {
   const fullText = contentEl.textContent || ''
   const startOffset = getSelectionStartOffsetInElement(contentEl, range)
-  const needle = selection.trim()
-  if (startOffset === -1 || !needle) return 0
-
-  let occurrence = 0
-  let pos = 0
-  while (pos < fullText.length) {
-    const idx = fullText.indexOf(needle, pos)
-    if (idx === -1) break
-    if (idx === startOffset) {
-      return occurrence
-    }
-    if (idx > startOffset) {
-      break
-    }
-    occurrence++
-    pos = idx + 1
-  }
-  return Math.max(0, occurrence)
+  if (startOffset === -1) return 0
+  return commentTextOccurrenceIndex(fullText, selection, startOffset)
 }
 
 function computeParagraphIndex(contentEl: HTMLElement, range: Range): number {
@@ -2045,7 +2284,7 @@ function onChatSelectionChange(): void {
     selectionAnchor.value = null
     return
   }
-  const text = sel.toString().trim()
+  const text = cleanCommentSelection(sel.toString().trim())
   if (!text) {
     lastChatSelectionRange = null
     selectionAnchor.value = null
@@ -2221,130 +2460,12 @@ function clearHighlights(root: HTMLElement): void {
   }
 }
 
-function highlightInElement(root: HTMLElement, selection: string, commentId: string, occurrenceIndex?: number): boolean {
-  const text = selection.trim()
-  if (!text) return false
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-  const nodes: Text[] = []
-  let node: Node | null
-  while ((node = walker.nextNode())) nodes.push(node as Text)
-  if (!nodes.length) return false
-
-  let fullText = ''
-  const offsets: { node: Text; start: number; end: number }[] = []
-  for (const n of nodes) {
-    const start = fullText.length
-    fullText += n.textContent || ''
-    offsets.push({ node: n, start, end: fullText.length })
-  }
-
-  let matchStart = -1
-  let matchEnd = -1
-
-  // Match the specific occurrence index if specified
-  const targetOccurrence = occurrenceIndex ?? 0
-  let currentOccurrence = 0
-  let pos = 0
-  while (pos < fullText.length) {
-    const idx = fullText.indexOf(text, pos)
-    if (idx === -1) break
-    if (currentOccurrence === targetOccurrence) {
-      matchStart = idx
-      matchEnd = idx + text.length
-      break
-    }
-    currentOccurrence++
-    pos = idx + 1
-  }
-
-  // Fallback if target occurrence was not found (e.g. text changed): pick first exact match
-  if (matchStart === -1) {
-    const exactIdx = fullText.indexOf(text)
-    if (exactIdx !== -1) {
-      matchStart = exactIdx
-      matchEnd = exactIdx + text.length
-    }
-  }
-
-  if (matchStart === -1) {
-    // Fallback: whitespace-normalized match for selections that span
-    // <br>, block boundaries, or have extra whitespace from rendering.
-    const normFull = fullText.replace(/\s+/g, '')
-    const normText = text.replace(/\s+/g, '')
-    const normIdx = normFull.indexOf(normText)
-    if (normIdx !== -1) {
-      // Map normalized start index back to original text position
-      let charCount = 0
-      for (let i = 0; i < fullText.length; i++) {
-        if (!/\s/.test(fullText[i])) {
-          if (charCount === normIdx) {
-            matchStart = i
-            break
-          }
-          charCount++
-        }
-      }
-      // Map normalized end index back to original text position
-      if (matchStart !== -1) {
-        charCount = 0
-        for (let i = 0; i < fullText.length; i++) {
-          if (!/\s/.test(fullText[i])) {
-            charCount++
-            if (charCount === normIdx + normText.length) {
-              matchEnd = i + 1
-              break
-            }
-          }
-        }
-        if (matchEnd === -1) matchEnd = fullText.length
-      }
-    }
-  }
-
-  if (matchStart === -1 || matchEnd === -1) {
-    console.warn('Comment highlight not found:', commentId, text.slice(0, 80))
-    return false
-  }
-
-  let success = false
-  for (let i = offsets.length - 1; i >= 0; i--) {
-    const o = offsets[i]
-    if (o.end <= matchStart || o.start >= matchEnd) continue
-    const localStart = Math.max(0, matchStart - o.start)
-    const localEnd = Math.min(o.end - o.start, matchEnd - o.start)
-    if (localStart >= localEnd) continue
-
-    const textNode = o.node
-    const slice = textNode.textContent?.slice(localStart, localEnd) || ''
-    if (!slice.trim()) continue
-
-    try {
-      // Split off the tail after the match so the slice we want to wrap
-      // becomes its own text node. Order matters: split the end first so
-      // `localStart` still references valid offsets in the original node.
-      textNode.splitText(localEnd)
-      const mid = textNode.splitText(localStart)
-      const span = document.createElement('span')
-      span.className = 'comment-highlight'
-      span.dataset.commentId = commentId
-      mid.parentNode?.replaceChild(span, mid)
-      span.appendChild(mid)
-      success = true
-    } catch {
-      // Skip this node; other nodes may still wrap successfully.
-    }
-  }
-  return success
-}
-
 function findBubbleForComment(root: HTMLElement, c: { id: string; selection: string; messageId?: string; messageIndex?: number; messageRole?: string }): HTMLElement | null {
   const stored = commentBubbleById.get(c.id)
   if (stored && root.contains(stored)) {
     const content = stored.querySelector('.message-content')
     const text = content?.textContent || ''
-    const normText = text.replace(/\s+/g, '')
-    const normSelection = c.selection.replace(/\s+/g, '')
-    if (text.includes(c.selection) || normText.includes(normSelection)) {
+    if (commentTextMatches(text, c.selection)) {
       return stored
     }
   }
@@ -2369,9 +2490,7 @@ function findBubbleForComment(root: HTMLElement, c: { id: string; selection: str
     const content = el.querySelector('.message-content')
     if (!content) continue
     const text = content.textContent || ''
-    const normText = text.replace(/\s+/g, '')
-    const normSelection = c.selection.replace(/\s+/g, '')
-    if (text.includes(c.selection) || normText.includes(normSelection)) {
+    if (commentTextMatches(text, c.selection)) {
       return el
     }
   }
@@ -2386,7 +2505,7 @@ function applyHighlights(): void {
   for (const c of store.pendingChatComments) {
     const bubble = findBubbleForComment(root, c)
     if (bubble) {
-      highlightInElement(bubble, c.selection, c.id, c.occurrenceIndex)
+      highlightCommentText(bubble, c.selection, c.id, c.occurrenceIndex)
     } else {
       console.warn('Bubble not found for comment', c.id, c.selection.slice(0, 80))
     }
@@ -2396,7 +2515,7 @@ function applyHighlights(): void {
   // they're commenting on while they type, not only after saving.
   const draft = commentDraft.value
   if (draft && draftBubbleEl && root.contains(draftBubbleEl)) {
-    highlightInElement(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID, draft.occurrenceIndex)
+    highlightCommentText(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID, draft.occurrenceIndex)
   }
 }
 
@@ -2543,10 +2662,8 @@ onMounted(async () => {
     providerDefaults.value = r.provider_defaults || {}
     thinkingLevels.value = r.thinking_levels || {}
   } catch { /* use defaults */ }
-  try {
-    const r = await api.get<{ commands: SlashCommand[] }>('/api/commands')
-    slashCommands.value = includeBuiltinPlanCommand(r.commands ?? [])
-  } catch { /* keep the built-in /plan entry available */ }
+  await loadSlashCommands()
+  await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
@@ -2566,7 +2683,10 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  writeChatDraft(draftChatId, inputText.value)
+  writeChatDraft(
+    draftChatId,
+    promptHistoryIndex.value < 0 ? inputText.value : promptHistoryDraft.value,
+  )
   window.removeEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
   window.removeEventListener('ciao:native-file-drop', handleNativeFileDrop)
@@ -3155,7 +3275,16 @@ function autoResize() {
   }
 }
 
+function handleInput(): void {
+  autoResize()
+  refreshComposerPickers()
+}
+
 function handleKeydown(e: KeyboardEvent) {
+  // Mention navigation uses the same keyboard-first picker contract as slash
+  // commands, but only consumes keys while an @ token is active.
+  if (mentionPicker.handleKeydown(e)) return
+
   // Slash-command picker navigation takes precedence over send/newline.
   if (showCommandsPicker.value) {
     if (e.key === 'ArrowDown') {
@@ -3200,6 +3329,12 @@ function handleKeydown(e: KeyboardEvent) {
     return
   }
 
+  // Recalling history is deliberately limited to the textarea's empty state
+  // so ArrowUp/ArrowDown keep their normal cursor-navigation meaning while a
+  // prompt is being edited. Once recall starts, the arrows walk that session's
+  // bounded history and Down restores the draft that was present beforehand.
+  if (handlePromptHistoryKey(e)) return
+
   // Cmd+Enter (mac) / Ctrl+Enter (linux/win) sends the message. Bare Enter
   // inserts a newline: this avoids accidental sends, especially on phones
   // where Enter is the default virtual-keyboard action. Mid-stream sends are
@@ -3212,6 +3347,7 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 function handleInputFocus() {
+  refreshComposerPickers()
   if (window.innerWidth < 768 && messagesEl.value) {
     // Wait for the keyboard animation, then scroll messages to the bottom
     // so the latest content sits above the input. Use direct scrollTop
@@ -3239,6 +3375,7 @@ function send() {
     void handlePlanCommand(action, originChatId, returnMode, submittedText, submittedRevision)
     return
   }
+  if (text) recordSentPrompt(chat.value.chat_id, inputText.value)
   // Always "queue": when a response is in flight the backend buffers and
   // flushes on turn end; for a fresh turn this starts it.
   let sendText = text
@@ -3271,23 +3408,37 @@ function send() {
 
 // Retry support: error messages are system bubbles whose content starts
 // with "Error:" (set in stores/projects.ts error-event handler). If the
-// prior user turn is still in the timeline, we can resend its text.
+// prior user turn is still in the timeline, we can resend its text plus
+// any images it carried — without draining the live composer.
 function isErrorMsg(content: string): boolean {
   return typeof content === 'string' && content.startsWith('Error:')
 }
-function lastUserBefore(errorIdx: number): string | null {
+function lastUserBefore(errorIdx: number): { text: string; images: string[] } | null {
   const items = renderItems.value
   for (let k = errorIdx - 1; k >= 0; k--) {
     const it = items[k]
-    if (it.kind === 'user') return it.msg.content
+    if (it.kind === 'user') {
+      const images = Array.isArray(it.msg.images) ? [...it.msg.images] : []
+      return { text: it.msg.content, images }
+    }
   }
   return null
 }
 function retryFromError(errorIdx: number) {
   if (chat.value.archived) return
-  const text = lastUserBefore(errorIdx)
-  if (!text) return
-  store.sendMessage(chat.value.chat_id, text, 'queue')
+  const prior = lastUserBefore(errorIdx)
+  if (!prior) return
+  // Build a PreparedMessage so sendMessage sends the prior turn's image
+  // refs alongside the text. We bypass prepareMessage (which would pull
+  // from the live composer) and pass `prepared` to skip the
+  // consumePreparedAttachments drain — a retry must not erase whatever
+  // the user has currently staged for a fresh send.
+  store.sendMessage(
+    chat.value.chat_id,
+    prior.text,
+    'queue',
+    { composed: prior.text, imageRefs: prior.images.length ? prior.images : undefined, fileComments: [], chatComments: [] },
+  )
 }
 
 // Open a fresh chat in the General project seeded with this error + the last
@@ -3296,7 +3447,8 @@ function retryFromError(errorIdx: number) {
 async function openFixChat(errorIdx: number) {
   const it = renderItems.value[errorIdx]
   const errorText = it && 'msg' in it ? it.msg.content : ''
-  const context = lastUserBefore(errorIdx) || undefined
+  const prior = lastUserBefore(errorIdx)
+  const context = prior ? prior.text : undefined
   try {
     await store.fixError({ errorText, context })
   } catch (e) {
@@ -3868,7 +4020,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, archiveActiveChat })
+defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
 </script>
 
 <style scoped>
@@ -4376,6 +4528,22 @@ defineExpose({ toggleDictation, archiveActiveChat })
   gap: 6px;
   flex-wrap: wrap;
 }
+
+.error-attribution {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  margin-top: 8px;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.error-attribution-label {
+  color: var(--error);
+  font-weight: 600;
+}
 .fix-btn { color: var(--accent); border-color: var(--accent); }
 .fix-btn:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 
@@ -4593,6 +4761,32 @@ defineExpose({ toggleDictation, archiveActiveChat })
   min-width: 0;
   overflow-wrap: break-word;
 }
+
+.thinking-block {
+  min-width: 0;
+}
+
+.thinking-toggle {
+  min-height: var(--touch);
+  padding: 4px 8px 4px 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  opacity: 0.85;
+}
+
+.thinking-toggle:hover { color: var(--fg); }
+.thinking-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .trace-text :deep(a) {
   color: var(--accent);
   text-decoration: underline;
@@ -4835,12 +5029,25 @@ details[open] > .activity-summary::before {
 .activity-icon { font-size: var(--text-base); }
 
 .activity-spinner {
+  position: relative;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
   animation: activity-pulse 1.1s ease-in-out infinite;
   flex-shrink: 0;
+}
+
+.activity-spinner::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.45;
+  animation: activity-ring 1.1s ease-out infinite;
+  pointer-events: none;
 }
 
 @keyframes activity-pulse {
@@ -4848,8 +5055,14 @@ details[open] > .activity-summary::before {
   50% { transform: scale(1); opacity: 1; }
 }
 
+@keyframes activity-ring {
+  0%   { transform: scale(0.7); opacity: 0.55; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .activity-spinner { animation-duration: 2.2s; }
+  .activity-spinner::before { animation-duration: 2.2s; }
 }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
@@ -5242,8 +5455,14 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: flex-start;
   gap: 6px;
-  width: 220px;
-  max-width: min(220px, 100%);
+  /* Shrinkable basis, not a fixed 220px: with flex-wrap the line break is
+     decided on the base size, so fixed-width chips wrapped onto their own row
+     as soon as the chat pane got narrow (pinned file panel open). A small
+     basis plus grow lets two or three chips share one row and split the
+     available width, capped so a single chip does not stretch. */
+  flex: 1 1 140px;
+  min-width: 0;
+  max-width: 220px;
   height: 48px;
   padding: 6px 8px;
   background: var(--bg);
@@ -5399,6 +5618,14 @@ details[open] > .activity-summary::before {
   font-weight: 600;
   flex-shrink: 0;
 }
+.commands-picker-kind {
+  color: var(--accent2);
+  font-size: 0.72em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
 .commands-picker-hint {
   color: var(--muted, #888);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -5416,6 +5643,26 @@ details[open] > .activity-summary::before {
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.mention-picker-row {
+  min-height: var(--touch);
+  box-sizing: border-box;
+  touch-action: manipulation;
+}
+.mention-picker-kind {
+  color: var(--accent2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.mention-picker-row .commands-picker-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Input bar */
@@ -6248,6 +6495,44 @@ details[open] > .activity-summary::before {
   0%   { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
   25%  { background: rgba(234, 179, 8, 0.7);  box-shadow: 0 0 0 6px rgba(234, 179, 8, 0.18); }
   100% { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
+}
+
+/* ── Ephemeral re-entry summary ── */
+.reentry-summary-message {
+  background: color-mix(in srgb, var(--accent2) 12%, var(--bg2));
+  border-color: color-mix(in srgb, var(--accent2) 45%, var(--border));
+  border-left-color: var(--accent2);
+}
+.reentry-summary-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.reentry-summary-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent2) 70%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent2) 18%, transparent);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+.reentry-summary-source {
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+}
+.reentry-summary-message .message-content {
+  color: var(--fg);
 }
 
 /* ── Loop banner ── */

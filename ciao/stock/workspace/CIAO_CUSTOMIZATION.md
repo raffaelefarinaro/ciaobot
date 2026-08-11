@@ -85,7 +85,7 @@ Provider keys live in `.env` or the provider's own OAuth store. Do not put keys 
 Common keys:
 
 - Claude Code authentication is owned by the Claude CLI; use Settings → Providers to connect or verify it.
-- `OPENAI_API_KEY`: OpenAI features such as cloud voice transcription.
+- Voice transcription and read-aloud use the host Mac's on-device Apple frameworks; no voice API key is required.
 - `CIAO_OLLAMA_API_KEY`: Ollama cloud API key.
 - `OPENROUTER_API_KEY`: optional critique/review model routing.
 

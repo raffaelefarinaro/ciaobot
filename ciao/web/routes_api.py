@@ -144,16 +144,36 @@ _GWS_BUILTIN_PROFILES = ("personal", "work")
 _GWS_PROFILE_META = {
     "personal": {
         "label": "Personal Google account",
-        "purpose": "Private Gmail, Calendar, and Tasks. Keep this separate from company systems.",
+        "purpose": "Private Google account. Keep this separate from company systems.",
+        # Shown for accounts connected before scopes were recorded. Their
+        # credentials.json has no `scopes` key and re-consent is the only way
+        # to get one, so without this an upgrading user's connected account
+        # silently loses every chip it used to show.
         "examples": ["Gmail", "Calendar", "Tasks"],
     },
     "work": {
         "label": "Work Google account",
-        "purpose": "Company Drive, Docs, Sheets, Slides, Gmail, Calendar, and Tasks.",
+        "purpose": "Company Google account used for work Drive, Docs, Sheets, and Slides.",
         "examples": ["Drive", "Docs", "Sheets", "Slides", "Gmail", "Calendar"],
     },
 }
 _GWS_AUTH_FILES = ("credentials.json", "credentials.enc")
+
+
+def _gws_purpose_with_chips(purpose: str, chips: list[str]) -> str:
+    """Append the granted services to the profile's standing description.
+
+    The description is not replaced: for the personal profile it carries the
+    "keep this separate from company systems" guidance, which matters most
+    once an account is actually connected.
+    """
+    if len(chips) == 1:
+        joined = chips[0]
+    elif len(chips) == 2:
+        joined = f"{chips[0]} and {chips[1]}"
+    else:
+        joined = f"{', '.join(chips[:-1])}, and {chips[-1]}"
+    return f"{purpose} Connected to {joined}."
 
 
 def _known_workspace_names(pcm: object) -> set[str]:
@@ -1384,7 +1404,6 @@ def _gws_profile_payload(
         {
             "label": f"{profile} Google profile",
             "purpose": "Custom Google Workspace profile configured outside the built-in personal/work wrapper.",
-            "examples": [],
         },
     )
     config_dir = _gws_profile_config_dir(config, profile)
@@ -1398,7 +1417,10 @@ def _gws_profile_payload(
         setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
         headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
 
+    from ciao import gws_auth
+
     email = ""
+    chips: list[str] = []
     if config_dir:
         creds_path = config_dir / "credentials.json"
         if creds_path.is_file():
@@ -1406,8 +1428,17 @@ def _gws_profile_payload(
                 with open(creds_path, "r", encoding="utf-8") as f:
                     creds_data = json.load(f)
                 email = creds_data.get("email") or ""
+                # gws_auth owns both the shape tolerance and the label
+                # catalogue, so a scope added to its scope sets cannot show up
+                # here as a raw URL without someone naming it there first.
+                chips = gws_auth.scope_labels(creds_data.get("scopes"))
             except Exception:
                 pass
+
+    # Connections made before scopes were recorded have none, and keep the
+    # profile's standing description and curated chip list.
+    examples = chips or list(meta.get("examples") or [])
+    purpose = _gws_purpose_with_chips(meta["purpose"], chips) if chips else meta["purpose"]
 
     # Cached token-health snapshot from the periodic monitor (issue #145).
     # Read-only and cheap — never runs the `auth status` subprocess here.
@@ -1422,8 +1453,8 @@ def _gws_profile_payload(
     return {
         "name": profile,
         "label": meta["label"],
-        "purpose": meta["purpose"],
-        "examples": meta["examples"],
+        "purpose": purpose,
+        "examples": examples,
         "configured": credentials_present,
         "credentials_present": credentials_present,
         "client_secret_present": client_secret_present,
@@ -2323,8 +2354,16 @@ async def chat_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     if request.method == "DELETE":
+        # `only_if_empty` is how closing a chat discards a never-used draft.
+        # The check has to happen here: "empty" means default title, no user
+        # turns, no session and no live stream, and `user_turn_count` is not
+        # in any payload the PWA receives — a client-side approximation of the
+        # rule deletes chats the server would have kept.
+        if request.query_params.get("only_if_empty") in {"1", "true"}:
+            if not pcm.is_empty_chat(chat_id):
+                return JSONResponse({"ok": False, "deleted": False, "reason": "not empty"})
         ok = pcm.delete_chat(chat_id)
-        return JSONResponse({"ok": ok})
+        return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
     if "control_surface" in body:
@@ -3329,6 +3368,24 @@ async def chat_speak(request: Request) -> Response:
     )
 
 
+async def chat_reentry_summary(request: Request) -> JSONResponse:
+    """Return an ephemeral Apple Intelligence summary for a reopened chat."""
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "chat not found"}, status_code=404)
+    if chat.archived:
+        return JSONResponse({"available": True, "summary": ""})
+
+    try:
+        summary = await pcm.generate_reentry_summary(chat_id)
+    except Exception as exc:  # noqa: BLE001 — orientation aid must never block chat use
+        logger.info("Re-entry summary failed for %s: %s", chat_id, exc)
+        return JSONResponse({"available": False, "summary": ""})
+    return JSONResponse({"available": bool(summary), "summary": summary})
+
+
 # ── Images ───────────────────────────────────────────────────────────────
 
 async def chat_images(request: Request) -> JSONResponse:
@@ -4249,6 +4306,23 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
     return JSONResponse({"status": "started", "model": model}, status_code=202)
 
 
+async def compare_apple_insights_route(request: Request) -> JSONResponse:
+    """Compare Apple Intelligence with a small sample of existing insights."""
+    from ciao.insights import compare_apple_insights
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — empty body uses the default sample size
+        body = {}
+    raw_limit = (body or {}).get("limit", 2) if isinstance(body, dict) else 2
+    try:
+        limit = max(1, min(int(raw_limit), 5))
+    except (TypeError, ValueError):
+        limit = 2
+    result = await compare_apple_insights(request.app.state.config, limit=limit)
+    return JSONResponse(result)
+
+
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     state = request.app.state.state_store
@@ -4815,9 +4889,9 @@ def _routines_payload(config, app_settings) -> dict:
                 for provider in load_custom_providers(config)
             },
         },
-        # The "apple" title option needs macOS 26+, the desktop app, and Apple
-        # Intelligence switched on; the Chat titles row explains which is
-        # missing instead of silently falling back to a cloud model.
+        # The "apple" title/insights options need macOS 26+, the desktop app,
+        # and Apple Intelligence switched on; the routine rows explain which
+        # prerequisite is missing instead of silently hiding the option.
         "apple_model_available": native_sidecar.apple_model_available(),
         "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
         "transcription": {
@@ -5565,6 +5639,61 @@ async def admin_snapshot(request: Request) -> JSONResponse:
 
 
 
+# Enough of a failing step's tail to carry a traceback or a pip resolver
+# error. The old 500 was not enough for either.
+_DEPLOY_STEP_OUTPUT_CHARS = 4000
+
+
+def _record_step(step: str, result: subprocess.CompletedProcess) -> dict:
+    """Capture a step's output, keeping the part that says what went wrong.
+
+    Two things this must not do, both of which hid real failures:
+
+    * Truncate from the *head*. Build tools put progress chatter first and
+      the diagnosis last, so `[:500]` on a failed `pip install` showed
+      "Preparing editable metadata..." and cut off before the error.
+    * Take ``stdout or stderr``. pip writes progress to stdout and errors
+      to stderr, so stdout is never empty and stderr was always discarded.
+
+    The full output is logged regardless: the response is the only other
+    copy, and a truncated card was previously the sole record of a failure.
+    """
+    parts = [p for p in (result.stdout.strip(), result.stderr.strip()) if p]
+    combined = "\n".join(parts)
+    out = combined[-_DEPLOY_STEP_OUTPUT_CHARS:]
+    if len(combined) > _DEPLOY_STEP_OUTPUT_CHARS:
+        out = f"[earlier output trimmed]\n{out}"
+    ok = result.returncode == 0
+    if not ok:
+        logger.error(
+            "deploy step %r failed (exit %s):\n%s", step, result.returncode, combined
+        )
+    return {"step": step, "ok": ok, "output": out}
+
+
+def _pip_install_hint(output: str) -> str:
+    """Turn pip's "cannot uninstall" wall of text into an actionable sentence.
+
+    Restart reinstalls the checkout with the *running server's* interpreter. When
+    that server is the Homebrew build, its `ciaobot` dist-info ships without a
+    RECORD file, so pip cannot work out which files belong to it and refuses to
+    uninstall — which it must do before installing the editable copy. Nothing
+    about the checkout is wrong, so the raw pip output sends people to debug the
+    wrong thing.
+    """
+    lowered = output.lower()
+    if "cannot uninstall" in lowered or "no record file" in lowered:
+        return (
+            "The engine is running from the Homebrew install, which pip cannot "
+            "replace in place: that install has no RECORD file, so pip refuses "
+            "to uninstall it before installing this checkout. Restart-from-source "
+            "needs an engine started from a source install — run `ciao run` from "
+            "a venv with `pip install -e .` — or use `brew upgrade ciaobot` to "
+            "move the Homebrew copy forward instead."
+        )
+    return ""
+
+
 def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
@@ -5633,10 +5762,6 @@ async def admin_deploy(request: Request) -> JSONResponse:
     codebase_root = _resolve_codebase_root(config)
     steps = []
 
-    def _record(step: str, result: subprocess.CompletedProcess) -> dict:
-        out = (result.stdout.strip() or result.stderr.strip())[:500]
-        return {"step": step, "ok": result.returncode == 0, "output": out}
-
     problem = _checkout_problem(codebase_root)
     if problem:
         hint = (
@@ -5680,10 +5805,15 @@ async def admin_deploy(request: Request) -> JSONResponse:
         desktop_build.run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
         cwd=str(codebase_root), timeout=120,
     )
-    steps.append(_record("pip install", result))
+    steps.append(_record_step("pip install", result))
     if result.returncode != 0:
+        hint = _pip_install_hint(steps[-1]["output"])
+        if hint:
+            steps[-1]["output"] = f"{hint}\n\n{steps[-1]['output']}"
+        # The step card renders the full output; the top-level error is the
+        # one-line headline above it, not a second copy of the same text.
         return JSONResponse(
-            {"steps": steps, "ok": False, "error": f"pip install failed: {steps[-1]['output']}"},
+            {"steps": steps, "ok": False, "error": hint or "pip install failed."},
             status_code=500,
         )
 
@@ -5693,7 +5823,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     result = await asyncio.to_thread(
         _run_root_npm_install, codebase_root,
     )
-    steps.append(_record("npm install (root)", result))
+    steps.append(_record_step("npm install (root)", result))
 
     # 3. npm build
     web_dir = codebase_root / "web"
@@ -5701,7 +5831,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
         desktop_build.run_step, ["npm", "run", "build"],
         cwd=str(web_dir), timeout=120,
     )
-    steps.append(_record("npm build", result))
+    steps.append(_record_step("npm build", result))
     if result.returncode != 0:
         return JSONResponse(
             {"steps": steps, "ok": False, "error": f"npm build failed: {steps[-1]['output']}"},

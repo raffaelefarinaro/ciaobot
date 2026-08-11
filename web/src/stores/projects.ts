@@ -16,6 +16,7 @@ import type {
   ProjectInfo,
   ChatInfo,
   ChatRow,
+  ChatGroup,
   ChatMessage,
   SubagentTranscript,
   WsEvent,
@@ -49,6 +50,10 @@ export function isHostConnectionUnavailableMessage(message: string): boolean {
   return message.trim().toLowerCase().startsWith('host ws unreachable')
 }
 
+// Must match `_DEFAULT_CHAT_TITLE` on the server: `_is_empty_chat` uses it to
+// tell an abandoned draft from a chat the user deliberately named.
+const DEFAULT_CHAT_TITLE = 'New Chat'
+
 export const useProjectStore = defineStore('projects', () => {
   const projects = ref<ProjectInfo[]>([])
   const chats = ref<ChatInfo[]>([])
@@ -64,6 +69,12 @@ export const useProjectStore = defineStore('projects', () => {
   const workspaceAppDefaultModel = ref('')
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
+  // Re-entry summaries are requested in the background whenever a non-empty
+  // chat is opened. They are deliberately ephemeral: the first new message
+  // clears the summary so it never becomes part of the conversation history.
+  const reentrySummaries = ref<Record<string, string>>({})
+  const reentrySummaryRequests = new Set<string>()
+  const reentrySummaryRevisions = ref<Record<string, number>>({})
   // False until the first fetchAll() resolves. Gates the home empty state so
   // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
@@ -464,6 +475,13 @@ export const useProjectStore = defineStore('projects', () => {
   // the flat list the counts (unread, needs-input) are summed over — a
   // delegate's unread still belongs to its project.
   function projectChatRows(projectId: string): ChatRow[] {
+    return projectChatGroups(projectId).flatMap(group => [
+      { chat: group.chat, isDelegate: false },
+      ...group.delegates.map(chat => ({ chat, isDelegate: true })),
+    ])
+  }
+
+  function projectChatGroups(projectId: string): ChatGroup[] {
     const all = projectChats(projectId)
     const visible = new Set(all.map(c => c.chat_id))
     const byParent = new Map<string, ChatInfo[]>()
@@ -474,18 +492,15 @@ export const useProjectStore = defineStore('projects', () => {
       siblings.push(chat)
       byParent.set(parent, siblings)
     }
-    const rows: ChatRow[] = []
+    const groups: ChatGroup[] = []
     for (const chat of all) {
       // A delegate nests only when its supervisor is visible in this same
       // project. Orphans (supervisor archived, deleted, or moved elsewhere)
       // stay top-level rather than vanishing from the sidebar entirely.
       if (chat.spawned_from_chat_id && visible.has(chat.spawned_from_chat_id)) continue
-      rows.push({ chat, isDelegate: false })
-      for (const delegate of byParent.get(chat.chat_id) || []) {
-        rows.push({ chat: delegate, isDelegate: true })
-      }
+      groups.push({ chat, delegates: byParent.get(chat.chat_id) || [] })
     }
-    return rows
+    return groups
   }
 
   function chatActivity(chat: ChatInfo): string {
@@ -978,6 +993,10 @@ export const useProjectStore = defineStore('projects', () => {
   // if set it wins. The getter returns 0 or 1 — the bell dropdown surfaces
   // the list, so an exact per-chat count isn't needed.
   function chatUnread(chatId: string): number {
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    // Delegate completion is internal model-to-model traffic. It wakes the
+    // supervisor, so the child must never create a second unread notification.
+    if (chat && isNestedDelegate(chat)) return 0
     // Invariant: the chat the user is actively looking at is, by definition,
     // read. Suppress the badge regardless of the server's last_read_at. This
     // also closes a race in `chat_result_ready` where api.get('/api/chats')
@@ -985,7 +1004,6 @@ export const useProjectStore = defineStore('projects', () => {
     // optimistic last_read_at update.
     if (chatId === activeChatId.value && documentVisible.value) return 0
     if (unread.value[chatId]) return 1
-    const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat) return 0
     const activity = chat.last_activity_at || ''
     const read = chat.last_read_at || ''
@@ -1093,13 +1111,11 @@ export const useProjectStore = defineStore('projects', () => {
         activeWorkspace.value = workspaceResponse.active || knownWorkspaceNames[0] || 'personal'
       }
 
-      // Initial active-chat resolution priority:
-      //   1) URL /chat/:chatId (represents the user's direct intent on a reload
-      //      or deep link; must beat localStorage to avoid briefly subscribing
-      //      to the wrong chat's WS and, on switch, rewriting the URL).
-      //   2) activeChatId restored from localStorage (if it still exists and
-      //      isn't archived).
-      //   3) First chat in the current workspace.
+      // Initial active-chat resolution:
+      //   1) URL /chat/:chatId represents the user's direct intent on a
+      //      reload, notification, or deep link.
+      //   2) Ordinary launches stay on the home screen. In particular, do not
+      //      reopen the chat that happened to be active in the previous run.
       const { router } = await import('../router')
       const urlChatId = (router.currentRoute.value.params.chatId as string | undefined)
         || (typeof window !== 'undefined'
@@ -1108,12 +1124,15 @@ export const useProjectStore = defineStore('projects', () => {
       if (urlChatId && chatExistsInList(urlChatId, c)) {
         await ensureWorkspaceForChat(urlChatId)
         activeChatId.value = urlChatId
-      } else if (activeChatId.value && !chatExistsInList(activeChatId.value, c)) {
+      } else if (!bootstrapped.value) {
+        // Boot only. fetchAll is also a refresh — SchedulePanel and
+        // SchedulesView call it while the app is running — and clearing the
+        // selection there dropped the user's open chat just because the
+        // current route was /schedules, sending them to the home screen when
+        // they navigated back.
         activeChatId.value = null
       }
-      if (!activeChatId.value) {
-        selectFirstChat()
-      }
+      persistState()
       if (activeChatId.value) {
         // Only clear unread if the chat is actually on screen. This used to mark
         // read unconditionally, so a fetchAll while the window was hidden (the
@@ -1137,6 +1156,7 @@ export const useProjectStore = defineStore('projects', () => {
         void (async () => {
           await loadMessages(bootChatId)
           connectWs(bootChatId)
+          requestReentrySummaryIfUseful(bootChatId)
         })()
       }
       // Open the cross-chat awareness socket once per app session.
@@ -1472,7 +1492,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Chat actions ────────────────────────────────────────────────────
 
-  async function createChat(projectId: string, title = 'New Chat') {
+  async function createChat(projectId: string, title = DEFAULT_CHAT_TITLE) {
     creatingChatProjectIds.value[projectId] = true
     try {
       const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
@@ -1553,14 +1573,125 @@ export const useProjectStore = defineStore('projects', () => {
     return c
   }
 
-  async function deleteChat(chatId: string) {
+  async function deleteChat(
+    chatId: string,
+    options?: { selectNext?: boolean; onlyIfEmpty?: boolean },
+  ): Promise<boolean> {
     disconnectWs(chatId)
-    await api.del(`/api/chats/${chatId}`)
+    // `only_if_empty` makes the server apply its own `_is_empty_chat` rule and
+    // decline otherwise, so closing a draft can never delete a real chat.
+    const query = options?.onlyIfEmpty ? '?only_if_empty=1' : ''
+    const result = await api.del<{ deleted?: boolean }>(`/api/chats/${chatId}${query}`)
+    if (options?.onlyIfEmpty && result?.deleted === false) return false
     chats.value = chats.value.filter(c => c.chat_id !== chatId)
     delete messages.value[chatId]
+    delete reentrySummaries.value[chatId]
+    delete reentrySummaryRevisions.value[chatId]
+    reentrySummaryRequests.delete(chatId)
     persistMessages()
-    if (activeChatId.value === chatId) {
+    if (options?.selectNext !== false && activeChatId.value === chatId) {
       await transitionToFirstChat()
+    }
+    return true
+  }
+
+  // Mirrors the server's `_is_empty_chat` (project_chats.py). It must not be
+  // more eager than the server: this deletes the chat outright, and the two
+  // rules disagreeing means deleting something the server would have kept.
+  //
+  // The client cannot see `user_turn_count`, so it substitutes the loaded
+  // messages — which is only sound when they are actually loaded. `messages`
+  // is undefined for a chat that was never opened, and reading that as "no
+  // user turns" made a real conversation look like a discarded draft.
+  function isEmptyDraft(chatId: string): boolean {
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (!chat || chat.archived || chat.session_id) return false
+    // A renamed chat is a deliberate act, not an abandoned draft.
+    if (chat.title !== DEFAULT_CHAT_TITLE) return false
+    const loaded = messages.value[chatId]
+    if (!loaded) return false
+    return !loaded.some(message => message.role === 'user')
+  }
+
+  async function closeChat(chatId = activeChatId.value): Promise<void> {
+    if (!chatId) return
+    const emptyDraft = isEmptyDraft(chatId)
+    const wasActive = activeChatId.value === chatId
+    if (emptyDraft) {
+      // A never-used New Chat is only a draft. Delete it on close and leave
+      // the home screen empty instead of jumping to another conversation.
+      // Clear the view before awaiting the DELETE so the close gesture feels
+      // immediate even if the local server is briefly slow.
+      if (wasActive) {
+        activeChatId.value = null
+        persistState()
+      }
+      // onlyIfEmpty: the server re-checks with the full rule and declines if
+      // this is not actually a discardable draft. Closing a chat must never
+      // be able to destroy one.
+      try {
+        await deleteChat(chatId, { selectNext: false, onlyIfEmpty: true })
+      } finally {
+        // The view is already cleared. A failed DELETE must not also strand
+        // the router on /chat/<id> with no active chat behind it.
+        await leaveChatView(wasActive)
+      }
+      return
+    }
+    // Warm the persistent per-chat summary cache while the user is away.
+    // The request is intentionally detached so closing the chat stays
+    // immediate; switchChat still requests it as a fallback if this call
+    // has not finished by the time the user returns.
+    void requestReentrySummary(chatId)
+    disconnectWs(chatId)
+    await leaveChatView(wasActive)
+  }
+
+  async function leaveChatView(wasActive: boolean): Promise<void> {
+    if (!wasActive) return
+    activeChatId.value = null
+    persistState()
+    const { router } = await import('../router')
+    await router.push('/')
+  }
+
+  function clearReentrySummary(chatId: string): void {
+    delete reentrySummaries.value[chatId]
+    reentrySummaryRevisions.value[chatId] = (reentrySummaryRevisions.value[chatId] || 0) + 1
+  }
+
+  async function requestReentrySummary(chatId: string): Promise<void> {
+    if (reentrySummaryRequests.has(chatId)) return
+    reentrySummaryRequests.add(chatId)
+    const revision = reentrySummaryRevisions.value[chatId] || 0
+    try {
+      const result = await api.post<{ summary?: string }>(`/api/chats/${chatId}/reentry-summary`, {})
+      const summary = typeof result?.summary === 'string' ? result.summary.trim() : ''
+      if (
+        summary
+        && revision === (reentrySummaryRevisions.value[chatId] || 0)
+        && chats.value.some(chat => chat.chat_id === chatId)
+      ) {
+        reentrySummaries.value[chatId] = summary
+      }
+    } catch {
+      // Apple Intelligence is optional. A failed/unavailable summary should
+      // never interfere with opening or using the chat.
+    } finally {
+      reentrySummaryRequests.delete(chatId)
+    }
+  }
+
+  function requestReentrySummaryIfUseful(chatId: string): void {
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (!chat || chat.archived) return
+    // session_id covers chats whose history is still being hydrated; the
+    // message check covers providers/fixtures that do not expose one.
+    const hasHistory = Boolean(chat.session_id) || (messages.value[chatId] || []).some(
+      message => message.role === 'user' || message.role === 'assistant',
+    )
+    if (hasHistory && !reentrySummaries.value[chatId]) {
+      void requestReentrySummary(chatId)
     }
   }
 
@@ -1706,6 +1837,7 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       let normalizedLocal = normalizeMessages(messages.value[chatId] || [])
+      const historyChanged = historySignature(normalizedServer) !== historySignature(normalizedLocal)
 
       // Heal orphaned optimistic user bubbles. A send queued behind a still
       // streaming turn can leave a turn_index-less copy that the live echo
@@ -1756,6 +1888,7 @@ export const useProjectStore = defineStore('projects', () => {
         messages.value[chatId] = normalizedLocal
         persistMessages()
       }
+      if (historyChanged) clearReentrySummary(chatId)
       if (
         streaming.value[chatId]
         && !projectStreaming.value[chatId]
@@ -1854,6 +1987,7 @@ export const useProjectStore = defineStore('projects', () => {
     await loadMessages(chatId)
     void loadSubagents(chatId)
     connectWs(chatId)
+    requestReentrySummaryIfUseful(chatId)
   }
 
   async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }) {
@@ -2333,6 +2467,11 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'chat_result_ready': {
+        const resultChat = chats.value.find(c => c.chat_id === msg.chat_id)
+        // The server suppresses delegate result events, but keep this guard
+        // for older servers and replayed events so internal child work cannot
+        // leak into the notification tray.
+        if (resultChat && isNestedDelegate(resultChat)) break
         const isFocused = activeChatId.value === msg.chat_id &&
           (typeof document === 'undefined' || document.visibilityState === 'visible')
         if (isFocused) {
@@ -2606,6 +2745,9 @@ export const useProjectStore = defineStore('projects', () => {
     mode: 'queue' | 'steer' = 'queue',
     prepared?: PreparedMessage,
   ) {
+    // A re-entry summary is a transient orientation aid, not a new chat
+    // message. The first send is the user's signal that it has done its job.
+    clearReentrySummary(chatId)
     // Any send implicitly answers (or dismisses) a pending AskUserQuestion
     // picker — the model already got an empty tool result and is reading
     // this turn for the actual answer. Clear the local chat's persisted
@@ -3244,6 +3386,13 @@ export const useProjectStore = defineStore('projects', () => {
   function handleEvent(chatId: string, event: WsEvent) {
     const msgs = messages.value[chatId] || []
 
+    // A summary belongs only to the moment the user re-enters a quiet chat.
+    // Any message arriving over the socket makes that orientation stale,
+    // including messages from another device and assistant results.
+    if (event.type === 'user_echo' || event.type === 'queued' || event.type === 'steered' || event.type === 'result') {
+      clearReentrySummary(chatId)
+    }
+
     // Any event that implies an in-flight stream flips the flag, so a resumed
     // stream (WS reconnect with buffered-event replay from the server broker)
     // renders as "streaming" without the client having called sendMessage.
@@ -3564,6 +3713,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (isCompacting) {
           _pushStatusLine(chatId, message)
         } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isTelemetry) {
+          clearReentrySummary(chatId)
           msgs.push({
             role: 'system',
             content: message,
@@ -3839,20 +3989,20 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, unread,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, unread, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
     chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, totalUnread, clearUnread, markRead, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
-    createChat, newChatInGeneral, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest,

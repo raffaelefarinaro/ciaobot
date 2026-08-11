@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ciaobot"
-version = "0.7.1"
+version = "0.8.0"
 description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-  "claude-agent-sdk==0.2.128",
+  "claude-agent-sdk==0.2.134",
   # Agent-facing control plane shared by Claude Code and Codex.
   "mcp>=1.29.0,<2.0",
   "starlette==0.52.1",
@@ -23,7 +23,7 @@ dependencies = [
   # `websockets` is already pulled in transitively by uvicorn[standard].
   "httpx==0.28.1",
   "python-pptx==1.0.2",
-  "notebooklm-py==0.7.3",
+  "notebooklm-py==0.8.0",
 ]
 
 [project.optional-dependencies]

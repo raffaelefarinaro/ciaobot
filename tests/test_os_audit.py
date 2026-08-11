@@ -114,6 +114,106 @@ def test_audit_memory_hygiene(tmp_path: Path) -> None:
     assert res["invalid_expiration_entries"] == 1
 
 
+def test_audit_memory_reports_content_rot(tmp_path: Path) -> None:
+    (tmp_path / "memory-vault").mkdir()
+    guide = _seed_guide(
+        tmp_path / "CLAUDE.md",
+        memory=[
+            'User said: "do it" -> assistant bumped the default.',
+            "Notes live in `memory-vault/absent.md` now.",
+        ],
+        profile=["Raffa writes without em-dashes."],
+    )
+
+    res = audit_memory(guide_path=guide, workspace_dir=tmp_path)
+
+    assert len(res["event_shaped_entries"]) == 1
+    assert len(res["stale_path_entries"]) == 1
+    assert res["paths_checked"] == 1
+    assert res["superseded_state_candidates"] == []
+
+
+def test_run_os_audit_counts_rot_but_not_superseded_candidates(tmp_path: Path) -> None:
+    """Superseded-state is a judgement call, so it must not gate the status.
+
+    Counting it would leave the audit permanently at needs_attention for a user
+    who has looked at the pair and decided to keep both entries.
+    """
+    (tmp_path / "memory-vault").mkdir()
+    _seed_guide(
+        tmp_path / "CLAUDE.md",
+        memory=[
+            "Set `ollama_haiku_model` to the old slug.",
+            "Set `ollama_haiku_model` to the new slug.",
+        ],
+        profile=[],
+    )
+
+    report = run_os_audit(workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault")
+    memory = report["memory_hygiene"]
+
+    assert len(memory["superseded_state_candidates"]) == 1
+    assert memory["event_shaped_entries"] == []
+    assert memory["stale_path_entries"] == []
+
+    baseline = run_os_audit(
+        workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault"
+    )
+    _seed_guide(
+        tmp_path / "CLAUDE.md",
+        memory=['User said: "go" -> assistant changed it.'],
+        profile=[],
+    )
+    with_event = run_os_audit(
+        workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault"
+    )
+
+    assert with_event["total_issues"] == baseline["total_issues"] + 1
+
+
+def test_memory_actionable_count_covers_the_mechanical_findings(tmp_path: Path) -> None:
+    """`ciao memory-audit` and `ciao os-audit` must agree on "clean".
+
+    The CLI used to sum its own subset of the report and omitted
+    `oversize_entries`, `invisible_unicode` and `pending_memory_proposals`, so
+    it exited 0 on a region that os-audit failed. Both now call this function,
+    and this test fails if a new key is counted in one place only.
+    """
+    from ciao.os_audit import memory_actionable_count
+
+    # A zero-width space is invisible Unicode: os-audit has always failed on it.
+    (tmp_path / "memory-vault").mkdir()
+    _seed_guide(
+        tmp_path / "CLAUDE.md",
+        memory=["Prefers concise​ answers."],
+        profile=[],
+    )
+
+    report = run_os_audit(workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault")
+    memory = report["memory_hygiene"]
+
+    assert len(memory["invisible_unicode"]) == 1
+    assert memory_actionable_count(memory) >= 1
+    # The whole-audit status agrees, which is the contract the CLI relies on.
+    assert report["total_issues"] >= 1
+
+
+def test_format_audit_markdown_renders_rot_findings(tmp_path: Path) -> None:
+    (tmp_path / "memory-vault").mkdir()
+    _seed_guide(
+        tmp_path / "CLAUDE.md",
+        memory=['User said: "go" -> assistant changed `timeout_s`.'],
+        profile=[],
+    )
+
+    report = run_os_audit(workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault")
+    markdown = format_audit_markdown(report)
+
+    assert "Event-shaped entries (belong in a log): 1" in markdown
+    assert "reads as a chat event" in markdown
+    assert "paths checked" in markdown
+
+
 def test_audit_memory_reports_unclosed_expiration_tag(tmp_path: Path) -> None:
     guide = _seed_guide(
         tmp_path / "CLAUDE.md",
