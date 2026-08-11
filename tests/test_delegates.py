@@ -18,7 +18,7 @@ from ciao.web.project_chats import (
 )
 
 
-def _make_manager(tmp_path: Path) -> ProjectChatManager:
+def _make_manager(tmp_path: Path, **config_kwargs: object) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -26,6 +26,7 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
+        **config_kwargs,
     )
     return ProjectChatManager(
         config,
@@ -687,3 +688,58 @@ def test_create_chat_rejects_an_unconfigured_model(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unknown model 'deepseek-coder'"):
         manager.create_chat(project.project_id, model="deepseek-coder")
+
+
+def test_create_chat_validates_the_workspace_default_model(tmp_path: Path) -> None:
+    """A stale workspace default must be rejected, not silently accepted.
+
+    When ``model`` is omitted, ``chat_model`` resolves to the workspace
+    default; validating only the explicit arg let an invalid default create
+    a delegate that fails on its first turn (#259).
+    """
+    manager = _make_manager(tmp_path, claude_default_model="deepseek-coder")
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown model 'deepseek-coder'"):
+        manager.create_chat(project.project_id, title="New Chat")
+
+
+def test_create_chat_invalid_model_does_not_cleanup_empty_chats(
+    tmp_path: Path,
+) -> None:
+    """A rejected model must not delete unrelated empty chats (#259).
+
+    Validation runs before ``_cleanup_empty_chats``, so a failed create
+    request leaves other abandoned drafts untouched.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    empty = manager.create_chat(project.project_id, title="New Chat")
+
+    with pytest.raises(ValueError, match="Unknown model 'deepseek-coder'"):
+        manager.create_chat(project.project_id, title="New Chat", model="deepseek-coder")
+
+    assert empty.chat_id in manager._chats
+
+
+def test_delegate_spawn_preserves_non_model_errors(tmp_path: Path) -> None:
+    """An unknown provider must not be relabeled as ``invalid_model`` (#259).
+
+    Only the specific unknown-model failure translates to ``invalid_model``;
+    other ``create_chat`` rejections keep their own identity so the MCP
+    boundary reports them as ``invalid_request``.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    plane = _control_plane(manager)
+
+    with pytest.raises(ValueError) as excinfo:
+        plane.delegate_spawn(
+            _principal(parent.chat_id, project.project_id),
+            prompt="do the thing",
+            provider="bogus",
+        )
+    assert not isinstance(excinfo.value, ControlPlaneError)
+    assert "Unknown provider 'bogus'" in str(excinfo.value)

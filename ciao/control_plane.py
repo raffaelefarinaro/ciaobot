@@ -24,7 +24,7 @@ from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
 from ciao.loops import publish_loops_changed
 from ciao.memory_tool import resolve_region
 from ciao.models import ControlSurface
-from ciao.web.project_chats import _MAX_ACTIVE_DELEGATES
+from ciao.web.project_chats import UnknownModelError, _MAX_ACTIVE_DELEGATES
 from ciao.schedules import ScheduleEntry, compute_next_run
 
 logger = logging.getLogger(__name__)
@@ -794,7 +794,11 @@ class CiaoControlPlane:
                 spawned_from_chat_id=parent.chat_id,
                 delegation_id=delegation_id.strip(),
             )
-        except ValueError as exc:
+        except UnknownModelError as exc:
+            # Only the model failure is a model problem; an unknown provider
+            # or bucket raises ValueError before model validation and must
+            # keep its own identity at the MCP boundary (invalid_request)
+            # instead of being relabeled invalid_model (#259).
             raise ControlPlaneError("invalid_model", str(exc)) from exc
         # Same start/queue split as chat_send: a brand-new chat is never
         # streaming, so this normally starts immediately.

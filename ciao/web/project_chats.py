@@ -35,6 +35,17 @@ class RestartDrainingError(RuntimeError):
     def __init__(self, message: str = RESTART_DRAIN_MESSAGE) -> None:
         super().__init__(message)
 
+
+class UnknownModelError(ValueError):
+    """A model id that is not in the configured set.
+
+    Raised by ``ProjectChatManager._validate_configured_model``. Distinct
+    from the other ``ValueError``s ``create_chat`` raises (unknown provider,
+    bucket, control surface) so the MCP delegate boundary can translate only
+    the model failure to ``invalid_model`` and leave the rest as
+    ``invalid_request`` (#259).
+    """
+
 try:  # pragma: no cover - Ciaobot targets Unix; fallback keeps imports portable.
     import fcntl
 except ImportError:  # pragma: no cover
@@ -1707,10 +1718,15 @@ class ProjectChatManager:
                 f"To begin, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
             )
 
+        # A system bootstrap chat must always be creatable, so it uses a
+        # guaranteed-valid tier alias rather than the workspace default: a
+        # stale hand-edited default would otherwise crash the server at
+        # startup instead of surfacing as a create_chat error the user can
+        # fix in Settings (#259).
         chat = self.create_chat(
             project_id,
             title=title,
-            model=self._config.claude_default_model,
+            model="haiku",
         )
         chat.handover_context_pending = True
         chat.handover_messages = [
@@ -2788,11 +2804,8 @@ class ProjectChatManager:
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if control_surface not in {None, "", "legacy", "mcp", "auto"}:
             raise ValueError(f"Unknown control surface '{control_surface}'")
-        # Sweep any other empty chats before creating a new one. Opening a
-        # fresh "New Chat" signals the user has moved on from whatever they
-        # had open and never sent, so we don't let empty shells pile up.
-        self._cleanup_empty_chats()
-        cid = f"chat-{_uuid8()}"
+        # Resolve the effective model/provider before any side effects, so a
+        # rejected model can't leave unrelated empty chats deleted (#259).
         # Per-workspace default: personal projects can default to Ollama
         # models, work to Anthropic, etc. Explicit ``model`` arg wins.
         project = self._projects.get(project_id)
@@ -2803,7 +2816,16 @@ class ProjectChatManager:
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
         self._validate_custom_model_runner(chat_model, chat_provider)
-        self._validate_configured_model(model, chat_provider)
+        # Validate the effective model (the workspace default when ``model``
+        # is omitted), not just the explicit arg, so a stale workspace
+        # default can't create a delegate that fails on its first turn
+        # (#259).
+        self._validate_configured_model(chat_model, chat_provider)
+        # Sweep any other empty chats before creating a new one. Opening a
+        # fresh "New Chat" signals the user has moved on from whatever they
+        # had open and never sent, so we don't let empty shells pile up.
+        self._cleanup_empty_chats()
+        cid = f"chat-{_uuid8()}"
         # Claude chats record the bucket explicitly: the workspace only
         # preselects (personal → "personal"), but an explicit picker choice
         # wins and survives project moves. Personal-bucket alias defaults
@@ -4071,7 +4093,7 @@ class ProjectChatManager:
         if model in allowed:
             return
         sample = ", ".join(allowed[:8]) if allowed else "(none configured)"
-        raise ValueError(
+        raise UnknownModelError(
             f"Unknown model '{model}' for provider '{provider or 'default'}' "
             f"(configured models: {sample})"
         )
