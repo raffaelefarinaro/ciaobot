@@ -95,11 +95,19 @@ That sets `develop` as the default branch and enables pull-request + CI requirem
 
 ## Frontend build
 
+Node 22 is the supported version (`.nvmrc`, and what CI uses). The floor is
+`^20.19.0 || ^22.13.0 || >=24.0.0`, set by jsdom — below it every jsdom test file
+fails to start its worker, and vitest still reports a pass for the subset that
+ran. `npm test` preflights this and exits with an explanation rather than
+producing a misleading green summary.
+
 ```bash
+nvm use              # reads .nvmrc → Node 22
 npm install          # optional root Node tooling
 cd web
 npm install
 npm run build        # typecheck + Vite build, outputs to ciao/web/static/
+npm test             # 42 files / 345 tests
 ```
 
 ## macOS desktop development
@@ -107,6 +115,19 @@ npm run build        # typecheck + Vite build, outputs to ciao/web/static/
 The Tauri 2 shell requires macOS 13+, Node 22.x, Rust 1.90.0 with
 `aarch64-apple-darwin` and `x86_64-apple-darwin` targets, and `swiftc` from the
 Xcode Command Line Tools (it builds the `ciaobot-native` sidecar).
+
+`desktop/native/main.swift` uses Apple's FoundationModels, whose
+`GenerationOptions` initialiser was renamed: `sampling:` on the macOS 26 SDK,
+`samplingMode:` on macOS 27. **The file deliberately uses the older
+`sampling:`** — it is the only spelling that compiles on both, since the GitHub
+macOS runner currently tops out at Xcode 26.6 (Swift 6.3.3, macOS 26 SDK) where
+`samplingMode:` does not exist. On a macOS 27 SDK it still builds, with a
+deprecation warning. Switch to `samplingMode:` only once the runner image ships
+Xcode 27, or CI cannot build the sidecar at all.
+
+CI and the publish workflow both select the newest Xcode installed on the runner
+before building the sidecar and print `xcodebuild -version`, so a toolchain skew
+is visible in the log instead of looking like a code regression.
 
 `./scripts/check-desktop.sh` runs the whole gate — the same commands CI's
 `build-desktop` job does — and asserts the sidecar ends up bundled, universal,

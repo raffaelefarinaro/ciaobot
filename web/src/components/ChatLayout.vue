@@ -46,11 +46,13 @@
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
-            <div class="empty-state">
-              <div class="empty-mark">
+            <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
+              <div class="empty-home-header">
+                <div class="empty-mark" :class="{ 'empty-mark--compact': store.activeChatsAll.length > 0 }">
                 <button
                   type="button"
                   class="empty-face-btn"
+                  :class="{ 'empty-face-btn--compact': store.activeChatsAll.length > 0 }"
                   aria-label="Say hello"
                   @click="onFaceClick"
                   @mouseenter="onFaceEnter"
@@ -63,14 +65,17 @@
                   </Transition>
                   <img
                     class="empty-face"
+                    :class="{ 'empty-face--compact': store.activeChatsAll.length > 0 }"
                     :src="faceSrc"
                     alt=""
                     draggable="false"
                   />
                 </button>
+                </div>
+                <span v-if="store.activeChatsAll.length" class="empty-status-text">{{ homeStatus }}</span>
               </div>
-              <HomeRecentChats ref="homeRecentRef" />
-              <div class="empty-actions">
+              <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
+              <div v-if="showGlobalNewChatActions" class="empty-actions">
                 <button
                   v-for="action in generalWorkspaceActions"
                   :key="action.workspace"
@@ -126,11 +131,13 @@
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
           <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
-          <div class="empty-state">
-            <div class="empty-mark">
+          <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
+            <div class="empty-home-header">
+              <div class="empty-mark" :class="{ 'empty-mark--compact': store.activeChatsAll.length > 0 }">
               <button
                 type="button"
                 class="empty-face-btn"
+                :class="{ 'empty-face-btn--compact': store.activeChatsAll.length > 0 }"
                 aria-label="Say hello"
                 @click="onFaceClick"
                 @mouseenter="onFaceEnter"
@@ -143,14 +150,17 @@
                 </Transition>
                 <img
                   class="empty-face"
+                  :class="{ 'empty-face--compact': store.activeChatsAll.length > 0 }"
                   :src="faceSrc"
                   alt=""
                   draggable="false"
                 />
               </button>
+              </div>
+              <span v-if="store.activeChatsAll.length" class="empty-status-text">{{ homeStatus }}</span>
             </div>
-            <HomeRecentChats ref="homeRecentRef" />
-            <div class="empty-actions">
+            <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
+            <div v-if="showGlobalNewChatActions" class="empty-actions">
               <button
                 v-for="action in generalWorkspaceActions"
                 :key="action.workspace"
@@ -433,6 +443,15 @@ const currentProjectId = computed(() => {
   if (chat?.project_id) return chat.project_id
   return ''
 })
+// The per-lane "+ new" button replaces these on a wide screen, but a lane
+// header is hidden for every collapsed lane below 820px — so on a phone with at
+// least one chat there would otherwise be no way to start a chat in a
+// non-active workspace. Keep the global buttons wherever the lane ones are not
+// all reachable.
+const showGlobalNewChatActions = computed(() =>
+  !store.activeChatsAll.length || isMobile.value,
+)
+
 const generalWorkspaceActions = computed(() => {
   return store.workspaceOptions
     .map(workspace => {
@@ -448,6 +467,21 @@ const generalWorkspaceActions = computed(() => {
       }
     })
     .filter(action => action.projectId)
+})
+
+const homeStatus = computed(() => {
+  const chats = store.activeChatsAll
+  const needs = chats.filter(chat => store.chatNeedsInput(chat.chat_id)).length
+  const working = chats.filter(chat =>
+    store.isChatStreaming(chat.chat_id) || store.chatHasBackgroundAgents(chat.chat_id),
+  ).length
+  const needText = needs
+    ? `${needs} chat${needs === 1 ? '' : 's'} need you`
+    : 'nothing needs you'
+  const workingText = working
+    ? `${working} agent${working === 1 ? '' : 's'} still working`
+    : 'no agents working'
+  return `${needText}. ${workingText}.`
 })
 
 function workspaceLabel(name: string): string {
@@ -856,6 +890,36 @@ onBeforeUnmount(() => {
   overflow-y: auto;
 }
 
+.empty-state--active {
+  align-items: stretch;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.empty-home-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 1040px;
+  min-height: 44px;
+  gap: 10px;
+  margin: 0 auto;
+}
+
+.empty-state--active .empty-home-header {
+  justify-content: flex-start;
+}
+
+.empty-status-text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .empty-state .empty-mark {
   display: inline-flex;
   align-items: center;
@@ -887,6 +951,18 @@ onBeforeUnmount(() => {
     drop-shadow(-1px 0 0 color-mix(in srgb, var(--accent) 40%, transparent))
     drop-shadow(0 1px 0 color-mix(in srgb, var(--accent) 40%, transparent))
     drop-shadow(0 -1px 0 color-mix(in srgb, var(--accent) 40%, transparent));
+}
+
+.empty-state .empty-face--compact {
+  width: 30px;
+  height: 30px;
+}
+
+.empty-face-btn--compact {
+  min-width: var(--touch);
+  min-height: var(--touch);
+  align-items: center;
+  justify-content: center;
 }
 .face-speech-bubble {
   position: absolute;
@@ -949,12 +1025,9 @@ onBeforeUnmount(() => {
 }
 
 .empty-actions {
-  /* Mirror the jump-back-in tile grid so the new-chat buttons line up with
-     the cards (same 560px column, same auto-fit tracks and gap). auto-fit
-     collapses empty tracks so a lone workspace button — or the last one on
-     an odd-count row — stretches full width. */
+  /* Keep the genuine empty state aligned with the lane container. */
   width: 100%;
-  max-width: 560px;
+  max-width: 1040px;
   margin: 0 auto;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

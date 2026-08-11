@@ -31,24 +31,31 @@
       </template>
     </PaneHeader>
 
+    <!-- Counts only, ordered by urgency. "Created" used to sit here as a date
+         styled like a metric, while the count that matters - how many chats want
+         you - was missing entirely. Dates moved to the caption below. -->
     <div class="project-stats">
-      <div class="stat">
-        <div class="stat-value">{{ activeChats.length }}</div>
-        <div class="stat-label">Active chats</div>
+      <div class="stat" :class="{ 'stat--hot': needsInputCount > 0 }">
+        <div class="stat-value">{{ needsInputCount }}</div>
+        <div class="stat-label">Need you</div>
       </div>
       <div class="stat">
-        <div class="stat-value">{{ archivedChats.length }}</div>
-        <div class="stat-label">Archived</div>
+        <div class="stat-value">{{ workingCount }}</div>
+        <div class="stat-label">Working</div>
       </div>
       <div class="stat">
         <div class="stat-value">{{ totalUnread }}</div>
         <div class="stat-label">Unread</div>
       </div>
       <div class="stat">
-        <div class="stat-value">{{ formatDate(project.created_at) }}</div>
-        <div class="stat-label">Created</div>
+        <div class="stat-value">{{ activeChats.length }}</div>
+        <div class="stat-label">Active</div>
       </div>
     </div>
+    <p class="project-caption">
+      created {{ formatDate(project.created_at) }}
+      <template v-if="archivedChats.length"> · {{ archivedChats.length }} archived</template>
+    </p>
 
     <section class="card">
       <div class="card-header">
@@ -85,16 +92,19 @@
           :title="chat.local === false ? 'This chat lives on another instance' : ''"
         >
           <div class="chat-row-main">
-            <span class="chat-name">{{ chat.title }}</span>
-            <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
-            <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer" aria-label="Needs your answer">?</span>
+            <!-- Chat-level unread is title weight, not a digit: chatUnread() is
+                 binary, so a badge could only ever read "1". -->
+            <span
+              class="chat-name"
+              :class="{ 'chat-name--unread': store.chatUnread(chat.chat_id) > 0 }"
+            >{{ chat.title }}</span>
+            <ChatSignals :chat-id="chat.chat_id" density="row" :hue="workspaceHue" />
             <span v-if="chat.local === false" class="remote-chip">remote</span>
-            <span v-else-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
           </div>
           <div class="chat-row-meta">
             <span>{{ chat.model }}</span>
             <span class="dot">·</span>
-            <span>{{ formatDate(chat.created_at) }}</span>
+            <span>{{ formatRelative(chatActivity(chat), { suffix: true, absoluteAfterDays: 7 }) }}</span>
           </div>
         </div>
       </div>
@@ -141,9 +151,9 @@
           class="file-row"
           @click="openFile(f)"
         >
-          <span class="file-icon">📄</span>
+          <AppIcon class="file-icon" name="doc" :size="18" />
           <span class="file-name">{{ f.path }}</span>
-          <span class="file-meta">{{ formatSize(f.size) }} · {{ formatRelative(f.mtime) }}</span>
+          <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
         </div>
       </div>
 
@@ -162,7 +172,7 @@
             loading="lazy"
           />
           <span class="file-name">{{ f.path }}</span>
-          <span class="file-meta">{{ formatSize(f.size) }} · {{ formatRelative(f.mtime) }}</span>
+          <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
         </div>
       </div>
 
@@ -174,9 +184,9 @@
           class="file-row"
           @click="openFile(f)"
         >
-          <span class="file-icon">📎</span>
+          <AppIcon class="file-icon" name="file" :size="18" />
           <span class="file-name">{{ f.path }}</span>
-          <span class="file-meta">{{ formatSize(f.size) }} · {{ formatRelative(f.mtime) }}</span>
+          <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
         </div>
       </div>
     </section>
@@ -227,7 +237,13 @@ import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { askConfirm } from '../lib/confirm'
+import { formatRelative } from '../lib/relativeTime'
+import { chatActivityTimestamp } from '../lib/homeLanes'
+import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
+import ChatSignals from './ChatSignals.vue'
+import AppIcon from './AppIcon.vue'
+import type { ChatInfo } from '../lib/types'
 
 interface ProjectFile {
   path: string
@@ -256,7 +272,10 @@ const activeChats = computed(() =>
   allChats.value
     // Hide remote chats (session lives on another device, not openable here).
     .filter(c => !c.archived && c.local !== false)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    // Sorted by the same timestamp the row displays. Sorting by created_at
+    // while showing last activity made the visible times non-monotonic, so the
+    // list read as unsorted.
+    .sort((a, b) => chatActivityTimestamp(b).localeCompare(chatActivityTimestamp(a)))
 )
 const archivedChats = computed(() =>
   allChats.value
@@ -264,6 +283,22 @@ const archivedChats = computed(() =>
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
 )
 const totalUnread = computed(() => store.projectUnread(props.projectId))
+const needsInputCount = computed(() => store.projectNeedsInput(props.projectId))
+const workingCount = computed(() =>
+  activeChats.value.filter(c =>
+    store.isChatStreaming(c.chat_id) || store.chatHasBackgroundAgents(c.chat_id),
+  ).length,
+)
+
+// Hue follows the project's workspace so the marks here read the same as the
+// sidebar and the home lanes rather than inheriting the active accent.
+const workspaceHue = computed(() =>
+  colorForWorkspace(store.workspaceOptions.find(w => w.name === project.value?.workspace)),
+)
+
+function chatActivity(chat: ChatInfo): string {
+  return chatActivityTimestamp(chat)
+}
 
 const ARCHIVED_PER_PAGE = 10
 const archivedPage = ref(0)
@@ -501,19 +536,11 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-function formatRelative(iso: string): string {
-  if (!iso) return ''
-  try {
-    const t = new Date(iso).getTime()
-    const diffSec = (Date.now() - t) / 1000
-    if (diffSec < 60) return 'just now'
-    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`
-    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`
-    if (diffSec < 86400 * 7) return `${Math.floor(diffSec / 86400)}d ago`
-    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-  } catch {
-    return iso.slice(0, 10)
-  }
+// File mtimes read as prose and want an exact date once they are old enough,
+// so they pass suffix + absoluteAfterDays to the shared helper. There is
+// deliberately only one relative-time implementation in the app.
+function formatFileTime(iso: string): string {
+  return formatRelative(iso, { suffix: true, absoluteAfterDays: 7 })
 }
 
 async function reloadAll() {
@@ -614,17 +641,35 @@ watch(() => props.projectId, reloadAll)
   gap: 4px;
 }
 
+/* Only the urgent tile carries the accent, so a glance answers "does anything
+   here want me?" before any number is read. */
+.stat--hot {
+  border-left: 2px solid var(--accent);
+}
+
+.stat--hot .stat-value {
+  color: var(--accent);
+}
+
 .stat-value {
-  font-size: 18px;
+  font-size: var(--text-lg);
   font-weight: 700;
   color: var(--fg);
+  font-variant-numeric: tabular-nums;
 }
 
 .stat-label {
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.4px;
   color: var(--fg2);
+}
+
+.project-caption {
+  margin: 0 0 var(--space-4);
+  padding: 0 var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--fg3);
 }
 
 .card {
@@ -712,11 +757,18 @@ watch(() => props.projectId, reloadAll)
 }
 
 .chat-name {
-  font-size: 13px;
-  color: var(--fg);
+  font-size: var(--text-base);
+  color: var(--fg2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Chat-level unread reads as title weight; the digit belongs to the project
+   and workspace rollups, which are real counts. */
+.chat-name--unread {
+  color: var(--fg);
+  font-weight: 600;
 }
 
 .chat-row-meta {
@@ -742,59 +794,6 @@ watch(() => props.projectId, reloadAll)
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.4px;
-}
-
-.spinner-dot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border: 2px solid var(--accent2);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: ciao-spin 0.8s linear infinite;
-  vertical-align: middle;
-  flex-shrink: 0;
-}
-
-@keyframes ciao-spin {
-  to { transform: rotate(360deg); }
-}
-
-.badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: 9px;
-  background: var(--accent);
-  color: var(--bg);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.needs-input-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: var(--accent);
-  color: var(--bg);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-  flex-shrink: 0;
-  animation: ciao-pulse 1.1s ease-in-out infinite;
-}
-
-@keyframes ciao-pulse {
-  0%, 100% { transform: scale(0.85); opacity: 0.55; }
-  50% { transform: scale(1); opacity: 1; }
 }
 
 .empty-row {

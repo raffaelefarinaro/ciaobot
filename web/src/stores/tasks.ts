@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { api } from '../lib/api'
 import type {
   Loop,
@@ -44,6 +44,20 @@ export const useTaskStore = defineStore('tasks', () => {
   const models = ref<ModelsResponse | null>(null)
   const stats = ref<CliStats | null>(null)
   const loading = ref(false)
+
+  // One shared lookup for chat loop signals. Home and the sidebar must agree
+  // about both the number of loops and whether any of them is running.
+  const loopsByChat = computed(() => {
+    const byChat = new Map<string, { count: number; running: boolean }>()
+    for (const loop of loops.value) {
+      const previous = byChat.get(loop.web_chat_id)
+      byChat.set(loop.web_chat_id, {
+        count: (previous?.count || 0) + 1,
+        running: Boolean(previous?.running || loop.running),
+      })
+    }
+    return byChat
+  })
 
   async function fetchSchedules() {
     schedules.value = await api.get<Schedule[]>('/api/schedules')
@@ -160,7 +174,7 @@ export const useTaskStore = defineStore('tasks', () => {
   }
 
   return {
-    schedules, loops, status, models, stats, loading,
+    schedules, loops, loopsByChat, status, models, stats, loading,
     fetchSchedules, fetchLoops, fetchStatus, fetchModels, fetchStats, fetchAll,
     createSchedule, runScheduleNow, updateSchedule, deleteSchedule, updateStatus,
     createLoop, updateLoop, runLoopNow, deleteLoop,

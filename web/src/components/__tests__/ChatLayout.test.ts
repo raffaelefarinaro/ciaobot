@@ -711,17 +711,20 @@ describe('ChatLayout home arrow navigation', () => {
     await router.isReady()
 
     const store = useProjectStore()
-    store.projects = [{
-      project_id: 'project-1',
-      name: 'General',
-      workspace: 'personal',
-    }] as unknown as typeof store.projects
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+    ]
+    store.projects = [
+      { project_id: 'personal-project', name: 'General', workspace: 'personal' },
+      { project_id: 'work-project', name: 'General', workspace: 'work' },
+    ] as unknown as typeof store.projects
     store.chats = Array.from({ length: 4 }, (_, i) => ({
       chat_id: `chat-${i + 1}`,
-      project_id: 'project-1',
+      project_id: i < 2 ? 'personal-project' : 'work-project',
       title: `Chat ${i + 1}`,
-      created_at: `2026-08-0${i + 1}T00:00:00Z`,
-      last_activity_at: `2026-08-0${i + 1}T00:00:00Z`,
+      created_at: new Date(Date.now() - (i + 1) * 60 * 60 * 1000).toISOString(),
+      last_activity_at: new Date(Date.now() - (i + 1) * 60 * 60 * 1000).toISOString(),
       archived: false,
       local: true,
     })) as unknown as typeof store.chats
@@ -735,7 +738,7 @@ describe('ChatLayout home arrow navigation', () => {
     vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
-    // HomeRecentChats is deliberately NOT stubbed: the grid is the thing under
+    // HomeRecentChats is deliberately NOT stubbed: the lanes are the thing under
     // test. Every other ChatLayout test stubs it, which is why the keyboard
     // path here was never covered.
     const wrapper = mount(ChatLayout, {
@@ -759,15 +762,15 @@ describe('ChatLayout home arrow navigation', () => {
     return wrapper
   }
 
-  it('renders the recent-chat grid on the home screen', async () => {
+  it('renders the recent-chat lanes on the home screen', async () => {
     const wrapper = await mountHome()
-    expect(wrapper.findAll('.home-recent-card').length).toBeGreaterThan(0)
+    expect(wrapper.findAll('.home-lane')).toHaveLength(2)
     wrapper.unmount()
   })
 
-  it('moves focus across the grid from a window keydown', async () => {
+  it('moves focus across lanes from a window keydown', async () => {
     const wrapper = await mountHome()
-    const cards = wrapper.findAll('.home-recent-card')
+    const cards = wrapper.findAll('.home-chat-item')
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
     await nextTick()
@@ -775,7 +778,7 @@ describe('ChatLayout home arrow navigation', () => {
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
     await nextTick()
-    expect(document.activeElement).toBe(cards[1].element)
+    expect(document.activeElement).toBe(cards[2].element)
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
     await nextTick()
@@ -786,11 +789,22 @@ describe('ChatLayout home arrow navigation', () => {
   it('works in the PWA, not just the desktop app', async () => {
     window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
-    const cards = wrapper.findAll('.home-recent-card')
+    const cards = wrapper.findAll('.home-chat-item')
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
     await nextTick()
     expect(document.activeElement).toBe(cards[0].element)
+    wrapper.unmount()
+  })
+
+  it('keeps number keys as workspace shortcuts from home', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true }))
+    await flushPromises()
+    expect(store.activeWorkspace).toBe('work')
     wrapper.unmount()
   })
 
@@ -864,7 +878,7 @@ describe('ChatLayout home arrow navigation', () => {
     // so the PWA looked fine. Mode must not change how far an arrow moves.
     window.__CIAOBOT_DESKTOP__ = true
     const wrapper = await mountHome()
-    const cards = wrapper.findAll('.home-recent-card')
+    const cards = wrapper.findAll('.home-chat-item')
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
     await nextTick()
@@ -872,7 +886,7 @@ describe('ChatLayout home arrow navigation', () => {
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
     await nextTick()
-    expect(document.activeElement).toBe(cards[1].element)
+    expect(document.activeElement).toBe(cards[2].element)
     wrapper.unmount()
   })
 })

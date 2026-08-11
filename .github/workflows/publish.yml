@@ -52,6 +52,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.90.0
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # Same as ci.yml: `tauri build` compiles the Swift sidecar through the
+      # pretauri hook, so it needs the same toolchain selection and logging.
+      - name: Select newest Xcode
+        run: |
+          newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$newest" ]; then
+            echo "No Xcode found under /Applications" >&2
+            exit 1
+          fi
+          echo "Selecting $newest"
+          sudo xcode-select -s "$newest"
+          xcodebuild -version
+          swiftc --version
+
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci

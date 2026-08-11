@@ -83,6 +83,25 @@ jobs:
         targets: aarch64-apple-darwin,x86_64-apple-darwin
         components: rustfmt,clippy
 
+    # The image ships several Xcodes; take the newest rather than its default,
+    # and print the version. The runner currently tops out at Xcode 26.6 (Swift
+    # 6.3.3, macOS 26 SDK), which is why main.swift pins the older
+    # FoundationModels spelling — see the comment there before changing it.
+    # Selecting by "newest present" rather than a hardcoded version means this
+    # keeps working as the image rolls, and the logged version is how you tell a
+    # toolchain skew from a real code regression.
+    - name: Select newest Xcode
+      run: |
+        newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+        if [ -z "$newest" ]; then
+          echo "No Xcode found under /Applications" >&2
+          exit 1
+        fi
+        echo "Selecting $newest"
+        sudo xcode-select -s "$newest"
+        xcodebuild -version
+        swiftc --version
+
     - name: Build native sidecar
       working-directory: desktop
       # Must run before any cargo invocation: tauri.conf.json declares the

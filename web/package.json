@@ -3,12 +3,15 @@
   "private": true,
   "version": "0.8.0",
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build:icons": "node scripts/build-icons.mjs",
     "build": "vue-tsc --noEmit && vite build",
     "lint": "eslint . --ext .ts,.vue",
-    "test": "vitest run",
+    "test": "node scripts/check-node.mjs && vitest run",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -309,10 +309,30 @@
           :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
           @click="store.switchWorkspace(workspace.name)"
         >
+          <!-- Shortcut badge comes from workspaceShortcut(), which also backs the
+               aria-keyshortcuts on this button and returns '' past the 9th
+               workspace. Marks follow the signal grammar: needs-you outranks
+               working, and unread is a separate count. -->
           <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-          {{ workspaceLabel(workspace.name) }}
-          <span v-if="store.workspaceIsStreaming(workspace.name)" class="spinner-dot" title="A chat is working" />
-          <span v-else-if="store.workspaceUnread(workspace.name) > 0" class="badge">{{ store.workspaceUnread(workspace.name) }}</span>
+          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
+          <span
+            v-if="store.workspaceNeedsInput(workspace.name) > 0"
+            class="workspace-status-dot"
+            title="A chat needs your answer"
+            aria-label="A chat needs your answer"
+          />
+          <span
+            v-else-if="store.workspaceIsStreaming(workspace.name)"
+            class="workspace-status-ring"
+            title="A chat is working"
+            aria-label="A chat is working"
+          ><span class="workspace-status-core" aria-hidden="true" /></span>
+          <span
+            v-if="store.workspaceUnread(workspace.name) > 0"
+            class="badge"
+            :title="`${store.workspaceUnread(workspace.name)} unread chats`"
+            :aria-label="`${store.workspaceUnread(workspace.name)} unread chats`"
+          >{{ store.workspaceUnread(workspace.name) }}</span>
         </button>
       </div>
 
@@ -331,7 +351,6 @@
               :class="{
                 active: chat.chat_id === store.activeChatId,
                 remote: chat.local === false,
-                'needs-input': store.chatNeedsInput(chat.chat_id),
               }"
               @click="chat.local !== false && selectChat(chat.chat_id)"
               :disabled="chat.local === false"
@@ -343,15 +362,20 @@
                 aria-label="Generating title"
                 title="Generating title..."
               />
-              <span v-else class="recent-title">{{ chat.title }}</span>
-              <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
-              <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
-              <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer" aria-label="Needs your answer">?</span>
+              <span
+                v-else
+                class="recent-title"
+                :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
+              >{{ chat.title }}</span>
+              <ChatSignals
+                :chat-id="chat.chat_id"
+                density="row"
+                :hue="colorForChat(chat)"
+              />
               <span v-if="chat.local === false" class="remote-chip">remote</span>
               <span class="recent-project" v-if="store.projectFor(chat.chat_id)?.name">
                 {{ store.projectFor(chat.chat_id)?.name }}
               </span>
-              <span v-else-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
             </button>
           </div>
         </div>
@@ -388,14 +412,31 @@
               <button
                 type="button"
                 class="project-name"
+                :data-workspace-color="colorForProject(project.workspace)"
                 v-if="editingProject !== project.project_id"
                 @click="openProject(project.project_id)"
                 title="Open project page"
               >
                 {{ project.name }}
                 <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
-                <span v-if="store.projectIsStreaming(project.project_id)" class="spinner-dot" title="A chat in this project is working" />
-                <span v-if="store.projectUnread(project.project_id) > 0" class="badge">{{ store.projectUnread(project.project_id) }}</span>
+                <span
+                  v-if="store.projectNeedsInput(project.project_id) > 0"
+                  class="rollup-needs-dot"
+                  title="A chat in this project needs your answer"
+                  aria-label="A chat in this project needs your answer"
+                />
+                <span
+                  v-else-if="store.projectIsStreaming(project.project_id)"
+                  class="rollup-ring"
+                  title="A chat in this project is working"
+                  aria-label="A chat in this project is working"
+                ><span class="rollup-ring-core" aria-hidden="true" /></span>
+                <span
+                  v-if="store.projectUnread(project.project_id) > 0"
+                  class="badge"
+                  :title="`${store.projectUnread(project.project_id)} unread chats`"
+                  :aria-label="`${store.projectUnread(project.project_id)} unread chats`"
+                >{{ store.projectUnread(project.project_id) }}</span>
               </button>
               <input
                 v-else
@@ -447,7 +488,6 @@
                 :class="{
                   active: chat.chat_id === store.activeChatId,
                   remote: chat.local === false,
-                  'needs-input': store.chatNeedsInput(chat.chat_id),
                   delegate: isDelegate,
                   dragging: dragChatId === chat.chat_id,
                 }"
@@ -475,20 +515,17 @@
                   aria-label="Generating title"
                   title="Generating title..."
                 />
-                <span v-else class="chat-title">{{ chat.title }}</span>
                 <span
-                  v-if="chatLoopBadge(chat.chat_id)"
-                  class="loop-mark"
-                  :class="{ stopped: !chatLoopBadge(chat.chat_id)!.running }"
-                  :title="chatLoopBadge(chat.chat_id)!.title"
-                  :aria-label="chatLoopBadge(chat.chat_id)!.title"
-                >&#10227;</span>
-                <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
-                <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
-                <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer" aria-label="Needs your answer">?</span>
-                <span v-else-if="chat.retry?.status === 'pending'" class="retry-dot" title="Retry scheduled" />
+                  v-else
+                  class="chat-title"
+                  :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
+                >{{ chat.title }}</span>
+                <ChatSignals
+                  :chat-id="chat.chat_id"
+                  density="row"
+                  :hue="colorForChat(chat)"
+                />
                 <span v-if="chat.local === false" class="remote-chip">remote</span>
-                <span v-else-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
                 <button
                   class="chat-actions-btn"
                   aria-label="Chat actions"
@@ -610,6 +647,7 @@ import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import NotificationBell from './NotificationBell.vue'
+import ChatSignals from './ChatSignals.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import { askConfirm } from '../lib/confirm'
@@ -640,32 +678,6 @@ const workspaceLoops = computed(() =>
     store.projects,
   )),
 )
-
-// Loop-driven chats get a ↻ marker in the list so it's obvious the chat has
-// a heartbeat of its own and new turns will appear without anyone typing.
-// Keyed lookup (not a filter per row) so a long chat list stays O(n).
-const loopsByChat = computed(() => {
-  const byChat = new Map<string, { count: number; running: boolean }>()
-  for (const l of taskStore.loops) {
-    const prev = byChat.get(l.web_chat_id)
-    byChat.set(l.web_chat_id, {
-      count: (prev?.count || 0) + 1,
-      running: (prev?.running || false) || !!l.running,
-    })
-  }
-  return byChat
-})
-function chatLoopBadge(chatId: string): { running: boolean; title: string } | null {
-  const info = loopsByChat.value.get(chatId)
-  if (!info) return null
-  const plural = info.count > 1 ? `${info.count} loops` : 'A loop'
-  return {
-    running: info.running,
-    title: info.running
-      ? `${plural} running in this chat`
-      : `${plural} attached to this chat (stopped)`,
-  }
-}
 
 const oneOffSchedules = computed(() => {
   return workspaceSchedules.value
@@ -1002,6 +1014,15 @@ function workspaceShortcut(name: string): string {
   return index >= 1 && index <= 9 ? String(index) : ''
 }
 
+function colorForChat(chat: { project_id: string }) {
+  const project = store.projects.find(item => item.project_id === chat.project_id)
+  return colorForWorkspace(store.workspaceOptions.find(item => item.name === project?.workspace))
+}
+
+function colorForProject(workspace: string) {
+  return colorForWorkspace(store.workspaceOptions.find(item => item.name === workspace))
+}
+
 // ── Completed (archived) projects ──────────────────────────────────────
 type CompletedProject = { stem: string; name: string; context: string; workspace: string; vault_doc_path?: string }
 const archiveOpen = ref(false)
@@ -1254,52 +1275,34 @@ async function confirmDeleteChat(chatId: string) {
   .spinner-dot { animation-duration: 2.2s; }
 }
 
-/* Slower, dimmer variant: background subagents still working after the
-   parent turn ended (no turn is streaming, but the chat isn't idle). */
-.spinner-dot.bg-agents {
-  background: var(--accent2);
-  animation-duration: 1.8s;
-}
-
-.retry-dot {
-  display: inline-block;
-  width: 9px;
-  height: 9px;
-  margin-left: 6px;
+.workspace-status-dot,
+.rollup-needs-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
   border-radius: 50%;
-  border: 1px solid rgba(255, 193, 7, 0.8);
-  background: rgba(255, 193, 7, 0.22);
-  flex-shrink: 0;
+  background: var(--accent);
 }
 
-/* AskUserQuestion: blocked until the user picks an answer. Pink ? badge
-   matches the question card accent and stays visible on the active chat. */
-.needs-input-badge {
+.workspace-status-ring,
+.rollup-ring {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  margin-left: 6px;
-  border-radius: 9px;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border: 1.5px solid var(--accent);
+  border-radius: 50%;
+}
+
+.workspace-status-core,
+.rollup-ring-core {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
   background: var(--accent);
-  color: var(--bg);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  line-height: 1;
-  flex-shrink: 0;
   animation: ciao-pulse 1.1s ease-in-out infinite;
-}
-
-.recent-item.needs-input,
-.chat-item.needs-input {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-
-.recent-item.needs-input.active,
-.chat-item.needs-input.active {
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg3));
 }
 
 /* Scrollable area for chats and projects */
@@ -1762,24 +1765,6 @@ async function confirmDeleteChat(chatId: string) {
 /* Loop marker on a chat row. Accent while the cadence is live, muted when the
    loop exists but is stopped, so "this chat re-runs itself" reads at a glance
    without competing with the streaming dot next to it. */
-.loop-mark {
-  flex: 0 0 auto;
-  /* Badge-sized (11px) was too small to see: ⟳ is a thin outline glyph, so it
-     read as a speck beside the solid 8px streaming dot. Sized above the row
-     text, and through the token so it follows the Settings > Appearance font
-     scale that a hardcoded px ignored. Still under the 18px unread badge, so
-     the row height does not move. */
-  font-size: var(--text-lg);
-  font-weight: 700;
-  line-height: 1;
-  color: var(--accent);
-}
-
-.loop-mark.stopped {
-  color: var(--fg3, var(--fg2));
-  opacity: 0.7;
-}
-
 .badge {
   display: inline-flex;
   align-items: center;
@@ -1832,6 +1817,30 @@ async function confirmDeleteChat(chatId: string) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-title--unread {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.workspace-shortcut {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.workspace-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-status-core,
+  .rollup-ring-core { animation: none; opacity: 0.65; }
 }
 
 /* Shimmer placeholder shown in the sidebar while the server auto-titles
