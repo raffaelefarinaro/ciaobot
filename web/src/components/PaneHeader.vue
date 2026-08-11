@@ -105,20 +105,22 @@ const hasTitle = computed(() => !!slots.title)
 @container chat-split (max-width: 420px) {
   .header-center { display: none; }
 }
+/* Kept in the document, not on the screen. The page now names itself next to
+   its own nav icon in the sidebar, which is where it was asked for, so a second
+   copy here beside the wordmark was the same fact twice. It stays rendered
+   because on home, settings and the automations list it is the pane's only
+   heading, and dropping the element would cost those views their document
+   outline. Same rule as .sr-only in App.vue. */
 .page-tag {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 400;
-  line-height: 1;
-  color: var(--fg3);
-  letter-spacing: 0.06em;
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xs);
-  background: transparent;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
   white-space: nowrap;
-  user-select: none;
+  border: 0;
 }
 :deep(.header-left) {
   display: flex;

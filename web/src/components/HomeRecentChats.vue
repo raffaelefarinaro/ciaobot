@@ -1,6 +1,6 @@
 <template>
   <div v-if="store.activeChatsAll.length" class="home-recent">
-    <div class="home-recent-label">jump back in</div>
+    <h2 class="home-recent-label">jump back in</h2>
     <div ref="lanesEl" class="home-lanes">
       <section
         v-for="lane in lanes"
@@ -362,12 +362,20 @@ watch(() => store.activeWorkspace, async () => {
   container-type: inline-size;
 }
 
+/* Off the screen, still in the document. The lane headings and tier headings
+   below already say what this list is, so the label was a caption for something
+   self-evident - but it is the only heading naming this region, so assistive
+   tech keeps it. Same rule as .sr-only in App.vue. */
 .home-recent-label {
-  margin: 0 0 8px 2px;
-  color: var(--fg2);
-  font-size: var(--text-xs, 0.72rem);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .home-lanes {

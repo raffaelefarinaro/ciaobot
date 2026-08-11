@@ -7,7 +7,16 @@
          what the breadcrumb and the transcript underneath it both already say.
          This is also the most crowded header in the app, so the room goes to the
          breadcrumb and the action icons instead. -->
-    <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
+    <!-- No brand mark here. This is the densest header in the app - breadcrumb,
+         model picker, agent pill, archive - and the centred wordmark was
+         squeezing the chat title down to a few characters. The breadcrumb
+         already says where you are, and the mark is a click-to-reload
+         shortcut available on every other view. -->
+    <PaneHeader
+      :brand="false"
+      :active-bg-agents="store.activeBackgroundAgents"
+      @open-sidebar="$emit('open-sidebar')"
+    >
       <template #title>
         <div class="header-left">
           <button class="close-btn" @click="$emit('close')" title="Close chat">&times;</button>

@@ -41,6 +41,7 @@
               <line x1="6" y1="13" x2="18" y2="13" />
               <polyline points="8 18 8 21 11 18" />
             </svg>
+                      <span class="nav-item-label" aria-hidden="true">chats</span>
           </router-link>
           <router-link
             to="/schedules"
@@ -62,6 +63,7 @@
               <line x1="19" y1="12" x2="21" y2="12" />
               <polyline points="12 8 12 12 15 14" />
             </svg>
+                      <span class="nav-item-label" aria-hidden="true">automations</span>
           </router-link>
           <router-link to="/settings" class="nav-item touch-hit" active-class="nav-item--active" title="settings" aria-label="settings">
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
@@ -74,6 +76,7 @@
               <rect x="7" y="10" width="4" height="4" fill="currentColor" />
               <rect x="15" y="15" width="4" height="4" fill="currentColor" />
             </svg>
+                      <span class="nav-item-label" aria-hidden="true">settings</span>
           </router-link>
           <NotificationBell class="sidebar-bell" />
         </div>
@@ -1384,23 +1387,59 @@ async function confirmDeleteChat(chatId: string) {
      icons to the far edge (the strip stops at 200px), and one dragged down to its
      180px minimum packs them back to the --space-1 floor instead of overflowing
      the rail. The strip is narrower on mobile, where the bell hides - see below. */
-  flex: 0 1 200px;
-  justify-content: space-between;
+  /* Sized to content now rather than a fixed strip: the active item carries an
+     expanding label, so the row's width depends on which page you are on. */
+  flex: 0 1 auto;
+  justify-content: flex-end;
   gap: var(--space-1);
   margin-left: auto;
+  min-width: 0;
 }
 
 .nav-item {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
+  gap: var(--space-1);
+  /* min-width, not width: the active item grows to fit its label. */
+  min-width: 30px;
   height: 30px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
   position: relative;
   isolation: isolate;
   color: var(--fg2);
   text-decoration: none;
   transition: color 120ms var(--ease);
+}
+
+/* The page you are on names itself, next to its own icon, instead of a separate
+   tag elsewhere in the window. Inactive items stay glyph-only, so the row reads
+   as one selected item among icons rather than a list of words. Collapsed with
+   max-width so it animates, and aria-hidden because .nav-item already carries a
+   full aria-label - otherwise the accessible name would read "automations
+   automations". */
+.nav-item-label {
+  max-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  opacity: 0;
+  transition: max-width 160ms var(--ease), opacity 120ms var(--ease);
+}
+
+.nav-item--active .nav-item-label {
+  max-width: 9ch;
+  opacity: 1;
+}
+
+/* Truncate the label before the icons are pushed out of the rail. */
+@media (max-width: 900px) {
+  .nav-item--active .nav-item-label { max-width: 7ch; }
 }
 
 .nav-item:hover {
