@@ -620,7 +620,7 @@
               @click="openFileCard(entry.file_path)"
               :title="entry.file_path"
             >
-              <span class="file-card-icon" aria-hidden="true">{{ fileCardIcon(entry.file_path) }}</span>
+              <AppIcon class="file-card-icon" :name="fileCardIcon(entry.file_path)" :size="18" />
               <span class="file-card-main">
                 <span class="file-card-name">{{ fileCardBasename(entry.file_path) }}</span>
                 <span class="file-card-meta">
@@ -933,22 +933,31 @@
          background-agents bar, which was a third rendering of a count the
          header pill already shows. Nothing here is unreachable — the strip is a
          disclosure. -->
-    <div v-if="dockDeferred.length" class="dock-strip-wrap">
+    <!-- Rendered whenever there is anything to collapse OR anything already
+         expanded, so the disclosure works in both directions. Gating purely on
+         dockDeferred made the strip unmount itself on click: every deferred
+         entry except background agents disappears once dockExpanded is true. -->
+    <div v-if="dockStripVisible" class="dock-strip-wrap">
+      <!-- aria-live sits on an inner span: an explicit role="status" on the
+           button would override its implicit button role and drop
+           aria-expanded, so assistive tech would stop treating it as a
+           control. -->
       <button
         type="button"
         class="dock-strip"
         :aria-expanded="dockExpanded"
-        role="status"
-        aria-live="polite"
         @click="dockExpanded = !dockExpanded"
       >
         <span class="dock-chevron" aria-hidden="true">{{ dockExpanded ? '▾' : '▸' }}</span>
-        <span
-          v-for="item in dockDeferred"
-          :key="item.key"
-          class="dock-pill"
-          :class="{ 'dock-pill--blocking': item.blocking }"
-        >{{ item.label }}</span>
+        <span class="dock-strip-items" role="status" aria-live="polite">
+          <span
+            v-for="item in dockDeferred"
+            :key="item.key"
+            class="dock-pill"
+            :class="{ 'dock-pill--blocking': item.blocking }"
+          >{{ item.label }}</span>
+          <span v-if="dockExpanded && !dockDeferred.length" class="dock-pill">collapse</span>
+        </span>
       </button>
     </div>
 
@@ -1591,6 +1600,14 @@ interface DockItem {
   label: string
   blocking?: boolean
 }
+
+// Anything to collapse, or anything already expanded that needs a way back.
+const dockStripVisible = computed(() =>
+  dockDeferred.value.length > 0
+  || (dockExpanded.value && (pendingApprovals.value.length > 1
+    || activeQuestions.value.length > 0
+    || store.currentQueued.length > 0)),
+)
 
 const dockDeferred = computed<DockItem[]>(() => {
   const items: DockItem[] = []
@@ -3383,6 +3400,10 @@ watch(
 // Force-scroll to bottom when switching to a different chat.
 watch(() => store.activeChatId, () => {
   isNearBottom.value = true
+  // Both disclosures are per-chat state; carrying them across a switch meant a
+  // chat you never expanded opened with its dock and context bar already open.
+  dockExpanded.value = false
+  contextExpanded.value = false
   nextTick(() => {
     if (messagesEl.value) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
@@ -5751,6 +5772,14 @@ details[open] > .activity-summary::before {
 }
 
 .dock-chevron { color: var(--fg3); flex-shrink: 0; }
+
+.dock-strip-items {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
 
 .dock-pill {
   padding: 2px var(--space-2);

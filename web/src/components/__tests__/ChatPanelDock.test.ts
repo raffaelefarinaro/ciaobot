@@ -267,7 +267,42 @@ describe('ChatPanel action dock', () => {
     expect(wrapper.find('.dock-strip').text()).toContain('3 agents running')
     wrapper.unmount()
   })
+
+  // The strip used to be gated purely on dockDeferred, every entry of which
+  // disappears once dockExpanded is true — so clicking it unmounted the control
+  // and left no way back, with focus dropping to <body>.
+  it('survives expansion so the disclosure works both ways', async () => {
+    const { wrapper } = await mountPanel(store => {
+      store.pendingPermissions = {
+        'chat-1': [approval('r1', 'Bash'), approval('r2', 'Write')],
+      } as unknown as typeof store.pendingPermissions
+    })
+
+    expect(wrapper.find('.dock-strip').exists()).toBe(true)
+    await wrapper.get('.dock-strip').trigger('click')
+    expect(wrapper.findAll('.permission-card')).toHaveLength(2)
+    expect(wrapper.find('.dock-strip').exists()).toBe(true)
+
+    await wrapper.get('.dock-strip').trigger('click')
+    expect(wrapper.findAll('.permission-card')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  // An explicit role="status" on the button would override its implicit button
+  // role and drop aria-expanded.
+  it('keeps the strip an operable button for assistive tech', async () => {
+    const { wrapper } = await mountPanel(store => {
+      store.backgroundAgents = { 'chat-1': 2 }
+    })
+    const strip = wrapper.get('.dock-strip')
+    expect(strip.element.tagName).toBe('BUTTON')
+    expect(strip.attributes('role')).toBeUndefined()
+    expect(strip.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('.dock-strip-items').attributes('aria-live')).toBe('polite')
+    wrapper.unmount()
+  })
 })
+
 
 describe('ChatPanel workspace breadcrumb', () => {
   beforeEach(() => {

@@ -75,7 +75,7 @@
                 <span v-if="store.activeChatsAll.length" class="empty-status-text">{{ homeStatus }}</span>
               </div>
               <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
-              <div v-if="!store.activeChatsAll.length" class="empty-actions">
+              <div v-if="showGlobalNewChatActions" class="empty-actions">
                 <button
                   v-for="action in generalWorkspaceActions"
                   :key="action.workspace"
@@ -160,7 +160,7 @@
               <span v-if="store.activeChatsAll.length" class="empty-status-text">{{ homeStatus }}</span>
             </div>
             <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
-            <div v-if="!store.activeChatsAll.length" class="empty-actions">
+            <div v-if="showGlobalNewChatActions" class="empty-actions">
               <button
                 v-for="action in generalWorkspaceActions"
                 :key="action.workspace"
@@ -443,6 +443,15 @@ const currentProjectId = computed(() => {
   if (chat?.project_id) return chat.project_id
   return ''
 })
+// The per-lane "+ new" button replaces these on a wide screen, but a lane
+// header is hidden for every collapsed lane below 820px — so on a phone with at
+// least one chat there would otherwise be no way to start a chat in a
+// non-active workspace. Keep the global buttons wherever the lane ones are not
+// all reachable.
+const showGlobalNewChatActions = computed(() =>
+  !store.activeChatsAll.length || isMobile.value,
+)
+
 const generalWorkspaceActions = computed(() => {
   return store.workspaceOptions
     .map(workspace => {

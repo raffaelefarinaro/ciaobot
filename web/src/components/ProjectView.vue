@@ -272,7 +272,10 @@ const activeChats = computed(() =>
   allChats.value
     // Hide remote chats (session lives on another device, not openable here).
     .filter(c => !c.archived && c.local !== false)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    // Sorted by the same timestamp the row displays. Sorting by created_at
+    // while showing last activity made the visible times non-monotonic, so the
+    // list read as unsorted.
+    .sort((a, b) => chatActivityTimestamp(b).localeCompare(chatActivityTimestamp(a)))
 )
 const archivedChats = computed(() =>
   allChats.value

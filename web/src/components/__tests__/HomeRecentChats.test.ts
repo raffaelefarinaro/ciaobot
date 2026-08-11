@@ -125,3 +125,69 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(wrapper.find('.home-lane-older-toggle').element.tagName).toBe('BUTTON')
   })
 })
+
+
+// Regression coverage for defects the lane rewrite introduced. The original
+// suite asserted lane counts but had no assertion that every non-archived chat
+// still reaches the screen, which is how these got through.
+describe('HomeRecentChats regressions', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+    if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
+  })
+
+  it('still renders chats whose workspace is missing from workspaceOptions', async () => {
+    const store = seedChats()
+    // What a workspace rename or delete leaves behind: workspaces.value is
+    // refreshed, projects.value[].workspace keeps the stale name.
+    store.projects = [
+      { project_id: 'personal-project', name: 'Personal project', workspace: 'renamed-away' },
+    ] as unknown as typeof store.projects
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const titles = wrapper.findAll('.home-chat-title').map(n => n.text())
+    expect(titles).toContain('Needs an answer')
+    expect(titles).toContain('A quiet chat')
+    wrapper.unmount()
+  })
+
+  it('does not print a quiet count and "all quiet" together', async () => {
+    const wrapper = await mountHome()
+    for (const summary of wrapper.findAll('.home-lane-summary')) {
+      expect(summary.text()).not.toMatch(/quiet\s+all quiet/)
+    }
+    wrapper.unmount()
+  })
+
+  // workspaceNeedsInput() counts nested delegates; activeChatsAll excludes
+  // them, so the header used to claim a chat needed you with no row to click.
+  it('keeps the lane needs-you count equal to the rows rendered', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'delegate', project_id: 'personal-project', title: 'Internal delegate',
+        spawned_from_chat_id: 'quiet',
+        pending_question: JSON.stringify({ questions: [{ question: 'Internal?' }] }),
+        created_at: timestamp(30), last_activity_at: timestamp(30), archived: false, local: true,
+      },
+    ] as unknown as typeof store.chats
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const personalLane = wrapper.find('[data-lane-key="personal"]')
+    const summary = personalLane.find('.home-lane-summary').text()
+    const rows = personalLane.findAll('.home-tier--needsYou .home-chat-item').length
+    const claimed = Number(/(\d+)\s+need/.exec(summary)?.[1] ?? 0)
+    expect(claimed).toBe(rows)
+    wrapper.unmount()
+  })
+})

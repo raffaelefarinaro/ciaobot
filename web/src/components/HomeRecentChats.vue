@@ -9,6 +9,7 @@
         class="home-lane"
         :class="{
           'home-lane--active': isLaneActive(lane),
+          'home-lane--expanded': isLaneExpanded(lane),
           'home-lane--unknown': !lane.workspace,
         }"
         :data-lane-key="lane.key"
@@ -18,16 +19,8 @@
             <span class="home-lane-shortcut">[{{ lane.shortcut }}]</span>
             <span class="home-lane-name">{{ lane.label || 'unassigned' }}</span>
             <span class="home-lane-summary" aria-live="polite">
-              <template v-if="laneNeedsCount(lane)">
-                <b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you
-              </template>
-              <template v-if="laneWorkingCount(lane)">
-                <span v-if="laneNeedsCount(lane)"> · </span>{{ laneWorkingCount(lane) }} working
-              </template>
-              <template v-if="laneQuietCount(lane)">
-                <span v-if="laneNeedsCount(lane) || laneWorkingCount(lane)"> · </span>{{ laneQuietCount(lane) }} quiet
-              </template>
-              <span v-if="!laneNeedsCount(lane) && !laneWorkingCount(lane)">all quiet</span>
+              <template v-if="laneNeedsCount(lane)"><b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you</template>
+              <template v-if="laneSummaryRest(lane)"><span v-if="laneNeedsCount(lane)"> · </span>{{ laneSummaryRest(lane) }}</template>
             </span>
           </div>
           <button
@@ -42,7 +35,7 @@
         </header>
 
         <button
-          v-if="!isLaneActive(lane)"
+          v-if="!isLaneExpanded(lane)"
           type="button"
           class="home-lane-peek"
           :data-workspace-color="lane.color"
@@ -190,6 +183,7 @@ const lanes = computed<HomeLane[]>(() => {
 
   const result = store.workspaceOptions.map((workspace, index) => {
     const chats = grouped.get(workspace.name) || []
+    grouped.delete(workspace.name)
     return makeLane(
       workspace.name,
       workspaceLabel(workspace.name),
@@ -198,6 +192,18 @@ const lanes = computed<HomeLane[]>(() => {
       chats,
     )
   })
+
+  // Any workspace still in `grouped` belongs to a project whose workspace is no
+  // longer in workspaceOptions — renaming or deleting a workspace refreshes
+  // workspaces.value but leaves projects.value[].workspace on the old name. The
+  // flat grid used to render these chats; without this sweep they would be
+  // grouped and then never read back out, vanishing from home until a reload.
+  // They keep a real workspace name, so the lane stays activatable.
+  for (const [workspace, chats] of grouped) {
+    if (!chats.length) continue
+    result.push(makeLane(workspace, workspaceLabel(workspace), '—', 'pink', chats))
+  }
+
   if (unknown.length) {
     result.push(makeLane('unknown', '', '—', 'pink', unknown, null))
   }
@@ -244,10 +250,11 @@ function laneHasChats(lane: HomeLane): boolean {
   return lane.chats.length > 0
 }
 
+// Derived from the same chat set as the rows beneath it. workspaceNeedsInput()
+// counts nested delegates, which activeChatsAll deliberately excludes, so using
+// it here made the header claim a chat needs you with no row to answer.
 function laneNeedsCount(lane: HomeLane): number {
-  return lane.workspace && lane.workspace !== 'unknown'
-    ? store.workspaceNeedsInput(lane.workspace)
-    : lane.tiers.needsYou.length
+  return lane.tiers.needsYou.length
 }
 
 function laneWorkingCount(lane: HomeLane): number {
@@ -267,6 +274,24 @@ function laneSummary(lane: HomeLane): string {
   if (working) parts.push(`${working} working`)
   if (quiet) parts.push(`${quiet} quiet`)
   return parts.join(' · ') || 'all quiet'
+}
+
+// The header renders the needs count itself so it can carry the hue emphasis;
+// this is everything after it. Returning 'all quiet' only when the lane is
+// wholly empty keeps the header from printing "3 quiet all quiet".
+function laneSummaryRest(lane: HomeLane): string {
+  const parts: string[] = []
+  if (laneWorkingCount(lane)) parts.push(`${laneWorkingCount(lane)} working`)
+  if (laneQuietCount(lane)) parts.push(`${laneQuietCount(lane)} quiet`)
+  if (!parts.length && !laneNeedsCount(lane)) return 'all quiet'
+  return parts.join(' · ')
+}
+
+// Lanes without a real workspace cannot be activated via switchWorkspace, so
+// they must never be the collapsed one at narrow widths or they become
+// unreachable: the peek button's click handler has nothing to switch to.
+function isLaneExpanded(lane: HomeLane): boolean {
+  return !lane.workspace || isLaneActive(lane)
 }
 
 function laneNewAction(lane: HomeLane): NewWorkspaceChatAction | null {
@@ -321,8 +346,11 @@ function focusableLanes(): HTMLElement[][] {
   const container = lanesEl.value
   if (!container) return []
   return Array.from(container.querySelectorAll<HTMLElement>('.home-lane')).map(lane => {
-    const key = lane.dataset.laneKey || ''
-    const selector = isNarrow.value && key !== store.activeWorkspace
+    // Read the rendered class rather than recomputing from activeWorkspace, so
+    // arrow navigation always matches what is actually on screen — including
+    // workspace-less lanes, which stay expanded at every width.
+    const collapsed = isNarrow.value && !lane.classList.contains('home-lane--expanded')
+    const selector = collapsed
       ? '.home-lane-peek:not([disabled])'
       : '.home-chat-item:not([disabled]), .home-lane-older-toggle:not([disabled])'
     return Array.from(lane.querySelectorAll<HTMLElement>(selector))
@@ -764,12 +792,12 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
     gap: 8px;
   }
 
-  .home-lane:not(.home-lane--active) .home-lane-header,
-  .home-lane:not(.home-lane--active) .home-lane-body {
+  .home-lane:not(.home-lane--expanded) .home-lane-header,
+  .home-lane:not(.home-lane--expanded) .home-lane-body {
     display: none;
   }
 
-  .home-lane:not(.home-lane--active) .home-lane-peek {
+  .home-lane:not(.home-lane--expanded) .home-lane-peek {
     display: flex;
   }
 }
