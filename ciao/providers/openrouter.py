@@ -20,6 +20,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from ciao.model_tiers import tier_model
@@ -158,34 +159,87 @@ def routine_env_for_model(model: str, settings: OpenRouterSettings) -> dict[str,
     return {}
 
 
+# Vision capability map for every id in the last catalog fetch, keyed by
+# model id. Rebuilt whenever ``discover_models`` runs (startup, Settings
+# tab, startup refresh — see ``refresh_openrouter_models`` in config.py);
+# the image pre-flight reads it via :func:`vision_support_openrouter` with
+# no separate refresh of its own.
+_VISION_MODELS: dict[str, bool] = {}
+
+
+def _catalog_entry_supports_vision(entry: Mapping[str, object]) -> bool:
+    """Vision support for one ``/api/v1/models`` catalog entry.
+
+    OpenRouter reports the capability under ``architecture.modality`` (a
+    string like ``"text+image"``) and/or ``architecture.input_modalities``
+    (an array like ``["text", "image"]``).
+    """
+    arch = entry.get("architecture")
+    if not isinstance(arch, Mapping):
+        return False
+    modality = arch.get("modality")
+    if isinstance(modality, str) and "image" in modality:
+        return True
+    input_modalities = arch.get("input_modalities")
+    if isinstance(input_modalities, (list, tuple)):
+        return any(
+            isinstance(m, str) and m in ("image", "vision")
+            for m in input_modalities
+        )
+    return False
+
+
 def discover_models(
     settings: OpenRouterSettings, *, timeout_s: float = 4.0, anthropic_only: bool = False
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], dict[str, bool]]:
     """List models from OpenRouter's ``/api/v1/models`` endpoint.
 
-    Returns ``()`` when the backend is unavailable or the request fails.
-    When ``anthropic_only`` is true, restricts to ``anthropic/*`` ids so the
-    picker only offers models that match the alias family and are known to
-    work through the Anthropic-compatible endpoint.
+    Returns ``((), {})`` when the backend is unavailable or the request
+    fails. The second element is a parallel ``{model_id: supports_vision}``
+    map covering every fetched entry (including non-``anthropic/*`` ids),
+    also stashed in the module-level :data:`_VISION_MODELS` so the image
+    pre-flight can look ids up without threading the map through callers.
+    When ``anthropic_only`` is true, the returned id tuple is restricted to
+    ``anthropic/*`` ids so the picker only offers models that match the
+    alias family and are known to work through the Anthropic-compatible
+    endpoint.
     """
     if not settings.available:
-        return ()
+        return (), {}
     url = settings.base_url.rstrip("/") + "/v1/models"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {settings.api_key}"})
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as response:
             payload = json.loads(response.read().decode())
     except (OSError, urllib.error.URLError, TimeoutError, ValueError):
-        return ()
-    models = []
+        return (), {}
+    models: list[str] = []
+    vision: dict[str, bool] = {}
     for entry in payload.get("data", []) or []:
         mid = entry.get("id") if isinstance(entry, dict) else None
         if not isinstance(mid, str) or not mid:
             continue
+        vision[mid] = _catalog_entry_supports_vision(entry)
         if anthropic_only and not mid.startswith("anthropic/"):
             continue
         models.append(mid)
-    return tuple(dict.fromkeys(models))
+    _VISION_MODELS.update(vision)
+    return tuple(dict.fromkeys(models)), vision
+
+
+def vision_support_openrouter(
+    model_id: str, settings: OpenRouterSettings
+) -> bool | None:
+    """Vision support for an OpenRouter id from the last catalog fetch.
+
+    Returns None when the id is not in the catalog (unknown) or the backend
+    is not configured — callers treat None as "unknown" and fall back to
+    today's default (capable). No refresh of its own: the map is rebuilt
+    whenever :func:`discover_models` runs (see ``refresh_openrouter_models``).
+    """
+    if not model_id or not settings.available:
+        return None
+    return _VISION_MODELS.get(model_id)
 
 
 def merge_discovered(settings: OpenRouterSettings, discovered: tuple[str, ...]) -> OpenRouterSettings:

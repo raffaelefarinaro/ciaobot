@@ -1378,6 +1378,145 @@ describe('Codex structured questions', () => {
   })
 })
 
+describe('image-capability questions', () => {
+  test('parses a model_capability_question event into the active list', () => {
+    const store = useProjectStore()
+    const chatId = 'cap-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Cap',
+      model: 'deepseek-v4-flash:cloud',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'model_capability_question',
+      request_id: 'cap-abc',
+      missing: 'image_input',
+      current_model: 'deepseek-v4-flash:cloud',
+      candidates: [
+        { id: 'deepseek-v4-flash:cloud', label: 'deepseek-v4-flash:cloud', disabled: true },
+        { id: 'minimax-m3:cloud', label: 'minimax-m3:cloud', supports_vision: true },
+      ],
+      timeout_s: 30,
+    }) })
+
+    const q = store.activeCapabilityQuestions[chatId]?.[0]
+    expect(q).toMatchObject({
+      request_id: 'cap-abc',
+      missing: 'image_input',
+      current_model: 'deepseek-v4-flash:cloud',
+      timeout_s: 30,
+    })
+    expect(q?.candidates[0]).toMatchObject({ id: 'deepseek-v4-flash:cloud', disabled: true })
+    expect(q?.candidates[1]).toMatchObject({ id: 'minimax-m3:cloud', supports_vision: true })
+    expect(typeof q?.opened_at).toBe('number')
+  })
+
+  test('dedupes a replayed question by request_id', () => {
+    const store = useProjectStore()
+    const chatId = 'cap-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Cap',
+      model: 'deepseek-v4-flash:cloud',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const payload = JSON.stringify({
+      type: 'model_capability_question',
+      request_id: 'cap-abc',
+      missing: 'image_input',
+      current_model: 'deepseek-v4-flash:cloud',
+      candidates: [],
+      timeout_s: 30,
+    })
+    socket.onmessage?.({ data: payload })
+    socket.onmessage?.({ data: payload })
+    expect(store.activeCapabilityQuestions[chatId]).toHaveLength(1)
+  })
+
+  test('respondCapability sends capability_response and pops the card', () => {
+    const store = useProjectStore()
+    const chatId = 'cap-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Cap',
+      model: 'deepseek-v4-flash:cloud',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'model_capability_question',
+      request_id: 'cap-abc',
+      missing: 'image_input',
+      current_model: 'deepseek-v4-flash:cloud',
+      candidates: [{ id: 'minimax-m3:cloud', label: 'minimax-m3:cloud', supports_vision: true }],
+      timeout_s: 30,
+    }) })
+    expect(store.activeCapabilityQuestions[chatId]).toHaveLength(1)
+
+    store.respondCapability(chatId, 'cap-abc', 'switch', 'minimax-m3:cloud')
+
+    expect(store.activeCapabilityQuestions[chatId]).toBeUndefined()
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'capability_response',
+      request_id: 'cap-abc',
+      action: 'switch',
+      model_id: 'minimax-m3:cloud',
+    }))
+  })
+
+  test('sendMessage clears any open capability question for the chat', () => {
+    const store = useProjectStore()
+    const chatId = 'cap-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Cap',
+      model: 'deepseek-v4-flash:cloud',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'model_capability_question',
+      request_id: 'cap-abc',
+      missing: 'image_input',
+      current_model: 'deepseek-v4-flash:cloud',
+      candidates: [],
+      timeout_s: 30,
+    }) })
+    expect(store.activeCapabilityQuestions[chatId]).toHaveLength(1)
+
+    store.sendMessage(chatId, 'hello')
+
+    expect(store.activeCapabilityQuestions[chatId]).toBeUndefined()
+  })
+})
+
 describe('Codex assistant message phases', () => {
   test('keeps commentary in the trace and the final answer separate', () => {
     apiGet.mockResolvedValue([])

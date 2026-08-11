@@ -51,6 +51,7 @@ from ciao.models import (
     BridgeMode,
     ChatContext,
     ImageAttachment,
+    ModelCapabilityQuestionEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
@@ -65,12 +66,15 @@ from ciao.model_tiers import (
     canonical_tier,
     is_capability_error,
     model_supports_vision,
+    model_vision_ambiguous,
     next_tier_for_failure,
 )
 from ciao.providers.ollama import (
     is_local_ollama_model,
     is_ollama_model,
+    vision_support_ollama,
 )
+from ciao.providers.openrouter import vision_support_openrouter
 from ciao.providers.codex import (
     CodexProvider,
     codex_collab_tree_counts,
@@ -100,6 +104,20 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _ALLOWED_VOICE_EXTENSIONS = {".webm", ".ogg", ".oga", ".mp3", ".m4a", ".wav"}
+
+# How long the PWA gets to answer a model-capability question (image input
+# against a non-vision model) before the turn closes with the system bubble
+# instead. Shorter than the permission-gate timeout on purpose: the user is
+# answering one click, not a review of tool input.
+CAPABILITY_QUESTION_TIMEOUT_S = 30
+
+# User-visible copy when the pre-flight closes a turn because the model
+# cannot see the attached images. Kept in one place so the backend bubble
+# and the docs stay in sync.
+_CAPABILITY_IMAGE_MSG = (
+    "Image input not sent — this model can't see images. "
+    "Pick a model that supports images and re-send."
+)
 
 # Project-files surface (list + upload). Mirrors the union of the read-only
 # workspace-file/image allowlists plus the new binary one (PDF, ZIP, office
@@ -4289,6 +4307,121 @@ class ProjectChatManager:
             mcp_required=resolved_surface == "mcp",
         )
 
+    # ── Image-capability pre-flight ──────────────────────────────────────
+
+    def _model_capable(self, model: str, chat: ChatInfo) -> bool:
+        """Whether ``model`` can accept image input.
+
+        Fast path: the built-in vision table classifies most ids. Only
+        genuinely ambiguous ids (unknown Ollama/OpenRouter models the table
+        has no token for) take the slow path, which consults the cached
+        capability answer and only then a live probe (2s timeout). Any
+        probe failure logs INFO and falls back to the fast-path default
+        (capable) so the check never blocks a turn.
+        """
+        if not model:
+            return True
+        if model_vision_ambiguous(model):
+            backend = intended_backend(model)
+            try:
+                if backend == "ollama":
+                    supports = vision_support_ollama(model, self._config.ollama)
+                elif backend == "openrouter":
+                    supports = vision_support_openrouter(
+                        model, self._config.openrouter
+                    )
+                else:
+                    return True
+            except Exception:
+                logger.info(
+                    "Vision capability check failed for %s; assuming capable",
+                    model,
+                    exc_info=True,
+                )
+                return True
+            # None means unknown (unreachable / not routable): default to
+            # capable so an image turn is not blocked on a failed probe.
+            return supports if supports is not None else True
+        return model_supports_vision(model)
+
+    def _capability_candidates(self, chat: ChatInfo, model: str) -> list[dict]:
+        """Top-3 same-backend vision-capable model choices for the question.
+
+        Always leads with the current model as a disabled ``current`` entry
+        so the PWA can render the active-but-unsuitable choice; the
+        remaining entries are the best vision-capable neighbors on the same
+        backend (most capable slot first), capped at three, and never
+        include the current model itself. Filtering reuses the fast-path
+        vision table exactly like the capability-error ladder, so a wrong
+        guess (unknown id that cannot actually see images) is caught at
+        dispatch time by that same ladder.
+        """
+        current = model
+        backend = intended_backend(model)
+        picks: list[str] = []
+        if backend == "ollama":
+            ollama_settings = self._config.ollama
+            for slot in ("fable", "opus", "sonnet", "haiku"):
+                candidate = getattr(ollama_settings, f"{slot}_model", "")
+                if (
+                    candidate
+                    and candidate != current
+                    and model_supports_vision(candidate)
+                ):
+                    picks.append(candidate)
+        elif backend == "openrouter":
+            or_settings = self._config.openrouter
+            seen: set[str] = set()
+            for slot in ("fable", "opus", "sonnet", "haiku"):
+                candidate = getattr(or_settings, f"{slot}_model", "")
+                if (
+                    candidate
+                    and candidate != current
+                    and candidate not in seen
+                ):
+                    seen.add(candidate)
+                    if model_supports_vision(candidate):
+                        picks.append(candidate)
+            # Fill the rest from the last catalog fetch (vision-capable
+            # only), which piggybacks on refresh_openrouter_models.
+            for cid in or_settings.models:
+                if len(picks) >= 3:
+                    break
+                if cid == current or cid in seen:
+                    continue
+                seen.add(cid)
+                if vision_support_openrouter(cid, or_settings) is True:
+                    picks.append(cid)
+        entries: list[dict] = [
+            {"id": current, "label": current, "disabled": True}
+        ]
+        for pick in picks[:3]:
+            entries.append({"id": pick, "label": pick, "supports_vision": True})
+        return entries
+
+    async def _await_capability_answer(
+        self, chat_id: str, request_id: str, timeout_s: int
+    ) -> dict | None:
+        """Wait for the client's ``capability_response`` on an open question.
+
+        Returns the answer dict (``{"action": ..., "model_id": ...}``) or
+        None on timeout or when the stream is gone. The timeout path
+        resolves the question with action ``"timeout"`` so the replay
+        buffer is stripped either way.
+        """
+        stream = self._broker.get(chat_id)
+        if stream is None or stream.pending_capability is None:
+            return None
+        entry = stream.pending_capability.get(request_id)
+        if entry is None:
+            return None
+        try:
+            await asyncio.wait_for(entry["event"].wait(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            stream.resolve_capability(request_id, "timeout")
+            return None
+        return entry.get("answer")
+
     # ── Streaming chat ───────────────────────────────────────────────────
 
     async def stream_chat(
@@ -4334,6 +4467,89 @@ class ProjectChatManager:
         # the floor — operators who configure a single-model ladder
         # get the original error surfaced instead of a loop.
         retry_used = False
+
+        # Image-capability pre-flight: when the user attached images, make
+        # sure the selected model can actually see them before dispatching.
+        # If it can't (or its vision status is genuinely unknown), ask the
+        # user to pick a vision-capable model on the same backend instead of
+        # silently dropping the attachment and sending text-only. The answer
+        # may re-dispatch on a switched model; picker/cancel/timeout end the
+        # turn here with no result event.
+        if images:
+            if not self._model_capable(request.model, chat):
+                if unattended:
+                    # No one is watching to answer; never block the turn.
+                    # Close with the system bubble so the user knows the
+                    # images were not sent.
+                    yield SystemStatusEvent(
+                        type="system",
+                        status=_CAPABILITY_IMAGE_MSG,
+                    )
+                    return
+                request_id = f"cap-{uuid.uuid4().hex[:12]}"
+                stream = self._broker.get(chat_id)
+                registered = stream is not None and stream.open_capability(
+                    request_id
+                )
+                if registered:
+                    yield ModelCapabilityQuestionEvent(
+                        type="model_capability_question",
+                        request_id=request_id,
+                        missing="image_input",
+                        current_model=chat.model,
+                        candidates=self._capability_candidates(
+                            chat, request.model
+                        ),
+                        timeout_s=CAPABILITY_QUESTION_TIMEOUT_S,
+                    )
+                    answer = await self._await_capability_answer(
+                        chat_id,
+                        request_id,
+                        CAPABILITY_QUESTION_TIMEOUT_S,
+                    )
+                    if answer is None:
+                        yield SystemStatusEvent(
+                            type="system",
+                            status=_CAPABILITY_IMAGE_MSG,
+                        )
+                        return
+                    action = str(answer.get("action") or "")
+                    if action == "switch":
+                        picked = str(answer.get("model_id") or "")
+                        if picked and picked != request.model:
+                            chat.model = picked
+                            self._save()
+                            yield ModelChangedEvent(
+                                type="model_changed",
+                                model=picked,
+                            )
+                            # Rebuild the request against the new model and
+                            # fall through to the normal dispatch below (not
+                            # the capability-error ladder: nothing failed).
+                            request = self.build_agent_request(
+                                chat,
+                                prompt=prompt,
+                                display_prompt=prompt,
+                                images=images,
+                                resume_session=chat.session_id or None,
+                                unattended=unattended,
+                            )
+                        # A pick of the current (disabled) model falls through
+                        # to normal dispatch; the ladder handles a rejection.
+                    elif action == "picker":
+                        # The PWA opens the model selector and the user
+                        # re-sends through the normal path. This turn ends
+                        # with no result event and no bubble: the user is
+                        # mid-flow.
+                        return
+                    elif action == "cancel":
+                        # The user declined to switch. Tell them the images
+                        # were not sent, then end the turn with no result.
+                        yield SystemStatusEvent(
+                            type="system",
+                            status=_CAPABILITY_IMAGE_MSG,
+                        )
+                        return
 
         outcome = _StreamOutcome(effective_model=chat.model)
         held_result: ResultEvent | None = None
@@ -6443,6 +6659,28 @@ class ProjectChatManager:
                 chat.pending_question = ""
                 self._save()
         return accepted
+
+    def respond_capability(
+        self,
+        chat_id: str,
+        *,
+        request_id: str,
+        action: str,
+        model_id: str = "",
+    ) -> bool:
+        """Deliver the user's answer to an image-capability question.
+
+        ``action`` is ``switch`` (re-dispatch on ``model_id``), ``picker``
+        (open the model selector; the user re-sends through the normal
+        path), or ``cancel`` (decline to switch). Resolving wakes the
+        pre-flight waiter in the active stream; the turn's own handling of
+        each action happens there. Returns True when the answer matched an
+        open question (stale replies after a timeout are benign False).
+        """
+        stream = self._broker.get(chat_id)
+        if stream is None:
+            return False
+        return stream.resolve_capability(request_id, action, model_id)
 
     async def stop_chat(self, chat_id: str) -> bool:
         # Mark the active stream as user-stopped so the drive loop flushes

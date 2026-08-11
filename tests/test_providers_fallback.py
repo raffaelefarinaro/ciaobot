@@ -206,3 +206,35 @@ def test_model_supports_vision() -> None:
     assert model_supports_vision("deepseek-v4-flash:0731-cloud") is False
     assert model_supports_vision("glm-5.2:cloud") is False
 
+
+def test_model_supports_vision_short_circuits_known_ids() -> None:
+    # The pre-flight fast path classifies these without any probe: Claude
+    # tiers, gemini, gpt-4o are known vision-capable; the known-bad
+    # prefixes are known non-vision.
+    assert model_supports_vision("claude-opus-4-8") is True
+    assert model_supports_vision("gemini-2.5-pro") is True
+    assert model_supports_vision("gpt-4o") is True
+    assert model_supports_vision("llama-3.3:cloud") is False
+    assert model_supports_vision("qwen-2.5:cloud") is False
+    assert model_supports_vision("codex-gpt-5.6-terra") is False
+
+
+def test_model_vision_ambiguous() -> None:
+    from ciao.model_tiers import model_vision_ambiguous
+
+    # Unknown ids the table has no token for are ambiguous: the pre-flight
+    # probes them (cached) instead of trusting the fast-path default True.
+    assert model_vision_ambiguous("some-unknown-ollama:cloud") is True
+    assert model_vision_ambiguous("owner/unknown-model") is True
+    # Known-good and known-bad ids are already classified, so they are not
+    # ambiguous and never take the slow path.
+    assert model_vision_ambiguous("sonnet") is False
+    assert model_vision_ambiguous("minimax-m3:cloud") is False
+    # kimi5.2 has no dash, so the "kimi-" token does not match: it is
+    # ambiguous and takes the slow path. kimi-k2.7-code matches and is
+    # classified non-vision without a probe.
+    assert model_vision_ambiguous("kimi5.2:cloud") is True
+    assert model_vision_ambiguous("kimi-k2.7-code:cloud") is False
+    assert model_vision_ambiguous("deepseek-v4-flash:cloud") is False
+    assert model_vision_ambiguous("") is False
+

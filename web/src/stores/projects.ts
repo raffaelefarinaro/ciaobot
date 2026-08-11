@@ -317,6 +317,54 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  // ── Image-capability questions ────────────────────────────────────────
+  // Rendered when the engine pre-flights an image turn and the selected
+  // model cannot see images; the user picks a vision-capable model (switch),
+  // opens the full model picker, or cancels. Answered with a
+  // `capability_response` client message. Unlike `activeQuestions` there is
+  // no persisted copy on the chat — the question lives only for the
+  // in-flight turn, so it is never rebuilt on reload.
+  type CapabilityCandidate = {
+    id: string
+    label: string
+    supports_vision?: boolean
+    disabled?: boolean
+  }
+  type CapabilityQuestion = {
+    request_id: string
+    missing: string
+    current_model: string
+    candidates: CapabilityCandidate[]
+    timeout_s: number
+    opened_at: number
+  }
+  const activeCapabilityQuestions = ref<Record<string, CapabilityQuestion[]>>({})
+
+  function parseCapabilityQuestion(event: {
+    request_id: string
+    missing?: string
+    current_model?: string
+    candidates?: Array<Record<string, unknown>>
+    timeout_s?: number
+  }): CapabilityQuestion {
+    return {
+      request_id: event.request_id,
+      missing: String(event.missing ?? 'image_input'),
+      current_model: String(event.current_model ?? ''),
+      candidates: Array.isArray(event.candidates)
+        ? (event.candidates as Array<Record<string, unknown>>).map(c => ({
+            id: String(c.id ?? ''),
+            label: String(c.label ?? c.id ?? ''),
+            supports_vision:
+              c.supports_vision === undefined ? undefined : Boolean(c.supports_vision),
+            disabled: Boolean(c.disabled),
+          }))
+        : [],
+      timeout_s: Number(event.timeout_s ?? 30),
+      opened_at: Date.now(),
+    }
+  }
+
   // Restore the AskUserQuestion picker after a reload. The picker lives in
   // ephemeral `activeQuestions` (set only by the live stream), but the server
   // persists the unanswered question on the chat, so we rebuild from there on
@@ -2774,6 +2822,12 @@ export const useProjectStore = defineStore('projects', () => {
       markResolvedQuestion(chatId)
       delete activeQuestions.value[chatId]
     }
+    // A send also implicitly dismisses any open image-capability question:
+    // the user is re-sending through the normal path (e.g. after opening the
+    // model picker), so the stale card must not linger.
+    if (activeCapabilityQuestions.value[chatId]) {
+      delete activeCapabilityQuestions.value[chatId]
+    }
     const answeredChat = chats.value.find(c => c.chat_id === chatId)
     if (answeredChat?.pending_question) answeredChat.pending_question = ''
     const message = prepared || prepareMessage(chatId, text)
@@ -2954,6 +3008,34 @@ export const useProjectStore = defineStore('projects', () => {
         type: 'question_response',
         request_id: requestId,
         answers,
+      }))
+    }
+  }
+
+  function respondCapability(
+    chatId: string,
+    requestId: string,
+    action: 'switch' | 'picker' | 'cancel',
+    modelId = '',
+  ) {
+    // Pop the card optimistically so rapid taps don't double-send. The
+    // server resolves its pending future on timeout/disconnect regardless.
+    const list = activeCapabilityQuestions.value[chatId]
+    if (list) {
+      const next = list.filter(q => q.request_id !== requestId)
+      if (next.length) {
+        activeCapabilityQuestions.value[chatId] = next
+      } else {
+        delete activeCapabilityQuestions.value[chatId]
+      }
+    }
+    const ws = sockets.value[chatId]
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'capability_response',
+        request_id: requestId,
+        action,
+        model_id: modelId,
       }))
     }
   }
@@ -3975,6 +4057,21 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
 
+      case 'model_capability_question': {
+        // The selected model cannot see the attached images; the engine is
+        // holding the turn until the user picks a vision-capable model,
+        // opens the full picker, or cancels. Keep the card per request_id
+        // (a reconnect replay must not duplicate it).
+        const list = activeCapabilityQuestions.value[chatId] || []
+        if (!list.some(q => q.request_id === event.request_id)) {
+          activeCapabilityQuestions.value[chatId] = [
+            ...list,
+            parseCapabilityQuestion(event),
+          ]
+        }
+        break
+      }
+
       case 'chat_title': {
         const chat = chats.value.find(c => c.chat_id === event.chat_id)
         if (chat) chat.title = event.title
@@ -4008,7 +4105,7 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, unread, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
+    projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
@@ -4023,7 +4120,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest,
-    sendMessage, stopChat, respondPermission, respondQuestion, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

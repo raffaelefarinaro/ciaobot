@@ -208,6 +208,27 @@ def model_supports_vision(model: str) -> bool:
     return True
 
 
+def model_vision_ambiguous(model: str) -> bool:
+    """True when the fast-path vision table cannot classify ``model``.
+
+    :func:`model_supports_vision` returns its default ``True`` for ids it
+    has no token for — an unknown Ollama/OpenRouter id. Those ids are
+    ambiguous: they may or may not accept image input. The image
+    pre-flight uses this to decide when a live, cached capability lookup
+    is worth a probe round-trip. Known-good (tier aliases, ``claude-*``,
+    ``minimax-m3``, ``gemini``, ...) and known-bad (``llama-``, ``qwen-``,
+    ...) ids return False here because the table already classified them.
+    """
+    if not model:
+        return False
+    low = model.lower().strip()
+    if low in _TIER_ORDER or "claude" in low:
+        return False
+    if any(k in low for k in ("minimax-m3", "vision", "gpt-4o", "gemini", "pixtral")):
+        return False
+    if any(k in low for k in ("kimi-", "deepseek-", "glm-", "llama-", "qwen-", "code")):
+        return False
+    return True
 
 
 def next_tier_for_failure(model: str, config: object) -> str | None:

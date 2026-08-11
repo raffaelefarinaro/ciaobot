@@ -139,6 +139,7 @@
             :model-value="canonicalTier(chat.model)"
             :active-models="activeModelHighlights"
             :sections="chatModelSections"
+            :filter-section="capabilityPickerSection"
             placeholder="Model"
             placement="bottom-end"
             @select="selectModel"
@@ -781,6 +782,53 @@
       <div class="question-card-actions">
         <button class="btn-sm" type="button" @click="dismissQuestions">Cancel</button>
         <button class="btn-sm primary" type="button" :disabled="!allQuestionsAnswered" @click="submitQuestionAnswers">Send answer</button>
+      </div>
+    </div>
+
+    <!-- Image-capability question. The server paused before dispatch because
+         the selected model can't see images. The first candidate is the current
+         model, disabled; the rest are same-backend vision models. Picking one
+         switches the chat and re-dispatches the turn; "Open picker" hands over
+         to the full ModelSelector filtered to the current backend; Cancel (or
+         the 30s timeout) closes the turn with a system bubble. -->
+    <div v-if="activeCapabilityQuestions.length" class="question-card capability-card">
+      <div class="question-card-header">
+        <span class="question-card-icon">&#128444;</span>
+        <span class="question-card-title">This model can't see images</span>
+        <span class="capability-countdown">{{ capabilityRemaining(activeCapabilityQuestions[0]) }}s</span>
+      </div>
+      <div
+        v-for="q in activeCapabilityQuestions"
+        :key="q.request_id"
+        class="question-block"
+      >
+        <div class="question-options">
+          <button
+            v-for="c in q.candidates"
+            :key="c.id"
+            type="button"
+            class="question-option"
+            :disabled="c.disabled || capabilityExpired(q)"
+            @click="switchCapabilityModel(q, c.id)"
+          >
+            <span class="question-option-label">{{ c.label }}</span>
+            <span v-if="c.disabled" class="question-option-desc">current model</span>
+          </button>
+        </div>
+      </div>
+      <div class="question-card-actions">
+        <button
+          class="btn-sm"
+          type="button"
+          :disabled="capabilityExpired(activeCapabilityQuestions[0])"
+          @click="cancelCapability(activeCapabilityQuestions[0])"
+        >Cancel</button>
+        <button
+          class="btn-sm"
+          type="button"
+          :disabled="capabilityExpired(activeCapabilityQuestions[0])"
+          @click="openCapabilityPicker(activeCapabilityQuestions[0])"
+        >Open picker</button>
       </div>
     </div>
 
@@ -2182,6 +2230,70 @@ function dismissQuestions() {
   delete store.activeQuestions[id]
   questionAnswers.value = {}
 }
+
+// Image-capability question. The server paused before dispatch because the
+// selected model can't see images; the card offers same-backend vision
+// candidates, an "Open picker" escape hatch, and a Cancel. The countdown
+// mirrors the server's 30s wait_for; when it hits zero the buttons disable
+// and the server closes the turn with a system bubble.
+const activeCapabilityQuestions = computed(() => {
+  const id = store.activeChatId
+  if (!id) return []
+  return store.activeCapabilityQuestions[id] || []
+})
+
+const capabilityNow = ref(Date.now())
+let capabilityTimer: number | undefined
+watch(activeCapabilityQuestions, (qs) => {
+  if (qs.length && capabilityTimer === undefined) {
+    capabilityTimer = window.setInterval(() => { capabilityNow.value = Date.now() }, 1000)
+  } else if (!qs.length && capabilityTimer !== undefined) {
+    window.clearInterval(capabilityTimer)
+    capabilityTimer = undefined
+  }
+})
+onBeforeUnmount(() => {
+  if (capabilityTimer !== undefined) window.clearInterval(capabilityTimer)
+})
+
+function capabilityRemaining(q: { opened_at: number; timeout_s: number }): number {
+  const elapsed = Math.floor((capabilityNow.value - q.opened_at) / 1000)
+  return Math.max(0, q.timeout_s - elapsed)
+}
+
+function capabilityExpired(q: { opened_at: number; timeout_s: number }): boolean {
+  return capabilityRemaining(q) <= 0
+}
+
+function switchCapabilityModel(q: { request_id: string }, modelId: string) {
+  if (!chat.value) return
+  store.respondCapability(chat.value.chat_id, q.request_id, 'switch', modelId)
+}
+
+function openCapabilityPicker(q: { request_id: string }) {
+  if (!chat.value) return
+  store.respondCapability(chat.value.chat_id, q.request_id, 'picker')
+  // Land the picker on the current backend so the user only sees same-provider
+  // vision models, not the full cross-provider list.
+  capabilityPickerSection.value = capabilitySectionForBucket(activeBucket.value)
+  showModelPicker.value = true
+}
+
+function cancelCapability(q: { request_id: string }) {
+  if (!chat.value) return
+  store.respondCapability(chat.value.chat_id, q.request_id, 'cancel')
+}
+
+// Section key (ModelSelector) for a bucket, used to preselect the backend when
+// the capability card opens the full picker.
+function capabilitySectionForBucket(bucket: BucketKey): string {
+  if (bucket === 'codex') return 'codex'
+  if (bucket === 'openrouter') return 'openrouter'
+  if (bucket === 'claude_personal') return 'ollama'
+  return 'anthropic'
+}
+
+const capabilityPickerSection = ref('')
 
 const activeProvider = computed<ProviderKey>(() => {
   return (chat.value?.provider as ProviderKey) || 'claude'
@@ -3891,7 +4003,12 @@ async function selectThinking(level: string) {
 
 /* Close picker on click outside or Escape */
 watch(showModelPicker, (open) => {
-  if (!open) return
+  if (!open) {
+    // A capability-card "Open picker" filtered the sections; drop the filter
+    // so the next normal open shows the full list again.
+    capabilityPickerSection.value = ''
+    return
+  }
   const clickHandler = (e: MouseEvent) => {
     if (modelPickerRef.value && !modelPickerRef.value.contains(e.target as Node)) {
       showModelPicker.value = false
@@ -6159,6 +6276,13 @@ details[open] > .activity-summary::before {
 }
 .question-card-icon { font-size: 16px; color: var(--accent); }
 .question-card-title { flex: 1 1 auto; }
+.capability-countdown {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg2);
+  font-variant-numeric: tabular-nums;
+}
 .question-card-dismiss {
   background: transparent;
   border: 0;
