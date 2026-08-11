@@ -52,9 +52,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.90.0
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      # Same reason as ci.yml: `tauri build` compiles the Swift sidecar through
-      # the pretauri hook, and the image's default Xcode is older than the
-      # FoundationModels API main.swift targets.
+      # Same as ci.yml: `tauri build` compiles the Swift sidecar through the
+      # pretauri hook, so it needs the same toolchain selection and logging.
       - name: Select newest Xcode
         run: |
           newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)

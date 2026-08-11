@@ -245,7 +245,7 @@ func runHear(path: String, requested: String) async {
         fail(.failure, "transcription failed while reading results: \(error.localizedDescription)")
     }
 
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    let trimmed = text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
     if trimmed.isEmpty {
         fail(.emptyResult, "transcription produced no text")
     }
@@ -373,7 +373,7 @@ final class SpeechCollector {
 func runSpeak(requested: String, explicit: String) {
     let input = FileHandle.standardInput.readDataToEndOfFile()
     guard let text = String(data: input, encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
+        .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines), !text.isEmpty
     else {
         fail(.usage, "speak expects the text to read on stdin")
     }
@@ -428,7 +428,7 @@ func modelUnavailableReason(_ reason: SystemLanguageModel.Availability.Unavailab
 func runRespond(instructions: String) async {
     let input = FileHandle.standardInput.readDataToEndOfFile()
     guard let prompt = String(data: input, encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty
+        .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines), !prompt.isEmpty
     else {
         fail(.usage, "respond expects the prompt on stdin")
     }
@@ -444,13 +444,22 @@ func runRespond(instructions: String) async {
     let session = instructions.isEmpty
         ? LanguageModelSession()
         : LanguageModelSession(instructions: instructions)
+    // `sampling:` is deliberate even though the macOS 27 SDK deprecates it in
+    // favour of `samplingMode:`. It is the only spelling that compiles on both:
+    // CI's newest available toolchain is Xcode 26.6 (Swift 6.3.3, macOS 26 SDK),
+    // where `samplingMode:` does not exist yet, and on macOS 27 this still
+    // builds with only a deprecation warning. Switch to `samplingMode:` once
+    // the GitHub macOS runner image ships Xcode 27 — not before, or CI cannot
+    // build the sidecar at all.
     let options = GenerationOptions(
-        samplingMode: .greedy,
+        sampling: .greedy,
         maximumResponseTokens: 512
     )
     do {
         let response = try await session.respond(to: prompt, options: options)
-        let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Explicit CharacterSet: the macOS 26 SDK cannot infer the contextual
+        // base for a bare `.whitespacesAndNewlines` here.
+        let text = response.content.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
         if text.isEmpty {
             fail(.emptyResult, "the model returned no text")
         }

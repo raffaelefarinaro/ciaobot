@@ -83,13 +83,13 @@ jobs:
         targets: aarch64-apple-darwin,x86_64-apple-darwin
         components: rustfmt,clippy
 
-    # The runner image ships several Xcodes and defaults to an older one whose
-    # FoundationModels still spells GenerationOptions' first label `sampling:`.
-    # desktop/native/main.swift targets the current SDK (`samplingMode:`), so on
-    # the default toolchain it fails to compile. Selecting the newest installed
-    # Xcode rather than hardcoding a version keeps this working as the image
-    # rolls; the printed versions make a future mismatch diagnosable from the log
-    # instead of looking like a code regression.
+    # The image ships several Xcodes; take the newest rather than its default,
+    # and print the version. The runner currently tops out at Xcode 26.6 (Swift
+    # 6.3.3, macOS 26 SDK), which is why main.swift pins the older
+    # FoundationModels spelling — see the comment there before changing it.
+    # Selecting by "newest present" rather than a hardcoded version means this
+    # keeps working as the image rolls, and the logged version is how you tell a
+    # toolchain skew from a real code regression.
     - name: Select newest Xcode
       run: |
         newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
