@@ -78,17 +78,38 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(wrapper.find('.home-chat-question').text()).toContain('Which launch date')
     expect(wrapper.find('.home-tier--working .home-chat-title').text()).toBe('Background work')
     expect(wrapper.find('.home-tier--quiet .home-chat-title').text()).toBe('A quiet chat')
-    expect(wrapper.find('.home-lane-older-toggle').text()).toContain('older than a week')
-    expect(wrapper.findAll('.home-chat-item')).toHaveLength(3)
+    // Older chats are listed in quiet now, not split behind a disclosure, so
+    // every seeded chat renders as a row.
+    expect(wrapper.find('.home-lane-older-toggle').exists()).toBe(false)
+    expect(wrapper.findAll('.home-chat-item')).toHaveLength(4)
   })
 
-  it('reports an empty needs-you tier and keeps zero-chat workspaces visible', async () => {
+  it('lists older chats inline with quiet instead of behind a disclosure', async () => {
+    const wrapper = await mountHome()
+    const quietTitles = wrapper.findAll('.home-tier--quiet .home-chat-title').map(n => n.text())
+    expect(quietTitles).toContain('A quiet chat')
+    expect(quietTitles).toContain('An older chat')
+    expect(wrapper.find('.home-tier--older').exists()).toBe(false)
+  })
+
+  it('hides the needs-you tier entirely when nothing needs the user', async () => {
     const store = seedChats()
     store.chats = store.chats.filter(chat => chat.chat_id !== 'needs')
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats)
-    expect(wrapper.findAll('.home-tier--needsYou')).toHaveLength(2)
-    expect(wrapper.findAll('.home-tier--needsYou')[1].text()).toContain('// nothing needs you here')
+    // Previously rendered an empty tier plus "// nothing needs you here" in
+    // every lane, which meant the loudest label on screen was usually a
+    // statement that there was nothing to do.
+    expect(wrapper.findAll('.home-tier--needsYou')).toHaveLength(0)
+    expect(wrapper.text()).not.toContain('nothing needs you here')
+  })
+
+  it('keeps tier labels lowercase', async () => {
+    const wrapper = await mountHome()
+    const labels = wrapper.findAll('.home-tier-label').map(n => n.text())
+    expect(labels).toContain('needs you')
+    expect(labels).toContain('working')
+    expect(labels.some(l => l === l.toUpperCase() && /[A-Z]/.test(l))).toBe(false)
   })
 
   it('keeps vertical motion within a lane and horizontal motion across lanes', async () => {
@@ -119,10 +140,9 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(emptyVm.onArrow('ArrowDown')).toBe(false)
   })
 
-  it('makes quiet rows and the older disclosure focusable buttons', async () => {
+  it('makes quiet rows focusable buttons', async () => {
     const wrapper = await mountHome()
     expect(wrapper.find('.home-tier--quiet .home-chat-item').element.tagName).toBe('BUTTON')
-    expect(wrapper.find('.home-lane-older-toggle').element.tagName).toBe('BUTTON')
   })
 })
 

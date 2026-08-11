@@ -768,6 +768,25 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
+  // The global "+ personal chat / + work chat" pair used to stay on screen at
+  // narrow widths, where it duplicated each lane's own "+ new" and spent a
+  // saturated fill on a non-blocking action.
+  it('drops the global new-chat buttons once any chat exists', async () => {
+    const wrapper = await mountHome()
+    expect(wrapper.find('.empty-actions').exists()).toBe(false)
+    expect(wrapper.findAll('.home-lane-new').length).toBeGreaterThan(0)
+    wrapper.unmount()
+  })
+
+  it('keeps every lane expanded, with no peek row to collapse into', async () => {
+    const wrapper = await mountHome()
+    expect(wrapper.find('.home-lane-peek').exists()).toBe(false)
+    for (const lane of wrapper.findAll('.home-lane')) {
+      expect(lane.find('.home-lane-body').exists()).toBe(true)
+    }
+    wrapper.unmount()
+  })
+
   it('moves focus across lanes from a window keydown', async () => {
     const wrapper = await mountHome()
     const cards = wrapper.findAll('.home-chat-item')

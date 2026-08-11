@@ -443,14 +443,12 @@ const currentProjectId = computed(() => {
   if (chat?.project_id) return chat.project_id
   return ''
 })
-// The per-lane "+ new" button replaces these on a wide screen, but a lane
-// header is hidden for every collapsed lane below 820px — so on a phone with at
-// least one chat there would otherwise be no way to start a chat in a
-// non-active workspace. Keep the global buttons wherever the lane ones are not
-// all reachable.
-const showGlobalNewChatActions = computed(() =>
-  !store.activeChatsAll.length || isMobile.value,
-)
+// Only for the true empty state. Every lane carries its own "+ new" and lanes
+// no longer collapse at narrow widths, so on a phone with chats these were a
+// second, louder copy of an action already on screen — and a saturated fill
+// spent on something non-blocking, which the design system reserves for
+// "needs the user".
+const showGlobalNewChatActions = computed(() => !store.activeChatsAll.length)
 
 const generalWorkspaceActions = computed(() => {
   return store.workspaceOptions
