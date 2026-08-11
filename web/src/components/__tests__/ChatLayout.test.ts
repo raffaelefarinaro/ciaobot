@@ -698,13 +698,18 @@ describe('ChatLayout home arrow navigation', () => {
     vi.restoreAllMocks()
   })
 
+  // Hoisted so the Esc tests below can assert where navigation ended up.
+  let router: ReturnType<typeof createRouter>
+
   async function mountHome(startPath = '/') {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
-    const router = createRouter({
+    router = createRouter({
       history: createMemoryHistory(),
       routes: [
         { path: '/', component: EmptyStub },
         { path: '/project/:projectId', component: EmptyStub },
+        { path: '/settings', component: EmptyStub },
+        { path: '/schedules', component: EmptyStub },
       ],
     })
     await router.push(startPath)
@@ -824,6 +829,39 @@ describe('ChatLayout home arrow navigation', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true }))
     await flushPromises()
     expect(store.activeWorkspace).toBe('work')
+    wrapper.unmount()
+  })
+
+  // Esc used to do nothing at all on settings and automations, because those
+  // views are excluded from shortcutsActive. It is the universal way back.
+  it('returns to home on Esc from a full-screen view', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = null
+    await router.push('/settings')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/settings')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
+    wrapper.unmount()
+  })
+
+  it('leaves Esc alone when already on home with no chat open', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = null
+    await router.push('/')
+    await flushPromises()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
     wrapper.unmount()
   })
 

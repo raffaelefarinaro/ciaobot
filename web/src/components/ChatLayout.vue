@@ -662,6 +662,31 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     }
   }
 
+  // Esc runs before the chat-only gate: it is the universal way back, and
+  // previously it did nothing at all on settings or automations because those
+  // views are excluded from shortcutsActive.
+  //
+  // It closes the open chat even while typing in the composer: escaping a chat
+  // is the more useful meaning of the key, and requiring a click-out first was
+  // the common complaint. Widgets that genuinely own Esc claim it with
+  // stopPropagation (the slash-command picker in ChatPanel, the notification
+  // bell), so this never steals the key from them.
+  if (e.key === 'Escape') {
+    // The confirm dialog and the file viewer own Esc while they are up.
+    if (pendingConfirm.value || fileViewer.isOpen) return
+    if (store.activeChat) {
+      e.preventDefault()
+      closeChat()
+      return
+    }
+    if (viewMode.value !== 'chat' || projectIdParam.value) {
+      e.preventDefault()
+      void router.push('/')
+      return
+    }
+    return
+  }
+
   if (!shortcutsActive.value) return
 
   if (e.key.startsWith('Arrow')) {
@@ -671,16 +696,6 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     return
   }
 
-  // Esc closes the open chat even while typing in the composer: escaping a
-  // chat is the more useful meaning of the key, and requiring a click-out
-  // first was the common complaint. Widgets that genuinely own Esc claim it
-  // with stopPropagation (see the slash-command picker in ChatPanel), so this
-  // never steals the key from them.
-  if (e.key === 'Escape') {
-    if (!store.activeChat) return
-    e.preventDefault()
-    closeChat()
-  }
 }
 
 function onShortcutKeydown(e: KeyboardEvent) {

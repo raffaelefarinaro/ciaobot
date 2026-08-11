@@ -341,7 +341,7 @@ watch(() => store.activeWorkspace, async () => {
 <style scoped>
 .home-recent {
   width: 100%;
-  max-width: 1040px;
+  max-width: 1320px;
   margin: 0 auto;
   text-align: left;
 }
@@ -363,20 +363,19 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-lane {
   min-width: 0;
-  padding: 0 var(--space-3) var(--space-2);
-  border-radius: var(--radius, 10px);
+  padding-left: var(--space-3);
   /* Reserved so switching workspaces does not shift the lanes sideways. */
   border-left: 2px solid transparent;
 }
 
-/* The selected workspace. Several weak cues rather than one strong one, because
-   a saturated fill is reserved for "needs the user" (design system rule S1):
-   a hue rail down the side, a hue-tinted panel, and a full-strength underline
-   in the header — against inactive lanes that get none of the three. The
-   previous 28%-alpha tint on its own was invisible on this ground. */
+/* The selected workspace: a rail down its edge, plus the emphatic header
+   rule, the brighter name and the accent key badge. Deliberately not a
+   tinted rounded panel - that wrapped a box around a column that already
+   holds cards, rows and a dashed button, so the screen became rounded
+   corners inside rounded corners. A flush rail reads at once and adds no
+   box. */
 .home-lane--active {
   border-left-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
 .home-lane-header {
@@ -545,8 +544,9 @@ watch(() => store.activeWorkspace, async () => {
 }
 
 .home-chat-item:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  box-shadow: none;
 }
 
 .home-chat-item--needsYou {

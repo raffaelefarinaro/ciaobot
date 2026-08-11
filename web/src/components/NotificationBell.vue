@@ -68,12 +68,28 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo } from '../lib/types'
 
 const store = useProjectStore()
 const open = ref(false)
+
+// Esc closes the panel from anywhere, not only when focus happens to be inside
+// it. Opening the bell by click leaves focus on the button, and clicking a row
+// can move it out entirely, so the root-level `@keydown.esc` missed most cases.
+// Captured and stopped so the same press does not also navigate home: the panel
+// is the innermost dismissable thing on screen, so it wins.
+function onWindowKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Escape' || !open.value) return
+  e.preventDefault()
+  e.stopPropagation()
+  open.value = false
+  btnRef.value?.focus()
+}
+
+onMounted(() => window.addEventListener('keydown', onWindowKeydown, true))
+onBeforeUnmount(() => window.removeEventListener('keydown', onWindowKeydown, true))
 const btnRef = ref<HTMLElement | null>(null)
 const panelStyle = ref<Record<string, string>>({})
 
