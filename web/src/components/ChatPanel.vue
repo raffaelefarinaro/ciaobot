@@ -8,6 +8,20 @@
         <div class="header-left">
           <button class="close-btn" @click="$emit('close')" title="Close chat">&times;</button>
           <div class="header-breadcrumb" ref="breadcrumbRef">
+            <!-- The workspace was only ever implied here, through --accent. This
+                 is the screen where you are deepest inside one, so it says so —
+                 with its number key, which is otherwise only discoverable in
+                 the sidebar. -->
+            <span
+              v-if="workspaceCrumb"
+              class="breadcrumb-workspace"
+              :data-workspace-color="workspaceCrumb.color"
+              :title="`Workspace ${workspaceCrumb.name} (press ${workspaceCrumb.key})`"
+            >
+              <span v-if="workspaceCrumb.key" class="breadcrumb-key" aria-hidden="true">{{ workspaceCrumb.key }}</span>
+              {{ workspaceCrumb.name }}
+            </span>
+            <span v-if="workspaceCrumb" class="breadcrumb-separator">/</span>
             <span
               v-if="project && project.name !== 'General'"
               class="breadcrumb-project"
@@ -72,7 +86,7 @@
                       @click="openProjectFile(f)"
                       :title="f.path"
                     >
-                      <span class="context-file-icon">{{ f.kind === 'image' ? '🖼' : f.kind === 'markdown' ? '📄' : '📎' }}</span>
+                      <AppIcon class="context-file-icon" :name="f.kind === 'image' ? 'image' : f.kind === 'markdown' ? 'doc' : 'file'" />
                       <span class="context-file-name">{{ f.path }}</span>
                     </div>
                   </div>
@@ -110,7 +124,7 @@
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
-            <span aria-hidden="true">🧠</span>
+            <AppIcon name="model" :size="18" />
           </button>
           <button
             v-if="chat.provider"
@@ -164,68 +178,84 @@
       </template>
     </PaneHeader>
 
-    <!-- Delegate parent banner: this chat was spawned from a supervisor chat -->
-    <div v-if="delegateParent" class="loop-banner">
-      <div class="loop-banner-row">
-        <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
-        <span class="loop-banner-text">
-          Delegate of <strong>{{ delegateParent.title || 'parent chat' }}</strong>
-        </span>
-        <router-link
-          :to="`/chat/${delegateParent.chat_id}`"
-          class="btn-small loop-banner-manage"
-        >Open parent</router-link>
-      </div>
-    </div>
-
-    <!-- Delegate children banner: this chat spawned one or more subchats -->
-    <div v-if="delegateChildren.length" class="loop-banner">
-      <div
-        v-for="child in delegateChildren"
-        :key="child.chat_id"
-        class="loop-banner-row"
+    <!-- Context bar: what this chat is attached to — a supervisor, subchats,
+         loops, schedules. These were four sibling banner blocks, each a v-for,
+         so a chat with all four opened with its first message below the fold.
+         Collapsed it is one line of counted chips; expanded it is the same
+         detail rows with the same actions. -->
+    <div v-if="contextRelations.length" class="ctx-bar" :class="{ 'ctx-bar--open': contextExpanded }">
+      <button
+        type="button"
+        class="ctx-summary"
+        :aria-expanded="contextExpanded"
+        @click="contextExpanded = !contextExpanded"
       >
-        <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
-        <span class="loop-banner-text">
-          Subchat <strong>{{ child.title || 'untitled' }}</strong>
-          <template v-if="store.isChatStreaming(child.chat_id)"> · working</template>
-          <template v-else-if="store.chatHasBackgroundAgents(child.chat_id)"> · agents running</template>
-          <template v-else-if="store.chatNeedsInput(child.chat_id)"> · needs input</template>
-          <template v-else-if="store.chatUnread(child.chat_id) > 0"> · unread</template>
+        <span class="ctx-chevron" aria-hidden="true">{{ contextExpanded ? '▾' : '▸' }}</span>
+        <span
+          v-for="rel in contextRelations"
+          :key="rel.key"
+          class="ctx-chip"
+        >
+          <span v-if="rel.glyph" class="ctx-chip-glyph" :class="{ live: rel.live }" aria-hidden="true">{{ rel.glyph }}</span>
+          {{ rel.label }}
         </span>
-        <router-link
-          :to="`/chat/${child.chat_id}`"
-          class="btn-small loop-banner-manage"
-        >Open</router-link>
-      </div>
-    </div>
+        <span v-if="contextNeedsAttention" class="ctx-attn" title="A subchat needs you">needs you</span>
+      </button>
 
-    <!-- Loop banner: this chat is driven by one or more loops -->
-    <div v-if="chatLoops.length" class="loop-banner">
-      <div v-for="l in chatLoops" :key="l.loop_id" class="loop-banner-row">
-        <span class="loop-banner-ico" aria-hidden="true">&#10227;</span>
-        <span class="loop-banner-text">
-          <strong>{{ l.title || 'Loop' }}</strong>
-          · every {{ l.interval_minutes }}m
-          · {{ l.running ? 'running' : 'stopped' }}<template v-if="l.last_status === 'busy'"> (waiting, chat busy)</template>
-          <template v-if="l.running && loopCountdown(l)"> · next {{ loopCountdown(l) }}</template>
-        </span>
-        <button class="btn-small" @click="toggleLoop(l)">{{ l.running ? 'Stop loop' : 'Start loop' }}</button>
-        <router-link :to="`/schedules/${l.loop_id}`" class="btn-small loop-banner-manage">Manage</router-link>
-      </div>
-    </div>
+      <div v-if="contextExpanded" class="ctx-detail">
+        <div v-if="delegateParent" class="loop-banner-row">
+          <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
+          <span class="loop-banner-text">
+            Delegate of <strong>{{ delegateParent.title || 'parent chat' }}</strong>
+          </span>
+          <router-link
+            :to="`/chat/${delegateParent.chat_id}`"
+            class="btn-small loop-banner-manage"
+          >Open parent</router-link>
+        </div>
 
-    <!-- Schedule banner: this chat was created or is driven by a schedule -->
-    <div v-if="chatSchedules.length" class="loop-banner">
-      <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
-        <span class="loop-banner-ico" aria-hidden="true">&#9201;</span>
-        <span class="loop-banner-text">
-          <strong>{{ s.title || 'Schedule' }}</strong>
-          · {{ scheduleCadence(s) }}
-          · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
-        </span>
-        <button class="btn-small" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
-        <router-link :to="`/schedules/${s.schedule_id}`" class="btn-small loop-banner-manage">Manage</router-link>
+        <div
+          v-for="child in delegateChildren"
+          :key="child.chat_id"
+          class="loop-banner-row"
+        >
+          <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
+          <!-- State comes from ChatSignals, not prose: this row used to spell
+               out "· working" / "· needs input", which was a fourth, divergent
+               rendering of the same facts the sidebar and home already draw. -->
+          <span class="loop-banner-text">
+            Subchat
+            <strong :class="{ 'subchat-unread': store.chatUnread(child.chat_id) > 0 }">{{ child.title || 'untitled' }}</strong>
+          </span>
+          <ChatSignals :chat-id="child.chat_id" density="row" />
+          <router-link
+            :to="`/chat/${child.chat_id}`"
+            class="btn-small loop-banner-manage"
+          >Open</router-link>
+        </div>
+
+        <div v-for="l in chatLoops" :key="l.loop_id" class="loop-banner-row">
+          <span class="loop-banner-ico" aria-hidden="true">&#10227;</span>
+          <span class="loop-banner-text">
+            <strong>{{ l.title || 'Loop' }}</strong>
+            · every {{ l.interval_minutes }}m
+            · {{ l.running ? 'running' : 'stopped' }}<template v-if="l.last_status === 'busy'"> (waiting, chat busy)</template>
+            <template v-if="l.running && loopCountdown(l)"> · next {{ loopCountdown(l) }}</template>
+          </span>
+          <button class="btn-small" @click="toggleLoop(l)">{{ l.running ? 'Stop loop' : 'Start loop' }}</button>
+          <router-link :to="`/schedules/${l.loop_id}`" class="btn-small loop-banner-manage">Manage</router-link>
+        </div>
+
+        <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
+          <AppIcon class="loop-banner-ico" name="clock" :size="18" />
+          <span class="loop-banner-text">
+            <strong>{{ s.title || 'Schedule' }}</strong>
+            · {{ scheduleCadence(s) }}
+            · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
+          </span>
+          <button class="btn-small" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
+          <router-link :to="`/schedules/${s.schedule_id}`" class="btn-small loop-banner-manage">Manage</router-link>
+        </div>
       </div>
     </div>
 
@@ -243,7 +273,7 @@
             @click="toggleTrace(i)"
           >
             <span class="trace-chevron">{{ openTraces[i] ? '\u25BE' : '\u25B8' }}</span>
-            <span class="trace-icon">&#129504;</span>
+            <AppIcon class="trace-icon" name="activity" :size="14" />
             <span class="trace-label">Activity</span>
             <span class="trace-meta">
               <span
@@ -275,7 +305,7 @@
                 @click="openFileCard(step.file_path || step.content)"
                 :title="step.file_path || step.content"
               >
-                <span class="file-card-icon" aria-hidden="true">{{ fileCardIcon(step.file_path || step.content) }}</span>
+                <AppIcon class="file-card-icon" :name="fileCardIcon(step.file_path || step.content)" :size="18" />
                 <span class="file-card-main">
                   <span class="file-card-name">{{ fileCardBasename(step.file_path || step.content) }}</span>
                   <span class="file-card-meta">
@@ -309,7 +339,7 @@
                 @click.stop="openFileCard(f.file_path)"
                 :title="f.file_path"
               >
-                <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
+                <AppIcon class="file-chip-icon" :name="fileCardIcon(f.file_path)" :size="14" />
                 <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
                 <span v-if="f.action === 'created'" class="file-chip-action">new</span>
                 <span class="file-chip-open" aria-hidden="true">&#8599;</span>
@@ -394,7 +424,7 @@
                     @click.stop="openFileCard(f.file_path)"
                     :title="f.file_path"
                   >
-                    <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
+                    <AppIcon class="file-chip-icon" :name="fileCardIcon(f.file_path)" :size="14" />
                     <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
                     <span v-if="f.action === 'created'" class="file-chip-action">new</span>
                     <span class="file-chip-open" aria-hidden="true">&#8599;</span>
@@ -526,7 +556,7 @@
 
       <div v-if="chat.retry?.status === 'pending' && !store.isStreaming" class="retry-card">
         <div class="retry-card-main">
-          <span class="retry-card-icon">⏱</span>
+          <AppIcon class="retry-card-icon" name="clock" :size="18" />
           <div>
             <div class="retry-card-title">Retrying this turn every hour</div>
             <div class="retry-card-meta">
@@ -590,7 +620,7 @@
               @click="openFileCard(entry.file_path)"
               :title="entry.file_path"
             >
-              <span class="file-card-icon" aria-hidden="true">{{ fileCardIcon(entry.file_path) }}</span>
+              <AppIcon class="file-card-icon" :name="fileCardIcon(entry.file_path)" :size="18" />
               <span class="file-card-main">
                 <span class="file-card-name">{{ fileCardBasename(entry.file_path) }}</span>
                 <span class="file-card-meta">
@@ -651,7 +681,7 @@
           type="button"
           title="Comment on this selection"
         >
-          <span class="chat-comment-trigger-icon">💬</span>
+          <AppIcon class="chat-comment-trigger-icon" name="comment" />
           Comment
         </button>
 
@@ -708,9 +738,9 @@
          a structured question; we render an interactive option list so the
          answer flows back as the next user message. The SDK's built-in CLI
          picker can't run headless, so this is the only path. -->
-    <div v-if="activeQuestions.length" class="question-card">
+    <div v-if="activeQuestions.length && (dockPrimary === 'question' || dockExpanded)" class="question-card">
       <div class="question-card-header">
-        <span class="question-card-icon">&#10067;</span>
+        <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
         <button class="question-card-dismiss" @click="dismissQuestions" title="Dismiss">&times;</button>
       </div>
@@ -756,15 +786,19 @@
 
     <!-- Pending Auto-mode permission prompts. Shown above queued/input so
          the user can't miss them. Each prompt sticks until it's approved or
-         denied; the server resolves still-open prompts on turn teardown. -->
+         denied; the server resolves still-open prompts on turn teardown.
+         Only the first is expanded by default: a permission blocks a tool
+         mid-turn, so it outranks a question, but several stacked cards used to
+         push the transcript off screen. The rest are reachable via the dock
+         strip below. -->
     <div v-if="pendingApprovals.length" class="permission-requests">
       <div
-        v-for="p in pendingApprovals"
+        v-for="p in visibleApprovals"
         :key="p.request_id"
         class="permission-card"
       >
         <div class="permission-header">
-          <svg class="permission-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3.5v5c0 4.5-3 7.75-7 9-4-1.25-7-4.5-7-9v-5L12 3z"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
+          <svg class="permission-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter"><path d="M12 3l7 3.5v5c0 4.5-3 7.75-7 9-4-1.25-7-4.5-7-9v-5L12 3z"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
           <span class="permission-tool">{{ p.tool_name }}</span>
           <span v-if="permissionReason(p)" class="permission-message">{{ permissionReason(p) }}</span>
         </div>
@@ -794,7 +828,7 @@
     </div>
 
     <!-- Queued messages (sent while a response was already streaming). -->
-    <div v-if="store.currentQueued.length" class="queued-messages">
+    <div v-if="store.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
       <div
         v-for="(q, i) in store.currentQueued"
         :key="q.id || i"
@@ -864,7 +898,7 @@
         class="comment-chip"
         :class="{ 'is-editing': editingChatCommentId === c.id }"
       >
-        <span class="comment-chip-icon" aria-hidden="true">&#128172;</span>
+        <AppIcon class="comment-chip-icon" name="comment" :size="14" />
         <button
           type="button"
           class="comment-chip-body"
@@ -877,7 +911,7 @@
         <button class="comment-chip-remove" @click.stop.prevent="deleteChatComment(c.id)" title="Remove">&times;</button>
       </span>
       <span v-for="c in store.pendingComments" :key="`fc-${c.id}`" class="comment-chip">
-        <span class="comment-chip-icon" aria-hidden="true">&#128196;</span>
+        <AppIcon class="comment-chip-icon" name="doc" :size="14" />
         <button
           type="button"
           class="comment-chip-body"
@@ -894,19 +928,37 @@
       </span>
     </div>
 
-    <!-- Input -->
-    <!-- Background agents still running after the parent turn finished. -->
-    <div
-      v-if="store.activeBackgroundAgents > 0 && !chat.archived"
-      class="bg-agents-bar"
-      role="status"
-      aria-live="polite"
-    >
-      <span class="bg-agents-dot" aria-hidden="true"></span>
-      <span class="bg-agents-label">
-        {{ store.activeBackgroundAgents }}
-        background {{ store.activeBackgroundAgents === 1 ? 'agent' : 'agents' }} running…
-      </span>
+    <!-- Dock strip: one counted line for everything not expanded above, so the
+         dock never grows past one card plus this. Replaces the standalone
+         background-agents bar, which was a third rendering of a count the
+         header pill already shows. Nothing here is unreachable — the strip is a
+         disclosure. -->
+    <!-- Rendered whenever there is anything to collapse OR anything already
+         expanded, so the disclosure works in both directions. Gating purely on
+         dockDeferred made the strip unmount itself on click: every deferred
+         entry except background agents disappears once dockExpanded is true. -->
+    <div v-if="dockStripVisible" class="dock-strip-wrap">
+      <!-- aria-live sits on an inner span: an explicit role="status" on the
+           button would override its implicit button role and drop
+           aria-expanded, so assistive tech would stop treating it as a
+           control. -->
+      <button
+        type="button"
+        class="dock-strip"
+        :aria-expanded="dockExpanded"
+        @click="dockExpanded = !dockExpanded"
+      >
+        <span class="dock-chevron" aria-hidden="true">{{ dockExpanded ? '▾' : '▸' }}</span>
+        <span class="dock-strip-items" role="status" aria-live="polite">
+          <span
+            v-for="item in dockDeferred"
+            :key="item.key"
+            class="dock-pill"
+            :class="{ 'dock-pill--blocking': item.blocking }"
+          >{{ item.label }}</span>
+          <span v-if="dockExpanded && !dockDeferred.length" class="dock-pill">collapse</span>
+        </span>
+      </button>
     </div>
 
     <!-- @-mention picker (textarea version: inserts plain backend-facing text) -->
@@ -1021,6 +1073,9 @@ import type { AgentAssetsResponse, CommandsResponse, Loop, Schedule, ModelsRespo
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
+import ChatSignals from './ChatSignals.vue'
+import { colorForWorkspace } from '../lib/workspaceColors'
+import AppIcon, { type AppIconName } from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import {
@@ -1472,6 +1527,107 @@ const delegateChildren = computed(() => {
     c => c.spawned_from_chat_id === cid && !c.archived && c.local !== false,
   )
 })
+
+// ── Context bar ─────────────────────────────────────────────────────
+// One counted chip per relation, so four v-for banner blocks can never again
+// push the transcript below the fold. Detail rows live behind the disclosure.
+const contextExpanded = ref(false)
+
+interface ContextRelation {
+  key: string
+  label: string
+  glyph?: string
+  live?: boolean
+}
+
+const contextRelations = computed<ContextRelation[]>(() => {
+  const rels: ContextRelation[] = []
+  if (delegateParent.value) {
+    rels.push({ key: 'parent', label: 'delegate', glyph: '↳' })
+  }
+  if (delegateChildren.value.length) {
+    const n = delegateChildren.value.length
+    rels.push({ key: 'children', label: `${n} subchat${n === 1 ? '' : 's'}`, glyph: '↳' })
+  }
+  if (chatLoops.value.length) {
+    const running = chatLoops.value.some(l => l.running)
+    const label = chatLoops.value.length === 1
+      ? `loop ${chatLoops.value[0].interval_minutes}m`
+      : `${chatLoops.value.length} loops`
+    rels.push({ key: 'loops', label, glyph: '↻', live: running })
+  }
+  if (chatSchedules.value.length) {
+    const label = chatSchedules.value.length === 1
+      ? `scheduled ${scheduleCadence(chatSchedules.value[0])}`
+      : `${chatSchedules.value.length} schedules`
+    rels.push({ key: 'schedules', label })
+  }
+  return rels
+})
+
+// Surfaced on the collapsed bar so a blocked subchat is never hidden behind a
+// disclosure. Same rule as everywhere else: filled means it needs the user.
+const contextNeedsAttention = computed(() =>
+  delegateChildren.value.some(c => store.chatNeedsInput(c.chat_id)),
+)
+
+// ── Action dock ─────────────────────────────────────────────────────
+// Six independent v-if blocks used to stack between the transcript and the
+// composer with nothing distinguishing blocking items from status. Now: exactly
+// one blocking item expanded by precedence, everything else on one counted
+// strip that expands.
+//
+// Precedence: a permission blocks a tool mid-turn, a question blocks the turn's
+// end, so the permission is the tighter deadline and wins.
+//
+// Staged attachments and the slash-command picker deliberately stay outside the
+// dock: both are immediate feedback for something the user just did, and hiding
+// them behind a disclosure would make the composer feel unresponsive.
+const dockExpanded = ref(false)
+
+const dockPrimary = computed<'permission' | 'question' | null>(() => {
+  if (pendingApprovals.value.length) return 'permission'
+  if (activeQuestions.value.length) return 'question'
+  return null
+})
+
+const visibleApprovals = computed(() =>
+  dockExpanded.value ? pendingApprovals.value : pendingApprovals.value.slice(0, 1),
+)
+
+interface DockItem {
+  key: string
+  label: string
+  blocking?: boolean
+}
+
+// Anything to collapse, or anything already expanded that needs a way back.
+const dockStripVisible = computed(() =>
+  dockDeferred.value.length > 0
+  || (dockExpanded.value && (pendingApprovals.value.length > 1
+    || activeQuestions.value.length > 0
+    || store.currentQueued.length > 0)),
+)
+
+const dockDeferred = computed<DockItem[]>(() => {
+  const items: DockItem[] = []
+  const extraApprovals = pendingApprovals.value.length - 1
+  if (!dockExpanded.value && extraApprovals > 0) {
+    items.push({ key: 'permissions', label: `${extraApprovals} more permission${extraApprovals === 1 ? '' : 's'}`, blocking: true })
+  }
+  if (!dockExpanded.value && dockPrimary.value === 'permission' && activeQuestions.value.length) {
+    items.push({ key: 'question', label: 'a question waiting', blocking: true })
+  }
+  if (!dockExpanded.value && dockPrimary.value && store.currentQueued.length) {
+    const n = store.currentQueued.length
+    items.push({ key: 'queued', label: `${n} queued` })
+  }
+  if (store.activeBackgroundAgents > 0 && !chat.value?.archived) {
+    const n = store.activeBackgroundAgents
+    items.push({ key: 'agents', label: `${n} agent${n === 1 ? '' : 's'} running` })
+  }
+  return items
+})
 onMounted(() => {
   taskStore.fetchLoops().catch(() => {})
   taskStore.fetchSchedules().catch(() => {})
@@ -1546,6 +1702,21 @@ async function runScheduleNow(s: Schedule) {
   }
 }
 const project = computed(() => store.activeProject)
+
+// Workspace crumb: name, accent and the 1-9 shortcut that selects it. The index
+// comes from workspaceOptions so it always matches the sidebar pill and the home
+// lane badge for the same workspace.
+const workspaceCrumb = computed(() => {
+  const name = project.value?.workspace
+  if (!name) return null
+  const index = store.workspaceOptions.findIndex(w => w.name === name)
+  if (index < 0) return null
+  return {
+    name: name.split(/[-_\s]+/).filter(Boolean).join(' '),
+    color: colorForWorkspace(store.workspaceOptions[index]),
+    key: index < 9 ? String(index + 1) : '',
+  }
+})
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
@@ -2991,13 +3162,13 @@ function fileCardDirname(filePath: string): string {
   return slash > 0 ? filePath.slice(0, slash) : ''
 }
 
-function fileCardIcon(filePath: string): string {
-  if (_IMAGE_EXT_RE.test(filePath)) return '\u{1F5BC}'  // 🖼
-  if (/\.(md|markdown|txt)$/i.test(filePath)) return '\u{1F4DD}'  // 📝
-  if (/\.(json|ya?ml|toml|ini|cfg)$/i.test(filePath)) return '\u{2699}️'  // ⚙
-  if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return '\u{1F4C4}'  // 📄
-  if (/\.(ipynb)$/i.test(filePath)) return '\u{1F4D3}'  // 📓
-  return '\u{1F4C4}'  // 📄
+// Emoji cannot inherit currentColor, so file glyphs are SVG names now; see
+// docs/DESIGN_SYSTEM.md rule S4.
+function fileCardIcon(filePath: string): AppIconName {
+  if (_IMAGE_EXT_RE.test(filePath)) return 'image'
+  if (/\.(md|markdown|txt)$/i.test(filePath)) return 'doc'
+  if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return 'doc'
+  return 'file'
 }
 
 const renderData = computed<{
@@ -3229,6 +3400,10 @@ watch(
 // Force-scroll to bottom when switching to a different chat.
 watch(() => store.activeChatId, () => {
   isNearBottom.value = true
+  // Both disclosures are per-chat state; carrying them across a switch meant a
+  // chat you never expanded opened with its dock and context bar already open.
+  dockExpanded.value = false
+  contextExpanded.value = false
   nextTick(() => {
     if (messagesEl.value) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
@@ -4123,8 +4298,37 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
   position: relative;
 }
 
+/* Hue is workspace identity, so the crumb is tinted by data-workspace-color
+   rather than inheriting whatever the active accent happens to be. */
+.breadcrumb-workspace {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--accent);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.breadcrumb-key {
+  min-width: 15px;
+  padding: 0 3px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+}
+
+@media (max-width: 600px) {
+  /* The chat title is what matters on a phone; the crumb is orientation. */
+  .breadcrumb-workspace { display: none; }
+  .breadcrumb-workspace + .breadcrumb-separator { display: none; }
+}
+
 .breadcrumb-project {
-  font-size: 16px;
+  font-size: var(--text-lg);
   color: var(--fg2);
   white-space: nowrap;
   overflow: hidden;
@@ -5534,17 +5738,65 @@ details[open] > .activity-summary::before {
 .comment-chip-remove:hover { background: var(--bg2); color: var(--fg); }
 
 
-/* Background agents running after the parent turn finished. */
-.bg-agents-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  padding-left: calc(12px + var(--safe-left));
-  padding-right: calc(12px + var(--safe-right));
+/* Dock strip: the single counted line for everything the dock defers. */
+.dock-strip-wrap {
+  flex-shrink: 0;
   border-top: 1px solid var(--border);
   background: var(--bg);
-  flex-shrink: 0;
+}
+
+.dock-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--touch);
+  padding: var(--space-2) var(--space-3);
+  padding-left: calc(var(--space-3) + var(--safe-left));
+  padding-right: calc(var(--space-3) + var(--safe-right));
+  border: 0;
+  background: none;
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+
+.dock-strip:hover { background: var(--bg2); }
+
+.dock-strip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.dock-chevron { color: var(--fg3); flex-shrink: 0; }
+
+.dock-strip-items {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.dock-pill {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+/* Deferred blocking work is still the user's move, so it is marked — but it
+   stays outlined rather than filled, because the filled treatment belongs to
+   the one item actually expanded above. */
+.dock-pill--blocking {
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  background: none;
 }
 
 .bg-agents-dot {
@@ -5561,10 +5813,6 @@ details[open] > .activity-summary::before {
   50% { opacity: 1; }
 }
 
-.bg-agents-label {
-  font-size: var(--text-sm);
-  color: var(--fg2);
-}
 
 /* Voice transcribing spinner */
 .voice-transcribing {
@@ -6536,13 +6784,70 @@ details[open] > .activity-summary::before {
 }
 
 /* ── Loop banner ── */
-.loop-banner {
+/* ── Context bar ─────────────────────────────────────────────────────
+   Collapsed: one line of counted chips. Expanded: the detail rows, which
+   keep the original .loop-banner-row layout and actions. */
+.ctx-bar {
   border-bottom: 1px solid var(--border);
   background: var(--bg2);
-  padding: 6px 16px;
+}
+.ctx-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  background: none;
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
+  flex-wrap: wrap;
+  min-height: var(--touch);
+}
+.ctx-summary:hover { background: var(--bg3); }
+.ctx-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.ctx-chevron { color: var(--fg3); flex-shrink: 0; }
+.ctx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--fg2);
+  white-space: nowrap;
+}
+.ctx-chip-glyph {
+  color: var(--fg3);
+  font-weight: 700;
+  line-height: 1;
+}
+/* A running loop is the one thing here that is actively happening. */
+.ctx-chip-glyph.live { color: var(--accent); }
+/* Filled, because it means the user is the blocker — same rule as the
+   sidebar, home lanes and the action dock. */
+.ctx-attn {
+  margin-left: auto;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--bg);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  white-space: nowrap;
+}
+:global(:root.theme-light) .ctx-attn { color: var(--fg); }
+.ctx-detail {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
+  padding: 0 var(--space-4) var(--space-2);
 }
 .loop-banner-row {
   display: flex;
@@ -6564,5 +6869,9 @@ details[open] > .activity-summary::before {
   min-width: 0;
 }
 .loop-banner-text strong { color: var(--fg); }
+
+/* Chat-level unread is title weight everywhere; chatUnread() is binary so a
+   digit could only ever read "1". */
+.loop-banner-text strong.subchat-unread { font-weight: 700; }
 .loop-banner-manage { text-decoration: none; }
 </style>

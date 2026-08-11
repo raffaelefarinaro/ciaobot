@@ -163,4 +163,55 @@ describe('PinnedFilePanel', () => {
     expect(wrapper.find('button[aria-label="Edit"]').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  it('edits the newly pinned file after the pinned path changes', async () => {
+    // Regression: switching pinned files used to leave the panel showing the
+    // previous file's content when entering edit mode.
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('fileA.md')) {
+        return new Response('# File A content', { status: 200, headers: { 'content-type': 'text/plain' } })
+      }
+      if (url.includes('fileB.md')) {
+        return new Response('# File B content', { status: 200, headers: { 'content-type': 'text/plain' } })
+      }
+      if (url.startsWith('/api/vault-markdown-paths')) {
+        return new Response(JSON.stringify({ paths: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    const store = useProjectStore()
+    store.activeChatId = 'chat-1'
+    store.streaming = {}
+    store.bootstrapped = true
+
+    const { default: PinnedFilePanel } = await import('../PinnedFilePanel.vue')
+    const wrapper = mount(PinnedFilePanel, {
+      props: { filePath: '/vault/fileA.md' },
+    })
+    await flushPromises()
+    await nextTick()
+
+    await wrapper.get('button[aria-label="Edit"]').trigger('click')
+    await nextTick()
+    expect((wrapper.get('textarea.pfp-edit-textarea').element as HTMLTextAreaElement).value).toContain('File A')
+
+    const cancel = wrapper.findAll('button').find(b => b.text() === 'Cancel')!
+    await cancel.trigger('click')
+    await nextTick()
+    expect(wrapper.find('textarea.pfp-edit-textarea').exists()).toBe(false)
+
+    await wrapper.setProps({ filePath: '/vault/fileB.md' })
+    await flushPromises()
+    await nextTick()
+
+    await wrapper.get('button[aria-label="Edit"]').trigger('click')
+    await nextTick()
+    const textarea = wrapper.get('textarea.pfp-edit-textarea')
+    expect((textarea.element as HTMLTextAreaElement).value).toContain('File B')
+    expect((textarea.element as HTMLTextAreaElement).value).not.toContain('File A')
+
+    wrapper.unmount()
+  })
 })

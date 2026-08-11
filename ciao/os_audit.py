@@ -910,7 +910,9 @@ def memory_actionable_count(memory_result: dict[str, Any]) -> int:
     the user may decline, and a finding that can never be cleared would hold
     the audit at needs_attention until people stop reading it.
     """
-    return (
+    # int() because memory_result is dict[str, Any]: the counts are ints at
+    # runtime, but the sum is Any to the type checker.
+    return int(
         memory_result["expired_memory_entries"]
         + memory_result["expired_profile_entries"]
         + memory_result["invalid_expiration_entries"]

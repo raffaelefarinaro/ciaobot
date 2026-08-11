@@ -141,7 +141,10 @@ _PROVIDER_KEY_META = {
 # speech, and nothing else in the app ever read it.
 _SERVICE_KEY_META: dict[str, dict[str, str]] = {}
 _GWS_BUILTIN_PROFILES = ("personal", "work")
-_GWS_PROFILE_META = {
+# Annotated because the values are heterogeneous (str labels alongside a
+# list[str] of examples): without it mypy widens every lookup to Sequence[str],
+# and `meta["purpose"]` stops being usable where a str is expected.
+_GWS_PROFILE_META: dict[str, dict[str, Any]] = {
     "personal": {
         "label": "Personal Google account",
         "purpose": "Private Google account. Keep this separate from company systems.",
@@ -5807,7 +5810,9 @@ async def admin_deploy(request: Request) -> JSONResponse:
     )
     steps.append(_record_step("pip install", result))
     if result.returncode != 0:
-        hint = _pip_install_hint(steps[-1]["output"])
+        # str() because `steps` is inferred as list[dict[str, object]] from its
+        # first append; _record_step always puts a string here.
+        hint = _pip_install_hint(str(steps[-1]["output"]))
         if hint:
             steps[-1]["output"] = f"{hint}\n\n{steps[-1]['output']}"
         # The step card renders the full output; the top-level error is the
