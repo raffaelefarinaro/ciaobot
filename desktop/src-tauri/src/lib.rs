@@ -813,9 +813,7 @@ fn disconnect_from_host(app: AppHandle) {
 fn prompt_disconnect_from_host(app: &AppHandle) {
     let app_for_action = app.clone();
     app.dialog()
-        .message(
-            "The host may be unavailable. Disconnect this device and make it the host here?",
-        )
+        .message("The host may be unavailable. Disconnect this device and make it the host here?")
         .title("Disconnect from host?")
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Disconnect".into(),
