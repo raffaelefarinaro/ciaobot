@@ -1938,6 +1938,98 @@ describe('deep-link chat navigation', () => {
     expect(store.chats[0].archive_path).toBe('archive/c1.md')
     expect(store.activeChatId).toBeNull()
   })
+
+  function supervisorWithTwoSubchats(): ChatInfo[] {
+    return [
+      { chat_id: 'parent', project_id: 'p1', title: 'Parent', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'child-a', project_id: 'p1', title: 'Subchat A', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, spawned_from_chat_id: 'parent' },
+      { chat_id: 'child-b', project_id: 'p1', title: 'Subchat B', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, spawned_from_chat_id: 'parent' },
+    ]
+  }
+
+  test('archiving a supervisor marks the subchats the server confirms', async () => {
+    const store = useProjectStore()
+    store.chats = supervisorWithTwoSubchats()
+    apiPost.mockResolvedValue({
+      ok: true,
+      archived_chat_ids: ['parent', 'child-a', 'child-b'],
+    })
+
+    await store.archiveChat('parent')
+
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/parent/archive')
+    expect(store.chats.every(chat => chat.archived)).toBe(true)
+  })
+
+  test('a subchat the server did not archive stays active and keeps its socket', async () => {
+    const store = useProjectStore()
+    store.chats = supervisorWithTwoSubchats()
+    store.connectWs('child-b')
+    const childSocket = fakeSockets[fakeSockets.length - 1]
+    // The server archived the parent and one child; child-b failed and is
+    // still streaming. Marking it archived anyway would drop it out of the
+    // sidebar, recentChats and activeChatsAll while it burns tokens unseen.
+    apiPost.mockResolvedValue({
+      ok: true,
+      archived_chat_ids: ['parent', 'child-a'],
+      failed_chat_ids: ['child-b'],
+    })
+
+    await store.archiveChat('parent')
+
+    const byId = Object.fromEntries(store.chats.map(c => [c.chat_id, c.archived]))
+    expect(byId).toEqual({ parent: true, 'child-a': true, 'child-b': false })
+    // Its socket was closed before the POST, so it has to be reopened or the
+    // live chat would receive no more tokens or permission prompts.
+    expect(childSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(fakeSockets.some(s => s !== childSocket && s.url.includes('child-b'))).toBe(true)
+    // The failure is reported rather than silently dropped.
+    const errors = store.toasts.filter(t => t.variant === 'error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0].title).toBe('Some subchats were not archived')
+  })
+
+  test('a stopped-mid-turn subchat is reported to the user', async () => {
+    const store = useProjectStore()
+    store.chats = supervisorWithTwoSubchats()
+    apiPost.mockResolvedValue({
+      ok: true,
+      archived_chat_ids: ['parent', 'child-a', 'child-b'],
+      stopped_chat_ids: ['child-a'],
+    })
+
+    await store.archiveChat('parent')
+
+    const toast = store.toasts.find(t => t.title.includes('mid-turn'))
+    expect(toast?.title).toBe('Stopped 1 subchat mid-turn')
+    expect(toast?.body).toContain('is not in the archive')
+  })
+
+  test('a failed archive POST reconnects the sockets and raises an error toast', async () => {
+    const store = useProjectStore()
+    store.chats = supervisorWithTwoSubchats()
+    store.activeChatId = 'parent'
+    store.connectWs('parent')
+    store.connectWs('child-a')
+    const opened = fakeSockets.slice()
+    apiPost.mockRejectedValue(new Error('archive exploded'))
+
+    await expect(store.archiveChat('parent')).rejects.toThrow('archive exploded')
+
+    // Nothing was archived, so nothing may be marked archived.
+    expect(store.chats.some(chat => chat.archived)).toBe(false)
+    // disconnectWs marked both closes intentional, so onclose scheduled no
+    // reconnect; without an explicit one these live chats go permanently
+    // silent — no tokens, no permission cards, no AskUserQuestion prompts.
+    for (const chatId of ['parent', 'child-a']) {
+      expect(fakeSockets.some(s => !opened.includes(s) && s.url.includes(chatId))).toBe(true)
+    }
+    const errors = store.toasts.filter(t => t.variant === 'error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0].title).toBe('Could not archive chat')
+    // The chat stays open, because it was not archived.
+    expect(store.activeChatId).toBe('parent')
+  })
 })
 
 describe('chat creation', () => {

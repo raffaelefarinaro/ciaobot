@@ -12,7 +12,10 @@ import {
   reloadWhenServerReady,
   restartMessageForDisplay,
 } from '../lib/serverRestart'
+import { archiveFailedToast, archiveStoppedToast } from '../lib/archiveCopy'
+import { errorMessage } from '../lib/errorMessage'
 import type {
+  ArchiveChatResponse,
   ProjectInfo,
   ChatInfo,
   ChatRow,
@@ -568,6 +571,20 @@ export const useProjectStore = defineStore('projects', () => {
     if (!parentId) return false
     const parent = chatsById.value.get(parentId)
     return Boolean(parent && !parent.archived && parent.local !== false)
+  }
+
+  // A chat's active delegate subchats, as the user can actually see them.
+  //
+  // One definition, because the same filter had drifted into three copies and
+  // two of them dropped the `local !== false` guard that every other
+  // visibility computation applies — so an archive button offered to take "2
+  // subchats" while the sidebar listed 1. Counts shown to the user must match
+  // the rows they can see. The server-side cascade deliberately covers remote
+  // delegates too; that asymmetry is intentional, not a bug to paper over here.
+  function activeDelegatesFor(chatId: string): ChatInfo[] {
+    return chats.value.filter(
+      c => c.spawned_from_chat_id === chatId && !c.archived && c.local !== false,
+    )
   }
 
   // Most recent (max 5) non-archived chats in the active workspace.
@@ -1769,10 +1786,56 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function archiveChat(chatId: string) {
+    // The server cascades archival to delegate subchats. Note this filter has
+    // no `local !== false` guard, unlike activeDelegatesFor(): the cascade
+    // covers remote delegates too, so the socket bookkeeping here has to as
+    // well. Only user-facing counts exclude them.
+    const childIds = chats.value
+      .filter(c => c.spawned_from_chat_id === chatId && !c.archived)
+      .map(c => c.chat_id)
+    // Remember which sockets we actually closed. If the POST fails these chats
+    // are all still live, and a closed socket is marked as an intentional close
+    // so nothing auto-reconnects it — the chat would go silent, with no tokens,
+    // permission cards or AskUserQuestion prompts, and no sign anything broke.
+    const closedIds = [chatId, ...childIds].filter(id => Boolean(sockets.value[id]))
     disconnectWs(chatId)
-    await api.post(`/api/chats/${chatId}/archive`)
-    const idx = chats.value.findIndex(c => c.chat_id === chatId)
-    if (idx >= 0) chats.value[idx].archived = true
+    for (const childId of childIds) disconnectWs(childId)
+
+    let res: ArchiveChatResponse
+    try {
+      res = await api.post<ArchiveChatResponse>(`/api/chats/${chatId}/archive`)
+    } catch (e) {
+      for (const id of closedIds) connectWs(id)
+      pushErrorToast('Could not archive chat', `${errorMessage(e)}`)
+      throw e
+    }
+
+    // Mark only what the server confirms. Flipping every child on a bare 2xx
+    // dropped skipped delegates out of the sidebar, recentChats and
+    // activeChatsAll while they were still streaming, and listed them in the
+    // archive with no transcript behind them.
+    const confirmed = new Set(
+      Array.isArray(res?.archived_chat_ids) ? res.archived_chat_ids : [chatId],
+    )
+    for (const chat of chats.value) {
+      if (confirmed.has(chat.chat_id)) chat.archived = true
+    }
+    // A child the server did not archive is still running: put its socket back.
+    for (const id of closedIds) {
+      if (!confirmed.has(id)) connectWs(id)
+    }
+
+    // Archiving is immediate, so it may have discarded a delegate's in-flight
+    // turn. Say so — it is the user's work that was thrown away.
+    const stopped = (res?.stopped_chat_ids || []).filter(id => id !== chatId)
+    if (stopped.length) {
+      pushToast({ chat_id: '', ...archiveStoppedToast(stopped.length) })
+    }
+    const failed = res?.failed_chat_ids || []
+    if (failed.length) {
+      const toast = archiveFailedToast(failed.length)
+      pushErrorToast(toast.title, toast.body)
+    }
     // Clear the active chat instead of auto-jumping to another one.
     // Auto-jumping caused a half-mounted state where the header showed
     // the newly-selected chat's title but the message list hadn't
@@ -4114,7 +4177,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
     chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, clearUnread, markRead, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
