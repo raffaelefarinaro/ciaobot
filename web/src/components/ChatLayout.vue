@@ -99,7 +99,7 @@
             transition: isDraggingSplit ? 'none' : undefined
           }"
         >
-          <PinnedFilePanel :file-path="pinnedFilePath" @close="unpinCurrent" />
+          <PinnedFilePanel :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
         </div>
       </template>
       <template v-else>
