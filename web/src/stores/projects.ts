@@ -16,6 +16,7 @@ import type {
   ProjectInfo,
   ChatInfo,
   ChatRow,
+  ChatGroup,
   ChatMessage,
   SubagentTranscript,
   WsEvent,
@@ -474,6 +475,13 @@ export const useProjectStore = defineStore('projects', () => {
   // the flat list the counts (unread, needs-input) are summed over — a
   // delegate's unread still belongs to its project.
   function projectChatRows(projectId: string): ChatRow[] {
+    return projectChatGroups(projectId).flatMap(group => [
+      { chat: group.chat, isDelegate: false },
+      ...group.delegates.map(chat => ({ chat, isDelegate: true })),
+    ])
+  }
+
+  function projectChatGroups(projectId: string): ChatGroup[] {
     const all = projectChats(projectId)
     const visible = new Set(all.map(c => c.chat_id))
     const byParent = new Map<string, ChatInfo[]>()
@@ -484,18 +492,15 @@ export const useProjectStore = defineStore('projects', () => {
       siblings.push(chat)
       byParent.set(parent, siblings)
     }
-    const rows: ChatRow[] = []
+    const groups: ChatGroup[] = []
     for (const chat of all) {
       // A delegate nests only when its supervisor is visible in this same
       // project. Orphans (supervisor archived, deleted, or moved elsewhere)
       // stay top-level rather than vanishing from the sidebar entirely.
       if (chat.spawned_from_chat_id && visible.has(chat.spawned_from_chat_id)) continue
-      rows.push({ chat, isDelegate: false })
-      for (const delegate of byParent.get(chat.chat_id) || []) {
-        rows.push({ chat: delegate, isDelegate: true })
-      }
+      groups.push({ chat, delegates: byParent.get(chat.chat_id) || [] })
     }
-    return rows
+    return groups
   }
 
   function chatActivity(chat: ChatInfo): string {
@@ -988,6 +993,10 @@ export const useProjectStore = defineStore('projects', () => {
   // if set it wins. The getter returns 0 or 1 — the bell dropdown surfaces
   // the list, so an exact per-chat count isn't needed.
   function chatUnread(chatId: string): number {
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    // Delegate completion is internal model-to-model traffic. It wakes the
+    // supervisor, so the child must never create a second unread notification.
+    if (chat && isNestedDelegate(chat)) return 0
     // Invariant: the chat the user is actively looking at is, by definition,
     // read. Suppress the badge regardless of the server's last_read_at. This
     // also closes a race in `chat_result_ready` where api.get('/api/chats')
@@ -995,7 +1004,6 @@ export const useProjectStore = defineStore('projects', () => {
     // optimistic last_read_at update.
     if (chatId === activeChatId.value && documentVisible.value) return 0
     if (unread.value[chatId]) return 1
-    const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat) return 0
     const activity = chat.last_activity_at || ''
     const read = chat.last_read_at || ''
@@ -2459,6 +2467,11 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'chat_result_ready': {
+        const resultChat = chats.value.find(c => c.chat_id === msg.chat_id)
+        // The server suppresses delegate result events, but keep this guard
+        // for older servers and replayed events so internal child work cannot
+        // leak into the notification tray.
+        if (resultChat && isNestedDelegate(resultChat)) break
         const isFocused = activeChatId.value === msg.chat_id &&
           (typeof document === 'undefined' || document.visibilityState === 'visible')
         if (isFocused) {
@@ -3982,7 +3995,7 @@ export const useProjectStore = defineStore('projects', () => {
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
     chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, totalUnread, clearUnread, markRead, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions

@@ -164,6 +164,13 @@ export interface ChatRow {
   isDelegate: boolean
 }
 
+// One sidebar stack. The supervisor remains the visible anchor and its
+// delegate chats can be expanded beneath it as a single group.
+export interface ChatGroup {
+  chat: ChatInfo
+  delegates: ChatInfo[]
+}
+
 export interface ChatRetryInfo {
   status: '' | 'pending' | 'stopped'
   next_at: string

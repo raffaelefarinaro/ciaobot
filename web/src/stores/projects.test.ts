@@ -2288,6 +2288,22 @@ describe('projectChatRows (delegate grouping)', () => {
     expect(rows.map(r => r.isDelegate)).toEqual([false, true, true, false])
   })
 
+  test('returns one collapsible group for a supervisor and its delegates', () => {
+    const store = useProjectStore()
+    seed(store, [
+      { chat_id: 'boss', title: 'Supervisor' },
+      { chat_id: 'd1', title: 'First task', spawned_from_chat_id: 'boss' },
+      { chat_id: 'd2', title: 'Second task', spawned_from_chat_id: 'boss' },
+      { chat_id: 'other', title: 'Other' },
+    ])
+
+    const groups = store.projectChatGroups('p1')
+
+    expect(groups.map(group => group.chat.chat_id)).toEqual(['boss', 'other'])
+    expect(groups[0].delegates.map(chat => chat.chat_id)).toEqual(['d1', 'd2'])
+    expect(groups[1].delegates).toEqual([])
+  })
+
   test('an orphaned delegate stays top-level instead of disappearing', () => {
     const store = useProjectStore()
     // Supervisor archived, so it is not in the visible list at all.
@@ -2366,5 +2382,39 @@ describe('activeChatsAll (hide nested delegates)', () => {
     ])
 
     expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['orphan'])
+  })
+})
+
+describe('delegate unread notifications', () => {
+  test('internal delegate activity is not reported as unread', () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
+    ]
+    store.chats = [
+      {
+        chat_id: 'boss',
+        project_id: 'p1',
+        title: 'Supervisor',
+        archived: false,
+        local: true,
+        created_at: '2026-07-31T00:00:00Z',
+        last_activity_at: '2026-07-31T01:00:00Z',
+        last_read_at: '2026-07-31T01:00:00Z',
+      },
+      {
+        chat_id: 'child',
+        project_id: 'p1',
+        title: 'Internal task',
+        archived: false,
+        local: true,
+        spawned_from_chat_id: 'boss',
+        created_at: '2026-07-31T00:00:00Z',
+        last_activity_at: '2026-07-31T02:00:00Z',
+        last_read_at: '2026-07-31T01:00:00Z',
+      },
+    ] as unknown as ChatInfo[]
+
+    expect(store.chatUnread('child')).toBe(0)
   })
 })

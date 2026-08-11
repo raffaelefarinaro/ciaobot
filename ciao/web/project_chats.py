@@ -5712,8 +5712,9 @@ class ProjectChatManager:
         Skips both for delegate chats (``spawned_from_chat_id`` set). Delegates
         already wake their supervisor on completion; a toast / unread / OS push
         for the child is duplicate noise because the user follows the parent.
-        Permission and AskUserQuestion pushes still fire for delegates — those
-        need action in the child chat and are not covered by the wake path.
+        AskUserQuestion pushes still fire for delegates because that is an
+        explicit question for the human. Permission requests stay internal to
+        the delegated run and do not create a second user-facing alert.
         """
         chat = self._chats.get(chat_id)
         if chat is not None and chat.spawned_from_chat_id:
@@ -6318,6 +6319,14 @@ class ProjectChatManager:
         """
         cb = self.notify_permission_cb
         if cb is None:
+            return
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.spawned_from_chat_id:
+            logger.debug(
+                "Skipping permission notification for delegate %s (parent %s)",
+                chat_id,
+                chat.spawned_from_chat_id,
+            )
             return
         try:
             cb(chat_id, event.tool_name, event.message, event.request_id)
