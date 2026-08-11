@@ -292,18 +292,31 @@ shape recurs:
 off-system (see §3 Rule S4 on emoji, and the chat-page proposals) — the state
 chain is fixed, the rest of those views is not.
 
-### Known harness breakage (pre-existing, not caused by this work)
+### Test suite: Node floor (resolved)
 
-`npm run test` currently exits 1 with **all 17 jsdom test files failing to start
-their workers**, so only the 25 non-DOM files actually run. Cause is upstream:
-`jsdom` floats at `^29.1.1`, and `html-encoding-sniffer@6.0.0` does a CJS
-`require()` of `@exodus/bytes@1.15.1`, which is ESM-only.
+There was never a broken dependency here, and an earlier draft of this document
+said there was. The real cause: **jsdom 29 requires Node
+`^20.19.0 || ^22.13.0 || >=24.0.0`** — its CJS dependency chain does `require()`
+on an ESM module, and `require(esm)` only landed in Node 20.19.0. Nothing in the
+repo declared that floor, so on an older local Node every jsdom test file failed
+to start its worker while vitest still printed
+`Test Files 25 passed` for the files that *did* run. 17 of 42 files silently
+never executed, and the summary looked green.
 
-This predates the branch — `web/package.json` last changed at the v0.7.1 release.
-Until it is fixed, component-level changes can only be verified with
-`npm run build` (which does run `vue-tsc --noEmit`) and `npm run lint`. Worth a
-dedicated fix commit, likely an npm `overrides` pin on `@exodus/bytes`; do not
-fold it into a UI PR.
+CI was always fine — `.github/workflows/ci.yml` uses Node 22.
+
+Fixed by declaring the constraint and making violations loud:
+
+- `engines` in `web/package.json`, mirroring jsdom's supported range
+- `.nvmrc` pinning 22 to match CI
+- `web/scripts/check-node.mjs`, run as the first step of `npm test`, which exits 1
+  with an explanation rather than letting a partial run report success
+
+On a supported Node the full suite is 42 files / 345 tests green.
+
+**Rule V1** — Never trust a green vitest summary without checking the file count
+against `find web/src -name '*.test.ts' | wc -l`. A worker that fails to start is
+reported as an error, not a failure, and does not fail the file count.
 
 ---
 

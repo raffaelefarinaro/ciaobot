@@ -95,11 +95,19 @@ That sets `develop` as the default branch and enables pull-request + CI requirem
 
 ## Frontend build
 
+Node 22 is the supported version (`.nvmrc`, and what CI uses). The floor is
+`^20.19.0 || ^22.13.0 || >=24.0.0`, set by jsdom — below it every jsdom test file
+fails to start its worker, and vitest still reports a pass for the subset that
+ran. `npm test` preflights this and exits with an explanation rather than
+producing a misleading green summary.
+
 ```bash
+nvm use              # reads .nvmrc → Node 22
 npm install          # optional root Node tooling
 cd web
 npm install
 npm run build        # typecheck + Vite build, outputs to ciao/web/static/
+npm test             # 42 files / 345 tests
 ```
 
 ## macOS desktop development
