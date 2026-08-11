@@ -19,14 +19,9 @@
         </svg>
       </button>
       <template v-if="!collapsed">
-        <button
-          type="button"
-          class="brand wordmark wordmark--sm"
-          :class="{ 'brand--refreshing': refreshing }"
-          @click="onBrandClick"
-          :title="refreshing ? 'Reloading...' : 'Click to reload the latest app build'"
-          :aria-busy="refreshing"
-        ><span class="brand-label">{{ brandLabel }}</span></button>
+        <!-- The wordmark used to sit here, between the toggle and these icons.
+             It is `BrandMark` in the pane header now, where it is centred and
+             does not have to share the sidebar's width. -->
         <div class="nav-links">
           <router-link
             to="/"
@@ -46,6 +41,7 @@
               <line x1="6" y1="13" x2="18" y2="13" />
               <polyline points="8 18 8 21 11 18" />
             </svg>
+                      <span class="nav-item-label" aria-hidden="true">chats</span>
           </router-link>
           <router-link
             to="/schedules"
@@ -67,8 +63,20 @@
               <line x1="19" y1="12" x2="21" y2="12" />
               <polyline points="12 8 12 12 15 14" />
             </svg>
+                      <span class="nav-item-label" aria-hidden="true">automations</span>
           </router-link>
-          <router-link to="/settings" class="nav-item touch-hit" active-class="nav-item--active" title="settings" aria-label="settings">
+          <!-- mode, not active-class: every settings tab is its own route
+               (/settings/providers, /settings/models, ...) and none of them match
+               the /settings record, so active-class left this item inactive on
+               nearly every settings page - and with it the label collapsed. The
+               sibling links already key off mode for the same reason. -->
+          <router-link
+            to="/settings"
+            class="nav-item touch-hit"
+            :class="{ 'nav-item--active': mode === 'settings' }"
+            title="settings"
+            aria-label="settings"
+          >
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -79,6 +87,7 @@
               <rect x="7" y="10" width="4" height="4" fill="currentColor" />
               <rect x="15" y="15" width="4" height="4" fill="currentColor" />
             </svg>
+                      <span class="nav-item-label" aria-hidden="true">settings</span>
           </router-link>
           <NotificationBell class="sidebar-bell" />
         </div>
@@ -102,7 +111,11 @@
           @click="selectAutomationWorkspace(workspace.name)"
         >
           <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-          {{ workspaceLabel(workspace.name) }}
+          <!-- Wrapped, not a bare text node: the buttons are nowrap so a long
+               workspace name needs a shrinkable element to ellipse inside, or it
+               overflows into its neighbour. The button's title carries the full
+               name. -->
+          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
           <span
             v-if="missedCountFor(workspace.name) > 0"
             class="badge badge--missed"
@@ -642,7 +655,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
@@ -733,11 +746,6 @@ const moveSubmenu = ref(false)
 const editingProject = ref<string | null>(null)
 const renamingChat = ref<string | null>(null)
 const renameValue = ref('')
-const refreshing = ref(false)
-const BRAND_TEXT = 'ciaobot'
-const PIXEL_CHARS = '█▓▒░▄▀▐▌▆▅▃▂▪▫◆●○·'
-const brandLabel = ref(BRAND_TEXT)
-
 const isAnyChatWorking = computed(() => {
   return Object.values(store.streaming).some(Boolean) ||
          Object.values(store.projectStreaming).some(Boolean) ||
@@ -748,29 +756,6 @@ const hasAutomationWarning = computed(() => {
   return taskStore.schedules.some(s => s.enabled && s.missed) ||
          taskStore.loops.some(l => l.running && (l.last_status === 'error' || l.last_status === 'missing-chat'))
 })
-let brandPixelTimer: ReturnType<typeof setInterval> | null = null
-
-function startBrandPixelAnimation() {
-  stopBrandPixelAnimation()
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-  brandPixelTimer = setInterval(() => {
-    brandLabel.value = BRAND_TEXT
-      .split('')
-      .map((char) => (Math.random() < 0.18 ? char : PIXEL_CHARS[Math.floor(Math.random() * PIXEL_CHARS.length)]))
-      .join('')
-  }, 80)
-}
-
-function stopBrandPixelAnimation() {
-  if (brandPixelTimer !== null) {
-    clearInterval(brandPixelTimer)
-    brandPixelTimer = null
-  }
-  brandLabel.value = BRAND_TEXT
-}
-
-onBeforeUnmount(stopBrandPixelAnimation)
-
 // Destination projects for "Move to..." — same workspace as the chat,
 // excluding the chat's current project. Backend rejects cross-workspace moves.
 const chatMenuChat = computed<ChatInfo | null>(() => {
@@ -876,30 +861,6 @@ async function moveChatToProject(chatId: string, targetProjectId: string) {
   } catch (e) {
     store.pushErrorToast('Could not move chat', `${errorMessage(e)}`)
   }
-}
-
-async function onBrandClick() {
-  if (refreshing.value) return
-  refreshing.value = true
-  startBrandPixelAnimation()
-  try {
-    // Force the service worker to update without unregistering it,
-    // so push subscriptions survive across builds.
-    if ('serviceWorker' in navigator) {
-      const regs = await navigator.serviceWorker.getRegistrations()
-      await Promise.all(regs.map(r => r.update()))
-    }
-    if (typeof caches !== 'undefined') {
-      const keys = await caches.keys()
-      await Promise.all(keys.map(k => caches.delete(k)))
-    }
-  } catch (e) {
-    console.warn('Hard refresh cleanup failed', e)
-  }
-  // Bust HTTP cache too via a query string; replace so no back-button stale entry.
-  const url = new URL(window.location.href)
-  url.searchParams.set('_r', String(Date.now()))
-  window.location.replace(url.toString())
 }
 
 // Auto-expand all projects when they load (and keep new ones expanded)
@@ -1239,47 +1200,6 @@ async function confirmDeleteChat(chatId: string) {
 .toggle-btn:active { transform: scale(0.94); }
 .toggle-btn--collapsed svg { transform: scaleX(-1); }
 
-.brand {
-  /* Inherits .wordmark base from App.vue; override size and add interaction. */
-  font-size: calc(16px * var(--font-scale));
-  cursor: pointer;
-  transition: opacity 120ms var(--ease);
-  min-height: var(--touch);
-  align-items: center;
-  padding: 0 4px;
-  border: 0;
-  background: transparent;
-}
-.brand::before {
-  content: none;
-}
-.brand:hover { opacity: 0.85; }
-.brand:active { opacity: 0.7; }
-.brand-label {
-  display: inline-block;
-  min-width: 7ch;
-  text-align: left;
-}
-.brand--refreshing {
-  opacity: 1;
-  color: var(--accent);
-  pointer-events: none;
-}
-.brand--refreshing .brand-label {
-  animation: brand-pixel-jitter 0.12s steps(2, end) infinite;
-  text-shadow:
-    1px 0 color-mix(in srgb, var(--accent) 75%, transparent),
-    -1px 0 color-mix(in srgb, var(--accent2) 55%, transparent),
-    0 1px color-mix(in srgb, var(--fg) 35%, transparent);
-}
-@keyframes brand-pixel-jitter {
-  0%, 100% { transform: translate(0, 0); }
-  50% { transform: translate(1px, -1px); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .brand--refreshing .brand-label { animation: none; }
-}
-
 /* Pulsing dot used inline next to project / chat names to signal activity.
    A breathing scale+opacity pulse reads as "alive" at a glance, unlike a
    thin two-tone ring spin which is too subtle at this size to notice. */
@@ -1313,25 +1233,44 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--accent);
 }
 
-.workspace-status-ring,
-.rollup-ring {
+/* Working, at rollup level. Same treatment as the chat transcript's own
+   activity pulse and ChatSignals: a solid accent dot with a halo plus an
+   expanding ring. The outlined ring this replaced was nearly invisible at this
+   size against the sidebar ground. */
+.rollup-ring,
+.workspace-status-ring {
+  position: relative;
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   flex: 0 0 auto;
-  border: 1.5px solid var(--accent);
-  border-radius: 50%;
-}
-
-.workspace-status-core,
-.rollup-ring-core {
-  width: 3px;
-  height: 3px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
   animation: ciao-pulse 1.1s ease-in-out infinite;
+}
+
+.rollup-ring::before,
+.workspace-status-ring::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.45;
+  animation: ciao-ring 1.1s ease-out infinite;
+  pointer-events: none;
+}
+
+/* The inner core is now the dot itself, so the nested span is decorative. */
+.workspace-status-core,
+.rollup-ring-core {
+  display: none;
+}
+
+@keyframes ciao-ring {
+  0% { transform: scale(0.6); opacity: 0.45; }
+  100% { transform: scale(1.6); opacity: 0; }
 }
 
 /* Scrollable area for chats and projects */
@@ -1452,21 +1391,76 @@ async function confirmDeleteChat(chatId: string) {
 .nav-links {
   display: flex;
   align-items: center;
-  gap: 4px;
+  /* The wordmark used to take the middle of this row, leaving these four icons
+     huddled at a 4px gap against the right edge. It is in the pane header now, and
+     the ~90px it gives back is spent here: the icons spread across a 200px strip,
+     so each 30px glyph gets ~27px of air and its 44px touch target no longer
+     overlaps its neighbour's. The glyphs stay 30px, because the pane header sizes
+     its own icons to match the sidebar - see the note there.
+     `space-between` over a capped basis rather than a fixed gap, because that
+     degrades in both directions: a sidebar dragged out to 500px does not fling the
+     icons to the far edge (the strip stops at 200px), and one dragged down to its
+     180px minimum packs them back to the --space-1 floor instead of overflowing
+     the rail. The strip is narrower on mobile, where the bell hides - see below. */
+  /* Sized to content now rather than a fixed strip: the active item carries an
+     expanding label, so the row's width depends on which page you are on. */
+  flex: 0 1 auto;
+  justify-content: flex-end;
+  /* Wider than the old icon-only 4px: the active item now ends in text, and a
+     4px gap between a word and the next glyph reads as a collision. */
+  gap: var(--space-2);
   margin-left: auto;
+  min-width: 0;
 }
 
 .nav-item {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
+  gap: var(--space-1);
+  /* min-width, not width: the active item grows to fit its label. */
+  min-width: 30px;
   height: 30px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
   position: relative;
   isolation: isolate;
   color: var(--fg2);
   text-decoration: none;
   transition: color 120ms var(--ease);
+}
+
+/* The page you are on names itself, next to its own icon, instead of a separate
+   tag elsewhere in the window. Inactive items stay glyph-only, so the row reads
+   as one selected item among icons rather than a list of words. Collapsed with
+   max-width so it animates, and aria-hidden because .nav-item already carries a
+   full aria-label - otherwise the accessible name would read "automations
+   automations". */
+.nav-item-label {
+  max-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  opacity: 0;
+  transition: max-width 160ms var(--ease), opacity 120ms var(--ease);
+}
+
+.nav-item--active .nav-item-label {
+  /* Room for the longest label ("automations", 11 characters) plus a little, so
+     it is never clipped mid-word. At 9ch it read as "automatio" hard against the
+     next glyph. */
+  max-width: 12ch;
+  opacity: 1;
+}
+
+/* Below this the rail cannot hold a full label and every glyph at once, so trade
+   the label away rather than the icons. */
+@media (max-width: 900px) {
+  .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
 }
 
 .nav-item:hover {
@@ -1579,7 +1573,7 @@ async function confirmDeleteChat(chatId: string) {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
 
@@ -1720,6 +1714,17 @@ async function confirmDeleteChat(chatId: string) {
   letter-spacing: inherit;
 }
 .project-name:hover { color: var(--fg); }
+
+/* The project header is a text button, not a flex row, so the state marks sit
+   flush against the last letter of the name. Space them the same 6px .badge
+   already gives itself, and align them to the text rather than the baseline.
+   Scoped here on purpose: the workspace pill puts the same marks in a flex row
+   with a gap, where a margin would double up. */
+.project-name .rollup-needs-dot,
+.project-name .rollup-ring {
+  margin-left: var(--space-2);
+  vertical-align: middle;
+}
 
 .edit-input {
   flex: 1;
@@ -1865,11 +1870,14 @@ async function confirmDeleteChat(chatId: string) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workspace-status-core,
-  .rollup-ring-core { animation: none; opacity: 0.65; }
+  .rollup-ring,
+  .workspace-status-ring { animation: none; }
+  .rollup-ring::before,
+  .workspace-status-ring::before { animation: none; opacity: 0.3; }
 }
 
 /* Shimmer placeholder shown in the sidebar while the server auto-titles
@@ -2122,6 +2130,10 @@ async function confirmDeleteChat(chatId: string) {
   }
   .add-chat-btn { opacity: 1; }
   .sidebar-bell { display: none; }
+  /* Three icons here instead of four (the pane header carries the bell on mobile),
+     so the strip narrows to match. Left at 200px it would space three glyphs
+     40px apart and read as scattered rather than spread. */
+  .nav-links { flex-basis: 150px; }
 }
 
 /* Schedules list in sidebar (schedules mode) */

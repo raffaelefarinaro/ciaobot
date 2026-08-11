@@ -698,13 +698,18 @@ describe('ChatLayout home arrow navigation', () => {
     vi.restoreAllMocks()
   })
 
+  // Hoisted so the Esc tests below can assert where navigation ended up.
+  let router: ReturnType<typeof createRouter>
+
   async function mountHome(startPath = '/') {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
-    const router = createRouter({
+    router = createRouter({
       history: createMemoryHistory(),
       routes: [
         { path: '/', component: EmptyStub },
         { path: '/project/:projectId', component: EmptyStub },
+        { path: '/settings', component: EmptyStub },
+        { path: '/schedules', component: EmptyStub },
       ],
     })
     await router.push(startPath)
@@ -768,6 +773,25 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
+  // The global "+ personal chat / + work chat" pair used to stay on screen at
+  // narrow widths, where it duplicated each lane's own "+ new" and spent a
+  // saturated fill on a non-blocking action.
+  it('drops the global new-chat buttons once any chat exists', async () => {
+    const wrapper = await mountHome()
+    expect(wrapper.find('.empty-actions').exists()).toBe(false)
+    expect(wrapper.findAll('.home-lane-new').length).toBeGreaterThan(0)
+    wrapper.unmount()
+  })
+
+  it('keeps every lane expanded, with no peek row to collapse into', async () => {
+    const wrapper = await mountHome()
+    expect(wrapper.find('.home-lane-peek').exists()).toBe(false)
+    for (const lane of wrapper.findAll('.home-lane')) {
+      expect(lane.find('.home-lane-body').exists()).toBe(true)
+    }
+    wrapper.unmount()
+  })
+
   it('moves focus across lanes from a window keydown', async () => {
     const wrapper = await mountHome()
     const cards = wrapper.findAll('.home-chat-item')
@@ -808,6 +832,39 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
+  // Esc used to do nothing at all on settings and automations, because those
+  // views are excluded from shortcutsActive. It is the universal way back.
+  it('returns to home on Esc from a full-screen view', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = null
+    await router.push('/settings')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/settings')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
+    wrapper.unmount()
+  })
+
+  it('leaves Esc alone when already on home with no chat open', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = null
+    await router.push('/')
+    await flushPromises()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
+    wrapper.unmount()
+  })
+
   it('closes the open chat on Esc, including while typing in the composer', async () => {
     // Requested behaviour: escaping a chat should not require clicking out of
     // the composer first. Widgets that own Esc claim it with stopPropagation.
@@ -825,6 +882,60 @@ describe('ChatLayout home arrow navigation', () => {
 
     expect(store.activeChatId).toBeNull()
     textarea.remove()
+    wrapper.unmount()
+  })
+
+  // Reported in review: activeChatId stays populated when Settings is opened
+  // from a chat, so a chat-first Esc ran closeChat() on a chat that was not on
+  // screen - disconnecting it, and deleting it outright when it was an unused
+  // draft with an unsent composer message.
+  it('leaves a retained hidden chat alone when escaping Settings', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = 'chat-1'
+    await router.push('/settings')
+    await flushPromises()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(store.activeChatId).toBe('chat-1')
+    wrapper.unmount()
+  })
+
+  it('does the same escaping Automations', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = 'chat-1'
+    await router.push('/schedules')
+    await flushPromises()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(store.activeChatId).toBe('chat-1')
+    wrapper.unmount()
+  })
+
+  // A popover that handled Escape itself must not also navigate away.
+  it('defers to a nested control that consumed Escape', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = null
+    await router.push('/settings')
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    event.preventDefault()
+    window.dispatchEvent(event)
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/settings')
     wrapper.unmount()
   })
 

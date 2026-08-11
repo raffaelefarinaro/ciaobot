@@ -207,6 +207,12 @@ function scrollActiveIntoView() {
 
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
+    // Claim the key. Dismissing this popover is the whole meaning of the press,
+    // and the global handler in ChatLayout treats an unclaimed Escape as "go
+    // home" - so without this, closing the picker also navigated away, out of
+    // half-finished Settings edits.
+    event.preventDefault()
+    event.stopPropagation()
     close()
     triggerRef.value?.focus()
     return

@@ -39,40 +39,41 @@
           />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-            <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
           </div>
           <!-- On mobile, the sidebar already lists every active chat. Showing the
                homepage behind it after closing a chat would just duplicate the
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-            <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
               <div class="empty-home-header">
-                <div class="empty-mark" :class="{ 'empty-mark--compact': store.activeChatsAll.length > 0 }">
-                <button
-                  type="button"
-                  class="empty-face-btn"
-                  :class="{ 'empty-face-btn--compact': store.activeChatsAll.length > 0 }"
-                  aria-label="Say hello"
-                  @click="onFaceClick"
-                  @mouseenter="onFaceEnter"
-                  @mouseleave="onFaceLeave"
-                >
-                  <Transition name="face-bubble">
-                    <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                      {{ speechGreeting }}
-                    </div>
-                  </Transition>
-                  <img
-                    class="empty-face"
-                    :class="{ 'empty-face--compact': store.activeChatsAll.length > 0 }"
-                    :src="faceSrc"
-                    alt=""
-                    draggable="false"
-                  />
-                </button>
+                <!-- With chats on screen the mark is decoration beside a status line, so it
+                     is a plain image: no button, no hover handlers, no greeting bubble. The
+                     bubble belongs to the big first-run face below, where it is the only
+                     thing on the screen and has room to be a greeting. Next to a sentence
+                     that already reads "nothing needs you" it just collided with it. -->
+                <template v-if="store.activeChatsAll.length">
+                  <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
+                  <span class="empty-status-text">{{ homeStatus }}</span>
+                </template>
+                <div v-else class="empty-mark">
+                  <button
+                    type="button"
+                    class="empty-face-btn"
+                    aria-label="Say hello"
+                    @click="onFaceClick"
+                    @mouseenter="onFaceEnter"
+                    @mouseleave="onFaceLeave"
+                  >
+                    <Transition name="face-bubble">
+                      <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                        {{ speechGreeting }}
+                      </div>
+                    </Transition>
+                    <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
+                  </button>
                 </div>
-                <span v-if="store.activeChatsAll.length" class="empty-status-text">{{ homeStatus }}</span>
               </div>
               <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
               <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -124,40 +125,41 @@
         />
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-          <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
         </div>
         <!-- On mobile, the sidebar already lists every active chat. Showing the
              homepage behind it after closing a chat would just duplicate the
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
             <div class="empty-home-header">
-              <div class="empty-mark" :class="{ 'empty-mark--compact': store.activeChatsAll.length > 0 }">
-              <button
-                type="button"
-                class="empty-face-btn"
-                :class="{ 'empty-face-btn--compact': store.activeChatsAll.length > 0 }"
-                aria-label="Say hello"
-                @click="onFaceClick"
-                @mouseenter="onFaceEnter"
-                @mouseleave="onFaceLeave"
-              >
-                <Transition name="face-bubble">
-                  <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                    {{ speechGreeting }}
-                  </div>
-                </Transition>
-                <img
-                  class="empty-face"
-                  :class="{ 'empty-face--compact': store.activeChatsAll.length > 0 }"
-                  :src="faceSrc"
-                  alt=""
-                  draggable="false"
-                />
-              </button>
+              <!-- With chats on screen the mark is decoration beside a status line, so it
+                   is a plain image: no button, no hover handlers, no greeting bubble. The
+                   bubble belongs to the big first-run face below, where it is the only
+                   thing on the screen and has room to be a greeting. Next to a sentence
+                   that already reads "nothing needs you" it just collided with it. -->
+              <template v-if="store.activeChatsAll.length">
+                <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
+                <span class="empty-status-text">{{ homeStatus }}</span>
+              </template>
+              <div v-else class="empty-mark">
+                <button
+                  type="button"
+                  class="empty-face-btn"
+                  aria-label="Say hello"
+                  @click="onFaceClick"
+                  @mouseenter="onFaceEnter"
+                  @mouseleave="onFaceLeave"
+                >
+                  <Transition name="face-bubble">
+                    <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                      {{ speechGreeting }}
+                    </div>
+                  </Transition>
+                  <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
+                </button>
               </div>
-              <span v-if="store.activeChatsAll.length" class="empty-status-text">{{ homeStatus }}</span>
             </div>
             <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
             <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -443,14 +445,12 @@ const currentProjectId = computed(() => {
   if (chat?.project_id) return chat.project_id
   return ''
 })
-// The per-lane "+ new" button replaces these on a wide screen, but a lane
-// header is hidden for every collapsed lane below 820px — so on a phone with at
-// least one chat there would otherwise be no way to start a chat in a
-// non-active workspace. Keep the global buttons wherever the lane ones are not
-// all reachable.
-const showGlobalNewChatActions = computed(() =>
-  !store.activeChatsAll.length || isMobile.value,
-)
+// Only for the true empty state. Every lane carries its own "+ new" and lanes
+// no longer collapse at narrow widths, so on a phone with chats these were a
+// second, louder copy of an action already on screen — and a saturated fill
+// spent on something non-blocking, which the design system reserves for
+// "needs the user".
+const showGlobalNewChatActions = computed(() => !store.activeChatsAll.length)
 
 const generalWorkspaceActions = computed(() => {
   return store.workspaceOptions
@@ -662,6 +662,52 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     }
   }
 
+  // Esc runs before the chat-only gate: it is the universal way back, and
+  // previously it did nothing at all on settings or automations because those
+  // views are excluded from shortcutsActive.
+  //
+  // It closes the open chat even while typing in the composer: escaping a chat
+  // is the more useful meaning of the key, and requiring a click-out first was
+  // the common complaint. Widgets that genuinely own Esc claim it with
+  // stopPropagation (the slash-command picker in ChatPanel, the notification
+  // bell), so this never steals the key from them.
+  if (e.key === 'Escape') {
+    // The confirm dialog and the file viewer own Esc while they are up.
+    if (pendingConfirm.value || fileViewer.isOpen) return
+    // A nested control that handled the key already, without claiming it. Popups
+    // like ModelSelector close on Esc but do not stopPropagation, and treating
+    // that press as "go home" both discarded their dismissal and navigated away
+    // from half-finished settings edits.
+    if (e.defaultPrevented) return
+
+    // Settings and Automations come first, ahead of any chat handling.
+    // activeChatId deliberately stays populated when either is opened from a
+    // chat, so checking the chat first meant Esc ran closeChat() on a chat that
+    // was not even on screen - disconnecting it, and deleting it outright when it
+    // was an unused draft with an unsent composer message. Leaving the view is
+    // what the key means there.
+    //
+    // Project routes stay chat-first on purpose: Esc closing the chat you opened
+    // through a project is long-standing, tested behaviour, and a project page is
+    // one press further from home either way.
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules') {
+      e.preventDefault()
+      void router.push('/')
+      return
+    }
+    if (store.activeChat) {
+      e.preventDefault()
+      closeChat()
+      return
+    }
+    if (projectIdParam.value) {
+      e.preventDefault()
+      void router.push('/')
+      return
+    }
+    return
+  }
+
   if (!shortcutsActive.value) return
 
   if (e.key.startsWith('Arrow')) {
@@ -671,16 +717,6 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     return
   }
 
-  // Esc closes the open chat even while typing in the composer: escaping a
-  // chat is the more useful meaning of the key, and requiring a click-out
-  // first was the common complaint. Widgets that genuinely own Esc claim it
-  // with stopPropagation (see the slash-command picker in ChatPanel), so this
-  // never steals the key from them.
-  if (e.key === 'Escape') {
-    if (!store.activeChat) return
-    e.preventDefault()
-    closeChat()
-  }
 }
 
 function onShortcutKeydown(e: KeyboardEvent) {
@@ -958,12 +994,6 @@ onBeforeUnmount(() => {
   height: 30px;
 }
 
-.empty-face-btn--compact {
-  min-width: var(--touch);
-  min-height: var(--touch);
-  align-items: center;
-  justify-content: center;
-}
 .face-speech-bubble {
   position: absolute;
   bottom: calc(100% + 10px);

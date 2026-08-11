@@ -1,6 +1,6 @@
 <template>
   <div class="settings-pane">
-    <PaneHeader title="settings" @open-sidebar="emit('open-sidebar')" />
+    <PaneHeader page-tag="settings" @open-sidebar="emit('open-sidebar')" />
     <div class="pane-body">
 
       <!-- HOME TAB -->

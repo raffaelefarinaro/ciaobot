@@ -1,6 +1,6 @@
 <template>
   <div v-if="store.activeChatsAll.length" class="home-recent">
-    <div class="home-recent-label">jump back in</div>
+    <h2 class="home-recent-label">jump back in</h2>
     <div ref="lanesEl" class="home-lanes">
       <section
         v-for="lane in lanes"
@@ -9,14 +9,13 @@
         class="home-lane"
         :class="{
           'home-lane--active': isLaneActive(lane),
-          'home-lane--expanded': isLaneExpanded(lane),
           'home-lane--unknown': !lane.workspace,
         }"
         :data-lane-key="lane.key"
       >
         <header class="home-lane-header" :data-workspace-color="lane.color">
           <div class="home-lane-heading">
-            <span class="home-lane-shortcut">[{{ lane.shortcut }}]</span>
+            <span class="home-lane-shortcut">{{ lane.shortcut }}</span>
             <span class="home-lane-name">{{ lane.label || 'unassigned' }}</span>
             <span class="home-lane-summary" aria-live="polite">
               <template v-if="laneNeedsCount(lane)"><b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you</template>
@@ -34,31 +33,16 @@
           >{{ laneNewAction(lane)!.isCreating ? '...' : '+ new' }}</button>
         </header>
 
-        <button
-          v-if="!isLaneExpanded(lane)"
-          type="button"
-          class="home-lane-peek"
-          :data-workspace-color="lane.color"
-          :aria-label="`Show ${lane.label || 'unassigned'} workspace`"
-          @click="activateLane(lane)"
-        >
-          <span>[{{ lane.shortcut }}] {{ lane.label || 'unassigned' }}</span>
-          <span class="home-lane-peek-summary">· {{ laneSummary(lane) }}</span>
-        </button>
-
         <div class="home-lane-body">
           <div v-if="!laneHasChats(lane)" class="home-lane-empty">// no active chats</div>
 
           <template v-for="entry in tierEntries(lane)" :key="entry.key">
             <div
-              v-if="entry.key !== 'older' && (entry.chats.length || entry.key === 'needsYou')"
+              v-if="entry.chats.length"
               class="home-tier"
               :class="`home-tier--${entry.key}`"
             >
-              <div class="home-tier-label">
-                <span>{{ entry.label }}</span>
-                <span v-if="entry.key === 'needsYou' && !entry.chats.length">// nothing needs you here</span>
-              </div>
+              <div class="home-tier-label"><span>{{ entry.label }}</span></div>
               <button
                 v-for="chat in entry.chats"
                 :key="chat.chat_id"
@@ -100,37 +84,6 @@
               </button>
             </div>
 
-            <div v-else-if="entry.chats.length" class="home-tier home-tier--older">
-              <div class="home-tier-label"><span>older</span></div>
-              <button
-                type="button"
-                class="home-lane-older-toggle"
-                :aria-expanded="Boolean(olderExpanded[lane.key])"
-                @click="olderExpanded[lane.key] = !olderExpanded[lane.key]"
-              >
-                {{ olderExpanded[lane.key] ? 'Hide older chats' : `${entry.chats.length} more, older than a week` }}
-              </button>
-              <template v-if="olderExpanded[lane.key]">
-                <button
-                  v-for="chat in entry.chats"
-                  :key="chat.chat_id"
-                  type="button"
-                  class="home-chat-item home-chat-item--quiet home-chat-item--older"
-                  :class="chatItemClasses('older', chat)"
-                  :data-workspace-color="colorOf(chat)"
-                  :disabled="chat.local === false"
-                  :title="chat.local === false ? 'This chat lives on another instance' : chat.title"
-                  @click="chat.local !== false && store.switchChat(chat.chat_id)"
-                >
-                  <span
-                    class="home-chat-title"
-                    :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
-                  >{{ chat.title }}</span>
-                  <ChatSignals :chat-id="chat.chat_id" density="row" :hue="colorOf(chat)" />
-                  <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
-                </button>
-              </template>
-            </div>
           </template>
         </div>
       </section>
@@ -139,7 +92,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
@@ -156,8 +109,6 @@ const emit = defineEmits<{
 const store = useProjectStore()
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
-const olderExpanded = ref<Record<string, boolean>>({})
-const isNarrow = ref(typeof window !== 'undefined' && window.innerWidth < 820)
 
 interface HomeLane {
   key: string
@@ -229,6 +180,7 @@ function makeLane(
       chats,
       chatId => store.chatNeedsInput(chatId),
       chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId),
+      chatId => store.chatUnread(chatId) > 0,
     ),
   }
 }
@@ -261,19 +213,12 @@ function laneWorkingCount(lane: HomeLane): number {
   return lane.tiers.working.length
 }
 
-function laneQuietCount(lane: HomeLane): number {
-  return lane.tiers.quiet.length + lane.tiers.older.length
+function laneUnreadCount(lane: HomeLane): number {
+  return lane.tiers.unread.length
 }
 
-function laneSummary(lane: HomeLane): string {
-  const needs = laneNeedsCount(lane)
-  const working = laneWorkingCount(lane)
-  const quiet = laneQuietCount(lane)
-  const parts: string[] = []
-  if (needs) parts.push(`${needs} need you`)
-  if (working) parts.push(`${working} working`)
-  if (quiet) parts.push(`${quiet} quiet`)
-  return parts.join(' · ') || 'all quiet'
+function laneQuietCount(lane: HomeLane): number {
+  return lane.tiers.quiet.length + lane.tiers.older.length
 }
 
 // The header renders the needs count itself so it can carry the hue emphasis;
@@ -282,16 +227,10 @@ function laneSummary(lane: HomeLane): string {
 function laneSummaryRest(lane: HomeLane): string {
   const parts: string[] = []
   if (laneWorkingCount(lane)) parts.push(`${laneWorkingCount(lane)} working`)
+  if (laneUnreadCount(lane)) parts.push(`${laneUnreadCount(lane)} unread`)
   if (laneQuietCount(lane)) parts.push(`${laneQuietCount(lane)} quiet`)
   if (!parts.length && !laneNeedsCount(lane)) return 'all quiet'
   return parts.join(' · ')
-}
-
-// Lanes without a real workspace cannot be activated via switchWorkspace, so
-// they must never be the collapsed one at narrow widths or they become
-// unreachable: the peek button's click handler has nothing to switch to.
-function isLaneExpanded(lane: HomeLane): boolean {
-  return !lane.workspace || isLaneActive(lane)
 }
 
 function laneNewAction(lane: HomeLane): NewWorkspaceChatAction | null {
@@ -311,16 +250,19 @@ function isLaneActive(lane: HomeLane): boolean {
   return lane.workspace === store.activeWorkspace
 }
 
-function activateLane(lane: HomeLane) {
-  if (lane.workspace) void store.switchWorkspace(lane.workspace)
-}
-
 function tierEntries(lane: HomeLane): Array<{ key: HomeTierKey; label: string; chats: ChatInfo[] }> {
   return [
     { key: 'needsYou', label: 'needs you', chats: lane.tiers.needsYou },
     { key: 'working', label: 'working', chats: lane.tiers.working },
-    { key: 'quiet', label: 'quiet', chats: lane.tiers.quiet },
-    { key: 'older', label: 'older', chats: lane.tiers.older },
+    // A chat that finished while you were away is worth reading but is not
+    // blocking, so it sits between working and quiet rather than being called
+    // quiet - which contradicted the unread badge the sidebar showed for the
+    // very same chat.
+    { key: 'unread', label: 'unread', chats: lane.tiers.unread },
+    // Older chats are listed inline with quiet rather than split behind a
+    // disclosure. The age opacity ramp still dims them, so "old" stays legible
+    // without a separate section and a count the user has to expand to read.
+    { key: 'quiet', label: 'quiet', chats: [...lane.tiers.quiet, ...lane.tiers.older] },
   ]
 }
 
@@ -329,10 +271,17 @@ function relativeActivity(chat: ChatInfo): string {
 }
 
 function chatItemClasses(tier: HomeTierKey, chat: ChatInfo): string[] {
+  // Age only dims the tiers where age is the whole story. An unread chat is
+  // surfaced precisely because it wants reading, and one that has been waiting a
+  // week is the most likely to be missed - fading it to 55% made the row look
+  // disabled and undid the reason it was pulled out of quiet. Same for anything
+  // needing you or working, which are about now rather than when.
+  const dimByAge = tier === 'quiet' || tier === 'older'
+  const age = dimByAge ? ageBucket(chatActivityTimestamp(chat)) : 'fresh'
   return [
     `home-chat-item--${tier}`,
-    ageBucket(chatActivityTimestamp(chat)) === 'week' ? 'home-chat-item--week-old' : '',
-    ageBucket(chatActivityTimestamp(chat)) === 'older' ? 'home-chat-item--old' : '',
+    age === 'week' ? 'home-chat-item--week-old' : '',
+    age === 'older' ? 'home-chat-item--old' : '',
     chat.local === false ? 'remote' : '',
   ].filter(Boolean)
 }
@@ -345,16 +294,10 @@ function setLaneRef(key: string, element: HTMLElement | null) {
 function focusableLanes(): HTMLElement[][] {
   const container = lanesEl.value
   if (!container) return []
-  return Array.from(container.querySelectorAll<HTMLElement>('.home-lane')).map(lane => {
-    // Read the rendered class rather than recomputing from activeWorkspace, so
-    // arrow navigation always matches what is actually on screen — including
-    // workspace-less lanes, which stay expanded at every width.
-    const collapsed = isNarrow.value && !lane.classList.contains('home-lane--expanded')
-    const selector = collapsed
-      ? '.home-lane-peek:not([disabled])'
-      : '.home-chat-item:not([disabled]), .home-lane-older-toggle:not([disabled])'
-    return Array.from(lane.querySelectorAll<HTMLElement>(selector))
-  })
+  // Every lane renders in full at every width now, so there is one selector.
+  return Array.from(container.querySelectorAll<HTMLElement>('.home-lane')).map(lane =>
+    Array.from(lane.querySelectorAll<HTMLElement>('.home-chat-item:not([disabled])')),
+  )
 }
 
 function focusElement(element: HTMLElement) {
@@ -385,7 +328,6 @@ function onArrow(key: string): boolean {
   }
 
   if (key !== 'ArrowLeft' && key !== 'ArrowRight') return false
-  if (isNarrow.value) return false
 
   const delta = key === 'ArrowRight' ? 1 : -1
   if (itemIndex < 0) {
@@ -406,34 +348,41 @@ function clamp(value: number, lower: number, upper: number): number {
 
 defineExpose({ onArrow })
 
-function onResize() {
-  isNarrow.value = window.innerWidth < 820
-}
-
 watch(() => store.activeWorkspace, async () => {
   await nextTick()
   const lane = laneElements.value[store.activeWorkspace]
   lane?.scrollIntoView({ block: 'nearest' })
 })
 
-onMounted(() => window.addEventListener('resize', onResize))
-onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 </script>
 
 <style scoped>
 .home-recent {
   width: 100%;
-  max-width: 1040px;
+  max-width: 1320px;
   margin: 0 auto;
   text-align: left;
+  /* Stacking is decided by the width the lanes actually get, not the window's.
+     The sidebar is resizable and takes a large share, so a viewport media query
+     stacked far too late: at a 1750px window the lanes still had only ~450px
+     each and ellipsed almost every title. */
+  container-type: inline-size;
 }
 
+/* Off the screen, still in the document. The lane headings and tier headings
+   below already say what this list is, so the label was a caption for something
+   self-evident - but it is the only heading naming this region, so assistive
+   tech keeps it. Same rule as .sr-only in App.vue. */
 .home-recent-label {
-  margin: 0 0 8px 2px;
-  color: var(--fg2);
-  font-size: var(--text-xs, 0.72rem);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .home-lanes {
@@ -445,11 +394,22 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 
 .home-lane {
   min-width: 0;
-  border-radius: var(--radius, 10px);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: transparent;
 }
 
+/* The selected workspace reads as a raised surface, not another accent line.
+   Every card and row in the lane already carries a hue rail, so a rail on the
+   lane itself competed with them for the same meaning. A neutral lift says
+   "this column" without adding a fourth coloured edge, and the accent stays
+   where it identifies the workspace: the header rule, the name and the key
+   badge. No border, so this is a surface rather than another outlined box. */
 .home-lane--active {
-  background: color-mix(in srgb, var(--bg2) 28%, transparent);
+  /* Between --bg and --bg2 on purpose: the cards inside are --bg2, so a full
+     --bg2 lane would swallow them. This lifts the column while leaving the
+     cards clearly above it. */
+  background: color-mix(in srgb, var(--bg2) 55%, var(--bg));
 }
 
 .home-lane-header {
@@ -460,7 +420,15 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   min-width: 0;
   min-height: 44px;
   padding: 6px 0 8px;
-  border-bottom: 2px solid var(--accent);
+  /* Inactive lanes keep the hue so the workspace is still identifiable, but at
+     a fraction of the weight, so the active lane's rule reads as the emphatic
+     one instead of every lane looking equally selected. */
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+.home-lane--active .home-lane-header {
+  border-bottom-width: 2px;
+  border-bottom-color: var(--accent);
 }
 
 .home-lane-heading {
@@ -471,19 +439,34 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   overflow: hidden;
 }
 
+.home-lane--active .home-lane-name {
+  color: var(--fg);
+}
+
+/* A bordered badge rather than bracketed text: it is a key you can press, and
+   the box is what makes that legible. Squared corners, per the design. */
 .home-lane-shortcut {
   flex: 0 0 auto;
-  color: var(--accent);
+  min-width: 18px;
+  padding: 0 var(--space-1);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  border-radius: var(--radius-xs);
+  color: color-mix(in srgb, var(--accent) 65%, var(--fg3));
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   font-weight: 700;
+  text-align: center;
+}
+
+.home-lane--active .home-lane-shortcut {
+  border-color: var(--accent);
 }
 
 .home-lane-name {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
-  color: var(--fg);
+  color: var(--fg2);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   font-weight: 700;
@@ -552,22 +535,18 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   min-width: 0;
 }
 
+/* Lowercase deliberately: these are quiet structural markers, not headings.
+   They used to inherit `text-transform: uppercase` with a `span:last-child`
+   override cancelling it — which only fired when a tier had a second span, so
+   "needs you" shouted in caps while "working" and "quiet" did not. */
 .home-tier-label {
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding-bottom: 4px;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
   border-bottom: 1px solid var(--border);
   color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-}
-
-.home-tier-label span:last-child {
-  letter-spacing: 0;
-  text-transform: none;
 }
 
 .home-chat-item {
@@ -580,7 +559,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-left: 2px solid var(--accent);
-  border-radius: var(--radius, 10px);
+  border-radius: var(--radius-sm);
   background: var(--bg2);
   color: var(--fg);
   cursor: pointer;
@@ -598,11 +577,15 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   transform: translateY(1px);
 }
 
-.home-chat-item:focus-visible,
-.home-lane-peek:focus-visible,
-.home-lane-older-toggle:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+/* Positive offset, so the ring sits clear of the card edge. At -1px it was drawn
+   inside the border and merged with the accent rail on the left, which is the
+   one place a keyboard user most needs to see where focus is. Kept to a single
+   ring - the old two-ring treatment was what made the rows read as boxes inside
+   boxes - with a --bg gap so it separates on any surface. */
+.home-chat-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--bg);
 }
 
 .home-chat-item--needsYou {
@@ -614,6 +597,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   font-weight: 400;
 }
 
+.home-chat-item--unread,
 .home-chat-item--quiet,
 .home-chat-item--older {
   flex-direction: row;
@@ -623,10 +607,12 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   padding: 7px 10px;
   border: 0;
   border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 0;
+  /* Square against its hue rail, rounded away from it. */
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
   background: transparent;
 }
 
+.home-chat-item--unread:hover,
 .home-chat-item--quiet:hover,
 .home-chat-item--older:hover {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
@@ -642,6 +628,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   min-width: 0;
 }
 
+.home-chat-item--unread .home-chat-heading,
 .home-chat-item--quiet .home-chat-heading,
 .home-chat-item--older .home-chat-heading {
   flex: 1;
@@ -665,6 +652,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   font-weight: 600;
 }
 
+.home-chat-item--unread .home-chat-title,
 .home-chat-item--quiet .home-chat-title,
 .home-chat-item--older .home-chat-title {
   display: block;
@@ -720,46 +708,6 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   white-space: nowrap;
 }
 
-.home-lane-older-toggle {
-  align-self: flex-start;
-  min-height: var(--touch, 44px);
-  padding: 5px 2px;
-  border: 0;
-  background: none;
-  color: var(--fg2);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-xs);
-  text-align: left;
-}
-
-.home-lane-older-toggle:hover { color: var(--fg); }
-
-.home-lane-peek {
-  display: none;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  min-height: var(--touch, 44px);
-  padding: 7px 10px;
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
-  border-radius: var(--radius, 10px);
-  background: color-mix(in srgb, var(--accent) 5%, var(--bg2));
-  color: var(--fg);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-sm);
-  text-align: left;
-}
-
-.home-lane-peek-summary {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .remote-chip {
   flex: 0 0 auto;
   padding: 1px 4px;
@@ -786,19 +734,14 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   100% { background-position: -200% 0; }
 }
 
-@media (max-width: 819px) {
+@container (max-width: 760px) {
+  /* Stack the lanes and keep every one of them open. Collapsing the inactive
+     lane to a summary row read as a stray element rather than a control, and it
+     hid that workspace's "+ new" button — leaving no way to start a chat there
+     on a phone. Scrolling past a short lane is cheaper than that. */
   .home-lanes {
     grid-template-columns: minmax(0, 1fr);
-    gap: 8px;
-  }
-
-  .home-lane:not(.home-lane--expanded) .home-lane-header,
-  .home-lane:not(.home-lane--expanded) .home-lane-body {
-    display: none;
-  }
-
-  .home-lane:not(.home-lane--expanded) .home-lane-peek {
-    display: flex;
+    gap: var(--space-5);
   }
 }
 

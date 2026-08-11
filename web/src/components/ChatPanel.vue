@@ -2,8 +2,21 @@
   <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handleFileLinkClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
-    <!-- Header -->
-    <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
+    <!-- Header. No page tag: the breadcrumb below already reads
+         `workspace / project / title`, so a "chat" marker beside it would name
+         what the breadcrumb and the transcript underneath it both already say.
+         This is also the most crowded header in the app, so the room goes to the
+         breadcrumb and the action icons instead. -->
+    <!-- No brand mark here. This is the densest header in the app - breadcrumb,
+         model picker, agent pill, archive - and the centred wordmark was
+         squeezing the chat title down to a few characters. The breadcrumb
+         already says where you are, and the mark is a click-to-reload
+         shortcut available on every other view. -->
+    <PaneHeader
+      :brand="false"
+      :active-bg-agents="store.activeBackgroundAgents"
+      @open-sidebar="$emit('open-sidebar')"
+    >
       <template #title>
         <div class="header-left">
           <button class="close-btn" @click="$emit('close')" title="Close chat">&times;</button>
@@ -18,7 +31,6 @@
               :data-workspace-color="workspaceCrumb.color"
               :title="`Workspace ${workspaceCrumb.name} (press ${workspaceCrumb.key})`"
             >
-              <span v-if="workspaceCrumb.key" class="breadcrumb-key" aria-hidden="true">{{ workspaceCrumb.key }}</span>
               {{ workspaceCrumb.name }}
             </span>
             <span v-if="workspaceCrumb" class="breadcrumb-separator">/</span>
@@ -4445,22 +4457,10 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
 .breadcrumb-workspace {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
-  font-size: var(--text-sm);
+  font-size: var(--text-lg);
   color: var(--accent);
   white-space: nowrap;
   flex-shrink: 0;
-}
-
-.breadcrumb-key {
-  min-width: 15px;
-  padding: 0 3px;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  line-height: 1.3;
-  text-align: center;
 }
 
 @media (max-width: 600px) {
@@ -4486,7 +4486,10 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
 
 .breadcrumb-separator {
   color: var(--fg3);
-  font-size: 16px;
+  /* Same step as the crumb either side of it. The hardcoded 16px here sat
+     visibly smaller than --text-lg once the font scale was applied, and did not
+     move with the Appearance setting at all. */
+  font-size: var(--text-lg);
   user-select: none;
   flex-shrink: 0;
 }
@@ -5383,6 +5386,9 @@ details[open] > .activity-summary::before {
   box-shadow: 0 0 4px var(--accent);
   animation: activity-pulse 1.1s ease-in-out infinite;
   flex-shrink: 0;
+  /* The halo and the expanding ring paint ~3px beyond this element's box, so the
+     row's 8px gap looked like ~5px and the dot read as touching the label. */
+  margin-right: var(--space-1);
 }
 
 .activity-spinner::before {

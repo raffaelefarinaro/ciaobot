@@ -2,10 +2,10 @@
   <div class="schedule-panel">
     <PaneHeader
       v-if="!schedule && !loop && !showNew"
-      title="automations"
+      page-tag="automations"
       @open-sidebar="emit('open-sidebar')"
     />
-    <PaneHeader v-else @open-sidebar="emit('open-sidebar')">
+    <PaneHeader v-else page-tag="automations" @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
           <button class="close-btn desktop-only" @click="closeSchedule" title="Close">&times;</button>
