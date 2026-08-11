@@ -867,6 +867,33 @@ export interface ActionResult {
   [key: string]: unknown
 }
 
+/** Per-subchat row in the archive cascade response. */
+export interface ArchivedSubchat {
+  chat_id: string
+  archived: boolean
+  stopped_mid_turn: boolean
+  error: string
+}
+
+/**
+ * `POST /api/chats/{id}/archive`.
+ *
+ * Archiving a supervisor cascades to its delegate subchats, and the cascade can
+ * partly fail. The id lists are the contract that matters: mark archived only
+ * what `archived_chat_ids` names, because a subchat missing from it is still
+ * streaming, and hiding it would leave it burning tokens out of sight.
+ * The fields are optional so a client talking to an older host (or through the
+ * node proxy) degrades to "the chat I asked for" instead of breaking.
+ */
+export interface ArchiveChatResponse {
+  ok?: boolean
+  archived_to?: string | null
+  archived_chat_ids?: string[]
+  stopped_chat_ids?: string[]
+  failed_chat_ids?: string[]
+  subchats?: ArchivedSubchat[]
+}
+
 /** One commit row in the update modal, from ciao/package_version.py. */
 export interface ChangelogCommit {
   sha: string

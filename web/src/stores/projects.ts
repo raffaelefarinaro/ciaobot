@@ -12,7 +12,10 @@ import {
   reloadWhenServerReady,
   restartMessageForDisplay,
 } from '../lib/serverRestart'
+import { archiveFailedToast, archiveStoppedToast } from '../lib/archiveCopy'
+import { errorMessage } from '../lib/errorMessage'
 import type {
+  ArchiveChatResponse,
   ProjectInfo,
   ChatInfo,
   ChatRow,
@@ -1783,18 +1786,55 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function archiveChat(chatId: string) {
-    // The server cascades archival to delegate subchats. Mark the known
-    // children optimistically as well so this device does not briefly show
-    // orphaned active rows while the corresponding archive events arrive.
+    // The server cascades archival to delegate subchats. Note this filter has
+    // no `local !== false` guard, unlike activeDelegatesFor(): the cascade
+    // covers remote delegates too, so the socket bookkeeping here has to as
+    // well. Only user-facing counts exclude them.
     const childIds = chats.value
       .filter(c => c.spawned_from_chat_id === chatId && !c.archived)
       .map(c => c.chat_id)
-    const archivedIds = new Set([chatId, ...childIds])
+    // Remember which sockets we actually closed. If the POST fails these chats
+    // are all still live, and a closed socket is marked as an intentional close
+    // so nothing auto-reconnects it — the chat would go silent, with no tokens,
+    // permission cards or AskUserQuestion prompts, and no sign anything broke.
+    const closedIds = [chatId, ...childIds].filter(id => Boolean(sockets.value[id]))
     disconnectWs(chatId)
     for (const childId of childIds) disconnectWs(childId)
-    await api.post(`/api/chats/${chatId}/archive`)
+
+    let res: ArchiveChatResponse
+    try {
+      res = await api.post<ArchiveChatResponse>(`/api/chats/${chatId}/archive`)
+    } catch (e) {
+      for (const id of closedIds) connectWs(id)
+      pushErrorToast('Could not archive chat', `${errorMessage(e)}`)
+      throw e
+    }
+
+    // Mark only what the server confirms. Flipping every child on a bare 2xx
+    // dropped skipped delegates out of the sidebar, recentChats and
+    // activeChatsAll while they were still streaming, and listed them in the
+    // archive with no transcript behind them.
+    const confirmed = new Set(
+      Array.isArray(res?.archived_chat_ids) ? res.archived_chat_ids : [chatId],
+    )
     for (const chat of chats.value) {
-      if (archivedIds.has(chat.chat_id)) chat.archived = true
+      if (confirmed.has(chat.chat_id)) chat.archived = true
+    }
+    // A child the server did not archive is still running: put its socket back.
+    for (const id of closedIds) {
+      if (!confirmed.has(id)) connectWs(id)
+    }
+
+    // Archiving is immediate, so it may have discarded a delegate's in-flight
+    // turn. Say so — it is the user's work that was thrown away.
+    const stopped = (res?.stopped_chat_ids || []).filter(id => id !== chatId)
+    if (stopped.length) {
+      pushToast({ chat_id: '', ...archiveStoppedToast(stopped.length) })
+    }
+    const failed = res?.failed_chat_ids || []
+    if (failed.length) {
+      const toast = archiveFailedToast(failed.length)
+      pushErrorToast(toast.title, toast.body)
     }
     // Clear the active chat instead of auto-jumping to another one.
     // Auto-jumping caused a half-mounted state where the header showed

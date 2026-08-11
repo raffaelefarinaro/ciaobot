@@ -1681,6 +1681,17 @@ const activeDelegateCount = computed(() => {
   // dropped the local !== false guard and over-counted remote subchats.
   return cid ? store.activeDelegatesFor(cid).length : 0
 })
+// Subchats working right now. Archiving stops them rather than waiting, so the
+// confirm dialog has to name them before the user commits. Background agents
+// count as working: they outlive the turn that spawned them, so a subchat with
+// no live turn can still have real work in flight.
+const busyDelegateCount = computed(() => {
+  const cid = chat.value?.chat_id
+  if (!cid) return 0
+  return store.activeDelegatesFor(cid).filter(
+    d => store.isChatStreaming(d.chat_id) || store.chatHasBackgroundAgents(d.chat_id),
+  ).length
+})
 const archiveActionLabel = computed(() => archiveLabel(activeDelegateCount.value))
 onMounted(() => {
   taskStore.fetchLoops().catch(() => {})
@@ -4033,12 +4044,18 @@ watch(showModelPicker, (open) => {
 })
 
 async function doArchive() {
-  const message = archiveConfirmMessage(activeDelegateCount.value)
+  const message = archiveConfirmMessage(activeDelegateCount.value, busyDelegateCount.value)
   if (!await askConfirm(message, {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return
-  await store.archiveChat(chat.value.chat_id)
+  try {
+    await store.archiveChat(chat.value.chat_id)
+  } catch {
+    // archiveChat already reconnected the sockets and raised an error toast.
+    // Keep the pane open so the still-live chat stays reachable.
+    return
+  }
   // Notify ChatLayout so it closes the chat pane.
   emit('close')
 }

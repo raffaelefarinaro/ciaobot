@@ -845,8 +845,17 @@ function archiveMenuLabel(chatId: string): string {
   return menuLabel(activeSubchatCount(chatId))
 }
 
+// Subchats working right now. Archiving stops them instead of waiting, so the
+// confirm dialog names them first. Background agents count as working: they
+// outlive their turn, so a subchat with no live turn can still be busy.
+function busySubchatCount(chatId: string): number {
+  return store.activeDelegatesFor(chatId).filter(
+    d => store.isChatStreaming(d.chat_id) || store.chatHasBackgroundAgents(d.chat_id),
+  ).length
+}
+
 function archiveConfirmation(chatId: string): string {
-  return archiveConfirmMessage(activeSubchatCount(chatId))
+  return archiveConfirmMessage(activeSubchatCount(chatId), busySubchatCount(chatId))
 }
 
 // Reset the submenu whenever the active chat menu changes (open, close,
@@ -1143,7 +1152,12 @@ async function doArchiveChat(chatId: string) {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return
-  await store.archiveChat(chatId)
+  try {
+    await store.archiveChat(chatId)
+  } catch {
+    // archiveChat reconnected the sockets and raised an error toast already;
+    // swallow the rejection so it is not an unhandled one.
+  }
 }
 
 async function setRetry(chatId: string) {
