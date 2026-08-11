@@ -379,19 +379,22 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-lane {
   min-width: 0;
-  padding-left: var(--space-3);
-  /* Reserved so switching workspaces does not shift the lanes sideways. */
-  border-left: 2px solid transparent;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: transparent;
 }
 
-/* The selected workspace: a rail down its edge, plus the emphatic header
-   rule, the brighter name and the accent key badge. Deliberately not a
-   tinted rounded panel - that wrapped a box around a column that already
-   holds cards, rows and a dashed button, so the screen became rounded
-   corners inside rounded corners. A flush rail reads at once and adds no
-   box. */
+/* The selected workspace reads as a raised surface, not another accent line.
+   Every card and row in the lane already carries a hue rail, so a rail on the
+   lane itself competed with them for the same meaning. A neutral lift says
+   "this column" without adding a fourth coloured edge, and the accent stays
+   where it identifies the workspace: the header rule, the name and the key
+   badge. No border, so this is a surface rather than another outlined box. */
 .home-lane--active {
-  border-left-color: var(--accent);
+  /* Between --bg and --bg2 on purpose: the cards inside are --bg2, so a full
+     --bg2 lane would swallow them. This lifts the column while leaving the
+     cards clearly above it. */
+  background: color-mix(in srgb, var(--bg2) 55%, var(--bg));
 }
 
 .home-lane-header {

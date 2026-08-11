@@ -1740,6 +1740,17 @@ async function confirmDeleteChat(chatId: string) {
 }
 .project-name:hover { color: var(--fg); }
 
+/* The project header is a text button, not a flex row, so the state marks sit
+   flush against the last letter of the name. Space them the same 6px .badge
+   already gives itself, and align them to the text rather than the baseline.
+   Scoped here on purpose: the workspace pill puts the same marks in a flex row
+   with a gap, where a margin would double up. */
+.project-name .rollup-needs-dot,
+.project-name .rollup-ring {
+  margin-left: var(--space-2);
+  vertical-align: middle;
+}
+
 .edit-input {
   flex: 1;
   font-size: var(--text-sm);
