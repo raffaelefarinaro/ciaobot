@@ -215,6 +215,7 @@ When your message mentions a name that appears in the vault index, the agent get
 - Claude Code or OpenAI Codex with the subscription login you already have; Ollama (cloud or local) and OpenRouter as API backends.
 - Claude shell commands stay attached to the active turn until they return a result. Background subagents remain asynchronous and visible in the chat while they run.
 - haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models (Apple Intelligence, no install required).
+- Image-capability pre-flight: when a turn carries images and the selected model can't see them, the chat pauses and offers same-backend vision models to switch to, instead of failing mid-turn or silently dropping the images.
 
 **Google Workspace**
 

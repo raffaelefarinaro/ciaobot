@@ -1260,7 +1260,7 @@ def refresh_openrouter_models(config: "CiaoConfig") -> bool:
 
     if not config.openrouter.available:
         return False
-    discovered = discover_models(config.openrouter, anthropic_only=False)
+    discovered, _ = discover_models(config.openrouter, anthropic_only=False)
     if not discovered:
         return False
     before = config.openrouter.models

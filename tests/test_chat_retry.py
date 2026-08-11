@@ -213,6 +213,11 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
     # resolves to "ollama" and the retry path is enabled.
     chat.model = "kimi5.2:cloud"
     pcm._save()
+    # The image-capability pre-flight would intercept kimi5.2 (known
+    # non-vision) before dispatch. This test exercises the dispatch-time
+    # ladder safety net, so let the turn through as if the pre-flight
+    # approved the model.
+    pcm._model_capable = lambda model, chat: True  # type: ignore[assignment]
 
     seen_models: list[str] = []
     seen_image_counts: list[int] = []
@@ -379,6 +384,9 @@ async def test_capability_fallback_preserves_images(tmp_path: Path) -> None:
     chat = pcm.create_chat(project.project_id, title="preserve-images")
     chat.model = "kimi5.2:cloud"
     pcm._save()
+    # Bypass the image-capability pre-flight: this test targets the
+    # dispatch-time ladder's image preservation, not the pre-flight ask.
+    pcm._model_capable = lambda model, chat: True  # type: ignore[assignment]
 
     retry_images: list | None = None
 

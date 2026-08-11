@@ -268,6 +268,22 @@ export type WsEvent =
   | { type: 'token_usage'; input_tokens: number; output_tokens: number }
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
+  // The selected model cannot see the attached images; the engine asks the
+  // user to pick a vision-capable model before dispatching. Answered via a
+  // `capability_response` client message (action switch | picker | cancel).
+  | {
+      type: 'model_capability_question';
+      request_id: string;
+      missing: string;
+      current_model: string;
+      candidates: Array<{
+        id: string;
+        label: string;
+        supports_vision?: boolean;
+        disabled?: boolean;
+      }>;
+      timeout_s: number;
+    }
   | { type: 'chat_title'; chat_id: string; title: string }
   | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string }
   // A tool call was refused (user Deny, or the auto-deny on an unattended

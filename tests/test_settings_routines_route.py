@@ -21,7 +21,7 @@ def mock_discoveries(monkeypatch):
     )
     monkeypatch.setattr(
         "ciao.providers.openrouter.discover_models",
-        lambda settings, timeout_s=4.0, anthropic_only=False: (),
+        lambda settings, timeout_s=4.0, anthropic_only=False: ((), {}),
     )
 
 
