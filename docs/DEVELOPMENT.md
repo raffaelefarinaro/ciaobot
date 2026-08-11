@@ -116,6 +116,14 @@ The Tauri 2 shell requires macOS 13+, Node 22.x, Rust 1.90.0 with
 `aarch64-apple-darwin` and `x86_64-apple-darwin` targets, and `swiftc` from the
 Xcode Command Line Tools (it builds the `ciaobot-native` sidecar).
 
+`desktop/native/main.swift` uses Apple's FoundationModels and targets the
+**current** SDK: `GenerationOptions(samplingMode:…)`. An older Xcode still spells
+that label `sampling:` and fails to compile. CI and the publish workflow both
+select the newest Xcode installed on the runner before building the sidecar, and
+print `xcodebuild -version` so a future mismatch is visible in the log rather
+than looking like a code regression. Locally, `xcode-select -p` should point at
+an Xcode new enough to match.
+
 `./scripts/check-desktop.sh` runs the whole gate — the same commands CI's
 `build-desktop` job does — and asserts the sidecar ends up bundled, universal,
 signed, and runnable inside the built app. Run it after any change under

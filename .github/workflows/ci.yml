@@ -83,6 +83,25 @@ jobs:
         targets: aarch64-apple-darwin,x86_64-apple-darwin
         components: rustfmt,clippy
 
+    # The runner image ships several Xcodes and defaults to an older one whose
+    # FoundationModels still spells GenerationOptions' first label `sampling:`.
+    # desktop/native/main.swift targets the current SDK (`samplingMode:`), so on
+    # the default toolchain it fails to compile. Selecting the newest installed
+    # Xcode rather than hardcoding a version keeps this working as the image
+    # rolls; the printed versions make a future mismatch diagnosable from the log
+    # instead of looking like a code regression.
+    - name: Select newest Xcode
+      run: |
+        newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+        if [ -z "$newest" ]; then
+          echo "No Xcode found under /Applications" >&2
+          exit 1
+        fi
+        echo "Selecting $newest"
+        sudo xcode-select -s "$newest"
+        xcodebuild -version
+        swiftc --version
+
     - name: Build native sidecar
       working-directory: desktop
       # Must run before any cargo invocation: tauri.conf.json declares the
