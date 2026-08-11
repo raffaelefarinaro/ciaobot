@@ -41,6 +41,13 @@
       :title="loopTitle"
       :aria-label="loopTitle"
     >↻</span>
+
+    <span
+      v-if="unread"
+      class="chat-signal chat-signal--unread"
+      title="Unread chat"
+      aria-label="Unread chat"
+    />
   </span>
 </template>
 
@@ -66,9 +73,10 @@ const working = computed(() => store.isChatStreaming(props.chatId))
 const backgroundCount = computed(() => Number(store.backgroundAgents[props.chatId] || 0))
 const hasBackgroundAgents = computed(() => store.chatHasBackgroundAgents(props.chatId))
 const retryPending = computed(() => store.chats.find(c => c.chat_id === props.chatId)?.retry?.status === 'pending')
+const unread = computed(() => store.chatUnread(props.chatId) > 0)
 
-// Unread deliberately does not render here. Chat-level unread is title weight
-// in the parent (chatUnread(id) > 0); only project/workspace rollups get digits.
+// Unread is a separate static notification dot. The per-chat value is binary,
+// so the numeric counts remain reserved for project/workspace rollups.
 const primarySignal = computed<'needs' | 'working' | 'agents' | 'retry' | null>(() => {
   if (needsInput.value) return 'needs'
   if (working.value) return 'working'
@@ -109,6 +117,16 @@ const loopTitle = computed(() => {
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
+}
+
+/* Unread is a notification state rather than workspace activity, so it keeps
+   the semantic error color instead of inheriting the workspace accent. */
+.chat-signal--unread {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--error, #f44336);
+  box-shadow: 0 0 4px var(--error, #f44336);
 }
 
 /* A small squared tag, not a pill. The design this came from used a 4px radius

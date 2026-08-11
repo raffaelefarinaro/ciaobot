@@ -63,6 +63,60 @@ describe('ChatLayout', () => {
     vi.restoreAllMocks()
   })
 
+  it('counts unread chats in the home attention summary', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'unread-chat',
+      project_id: 'project-1',
+      title: 'Unread reply',
+      archived: false,
+      local: true,
+      last_activity_at: '2026-08-12T10:00:00Z',
+      last_read_at: '2026-08-12T09:00:00Z',
+    }] as unknown as typeof store.chats
+    store.activeChatId = null
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.empty-status-text').text()).toBe('1 chat needs your attention. no agents working.')
+    wrapper.unmount()
+  })
+
   it('keeps the mobile sidebar closed when the chat close button is clicked', async () => {
     const router = createRouter({
       history: createMemoryHistory(),

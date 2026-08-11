@@ -72,12 +72,14 @@ describe('ChatSignals', () => {
     expect(wrapper.findAll('.chat-signal')).toHaveLength(2)
   })
 
-  it('keeps quiet and unread chats free of a mark', () => {
+  it('marks an unread chat for attention without adding a count', () => {
     const { store } = seed()
     store.chats[0].last_activity_at = '2026-08-11T12:00:00Z'
     store.chats[0].last_read_at = '2026-08-10T12:00:00Z'
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1' } })
-    expect(wrapper.findAll('.chat-signal')).toHaveLength(0)
+    expect(wrapper.find('.chat-signal--unread').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--unread').attributes('aria-label')).toBe('Unread chat')
+    expect(wrapper.find('.chat-signal-count').exists()).toBe(false)
   })
 
   it('gives needs-you precedence over working and keeps row density unlabeled', () => {

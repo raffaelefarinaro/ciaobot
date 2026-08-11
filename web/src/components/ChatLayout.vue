@@ -471,13 +471,19 @@ const generalWorkspaceActions = computed(() => {
 
 const homeStatus = computed(() => {
   const chats = store.activeChatsAll
-  const needs = chats.filter(chat => store.chatNeedsInput(chat.chat_id)).length
+  // Unread replies need attention even when they do not block the agent on a
+  // direct answer. Keep the explicit-question state visible in its own lane,
+  // but include both kinds of actionable chat in the glanceable summary.
+  const needs = chats.filter(chat =>
+    store.chatNeedsInput(chat.chat_id) || store.chatUnread(chat.chat_id) > 0,
+  ).length
   const working = chats.filter(chat =>
     store.isChatStreaming(chat.chat_id) || store.chatHasBackgroundAgents(chat.chat_id),
   ).length
+  const needVerb = needs === 1 ? 'needs' : 'need'
   const needText = needs
-    ? `${needs} chat${needs === 1 ? '' : 's'} need you`
-    : 'nothing needs you'
+    ? `${needs} chat${needs === 1 ? '' : 's'} ${needVerb} your attention`
+    : 'nothing needs your attention'
   const workingText = working
     ? `${working} agent${working === 1 ? '' : 's'} still working`
     : 'no agents working'
@@ -915,7 +921,9 @@ onBeforeUnmount(() => {
   justify-content: center;
   gap: var(--space-3);
   color: var(--fg2);
-  padding: calc(var(--space-4) + var(--safe-top))
+  /* PaneHeader already owns the top safe-area inset. Adding it here again
+     creates a large empty band above the home status row on mobile. */
+  padding: var(--space-4)
            calc(var(--space-4) + var(--safe-right))
            calc(var(--space-4) + var(--safe-bottom))
            calc(var(--space-4) + var(--safe-left));

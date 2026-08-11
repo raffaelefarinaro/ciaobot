@@ -1604,6 +1604,13 @@ async function confirmDeleteChat(chatId: string) {
   background: color-mix(in srgb, var(--accent) 18%, var(--bg3));
 }
 
+/* Keep workspace status markers visually separate from the workspace name,
+   matching the spacing used by project-level state dots. */
+.workspace-toggle button .workspace-status-dot,
+.workspace-toggle button .workspace-status-ring {
+  margin-left: var(--space-2);
+}
+
 .project-list {
   display: flex;
   flex-direction: column;
