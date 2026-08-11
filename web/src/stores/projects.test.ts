@@ -2418,3 +2418,26 @@ describe('delegate unread notifications', () => {
     expect(store.chatUnread('child')).toBe(0)
   })
 })
+
+describe('workspaceNeedsInput', () => {
+  test('sums only the requested workspace and returns zero when clear', () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-personal', name: 'Personal', workspace: 'personal' },
+      { project_id: 'p-work', name: 'Work', workspace: 'work' },
+    ] as unknown as ProjectInfo[]
+    store.chats = [
+      {
+        chat_id: 'c-personal', project_id: 'p-personal', title: 'Personal', archived: false, local: true,
+        pending_question: JSON.stringify({ questions: [{ question: 'Answer?' }] }),
+      },
+      {
+        chat_id: 'c-work', project_id: 'p-work', title: 'Work', archived: false, local: true,
+      },
+    ] as unknown as ChatInfo[]
+
+    expect(store.workspaceNeedsInput('personal')).toBe(1)
+    expect(store.workspaceNeedsInput('work')).toBe(0)
+    expect(store.workspaceNeedsInput('missing')).toBe(0)
+  })
+})

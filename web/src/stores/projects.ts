@@ -1019,6 +1019,17 @@ export const useProjectStore = defineStore('projects', () => {
     return parseQuestions(chat?.pending_question).length > 0
   }
 
+  // The first outstanding question is useful on the home card, where it can
+  // tell the user what needs an answer before they open the chat.
+  function chatPendingQuestion(chatId: string): string | null {
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    const questions = activeQuestions.value[chatId]?.length
+      ? activeQuestions.value[chatId]
+      : parseQuestions(chat?.pending_question)
+    const question = questions[0]?.question.trim()
+    return question || null
+  }
+
   function projectNeedsInput(projectId: string): number {
     return projectChats(projectId).filter(c => chatNeedsInput(c.chat_id)).length
   }
@@ -1031,6 +1042,12 @@ export const useProjectStore = defineStore('projects', () => {
     return projects.value
       .filter(p => p.workspace === ws)
       .reduce((sum, p) => sum + projectUnread(p.project_id), 0)
+  }
+
+  function workspaceNeedsInput(ws: WorkspaceName): number {
+    return projects.value
+      .filter(p => p.workspace === ws)
+      .reduce((sum, p) => sum + projectNeedsInput(p.project_id), 0)
   }
 
   const totalUnread = computed(() =>
@@ -3996,7 +4013,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
-    chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, totalUnread, clearUnread, markRead, markAllRead,
+    chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, clearUnread, markRead, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
