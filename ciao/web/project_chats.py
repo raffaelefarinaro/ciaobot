@@ -662,6 +662,9 @@ async def _generate_chat_title_with_engine(
     #
     # This used to shell out to the `apfel` Homebrew CLI. It now goes through
     # the bundled sidecar to FoundationModels, so there is nothing to install.
+    # Captured when the on-device path raises; used as a last-resort detail
+    # for the fallback return so job_runs never records a blank cause (#257).
+    apple_detail: str | None = None
     if model in APPLE_TITLE_MODELS and native_sidecar.apple_model_available():
         try:
             text = await native_sidecar.respond(
@@ -673,7 +676,14 @@ async def _generate_chat_title_with_engine(
                 title, engine = _titled(text, user_snippet, "apple")
                 return title, engine, None
         except Exception as exc:
-            logger.info("on-device title generation failed (%s); falling back", exc)
+            # Surface the on-device failure into the same `detail` channel the
+            # Claude/Ollama path uses, so job_runs records *which* path
+            # failed instead of a generic "title engine failed" string
+            # (#257). Truncate to keep the run record bounded.
+            apple_detail = (str(exc) or "").strip()[:500] or None
+            logger.info(
+                "on-device title generation failed (%s); falling back", exc
+            )
 
     # "apple" (and the legacy "apfel") is a routing sentinel meaning "use the
     # on-device model above", not a real Claude/Ollama model id. If it was
@@ -713,9 +723,18 @@ async def _generate_chat_title_with_engine(
             fallback_model or "account default",
             detail or exc,
         )
-        return _fallback_title(user_snippet), "fallback", (detail[:500] or None)
+        # Prefer the provider's signal; if it didn't surface one, fall back
+        # to the on-device detail captured above so the record still names
+        # *something* (#257).
+        chosen = (detail[:500] or apple_detail)
+        return _fallback_title(user_snippet), "fallback", chosen
 
-    return _fallback_title(user_snippet), "fallback", None
+    # No exception, but run_oneshot returned empty — the model produced no
+    # text at all. Distinguish this from the exception path so an operator
+    # triaging a fallback can tell "no output" from "no exception" (#257).
+    if apple_detail:
+        return _fallback_title(user_snippet), "fallback", apple_detail
+    return _fallback_title(user_snippet), "fallback", "upstream returned empty text"
 
 
 def _titled(raw: str, user_snippet: str, engine: str) -> tuple[str | None, str]:
@@ -6805,13 +6824,21 @@ class ProjectChatManager:
             if engine == "fallback":
                 # A title was set, but the selected engine did not produce
                 # it — surface the degradation (with the upstream detail when
-                # available) instead of reporting ok.
+                # available) instead of reporting ok. The titler always
+                # populates a non-null detail for fallback paths now
+                # (Apple exception, oneshot exception, or empty return), so
+                # job_runs gets a real error_detail to triage from (#257).
                 run.status = "error"
-                run.error = (
-                    f"title engine failed ({detail}); used deterministic fallback"
-                    if detail
-                    else "title engine failed; used deterministic fallback"
-                )
+                if detail == "upstream returned empty text":
+                    run.error = (
+                        f"title engine returned empty (chat_id={chat_id}); "
+                        "used deterministic fallback"
+                    )
+                else:
+                    run.error = (
+                        f"title engine failed ({detail}); "
+                        "used deterministic fallback"
+                    )
             elif title_model in APPLE_TITLE_MODELS and engine != "apple":
                 run.extra["note"] = f"on-device model unavailable; used {engine}"
 

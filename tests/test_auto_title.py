@@ -388,3 +388,95 @@ async def test_generate_title_reports_engine(monkeypatch: pytest.MonkeyPatch) ->
     assert title == "Create google tasks for my wedding"
     # A hard failure surfaces the upstream error text for job_runs.
     assert detail == "provider unavailable"
+
+
+@pytest.mark.asyncio
+async def test_generate_chat_title_on_device_failure_propagates_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the on-device path fails AND the provider fallback also fails, the
+    captured exception from the on-device path must reach the caller (#257).
+    Previously the Apple except-block only logged and dropped the exception;
+    the caller's error_detail ended up empty.
+    """
+    from ciao import native_sidecar
+    from ciao.web.project_chats import _generate_chat_title_with_engine
+
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+
+    async def failing_respond(*args, **kwargs):
+        raise native_sidecar.SidecarError("Apple sidecar timed out")
+
+    monkeypatch.setattr(native_sidecar, "respond", failing_respond)
+
+    async def failing_oneshot(*args, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+
+    title, engine, detail = await _generate_chat_title_with_engine(
+        "Plan a standup retro", assistant_text="", model="apple"
+    )
+    assert engine == "fallback"
+    assert title == "Plan a standup retro"
+    # The provider path's detail wins because it is the most recent cause;
+    # an empty `detail` would have been the original regression.
+    assert detail == "provider unavailable"
+
+
+@pytest.mark.asyncio
+async def test_generate_chat_title_apple_only_failure_carries_apple_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When only the on-device path fails and the provider fallback succeeds,
+    the caller gets a clean title. But when the Apple failure is the only
+    failure recorded (provider returns empty, no exception), the on-device
+    detail should still flow through so the record isn't blank (#257).
+    """
+    from ciao import native_sidecar
+    from ciao.web.project_chats import _generate_chat_title_with_engine
+
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+
+    async def failing_respond(*args, **kwargs):
+        raise native_sidecar.SidecarError("Apple sidecar timed out")
+
+    monkeypatch.setattr(native_sidecar, "respond", failing_respond)
+
+    async def empty_oneshot(*args, **kwargs):
+        return ""
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", empty_oneshot)
+
+    title, engine, detail = await _generate_chat_title_with_engine(
+        "Brainstorm launch ideas", assistant_text="", model="apple"
+    )
+    assert engine == "fallback"
+    assert title == "Brainstorm launch ideas"
+    # The empty-return path falls back to the on-device detail rather than
+    # leaving the record blank.
+    assert detail == "Apple sidecar timed out"
+
+
+@pytest.mark.asyncio
+async def test_generate_chat_title_oneshot_empty_return_reports_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When run_oneshot returns an empty string with no exception, the titler
+    must still report a non-null detail so the job record distinguishes
+    "model returned empty" from "the model never ran" (#257)."""
+    from ciao.web.project_chats import _generate_chat_title_with_engine
+
+    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+
+    async def empty_oneshot(*args, **kwargs):
+        return ""
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", empty_oneshot)
+
+    title, engine, detail = await _generate_chat_title_with_engine(
+        "Sketch a release checklist", model="haiku"
+    )
+    assert engine == "fallback"
+    assert title == "Sketch a release checklist"
+    assert detail == "upstream returned empty text"
