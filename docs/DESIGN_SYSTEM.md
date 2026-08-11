@@ -136,9 +136,10 @@ Existing and wanted:
 
 | Component | Owns | Status |
 |---|---|---|
-| `ChatSignals` | chat state marks (needs-you / working / unread / loop / quiet) | **exists, 2 of 4 call sites — see §6** |
+| `ChatSignals` | chat state marks (needs-you / working / unread / loop / quiet) | **exists, all 4 call sites** |
+| `AppIcon` | the SVG icon set (see Rule S4) | **exists** |
 | `TierLabel` | a priority tier heading with its hairline rule | wanted |
-| `CountTile` | one number + label, urgency-ordered (project stats, lane summary) | wanted |
+| `CountTile` | one number + label, urgency-ordered (project stats, lane summary) | wanted — pattern now used in 2 places |
 | `KeyBadge` | the `1`–`9` workspace shortcut badge | wanted — currently drawn in 3 places |
 | `SectionCard` | titled section with optional actions slot | wanted — see §4 |
 | `EmptyNote` | the `// nothing here` convention | wanted — string built ad hoc in ~8 places |
@@ -175,12 +176,18 @@ invisible; never use `--accent` to mean "bad" or `--error` to mean "Work".
 **Rule S4 — Emoji are not icons.**
 Emoji cannot inherit `currentColor`, so they can never carry a workspace hue or
 dim with a tier — they are the one glyph type that cannot join the system. They
-also render differently per platform. Use the app's SVG set: square-cornered,
-`stroke-width: 2`, `stroke-linecap: square`, 18px default, `currentColor`.
+also render differently per platform. Use `AppIcon.vue`, which holds the set in
+the house style: 24 viewBox, `stroke-width: 2`, `stroke-linecap: square`, miter
+joins, `currentColor`. Add a named icon there rather than inlining an SVG.
 Text glyphs that *do* inherit colour (`↻` `↳` `▾` `›`) are fine and are already
 part of the signal spec.
-Current concentration: 13 in `ChatPanel.vue`, 2 in `ProjectView.vue`. Both
-`ProjectSidebar.vue` and `SchedulePanel.vue` are already emoji-free.
+
+**Rule S8 — Background work that produces a decision needs two surfaces.**
+A transient *working* mark where the work originates, and a persistent
+*needs you* count where its output waits. One without the other either hides
+that anything happened, or hides that something is now pending. See
+`docs/plans/MEMORY_VISIBILITY_PLAN.md` for the worked example — the insights and
+memory-proposal pipeline currently has neither.
 
 **Rule S5 — Counts are real counts.**
 `chatUnread()` returns 0 or 1 by design. Never render it as a digit; a per-chat
