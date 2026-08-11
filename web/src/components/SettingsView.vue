@@ -90,11 +90,13 @@
             </li>
             <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
             <li>
-              <kbd>&#8984;&#8679;=</kbd>
+              <kbd v-if="inDesktopApp">&#8984;&#8679;=</kbd>
+              <kbd v-else>&#8224;=</kbd>
               <span>Increase the font size</span>
             </li>
             <li>
-              <kbd>&#8984;&#8679;-</kbd>
+              <kbd v-if="inDesktopApp">&#8984;&#8679;-</kbd>
+              <kbd v-else>&#8224;-</kbd>
               <span>Decrease the font size</span>
             </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>

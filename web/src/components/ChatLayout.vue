@@ -706,23 +706,31 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
-  // Font zoom: Cmd+Shift+= (increase) and Cmd+Shift+- (decrease). Uses the
-  // platform's primary modifier (Cmd on Mac, Ctrl on Linux/Windows) whether
-  // we are inside the desktop app or the PWA — this is the conventional
-  // browser/macOS zoom shortcut, so it should behave the same regardless of
-  // host. Step, bounds, and persistence match the Settings +/- buttons so
-  // the two surfaces stay in lockstep. Shift is required to avoid hijacking
-  // plain Cmd+= / Cmd+- (the latter is Cmd+Minus on US layouts), which we
-  // may want for other shortcuts later.
-  if (mod && e.shiftKey && !alt && (e.key === '=' || e.key === '+')) {
-    e.preventDefault()
-    fontScale.adjust(FONT_SCALE_STEP)
-    return
-  }
-  if (mod && e.shiftKey && !alt && (e.key === '-' || e.key === '_')) {
-    e.preventDefault()
-    fontScale.adjust(-FONT_SCALE_STEP)
-    return
+  // Font zoom: Cmd+Shift+= / Cmd+Shift+- in the desktop app, Option+= /
+  // Option+- in the PWA — the same split as every other modifier shortcut
+  // here, and for the same reason.
+  //
+  // Cmd+Shift+= cannot be used in a browser: on a US layout that chord *is*
+  // Cmd++, the browser's own zoom-in, which is handled above the page and
+  // ignores preventDefault. The page zoomed *and* the font grew, two steps at
+  // once, while Cmd+Shift+- (not a browser chord) moved one — so the two
+  // directions disagreed and browser zoom-in became unusable on its own.
+  //
+  // Skipped while typing because Option+= / Option+- type ≠ and – on macOS.
+  // Step, bounds and persistence come from useFontScale, shared with the
+  // Settings +/- buttons.
+  const zoomModifier = isDesktop ? (mod && e.shiftKey && !alt) : (alt && !mod)
+  if (zoomModifier && !isTypingTarget(e.target)) {
+    if (e.key === '=' || e.key === '+') {
+      e.preventDefault()
+      fontScale.adjust(FONT_SCALE_STEP)
+      return
+    }
+    if (e.key === '-' || e.key === '_') {
+      e.preventDefault()
+      fontScale.adjust(-FONT_SCALE_STEP)
+      return
+    }
   }
 }
 

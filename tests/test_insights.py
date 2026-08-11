@@ -799,3 +799,16 @@ def test_transient_failure_still_retries_once(monkeypatch: pytest.MonkeyPatch) -
     assert err == ""
     assert "boom" in out
     assert calls == 2
+
+
+def test_backfill_caps_an_unlimited_run_and_reports_it(monkeypatch, tmp_path):
+    """limit=0 must not mean "one model call per archive in the vault".
+
+    Both automatic callers (startup, the Settings button) pass no limit, and
+    the archive path was broken until recently, so this had never run against
+    a real workspace. The cap is recorded rather than silent.
+    """
+    from ciao import insights
+
+    monkeypatch.setenv("CIAO_INSIGHTS_BACKFILL_MAX", "2")
+    assert insights._backfill_ceiling() == 2

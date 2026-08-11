@@ -112,39 +112,46 @@ def _max_input_chars() -> int:
     return _env_int("CIAO_INSIGHTS_MAX_INPUT_CHARS", _DEFAULT_MAX_INPUT_CHARS)
 
 
-def _resolve_insights_call(config, model: str, *, provider: str = "claude") -> tuple[str, dict[str, str], str, str | None]:
-    """Resolve an insights model without ever sending Apple sentinel ids upstream."""
-    requested = model.strip().lower()
-    if native_sidecar.is_apple_model(requested):
-        if native_sidecar.apple_model_available():
-            return model, {}, "claude", None
-        # Apple is an explicit choice, but it can become unavailable while the
-        # server is running (model download, settings, or OS capability). Keep
-        # the job useful and fall back to the configured automatic model.
-        fallback = (config.insights_model or "").strip()
-        if native_sidecar.is_apple_model(fallback):
-            fallback = "sonnet"
-        model = fallback
-        provider = "claude"
-        note = "Apple Intelligence unavailable; used the configured fallback model"
-    else:
-        note = None
+def _backfill_ceiling() -> int:
+    """Most archives one un-limited backfill run will process.
 
+    A safety bound, not a preference: the callers that pass no limit (startup
+    and the Settings button) would otherwise issue one model call per archive
+    in the whole vault from a single click.
+    """
+    return _env_int("CIAO_INSIGHTS_BACKFILL_MAX", 200)
+
+
+def _resolve_insights_call(
+    config, model: str, *, provider: str = "claude"
+) -> tuple[str, dict[str, str], str, str | None]:
+    """Resolve an insights model to (effective_model, env, provider, note).
+
+    Apple needs no special case here any more: `intended_backend` knows the
+    sentinel names an `apple` backend and `_backend_available` asks the sidecar,
+    so `resolve_with_fallback` substitutes the configured model and produces the
+    note when Apple Intelligence is off — the same path every other unavailable
+    backend takes. `run_oneshot` dispatches a surviving sentinel to the bundled
+    helper, so it never reaches an upstream either way.
+    """
     from ciao.custom_providers import env_for_model as custom_env_for_model
     from ciao.custom_providers import provider_for_model, runtime_model
     custom = provider_for_model(config, model)
     if custom is not None:
-        return runtime_model(model), custom_env_for_model(config, model), custom.runner, note
-    if provider == "codex":
-        return model, {}, provider, note
+        return runtime_model(model), custom_env_for_model(config, model), custom.runner, None
+    if provider == "codex" and not native_sidecar.is_apple_model(model):
+        return model, {}, provider, None
 
     from ciao.providers.routing import resolve_with_fallback
 
-    effective_model, env, routing_note = resolve_with_fallback(
-        model, config, default_model=config.insights_model
+    # An insights_model that is itself the sentinel cannot serve as the
+    # fallback; sonnet is the tier the automatic setting resolves to.
+    default_model = (config.insights_model or "").strip()
+    if native_sidecar.is_apple_model(default_model):
+        default_model = "sonnet"
+    effective_model, env, note = resolve_with_fallback(
+        model, config, default_model=default_model
     )
-    if routing_note:
-        note = f"{note}; {routing_note}" if note else routing_note
     return effective_model, env, provider, note
 
 
@@ -977,6 +984,24 @@ async def backfill_insights_task(
     stats["eligible"] = len(todo)
     if limit > 0:
         todo = todo[:limit]
+    elif len(todo) > _backfill_ceiling():
+        # limit=0 means "no caller-supplied limit", which is what the startup
+        # job and the Settings button both pass. Until the archive path was
+        # fixed this function found nothing, so nobody had run it against a
+        # real vault: one press is one model call per archive, and on an aged
+        # workspace that is hours of runtime and a large bill. Cap it, and
+        # record the cap in the stats so the job report says how many were
+        # left rather than implying it processed everything.
+        ceiling = _backfill_ceiling()
+        stats["capped_at"] = ceiling
+        stats["remaining_after_cap"] = len(todo) - ceiling
+        logger.info(
+            "Backfill capped at %d of %d eligible archives "
+            "(raise CIAO_INSIGHTS_BACKFILL_MAX, or pass an explicit limit, to change)",
+            ceiling,
+            len(todo),
+        )
+        todo = todo[:ceiling]
     stats["to_process"] = len(todo)
 
     if not todo:
