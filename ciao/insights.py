@@ -177,12 +177,14 @@ def _fit_transcript(filtered_jsonl: str) -> tuple[str, int]:
     return "\n".join(kept), len(lines) - len(kept)
 
 
-def _is_context_overflow(exc: Exception) -> bool:
+def is_context_overflow(exc: Exception) -> bool:
     """True for a deterministic oversized-input rejection.
 
     These fail identically on retry, so re-sending only burns another slow
     call plus the retry wait. Matched on message text because the providers
-    surface it as a plain 400 rather than a typed error.
+    surface it as a plain 400 rather than a typed error. Reused by the
+    schedule attention classifier so the two callers classify 400s the
+    same way.
     """
     text = str(exc).lower()
     return "too long" in text or "context window" in text or "context_length_exceeded" in text
@@ -653,7 +655,7 @@ async def _run_model_with_retry(
         ):
             logger.info("Apple FoundationModels is unavailable; not retrying: %s", exc)
             return "", str(exc).strip() or type(exc).__name__
-        if _is_context_overflow(exc):
+        if is_context_overflow(exc):
             logger.error(
                 "Insights input still exceeds the model's context window (%s); "
                 "not retrying. Lower CIAO_INSIGHTS_MAX_INPUT_CHARS (currently %d) "
