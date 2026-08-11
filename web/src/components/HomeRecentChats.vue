@@ -344,6 +344,11 @@ watch(() => store.activeWorkspace, async () => {
   max-width: 1320px;
   margin: 0 auto;
   text-align: left;
+  /* Stacking is decided by the width the lanes actually get, not the window's.
+     The sidebar is resizable and takes a large share, so a viewport media query
+     stacked far too late: at a 1750px window the lanes still had only ~450px
+     each and ellipsed almost every title. */
+  container-type: inline-size;
 }
 
 .home-recent-label {
@@ -691,7 +696,7 @@ watch(() => store.activeWorkspace, async () => {
   100% { background-position: -200% 0; }
 }
 
-@media (max-width: 819px) {
+@container (max-width: 760px) {
   /* Stack the lanes and keep every one of them open. Collapsing the inactive
      lane to a summary row read as a stray element rather than a control, and it
      hid that workspace's "+ new" button — leaving no way to start a chat there
