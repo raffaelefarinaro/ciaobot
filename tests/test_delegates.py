@@ -939,3 +939,111 @@ def test_create_chat_codex_exemption_only_for_native_ids(tmp_path: Path) -> None
 
     chat = manager.create_chat(project.project_id, provider="codex", model="gpt-5.6")
     assert chat.model == "gpt-5.6"
+
+
+def test_create_chat_rejects_unregistered_custom_id(tmp_path: Path) -> None:
+    """A ``custom:``-prefixed id with no registered provider must be rejected.
+
+    Without this guard, ``provider_for_model`` returns ``None`` for an
+    unregistered provider, and the native Codex exemption would rescue
+    the bogus id and forward it to the Codex CLI on its first turn (#259).
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown custom model 'custom:missing:foo'"):
+        manager.create_chat(
+            project.project_id, provider="codex", model="custom:missing:foo"
+        )
+
+    # Same id on the default Claude path is also rejected: it cannot be
+    # routed to anything.
+    with pytest.raises(ValueError, match="Unknown custom model 'custom:missing:foo'"):
+        manager.create_chat(project.project_id, model="custom:missing:foo")
+
+
+def test_create_chat_rejects_ollama_cloud_entry_without_cloud_key(
+    tmp_path: Path,
+) -> None:
+    """Cloud catalog membership requires a real cloud API key.
+
+    ``CIAO_OLLAMA_MODELS`` may list cloud-shaped ids regardless of whether
+    a key is configured. Without ``cloud_available`` the id would skip the
+    routing override and reach the Claude provider on its first turn (#259).
+    """
+    from ciao.providers.ollama import OllamaSettings
+
+    manager = _make_manager(
+        tmp_path,
+        ollama=OllamaSettings(
+            api_key="",  # no cloud key
+            models=("minimax-m3:cloud",),
+        ),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown model 'minimax-m3:cloud'"):
+        manager.create_chat(project.project_id, model="minimax-m3:cloud")
+
+
+def test_create_chat_accepts_ollama_cloud_entry_with_cloud_key(
+    tmp_path: Path,
+) -> None:
+    """A cloud catalog entry is valid when the cloud API key is configured."""
+    from ciao.providers.ollama import OllamaSettings
+
+    manager = _make_manager(
+        tmp_path,
+        ollama=OllamaSettings(
+            api_key="test-key",
+            models=("minimax-m3:cloud",),
+        ),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    chat = manager.create_chat(project.project_id, model="minimax-m3:cloud")
+    assert chat.model == "minimax-m3:cloud"
+
+
+def test_create_chat_rejects_openrouter_tier_target_without_api_key(
+    tmp_path: Path,
+) -> None:
+    """OpenRouter tier targets require a configured API key.
+
+    Tier defaults like ``anthropic/claude-sonnet-latest`` are filled in
+    even when no ``OPENROUTER_API_KEY`` is set. Without ``openrouter.available``
+    the id would pass validation and reach the Claude provider, where
+    Anthropic would reject the ``owner/model`` shape on its first turn (#259).
+    """
+    from ciao.providers.openrouter import OpenRouterSettings
+
+    manager = _make_manager(
+        tmp_path,
+        openrouter=OpenRouterSettings(api_key=""),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(
+        ValueError, match="Unknown model 'anthropic/claude-sonnet-latest'"
+    ):
+        manager.create_chat(
+            project.project_id, model="anthropic/claude-sonnet-latest"
+        )
+
+
+def test_create_chat_accepts_openrouter_tier_target_with_api_key(
+    tmp_path: Path,
+) -> None:
+    """An OpenRouter tier target is valid when an API key is configured."""
+    from ciao.providers.openrouter import OpenRouterSettings
+
+    manager = _make_manager(
+        tmp_path,
+        openrouter=OpenRouterSettings(api_key="test-key"),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    chat = manager.create_chat(
+        project.project_id, model="anthropic/claude-sonnet-latest"
+    )
+    assert chat.model == "anthropic/claude-sonnet-latest"

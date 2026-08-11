@@ -4099,6 +4099,14 @@ class ProjectChatManager:
                 encode_model(custom.id, m) for m in custom.models
             }:
                 return
+        elif model.startswith("custom:"):
+            # A ``custom:``-prefixed id whose provider was deleted or never
+            # configured would otherwise fall through to the native Codex
+            # exemption, sending the encoded id to the Codex CLI and
+            # failing on its first turn. Reject up front (#259).
+            raise UnknownModelError(
+                f"Unknown custom model '{model}' (provider not registered)"
+            )
         if provider == "codex" and custom is None:
             # Exempt only native Codex ids (no ``custom:`` prefix): the
             # catalog is async and the Codex CLI rejects unknown ids with a
@@ -4114,14 +4122,16 @@ class ProjectChatManager:
         # are filled in even when no Ollama backend is configured, so
         # accepting them unconditionally lets the id reach a Claude
         # provider with no Ollama routing overrides and fail on its first
-        # turn (#259).
+        # turn (#259). Cloud catalog membership is gated on a real cloud
+        # API key so an ``CIAO_OLLAMA_MODELS`` allowlist entry does not
+        # sneak through when no Ollama backend is actually configured.
         ollama = self._config.ollama
         local_available = bool(ollama.local_models)
         cloud_available = bool(ollama.api_key) and ollama.api_key != "ollama"
         backend_available = local_available or cloud_available
         if (
             is_local_ollama_model(model, ollama)
-            or model in ollama.models
+            or (cloud_available and model in ollama.models)
             or (
                 backend_available
                 and model
@@ -4137,15 +4147,19 @@ class ProjectChatManager:
             return
         # OpenRouter: the statically configured models and tier targets stay
         # valid even when catalog discovery failed at startup and never
-        # merged them into claude_models (#259).
+        # merged them into claude_models (#259). Tier targets are gated on
+        # ``openrouter.available`` so default values like
+        # ``anthropic/claude-sonnet-latest`` do not reach a Claude provider
+        # with no OpenRouter routing overrides when no API key is set.
         allowed = list(self._config.claude_models)
         allowed += list(self._config.openrouter.models)
-        allowed += [
-            self._config.openrouter.haiku_model,
-            self._config.openrouter.sonnet_model,
-            self._config.openrouter.opus_model,
-            self._config.openrouter.fable_model,
-        ]
+        if self._config.openrouter.available:
+            allowed += [
+                self._config.openrouter.haiku_model,
+                self._config.openrouter.sonnet_model,
+                self._config.openrouter.opus_model,
+                self._config.openrouter.fable_model,
+            ]
         if model in allowed:
             return
         sample = ", ".join(allowed[:8]) if allowed else "(none configured)"
