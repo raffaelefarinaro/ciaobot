@@ -1598,7 +1598,7 @@ async function confirmDeleteChat(chatId: string) {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
 
@@ -1884,11 +1884,14 @@ async function confirmDeleteChat(chatId: string) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workspace-status-core,
-  .rollup-ring-core { animation: none; opacity: 0.65; }
+  .rollup-ring,
+  .workspace-status-ring { animation: none; }
+  .rollup-ring::before,
+  .workspace-status-ring::before { animation: none; opacity: 0.3; }
 }
 
 /* Shimmer placeholder shown in the sidebar while the server auto-titles

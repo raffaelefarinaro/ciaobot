@@ -180,6 +180,7 @@ function makeLane(
       chats,
       chatId => store.chatNeedsInput(chatId),
       chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId),
+      chatId => store.chatUnread(chatId) > 0,
     ),
   }
 }
@@ -212,6 +213,10 @@ function laneWorkingCount(lane: HomeLane): number {
   return lane.tiers.working.length
 }
 
+function laneUnreadCount(lane: HomeLane): number {
+  return lane.tiers.unread.length
+}
+
 function laneQuietCount(lane: HomeLane): number {
   return lane.tiers.quiet.length + lane.tiers.older.length
 }
@@ -222,6 +227,7 @@ function laneQuietCount(lane: HomeLane): number {
 function laneSummaryRest(lane: HomeLane): string {
   const parts: string[] = []
   if (laneWorkingCount(lane)) parts.push(`${laneWorkingCount(lane)} working`)
+  if (laneUnreadCount(lane)) parts.push(`${laneUnreadCount(lane)} unread`)
   if (laneQuietCount(lane)) parts.push(`${laneQuietCount(lane)} quiet`)
   if (!parts.length && !laneNeedsCount(lane)) return 'all quiet'
   return parts.join(' · ')
@@ -248,6 +254,11 @@ function tierEntries(lane: HomeLane): Array<{ key: HomeTierKey; label: string; c
   return [
     { key: 'needsYou', label: 'needs you', chats: lane.tiers.needsYou },
     { key: 'working', label: 'working', chats: lane.tiers.working },
+    // A chat that finished while you were away is worth reading but is not
+    // blocking, so it sits between working and quiet rather than being called
+    // quiet - which contradicted the unread badge the sidebar showed for the
+    // very same chat.
+    { key: 'unread', label: 'unread', chats: lane.tiers.unread },
     // Older chats are listed inline with quiet rather than split behind a
     // disclosure. The age opacity ramp still dims them, so "old" stays legible
     // without a separate section and a count the user has to expand to read.
@@ -563,6 +574,7 @@ watch(() => store.activeWorkspace, async () => {
   font-weight: 400;
 }
 
+.home-chat-item--unread,
 .home-chat-item--quiet,
 .home-chat-item--older {
   flex-direction: row;
@@ -577,6 +589,7 @@ watch(() => store.activeWorkspace, async () => {
   background: transparent;
 }
 
+.home-chat-item--unread:hover,
 .home-chat-item--quiet:hover,
 .home-chat-item--older:hover {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
@@ -592,6 +605,7 @@ watch(() => store.activeWorkspace, async () => {
   min-width: 0;
 }
 
+.home-chat-item--unread .home-chat-heading,
 .home-chat-item--quiet .home-chat-heading,
 .home-chat-item--older .home-chat-heading {
   flex: 1;
@@ -615,6 +629,7 @@ watch(() => store.activeWorkspace, async () => {
   font-weight: 600;
 }
 
+.home-chat-item--unread .home-chat-title,
 .home-chat-item--quiet .home-chat-title,
 .home-chat-item--older .home-chat-title {
   display: block;

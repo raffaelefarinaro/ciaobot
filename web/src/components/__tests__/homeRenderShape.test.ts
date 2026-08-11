@@ -38,16 +38,16 @@ function seed(withNeedsYou: boolean) {
       ? [{
           chat_id: 'needs', project_id: 'p1', title: 'Needs an answer',
           pending_question: JSON.stringify({ questions: [{ question: 'Which date?' }] }),
-          created_at: timestamp(60), last_activity_at: timestamp(60), archived: false, local: true,
+          created_at: timestamp(60), last_activity_at: timestamp(60), last_read_at: timestamp(60), archived: false, local: true,
         }]
       : []),
     {
       chat_id: 'quiet', project_id: 'p1', title: 'A quiet chat',
-      created_at: timestamp(2 * 86400), last_activity_at: timestamp(2 * 86400), archived: false, local: true,
+      created_at: timestamp(2 * 86400), last_activity_at: timestamp(2 * 86400), last_read_at: timestamp(2 * 86400), archived: false, local: true,
     },
     {
       chat_id: 'old', project_id: 'p1', title: 'A three week old chat',
-      created_at: timestamp(21 * 86400), last_activity_at: timestamp(21 * 86400), archived: false, local: true,
+      created_at: timestamp(21 * 86400), last_activity_at: timestamp(21 * 86400), last_read_at: timestamp(21 * 86400), archived: false, local: true,
     },
   ] as unknown as typeof store.chats
   store.activeWorkspace = 'personal'
@@ -93,5 +93,30 @@ describe('home lane rendered shape', () => {
     expect(await render(false)).toEqual([
       'quiet: A quiet chat | A three week old chat',
     ])
+  })
+
+  // Reported from live use: a chat with an unread message was being listed
+  // under "quiet" while the sidebar showed an unread badge for it and the bell
+  // showed a count. The heading contradicted the rest of the screen.
+  it('does not call an unread chat quiet', async () => {
+    const store = seed(false)
+    // Same shape the server leaves behind: activity newer than the last read.
+    store.chats[0].last_read_at = new Date(Date.parse(store.chats[0].last_activity_at!) - 1000).toISOString()
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats)
+    await nextTick()
+
+    const tiers = wrapper.findAll('.home-tier').map(tier => ({
+      label: tier.find('.home-tier-label').text(),
+      rows: tier.findAll('.home-chat-title').map(t => t.text()),
+    }))
+    const unread = tiers.find(t => t.label === 'unread')
+    const quiet = tiers.find(t => t.label === 'quiet')
+
+    expect(unread?.rows).toContain('A quiet chat')
+    expect(quiet?.rows ?? []).not.toContain('A quiet chat')
+    wrapper.unmount()
   })
 })

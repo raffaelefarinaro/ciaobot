@@ -27,19 +27,19 @@ function seedChats(includeChats = true) {
     {
       chat_id: 'needs', project_id: 'personal-project', title: 'Needs an answer',
       pending_question: JSON.stringify({ questions: [{ question: 'Which launch date should we use?' }] }),
-      created_at: timestamp(60 * 60), last_activity_at: timestamp(60 * 60), archived: false, local: true,
+      created_at: timestamp(60 * 60), last_activity_at: timestamp(60 * 60), last_read_at: timestamp(60 * 60), archived: false, local: true,
     },
     {
       chat_id: 'working', project_id: 'work-project', title: 'Background work',
-      created_at: timestamp(2 * 60 * 60), last_activity_at: timestamp(2 * 60 * 60), archived: false, local: true,
+      created_at: timestamp(2 * 60 * 60), last_activity_at: timestamp(2 * 60 * 60), last_read_at: timestamp(2 * 60 * 60), archived: false, local: true,
     },
     {
       chat_id: 'quiet', project_id: 'personal-project', title: 'A quiet chat',
-      created_at: timestamp(2 * 24 * 60 * 60), last_activity_at: timestamp(2 * 24 * 60 * 60), archived: false, local: true,
+      created_at: timestamp(2 * 24 * 60 * 60), last_activity_at: timestamp(2 * 24 * 60 * 60), last_read_at: timestamp(2 * 24 * 60 * 60), archived: false, local: true,
     },
     {
       chat_id: 'older', project_id: 'work-project', title: 'An older chat',
-      created_at: timestamp(8 * 24 * 60 * 60), last_activity_at: timestamp(8 * 24 * 60 * 60), archived: false, local: true,
+      created_at: timestamp(8 * 24 * 60 * 60), last_activity_at: timestamp(8 * 24 * 60 * 60), last_read_at: timestamp(8 * 24 * 60 * 60), archived: false, local: true,
     },
   ] as unknown as typeof store.chats : [] as unknown as typeof store.chats
   store.activeWorkspace = 'personal'
@@ -194,7 +194,7 @@ describe('HomeRecentChats regressions', () => {
         chat_id: 'delegate', project_id: 'personal-project', title: 'Internal delegate',
         spawned_from_chat_id: 'quiet',
         pending_question: JSON.stringify({ questions: [{ question: 'Internal?' }] }),
-        created_at: timestamp(30), last_activity_at: timestamp(30), archived: false, local: true,
+        created_at: timestamp(30), last_activity_at: timestamp(30), last_read_at: timestamp(30), archived: false, local: true,
       },
     ] as unknown as typeof store.chats
     const taskStore = useTaskStore()
