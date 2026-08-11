@@ -327,8 +327,16 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
   -d '{"turn_index":0,"messages":[{"role":"user","content":"Question"},{"role":"assistant","content":"Answer"}]}'
 
 # Archive — finalises the chat and writes a Markdown transcript. If this chat
-# supervises delegate subchats, their active chats are archived too. Returns
-# {ok, archived_to}; one `chat_archived` event is emitted for each chat.
+# supervises delegate subchats, their active chats are archived too: a subchat
+# that is mid-turn is stopped first, so its unfinished output is discarded
+# rather than written past the archive. Returns
+# {ok, archived_to, archived_chat_ids, stopped_chat_ids, failed_chat_ids,
+# subchats}; one `chat_archived` event is emitted for each chat.
+# The cascade can partly fail, and `ok` only covers the requested chat, so
+# treat `archived_chat_ids` as the authority on what is actually archived —
+# anything absent from it is still live. `stopped_chat_ids` are the subchats
+# whose running turn was cut short (tell the user); `failed_chat_ids` are the
+# ones left active and needing a direct archive.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/archive"
 
 # Mark read — returns {ok, last_read_at}.

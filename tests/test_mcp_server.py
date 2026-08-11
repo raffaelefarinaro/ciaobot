@@ -691,8 +691,17 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
     config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
     archived_calls = []
 
+    async def _archive_chat(cid: str) -> SimpleNamespace:
+        archived_calls.append(cid)
+        return SimpleNamespace(
+            outcome=SimpleNamespace(path=Path("/tmp/chat.md")),
+            delegates=[],
+            stopped_ids=lambda: [],
+            failed_ids=lambda: [],
+        )
+
     fake_pcm = SimpleNamespace(
-        archive_chat=lambda cid: archived_calls.append(cid) or SimpleNamespace(path=Path("/tmp/chat.md")),
+        archive_chat=_archive_chat,
         run_archive_postprocess=lambda cid, outcome, chat, project: None,
         active_chat_ids=lambda: set(),
     )
@@ -713,18 +722,18 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
     )
 
     # Calling chat_archive with empty or "this chat" targets principal.chat_id
-    res1 = control_plane.chat_archive(principal, "")
+    res1 = await control_plane.chat_archive(principal, "")
     assert res1["ok"] is True
     assert res1["data"]["deferred"] is True
     assert res1["data"]["chat_id"] == "chat-active-123"
 
-    res2 = control_plane.chat_archive(principal, "this chat")
+    res2 = await control_plane.chat_archive(principal, "this chat")
     assert res2["ok"] is True
     assert res2["data"]["deferred"] is True
     assert res2["data"]["chat_id"] == "chat-active-123"
 
     # Calling with specific another chat archives that chat directly
-    res3 = control_plane.chat_archive(principal, "chat_other_999")
+    res3 = await control_plane.chat_archive(principal, "chat_other_999")
     assert res3["ok"] is True
     assert res3["data"]["chat_id"] == "chat_other_999"
     assert "chat_other_999" in archived_calls

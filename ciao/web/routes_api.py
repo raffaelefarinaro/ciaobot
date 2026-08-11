@@ -2589,12 +2589,28 @@ async def chat_archive(request: Request) -> JSONResponse:
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
     )
-    outcome = pcm.archive_chat(chat_id)
+    result = await pcm.archive_chat(chat_id)
+    outcome = result.outcome if result is not None else None
     if outcome is not None:
         pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
+    # Report the cascade per subchat rather than a bare ok. The client marks
+    # only what `archived_chat_ids` confirms — a delegate the server skipped is
+    # still live, and hiding it from the sidebar while it streams and spends
+    # tokens is worse than leaving the row visible. `stopped_chat_ids` is what
+    # the user is warned about; `failed_chat_ids` are the subchats they may
+    # still need to deal with by hand.
+    delegates = result.delegates if result is not None else []
     return JSONResponse({
         "ok": True,
         "archived_to": str(outcome.path) if outcome is not None else None,
+        # A chat with an empty transcript yields no ArchiveOutcome but is still
+        # archived, so this is keyed off the cascade running at all.
+        "archived_chat_ids": (
+            ([chat_id] + result.archived_ids()) if result is not None else []
+        ),
+        "stopped_chat_ids": result.stopped_ids() if result is not None else [],
+        "failed_chat_ids": result.failed_ids() if result is not None else [],
+        "subchats": [row.to_dict() for row in delegates],
     })
 
 
