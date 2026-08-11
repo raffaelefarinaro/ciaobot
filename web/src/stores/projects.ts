@@ -73,6 +73,7 @@ export const useProjectStore = defineStore('projects', () => {
   // clears the summary so it never becomes part of the conversation history.
   const reentrySummaries = ref<Record<string, string>>({})
   const reentrySummaryRequests = new Set<string>()
+  const reentrySummaryRevisions = ref<Record<string, number>>({})
   // False until the first fetchAll() resolves. Gates the home empty state so
   // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
@@ -1577,6 +1578,7 @@ export const useProjectStore = defineStore('projects', () => {
     chats.value = chats.value.filter(c => c.chat_id !== chatId)
     delete messages.value[chatId]
     delete reentrySummaries.value[chatId]
+    delete reentrySummaryRevisions.value[chatId]
     reentrySummaryRequests.delete(chatId)
     persistMessages()
     if (options?.selectNext !== false && activeChatId.value === chatId) {
@@ -1645,13 +1647,23 @@ export const useProjectStore = defineStore('projects', () => {
     await router.push('/')
   }
 
+  function clearReentrySummary(chatId: string): void {
+    delete reentrySummaries.value[chatId]
+    reentrySummaryRevisions.value[chatId] = (reentrySummaryRevisions.value[chatId] || 0) + 1
+  }
+
   async function requestReentrySummary(chatId: string): Promise<void> {
     if (reentrySummaryRequests.has(chatId)) return
     reentrySummaryRequests.add(chatId)
+    const revision = reentrySummaryRevisions.value[chatId] || 0
     try {
       const result = await api.post<{ summary?: string }>(`/api/chats/${chatId}/reentry-summary`, {})
       const summary = typeof result?.summary === 'string' ? result.summary.trim() : ''
-      if (summary && chats.value.some(chat => chat.chat_id === chatId)) {
+      if (
+        summary
+        && revision === (reentrySummaryRevisions.value[chatId] || 0)
+        && chats.value.some(chat => chat.chat_id === chatId)
+      ) {
         reentrySummaries.value[chatId] = summary
       }
     } catch {
@@ -1817,6 +1829,7 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       let normalizedLocal = normalizeMessages(messages.value[chatId] || [])
+      const historyChanged = historySignature(normalizedServer) !== historySignature(normalizedLocal)
 
       // Heal orphaned optimistic user bubbles. A send queued behind a still
       // streaming turn can leave a turn_index-less copy that the live echo
@@ -1867,6 +1880,7 @@ export const useProjectStore = defineStore('projects', () => {
         messages.value[chatId] = normalizedLocal
         persistMessages()
       }
+      if (historyChanged) clearReentrySummary(chatId)
       if (
         streaming.value[chatId]
         && !projectStreaming.value[chatId]
@@ -2720,7 +2734,7 @@ export const useProjectStore = defineStore('projects', () => {
   ) {
     // A re-entry summary is a transient orientation aid, not a new chat
     // message. The first send is the user's signal that it has done its job.
-    delete reentrySummaries.value[chatId]
+    clearReentrySummary(chatId)
     // Any send implicitly answers (or dismisses) a pending AskUserQuestion
     // picker — the model already got an empty tool result and is reading
     // this turn for the actual answer. Clear the local chat's persisted
@@ -3359,6 +3373,13 @@ export const useProjectStore = defineStore('projects', () => {
   function handleEvent(chatId: string, event: WsEvent) {
     const msgs = messages.value[chatId] || []
 
+    // A summary belongs only to the moment the user re-enters a quiet chat.
+    // Any message arriving over the socket makes that orientation stale,
+    // including messages from another device and assistant results.
+    if (event.type === 'user_echo' || event.type === 'queued' || event.type === 'steered' || event.type === 'result') {
+      clearReentrySummary(chatId)
+    }
+
     // Any event that implies an in-flight stream flips the flag, so a resumed
     // stream (WS reconnect with buffered-event replay from the server broker)
     // renders as "streaming" without the client having called sendMessage.
@@ -3679,6 +3700,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (isCompacting) {
           _pushStatusLine(chatId, message)
         } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isTelemetry) {
+          clearReentrySummary(chatId)
           msgs.push({
             role: 'system',
             content: message,

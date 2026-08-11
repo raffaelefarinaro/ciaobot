@@ -726,6 +726,78 @@ describe('chat closing and re-entry orientation', () => {
   })
 })
 
+describe('re-entry summary invalidation', () => {
+  test('clears the summary when a new user message arrives over the chat socket', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-user'
+    store.reentrySummaries[chatId] = 'Old orientation'
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'A new prompt',
+        turn_index: 4,
+      }),
+    })
+
+    expect(store.reentrySummaries[chatId]).toBeUndefined()
+  })
+
+  test('clears the summary when a new assistant result arrives', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-result'
+    store.reentrySummaries[chatId] = 'Old orientation'
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'The new answer',
+        is_error: false,
+        effective_model: 'claude-test',
+        usage: {},
+        session_id: 'session-1',
+      }),
+    })
+
+    expect(store.reentrySummaries[chatId]).toBeUndefined()
+  })
+
+  test('does not restore a stale summary after a new message arrives', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-race'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Summary race',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+
+    let resolveSummary!: (value: { summary: string }) => void
+    apiPost.mockReturnValue(new Promise(resolve => { resolveSummary = resolve }))
+    const request = store.requestReentrySummary(chatId)
+
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'A newer prompt',
+        turn_index: 5,
+      }),
+    })
+    resolveSummary({ summary: 'Stale orientation' })
+    await request
+
+    expect(store.reentrySummaries[chatId]).toBeUndefined()
+  })
+})
+
 describe('queued message replay handling', () => {
   test('keeps later queued messages visible when the first follow-up starts', () => {
     const store = useProjectStore()

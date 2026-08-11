@@ -233,21 +233,6 @@
     <div class="chat-with-sidebar">
     <div class="messages" ref="messagesEl" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
-      <!-- Ephemeral orientation aid shown after reopening a chat. It lives in
-           the transcript as a normal assistant-shaped bubble, but the tag
-           makes it clear that it is generated context rather than a reply. -->
-      <div v-if="reentrySummary" class="message-wrap assistant reentry-summary-wrap">
-        <div class="message-row">
-          <div class="message assistant reentry-summary-message" role="status" aria-label="Apple Intelligence summary">
-            <div class="reentry-summary-header">
-              <span class="reentry-summary-badge">Summary</span>
-              <span class="reentry-summary-source">Apple Intelligence</span>
-            </div>
-            <div class="message-content" v-html="renderMarkdown(reentrySummary)"></div>
-          </div>
-        </div>
-      </div>
-
       <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
@@ -495,6 +480,22 @@
           </div>
         </div>
       </template>
+
+      <!-- Ephemeral orientation aid shown after reopening a chat. Keep it
+           after the rendered transcript so it reads as the latest message,
+           while the tag makes it clear that it is generated context rather
+           than a reply. -->
+      <div v-if="reentrySummary" class="message-wrap assistant reentry-summary-wrap">
+        <div class="message-row">
+          <div class="message assistant reentry-summary-message" role="status" aria-label="Apple Intelligence summary">
+            <div class="reentry-summary-header">
+              <span class="reentry-summary-badge">Summary</span>
+              <span class="reentry-summary-source">Apple Intelligence</span>
+            </div>
+            <div class="message-content" v-html="renderMarkdown(reentrySummary)"></div>
+          </div>
+        </div>
+      </div>
 
       <div
         v-if="store.hostConnectionUnavailable"

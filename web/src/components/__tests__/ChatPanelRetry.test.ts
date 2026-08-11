@@ -270,6 +270,10 @@ describe('ChatPanel retry from error bubble', () => {
 
   it('renders a re-entry summary as a tagged assistant bubble', async () => {
     const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Earlier prompt', timestamp: '2026-08-08T15:50:00Z' },
+      { role: 'assistant', content: 'Earlier answer', timestamp: '2026-08-08T15:51:00Z' },
+    ]
     store.reentrySummaries = {
       'chat-1': '**Resume here**\n\n- Finish the handoff',
     }
@@ -283,6 +287,7 @@ describe('ChatPanel retry from error bubble', () => {
     expect(summary.find('.reentry-summary-badge').text()).toBe('Summary')
     expect(summary.find('.reentry-summary-source').text()).toBe('Apple Intelligence')
     expect(summary.find('.message-content strong').text()).toBe('Resume here')
+    expect(wrapper.findAll('.message-wrap').at(-1)?.classes()).toContain('reentry-summary-wrap')
     wrapper.unmount()
   })
 })
