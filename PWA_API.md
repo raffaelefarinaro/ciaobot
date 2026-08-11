@@ -38,7 +38,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant (local node only) |
 | GET | `/api/chats` | List all chats |
 | GET | `/api/menubar-chats` | Compact chat list for the `Ciaobot.app` tray |
-| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; proxied to the host in client mode) |
+| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; includes read-clear controls and is proxied to the host in client mode) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
@@ -334,6 +334,10 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 
 # Mark all read.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/read-all"
+
+# Read mutations also cancel the delayed push and emit a cross-device clear
+# control. Connected PWAs close the matching service-worker notification tag;
+# the macOS tray removes delivered Ciaobot banners for the chat.
 
 # Deferred retry after provider/session quota errors. action ∈ {set, try_now, stop}.
 # `set` needs the user prompt to replay; automatic quota handling fills this itself.

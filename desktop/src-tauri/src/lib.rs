@@ -1233,10 +1233,21 @@ fn start_notification_tail(app: AppHandle, runtime: RuntimeConfig) {
                 .lock()
                 .map(|settings| settings.notifications_enabled)
                 .unwrap_or(false);
-            if !enabled {
-                continue;
-            }
             for payload in pending {
+                if payload.get("kind").and_then(serde_json::Value::as_str) == Some("clear") {
+                    let chat_id = payload
+                        .get("chat_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    tauri::async_runtime::spawn(async move {
+                        native_notifications::dismiss_chat_notifications(&chat_id).await;
+                    });
+                    continue;
+                }
+                if !enabled {
+                    continue;
+                }
                 let notification = NativeNotification::from_value(&payload);
                 tauri::async_runtime::spawn(async move {
                     let _ = notification.post().await;

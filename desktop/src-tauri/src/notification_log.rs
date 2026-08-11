@@ -32,6 +32,10 @@ fn entry_id(entry: &Value) -> String {
     entry.to_string()
 }
 
+fn is_clear_entry(entry: &Value) -> bool {
+    entry.get("kind").and_then(Value::as_str) == Some("clear")
+}
+
 impl NotificationLogTail {
     pub fn at_end(path: impl Into<PathBuf>) -> Self {
         Self {
@@ -83,7 +87,15 @@ impl NotificationLogTail {
                 .collect();
         }
 
-        if priming { Vec::new() } else { fresh }
+        // Do not replay old banners at launch, but do replay clear controls:
+        // a read may have happened while this companion was not running and
+        // the delivered macOS banner can still be present in Notification
+        // Center from the previous process.
+        if priming {
+            entries.into_iter().filter(is_clear_entry).collect()
+        } else {
+            fresh
+        }
     }
 
     /// Local log entries at or after the cursor. A malformed or partially
@@ -187,5 +199,17 @@ mod tests {
         let mut tail = NotificationLogTail::at_end("/nonexistent/notifications.jsonl");
         assert!(tail.poll(None).is_empty());
         assert!(tail.poll(None).is_empty());
+    }
+
+    #[test]
+    fn the_first_poll_preserves_clear_controls_without_replaying_banners() {
+        let mut tail = NotificationLogTail::at_end("/nonexistent");
+        let entries = vec![
+            entry(1.0, "old banner"),
+            json!({"ts": 2.0, "kind": "clear", "chat_id": "chat-1"}),
+        ];
+        let pending = tail.poll(Some(entries));
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["kind"], "clear");
     }
 }

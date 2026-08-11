@@ -1103,6 +1103,10 @@ class ProjectChatManager:
         # AskUserQuestion. The headless CLI auto-cancels with empty answers,
         # so we notify the user so they can answer in the next turn.
         self.notify_question_cb: Optional[Callable[[str, str], None]] = None
+        # Fired after a read mutation so the macOS companion and remote PWA
+        # service workers can dismiss already-delivered OS notifications for
+        # that chat.
+        self.clear_notifications_cb: Optional[Callable[[str], None]] = None
         # Per-chat pending push tasks. Pushes are scheduled with a short
         # delay (CIAO_PUSH_DELAY_SECONDS, default 30s) so that reading the
         # chat on any device within the window suppresses the buzz. New
@@ -5878,6 +5882,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
+        was_unread = (chat.last_activity_at or "") > (chat.last_read_at or "")
         chat.last_read_at = _now_iso()
         self._save()
         self._cancel_pending_push(chat_id)
@@ -5886,6 +5891,11 @@ class ProjectChatManager:
             "chat_id": chat_id,
             "last_read_at": chat.last_read_at,
         })
+        if was_unread and self.clear_notifications_cb is not None:
+            try:
+                self.clear_notifications_cb(chat_id)
+            except Exception:
+                logger.exception("clear_notifications_cb failed for %s", chat_id)
         return chat
 
     def mark_all_read(self) -> list[str]:
@@ -5911,6 +5921,11 @@ class ProjectChatManager:
                     "chat_id": cid,
                     "last_read_at": now,
                 })
+                if self.clear_notifications_cb is not None:
+                    try:
+                        self.clear_notifications_cb(cid)
+                    except Exception:
+                        logger.exception("clear_notifications_cb failed for %s", cid)
         return touched
 
     # ── Delayed push scheduler ───────────────────────────────────────────

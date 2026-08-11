@@ -1034,6 +1034,21 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  function postServiceWorkerMessage(message: Record<string, unknown>) {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return
+    const controller = navigator.serviceWorker.controller
+    if (controller) {
+      try { controller.postMessage(message) } catch { /* ignore */ }
+      return
+    }
+    // On a cold iOS standalone launch the worker can be active before it has
+    // taken control of the page. Deliver the clear once it is ready instead
+    // of leaving the OS notification behind until the next navigation.
+    void navigator.serviceWorker.ready
+      .then(registration => registration.active?.postMessage(message))
+      .catch(() => { /* ignore */ })
+  }
+
   // Server-authoritative unread: a chat is unread if last_activity_at is
   // strictly newer than last_read_at. ISO-8601 timestamps compare correctly
   // as strings. The local `unread` ref is an optimistic overlay used for
@@ -1121,12 +1136,7 @@ export const useProjectStore = defineStore('projects', () => {
     }
     // Ask SW to drop its cache entry for this chat and refresh the native
     // badge. Existing message type kept for compatibility with the SW.
-    try {
-      navigator.serviceWorker?.controller?.postMessage({
-        type: 'chat-focused',
-        chat_id: chatId,
-      })
-    } catch { /* ignore */ }
+    postServiceWorkerMessage({ type: 'chat-focused', chat_id: chatId })
     try {
       await api.post(`/api/chats/${chatId}/read`, {})
     } catch { /* fire-and-forget; next fetchAll will reconcile */ }
@@ -1144,9 +1154,7 @@ export const useProjectStore = defineStore('projects', () => {
         chat.last_read_at = nowIso
       }
     }
-    try {
-      navigator.serviceWorker?.controller?.postMessage({ type: 'clear-badge' })
-    } catch { /* ignore */ }
+    postServiceWorkerMessage({ type: 'clear-badge' })
     try {
       await api.post('/api/chats/read-all', {})
     } catch { /* ignore; will reconcile on next fetchAll */ }
@@ -2602,12 +2610,7 @@ export const useProjectStore = defineStore('projects', () => {
           delete unread.value[msg.chat_id]
           persistUnread()
         }
-        try {
-          navigator.serviceWorker?.controller?.postMessage({
-            type: 'chat-focused',
-            chat_id: msg.chat_id,
-          })
-        } catch { /* ignore */ }
+        postServiceWorkerMessage({ type: 'chat-focused', chat_id: msg.chat_id })
         break
       }
       case 'chat_created': {

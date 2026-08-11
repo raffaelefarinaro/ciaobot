@@ -108,7 +108,7 @@ ciao/                          Python backend (Starlette).
     chat_broker.py             Chat WebSocket broker, file-touch tagging, snapshot scheduling.
     project_chats.py           ProjectChatManager: chat lifecycle, streaming, transcripts, archives, delegates.
     file_snapshots.py          SnapshotStore: append-only file snapshots behind the file viewer.
-    push.py                    PushManager: bounded notification log and Web Push publishing.
+    push.py                    PushManager: bounded notification log, Web Push publishing, and cross-device read-clear controls.
   # Route handlers live in ciao/web/routes_<domain>.py. routes_api.py is the catch-all for
   # handlers without a domain home; new domains get their own routes_*.py rather than growing
   # routes_api.py. mcp_server.py is the MCP adapter only; HTTP endpoints for MCP live in routes_mcp.py.
@@ -327,7 +327,7 @@ Unsent composer text is cached in browser-local storage by chat id. Switching ch
 or reloading the PWA restores each chat's draft on that device; dispatching the
 message clears only that chat's cached draft.
 
-When a chat reply, approval request, or model question needs the user's attention, `PushManager` appends its payload to `.runtime/notifications.jsonl` before attempting Web Push. The macOS menu-bar companion tails that bounded log, starting at its current end on launch so it never replays old alerts, and posts native notifications for new entries. Its regular refresh still derives the unread menu and badge from `.runtime/web_projects.json`.
+When a chat reply, approval request, or model question needs the user's attention, `PushManager` appends its payload to `.runtime/notifications.jsonl` before attempting Web Push. A chat read mutation appends a clear control and sends it to every Web Push subscription; service workers close the matching notification tag, while the macOS menu-bar companion removes delivered banners for that chat. The companion tails the bounded log, starting at its current end on launch so it never replays old alerts while still honoring queued clear controls. Its regular refresh still derives the unread menu and badge from `.runtime/web_projects.json`.
 
 Rendered markdown is sanitized through the shared frontend renderer before any `v-html` use. Keep new markdown surfaces on that helper. Chat tables render inside their own keyboard-focusable horizontal viewport: compact tables shrink to their contents, while wide tables scroll without widening the conversation or collapsing key columns. Completed chat traces render as compact `Activity` disclosures; deduplicated file touches move to an `Outputs` group below the final answer, while interrupted turns retain them inside the trace. The build outputs to `ciao/web/static/` so the same Starlette server hosts both the API and the PWA.
 

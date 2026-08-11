@@ -128,14 +128,27 @@ async function getPendingTarget() {
   }
 }
 
-async function clearPendingTarget() {
+async function clearPendingTarget(chatId = '') {
   try {
+    if (chatId && (await getPendingTarget()) !== chatId) return
     const cache = await caches.open(UNREAD_CACHE)
     await cache.delete(PENDING_TARGET_KEY)
   } catch { /* ignore */ }
 }
 
 // --- Push -------------------------------------------------------------------
+
+async function closeNotifications(chatId = '') {
+  if (!self.registration.getNotifications) return
+  try {
+    const notifications = await self.registration.getNotifications(
+      chatId ? { tag: chatId } : {}
+    )
+    for (const notification of notifications) notification.close()
+  } catch {
+    // Notification Center access is not available on every browser/version.
+  }
+}
 
 self.addEventListener('push', (event) => {
   let data = {}
@@ -146,6 +159,14 @@ self.addEventListener('push', (event) => {
   }
   const title = data.title || 'ciaobot'
   const chatId = data.chat_id || ''
+  if (data.kind === 'clear') {
+    event.waitUntil(Promise.all([
+      closeNotifications(chatId),
+      clearUnread(chatId),
+      clearPendingTarget(chatId),
+    ]))
+    return
+  }
   const options = {
     body: data.body || '',
     icon: ICON,
@@ -175,7 +196,8 @@ self.addEventListener('notificationclick', (event) => {
     event.waitUntil(
       (async () => {
         await clearUnread(chatId)
-        await clearPendingTarget()
+        await closeNotifications(chatId)
+        await clearPendingTarget(chatId)
       })()
     )
     return
@@ -183,7 +205,8 @@ self.addEventListener('notificationclick', (event) => {
   const url = chatId ? `/chat/${encodeURIComponent(chatId)}` : '/'
   event.waitUntil((async () => {
     await clearUnread(chatId)
-    await clearPendingTarget()
+    await closeNotifications(chatId)
+    await clearPendingTarget(chatId)
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
     for (const client of clients) {
       if ('focus' in client) {
@@ -207,13 +230,30 @@ self.addEventListener('notificationclick', (event) => {
   })())
 })
 
+self.addEventListener('notificationclose', (event) => {
+  const chatId = event.notification.data?.chat_id || ''
+  event.waitUntil(Promise.all([
+    clearUnread(chatId),
+    closeNotifications(chatId),
+    clearPendingTarget(chatId),
+  ]))
+})
+
 // Page tells us a chat is now in focus -> clear its badge.
 self.addEventListener('message', (event) => {
   const msg = event.data || {}
   if (msg.type === 'chat-focused') {
-    event.waitUntil(clearUnread(msg.chat_id || ''))
+    event.waitUntil(Promise.all([
+      clearUnread(msg.chat_id || ''),
+      closeNotifications(msg.chat_id || ''),
+      clearPendingTarget(msg.chat_id || ''),
+    ]))
   } else if (msg.type === 'clear-badge') {
-    event.waitUntil(clearUnread(''))
+    event.waitUntil(Promise.all([
+      clearUnread(''),
+      closeNotifications(''),
+      clearPendingTarget(),
+    ]))
   } else if (msg.type === 'sync-unread') {
     // Wholesale reconciliation: page sends the authoritative unread map
     // (one entry per unread chat). Overwrites any stale push-incremented
