@@ -800,7 +800,9 @@ def test_create_chat_accepts_statically_configured_openrouter_model(
     assert chat.model == "meta-llama/llama-4-maverick"
 
 
-def _write_custom_provider(tmp_path: Path, *, provider_id: str, models: list[str]) -> None:
+def _write_custom_provider(
+    tmp_path: Path, *, provider_id: str, models: list[str], runner: str = "claude"
+) -> None:
     """Register a custom provider in the worktree config's tracked file."""
     path = tmp_path / ".ciao" / "custom_providers.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -810,7 +812,7 @@ def _write_custom_provider(tmp_path: Path, *, provider_id: str, models: list[str
                 "id": provider_id,
                 "name": provider_id,
                 "url": "http://localhost:1234/v1",
-                "runner": "claude",
+                "runner": runner,
                 "models": models,
             }]
         }),
@@ -909,13 +911,31 @@ def test_create_chat_rejects_unmatched_custom_codex_model(tmp_path: Path) -> Non
     typo reaches the endpoint on its first turn (#259).
     """
     _write_custom_provider(
-        tmp_path, provider_id="my-codex", models=["gpt-5.6"]
+        tmp_path, provider_id="my-codex", models=["gpt-5.6"], runner="codex"
     )
     manager = _make_manager(tmp_path)
     project = manager.create_project("Delegates", workspace="work")
 
     with pytest.raises(ValueError, match="Unknown model 'custom:my-codex:typo'"):
-        manager.create_chat(project.project_id, model="custom:my-codex:typo")
+        manager.create_chat(
+            project.project_id, provider="codex", model="custom:my-codex:typo"
+        )
 
-    chat = manager.create_chat(project.project_id, model="custom:my-codex:gpt-5.6")
+    chat = manager.create_chat(
+        project.project_id, provider="codex", model="custom:my-codex:gpt-5.6"
+    )
     assert chat.model == "custom:my-codex:gpt-5.6"
+
+
+def test_create_chat_codex_exemption_only_for_native_ids(tmp_path: Path) -> None:
+    """A bare id on the codex provider stays exempt.
+
+    The native Codex catalog is async, so plain ids pass through to the
+    Codex CLI, which rejects unknown ones with a clear error at the first
+    turn (#259).
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+
+    chat = manager.create_chat(project.project_id, provider="codex", model="gpt-5.6")
+    assert chat.model == "gpt-5.6"

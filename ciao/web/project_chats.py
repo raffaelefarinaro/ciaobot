@@ -4099,7 +4099,12 @@ class ProjectChatManager:
                 encode_model(custom.id, m) for m in custom.models
             }:
                 return
-        if provider == "codex":
+        if provider == "codex" and custom is None:
+            # Exempt only native Codex ids (no ``custom:`` prefix): the
+            # catalog is async and the Codex CLI rejects unknown ids with a
+            # clear error at the first turn. A rejected custom id must not
+            # be rescued by this exemption, else the typo reaches the
+            # endpoint anyway (#259).
             return
         if is_tier(model):
             return
