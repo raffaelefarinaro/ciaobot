@@ -1938,6 +1938,20 @@ describe('deep-link chat navigation', () => {
     expect(store.chats[0].archive_path).toBe('archive/c1.md')
     expect(store.activeChatId).toBeNull()
   })
+
+  test('archiving a supervisor also marks its active subchats archived', async () => {
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'parent', project_id: 'p1', title: 'Parent', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'child', project_id: 'p1', title: 'Subchat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, spawned_from_chat_id: 'parent' },
+    ]
+    apiPost.mockResolvedValue({ ok: true })
+
+    await store.archiveChat('parent')
+
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/parent/archive')
+    expect(store.chats.every(chat => chat.archived)).toBe(true)
+  })
 })
 
 describe('chat creation', () => {

@@ -551,7 +551,9 @@
                       <button v-if="moveTargets.length" @click="openMoveSubmenu()">Move to...</button>
                       <button v-if="chatMenuChat?.retry?.status === 'pending'" @click="stopRetry(chatMenu!)">Stop trying</button>
                       <button v-else @click="setRetry(chatMenu!)">Set to retry</button>
-                      <button @click="doArchiveChat(chatMenu!)">Archive</button>
+                      <button @click="doArchiveChat(chatMenu!)">
+                        {{ archiveMenuLabel(chatMenu!) }}
+                      </button>
                       <button @click="confirmDeleteChat(chatMenu!)">Delete</button>
                     </template>
                     <template v-else>
@@ -832,6 +834,25 @@ function openMoveSubmenu() {
 function closeChatMenus() {
   chatMenu.value = null
   moveSubmenu.value = false
+}
+
+function activeSubchatCount(chatId: string): number {
+  return store.chats.filter(
+    chat => chat.spawned_from_chat_id === chatId && !chat.archived,
+  ).length
+}
+
+function archiveMenuLabel(chatId: string): string {
+  const count = activeSubchatCount(chatId)
+  return count
+    ? `Archive (also ${count} subchat${count === 1 ? '' : 's'})`
+    : 'Archive'
+}
+
+function archiveConfirmation(chatId: string): string {
+  const count = activeSubchatCount(chatId)
+  if (!count) return 'Archive this chat? You can reopen it from the archive.'
+  return `Archive this chat and ${count} subchat${count === 1 ? '' : 's'}? You can reopen them from the archive.`
 }
 
 // Reset the submenu whenever the active chat menu changes (open, close,
@@ -1124,7 +1145,7 @@ async function doArchiveChat(chatId: string) {
   chatMenu.value = null
   // This path never asked for confirmation, unlike the chat header's archive
   // button, so archiving from the sidebar menu was a single misclick.
-  if (!await askConfirm('Archive this chat? You can reopen it from the archive.', {
+  if (!await askConfirm(archiveConfirmation(chatId), {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return

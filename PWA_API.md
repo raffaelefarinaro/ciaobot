@@ -326,7 +326,9 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
   -H 'content-type: application/json' \
   -d '{"turn_index":0,"messages":[{"role":"user","content":"Question"},{"role":"assistant","content":"Answer"}]}'
 
-# Archive — finalises the chat and writes a Markdown transcript. Returns {ok, archived_to}.
+# Archive — finalises the chat and writes a Markdown transcript. If this chat
+# supervises delegate subchats, their active chats are archived too. Returns
+# {ok, archived_to}; one `chat_archived` event is emitted for each chat.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/archive"
 
 # Mark read — returns {ok, last_read_at}.

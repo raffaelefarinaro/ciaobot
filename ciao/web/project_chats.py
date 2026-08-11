@@ -3357,13 +3357,66 @@ class ProjectChatManager:
 
         Also disconnects any live provider and reclaims provider-side session
         storage (Claude SDK JSONL blob, Codex ``thread/delete``). The markdown
-        transcript in the vault is the durable record.
+        transcript in the vault is the durable record. Active delegate
+        subchats are archived as part of the same operation, so a supervisor
+        cannot leave its nested work chats running or visible on their own.
 
         Returns an ArchiveOutcome carrying the archive path plus a
         pre-filtered JSONL string captured before blob deletion, so the
         route handler can dispatch post-archive insights extraction
         without racing against the disk reclaim.
         """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        # Delegates are intentionally not allowed to nest today, but walking
+        # descendants keeps the archive invariant safe for older/corrupt
+        # registries and for any future relaxation of that rule.
+        delegate_ids = self._delegate_descendant_ids(chat_id)
+        outcome = self._archive_single_chat(chat_id)
+
+        # The route/control-plane caller runs post-processing for the primary
+        # chat. Do the same for each automatically archived subchat here so
+        # its insights, trajectory, and FTS indexing are not skipped.
+        for delegate_id in delegate_ids:
+            delegate = self._chats.get(delegate_id)
+            if delegate is None or delegate.archived:
+                continue
+            delegate_project = self._projects.get(delegate.project_id)
+            delegate_outcome = self._archive_single_chat(delegate_id)
+            if delegate_outcome is None:
+                continue
+            try:
+                self.run_archive_postprocess(
+                    delegate_id,
+                    delegate_outcome,
+                    delegate,
+                    delegate_project,
+                )
+            except Exception:  # noqa: BLE001 — child cleanup must not undo parent archive
+                logger.exception(
+                    "Archive postprocess failed for delegate subchat %s",
+                    delegate_id,
+                )
+        return outcome
+
+    def _delegate_descendant_ids(self, parent_chat_id: str) -> list[str]:
+        """Return active delegate descendants in parent-before-child order."""
+        descendants: list[str] = []
+        pending = [parent_chat_id]
+        seen = {parent_chat_id}
+        while pending:
+            current_parent = pending.pop(0)
+            for child in self.delegates_for_chat(current_parent):
+                if child.archived or child.chat_id in seen:
+                    continue
+                seen.add(child.chat_id)
+                descendants.append(child.chat_id)
+                pending.append(child.chat_id)
+        return descendants
+
+    def _archive_single_chat(self, chat_id: str) -> ArchiveOutcome | None:
+        """Archive one chat without cascading to its delegate children."""
         chat = self._chats.get(chat_id)
         if chat is None:
             return None

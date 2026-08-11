@@ -331,6 +331,29 @@ def test_archive_chat_publishes_event(tmp_path: Path) -> None:
     assert archived[0]["project_id"] == project.project_id
 
 
+def test_archiving_supervisor_also_archives_delegate_subchats(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-delegate-archive", workspace="work")
+    parent = pcm.create_chat(project.project_id, title="supervisor")
+    child = pcm.create_chat(
+        project.project_id,
+        title="subchat",
+        spawned_from_chat_id=parent.chat_id,
+    )
+
+    cap = _EventCapture(pcm)
+    pcm.archive_chat(parent.chat_id)
+
+    assert pcm.get_chat(parent.chat_id).archived is True
+    assert pcm.get_chat(child.chat_id).archived is True
+    archived_ids = [
+        event["chat_id"]
+        for event in cap.drain()
+        if event.get("type") == "chat_archived"
+    ]
+    assert archived_ids == [parent.chat_id, child.chat_id]
+
+
 def test_delete_and_archive_reclaim_codex_threads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -171,8 +171,8 @@
         <button
           class="archive-btn touch-hit"
           @click="doArchive"
-          title="Archive chat"
-          aria-label="Archive chat"
+          :title="archiveActionLabel"
+          :aria-label="archiveActionLabel"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         </button>
@@ -1675,6 +1675,20 @@ const dockDeferred = computed<DockItem[]>(() => {
     items.push({ key: 'agents', label: `${n} agent${n === 1 ? '' : 's'} running` })
   }
   return items
+})
+
+const activeDelegateCount = computed(() => {
+  const cid = chat.value?.chat_id
+  if (!cid) return 0
+  return store.chats.filter(
+    c => c.spawned_from_chat_id === cid && !c.archived,
+  ).length
+})
+const archiveActionLabel = computed(() => {
+  const count = activeDelegateCount.value
+  return count
+    ? `Archive chat and ${count} subchat${count === 1 ? '' : 's'}`
+    : 'Archive chat'
 })
 onMounted(() => {
   taskStore.fetchLoops().catch(() => {})
@@ -4027,7 +4041,11 @@ watch(showModelPicker, (open) => {
 })
 
 async function doArchive() {
-  if (!await askConfirm('Archive this chat? You can reopen it from the archive.', {
+  const count = activeDelegateCount.value
+  const message = count
+    ? `Archive this chat and ${count} subchat${count === 1 ? '' : 's'}? You can reopen them from the archive.`
+    : 'Archive this chat? You can reopen it from the archive.'
+  if (!await askConfirm(message, {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return

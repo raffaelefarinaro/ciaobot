@@ -1769,10 +1769,19 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function archiveChat(chatId: string) {
+    // The server cascades archival to delegate subchats. Mark the known
+    // children optimistically as well so this device does not briefly show
+    // orphaned active rows while the corresponding archive events arrive.
+    const childIds = chats.value
+      .filter(c => c.spawned_from_chat_id === chatId && !c.archived)
+      .map(c => c.chat_id)
+    const archivedIds = new Set([chatId, ...childIds])
     disconnectWs(chatId)
+    for (const childId of childIds) disconnectWs(childId)
     await api.post(`/api/chats/${chatId}/archive`)
-    const idx = chats.value.findIndex(c => c.chat_id === chatId)
-    if (idx >= 0) chats.value[idx].archived = true
+    for (const chat of chats.value) {
+      if (archivedIds.has(chat.chat_id)) chat.archived = true
+    }
     // Clear the active chat instead of auto-jumping to another one.
     // Auto-jumping caused a half-mounted state where the header showed
     // the newly-selected chat's title but the message list hadn't
