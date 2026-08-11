@@ -86,7 +86,7 @@
                       @click="openProjectFile(f)"
                       :title="f.path"
                     >
-                      <span class="context-file-icon">{{ f.kind === 'image' ? '🖼' : f.kind === 'markdown' ? '📄' : '📎' }}</span>
+                      <AppIcon class="context-file-icon" :name="f.kind === 'image' ? 'image' : f.kind === 'markdown' ? 'doc' : 'file'" />
                       <span class="context-file-name">{{ f.path }}</span>
                     </div>
                   </div>
@@ -124,7 +124,7 @@
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
-            <span aria-hidden="true">🧠</span>
+            <AppIcon name="model" :size="18" />
           </button>
           <button
             v-if="chat.provider"
@@ -247,7 +247,7 @@
         </div>
 
         <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
-          <span class="loop-banner-ico" aria-hidden="true">&#9201;</span>
+          <AppIcon class="loop-banner-ico" name="clock" :size="18" />
           <span class="loop-banner-text">
             <strong>{{ s.title || 'Schedule' }}</strong>
             · {{ scheduleCadence(s) }}
@@ -273,7 +273,7 @@
             @click="toggleTrace(i)"
           >
             <span class="trace-chevron">{{ openTraces[i] ? '\u25BE' : '\u25B8' }}</span>
-            <span class="trace-icon">&#129504;</span>
+            <AppIcon class="trace-icon" name="activity" :size="14" />
             <span class="trace-label">Activity</span>
             <span class="trace-meta">
               <span
@@ -305,7 +305,7 @@
                 @click="openFileCard(step.file_path || step.content)"
                 :title="step.file_path || step.content"
               >
-                <span class="file-card-icon" aria-hidden="true">{{ fileCardIcon(step.file_path || step.content) }}</span>
+                <AppIcon class="file-card-icon" :name="fileCardIcon(step.file_path || step.content)" :size="18" />
                 <span class="file-card-main">
                   <span class="file-card-name">{{ fileCardBasename(step.file_path || step.content) }}</span>
                   <span class="file-card-meta">
@@ -339,7 +339,7 @@
                 @click.stop="openFileCard(f.file_path)"
                 :title="f.file_path"
               >
-                <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
+                <AppIcon class="file-chip-icon" :name="fileCardIcon(f.file_path)" :size="14" />
                 <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
                 <span v-if="f.action === 'created'" class="file-chip-action">new</span>
                 <span class="file-chip-open" aria-hidden="true">&#8599;</span>
@@ -424,7 +424,7 @@
                     @click.stop="openFileCard(f.file_path)"
                     :title="f.file_path"
                   >
-                    <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
+                    <AppIcon class="file-chip-icon" :name="fileCardIcon(f.file_path)" :size="14" />
                     <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
                     <span v-if="f.action === 'created'" class="file-chip-action">new</span>
                     <span class="file-chip-open" aria-hidden="true">&#8599;</span>
@@ -556,7 +556,7 @@
 
       <div v-if="chat.retry?.status === 'pending' && !store.isStreaming" class="retry-card">
         <div class="retry-card-main">
-          <span class="retry-card-icon">⏱</span>
+          <AppIcon class="retry-card-icon" name="clock" :size="18" />
           <div>
             <div class="retry-card-title">Retrying this turn every hour</div>
             <div class="retry-card-meta">
@@ -681,7 +681,7 @@
           type="button"
           title="Comment on this selection"
         >
-          <span class="chat-comment-trigger-icon">💬</span>
+          <AppIcon class="chat-comment-trigger-icon" name="comment" />
           Comment
         </button>
 
@@ -740,7 +740,7 @@
          picker can't run headless, so this is the only path. -->
     <div v-if="activeQuestions.length && (dockPrimary === 'question' || dockExpanded)" class="question-card">
       <div class="question-card-header">
-        <span class="question-card-icon">&#10067;</span>
+        <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
         <button class="question-card-dismiss" @click="dismissQuestions" title="Dismiss">&times;</button>
       </div>
@@ -798,7 +798,7 @@
         class="permission-card"
       >
         <div class="permission-header">
-          <svg class="permission-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3.5v5c0 4.5-3 7.75-7 9-4-1.25-7-4.5-7-9v-5L12 3z"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
+          <svg class="permission-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter"><path d="M12 3l7 3.5v5c0 4.5-3 7.75-7 9-4-1.25-7-4.5-7-9v-5L12 3z"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
           <span class="permission-tool">{{ p.tool_name }}</span>
           <span v-if="permissionReason(p)" class="permission-message">{{ permissionReason(p) }}</span>
         </div>
@@ -898,7 +898,7 @@
         class="comment-chip"
         :class="{ 'is-editing': editingChatCommentId === c.id }"
       >
-        <span class="comment-chip-icon" aria-hidden="true">&#128172;</span>
+        <AppIcon class="comment-chip-icon" name="comment" :size="14" />
         <button
           type="button"
           class="comment-chip-body"
@@ -911,7 +911,7 @@
         <button class="comment-chip-remove" @click.stop.prevent="deleteChatComment(c.id)" title="Remove">&times;</button>
       </span>
       <span v-for="c in store.pendingComments" :key="`fc-${c.id}`" class="comment-chip">
-        <span class="comment-chip-icon" aria-hidden="true">&#128196;</span>
+        <AppIcon class="comment-chip-icon" name="doc" :size="14" />
         <button
           type="button"
           class="comment-chip-body"
@@ -1066,6 +1066,7 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import ChatSignals from './ChatSignals.vue'
 import { colorForWorkspace } from '../lib/workspaceColors'
+import AppIcon, { type AppIconName } from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import {
@@ -1550,7 +1551,7 @@ const contextRelations = computed<ContextRelation[]>(() => {
     const label = chatSchedules.value.length === 1
       ? `scheduled ${scheduleCadence(chatSchedules.value[0])}`
       : `${chatSchedules.value.length} schedules`
-    rels.push({ key: 'schedules', label, glyph: '⏱' })
+    rels.push({ key: 'schedules', label })
   }
   return rels
 })
@@ -3144,13 +3145,13 @@ function fileCardDirname(filePath: string): string {
   return slash > 0 ? filePath.slice(0, slash) : ''
 }
 
-function fileCardIcon(filePath: string): string {
-  if (_IMAGE_EXT_RE.test(filePath)) return '\u{1F5BC}'  // 🖼
-  if (/\.(md|markdown|txt)$/i.test(filePath)) return '\u{1F4DD}'  // 📝
-  if (/\.(json|ya?ml|toml|ini|cfg)$/i.test(filePath)) return '\u{2699}️'  // ⚙
-  if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return '\u{1F4C4}'  // 📄
-  if (/\.(ipynb)$/i.test(filePath)) return '\u{1F4D3}'  // 📓
-  return '\u{1F4C4}'  // 📄
+// Emoji cannot inherit currentColor, so file glyphs are SVG names now; see
+// docs/DESIGN_SYSTEM.md rule S4.
+function fileCardIcon(filePath: string): AppIconName {
+  if (_IMAGE_EXT_RE.test(filePath)) return 'image'
+  if (/\.(md|markdown|txt)$/i.test(filePath)) return 'doc'
+  if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return 'doc'
+  return 'file'
 }
 
 const renderData = computed<{

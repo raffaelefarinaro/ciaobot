@@ -151,7 +151,7 @@
           class="file-row"
           @click="openFile(f)"
         >
-          <span class="file-icon">📄</span>
+          <AppIcon class="file-icon" name="doc" :size="18" />
           <span class="file-name">{{ f.path }}</span>
           <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
         </div>
@@ -184,7 +184,7 @@
           class="file-row"
           @click="openFile(f)"
         >
-          <span class="file-icon">📎</span>
+          <AppIcon class="file-icon" name="file" :size="18" />
           <span class="file-name">{{ f.path }}</span>
           <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
         </div>
@@ -242,6 +242,7 @@ import { chatActivityTimestamp } from '../lib/homeLanes'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
 import ChatSignals from './ChatSignals.vue'
+import AppIcon from './AppIcon.vue'
 import type { ChatInfo } from '../lib/types'
 
 interface ProjectFile {
