@@ -277,6 +277,7 @@ watch(showStartup, (show) => {
   --warning: #ff9800;
   --error: #f44336;
   /* Geometry */
+  --radius-xs: 4px;     /* small squared tags: state chips, key badges */
   --radius: 10px;
   --radius-sm: 6px;
   --radius-lg: 14px;

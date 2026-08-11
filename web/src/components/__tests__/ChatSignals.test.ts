@@ -36,18 +36,30 @@ describe('ChatSignals', () => {
     expect(wrapper.find('.chat-signal--needs').attributes('aria-label')).toBe('Needs your answer')
   })
 
-  it('renders the working ring and background-agent count', () => {
+  // Working is the transcript's own activity pulse now, with no text label: the
+  // tier heading and sidebar context already say "working", so the chip was
+  // saying it twice. The accessible name still carries it.
+  it('renders the working pulse without a redundant label', () => {
     const { store } = seed()
     store.projectStreaming = { 'chat-1': true }
     const working = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
     expect(working.find('.chat-signal--working').exists()).toBe(true)
-    expect(working.text()).toContain('working')
+    expect(working.find('.chat-signal--working .activity-spinner').exists()).toBe(true)
+    expect(working.text()).toBe('')
+    expect(working.find('.chat-signal--working').attributes('aria-label')).toBe('Working')
+  })
 
-    store.projectStreaming = {}
+  it('shows a count only when more than one agent is running', () => {
+    const { store } = seed()
     store.backgroundAgents = { 'chat-1': 3 }
-    const agents = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(agents.find('.chat-signal--agents').exists()).toBe(true)
-    expect(agents.text()).toContain('3 agents')
+    const many = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(many.find('.chat-signal--agents').exists()).toBe(true)
+    expect(many.find('.chat-signal-count').text()).toBe('3')
+    expect(many.find('.chat-signal--agents').attributes('aria-label')).toContain('3 background agents')
+
+    store.backgroundAgents = { 'chat-1': 1 }
+    const one = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(one.find('.chat-signal-count').exists()).toBe(false)
   })
 
   it('renders loop and retry modifiers with their accessible labels', () => {
@@ -79,10 +91,11 @@ describe('ChatSignals', () => {
     expect(wrapper.find('.chat-signal--needs').classes()).toContain('chat-signal--needs')
   })
 
-  it('exposes a reduced-motion hook on the pulsing core', () => {
+  it('exposes a reduced-motion hook on the pulse', () => {
     const { store } = seed()
     store.projectStreaming = { 'chat-1': true }
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1' } })
-    expect(wrapper.find('.chat-signal-core--pulse').exists()).toBe(true)
+    // .activity-spinner is the element the prefers-reduced-motion block targets.
+    expect(wrapper.find('.activity-spinner').exists()).toBe(true)
   })
 })

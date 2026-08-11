@@ -15,7 +15,7 @@
       >
         <header class="home-lane-header" :data-workspace-color="lane.color">
           <div class="home-lane-heading">
-            <span class="home-lane-shortcut">[{{ lane.shortcut }}]</span>
+            <span class="home-lane-shortcut">{{ lane.shortcut }}</span>
             <span class="home-lane-name">{{ lane.label || 'unassigned' }}</span>
             <span class="home-lane-summary" aria-live="polite">
               <template v-if="laneNeedsCount(lane)"><b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you</template>
@@ -363,11 +363,20 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-lane {
   min-width: 0;
+  padding: 0 var(--space-3) var(--space-2);
   border-radius: var(--radius, 10px);
+  /* Reserved so switching workspaces does not shift the lanes sideways. */
+  border-left: 2px solid transparent;
 }
 
+/* The selected workspace. Several weak cues rather than one strong one, because
+   a saturated fill is reserved for "needs the user" (design system rule S1):
+   a hue rail down the side, a hue-tinted panel, and a full-strength underline
+   in the header — against inactive lanes that get none of the three. The
+   previous 28%-alpha tint on its own was invisible on this ground. */
 .home-lane--active {
-  background: color-mix(in srgb, var(--bg2) 28%, transparent);
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
 .home-lane-header {
@@ -378,7 +387,15 @@ watch(() => store.activeWorkspace, async () => {
   min-width: 0;
   min-height: 44px;
   padding: 6px 0 8px;
-  border-bottom: 2px solid var(--accent);
+  /* Inactive lanes keep the hue so the workspace is still identifiable, but at
+     a fraction of the weight, so the active lane's rule reads as the emphatic
+     one instead of every lane looking equally selected. */
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+.home-lane--active .home-lane-header {
+  border-bottom-width: 2px;
+  border-bottom-color: var(--accent);
 }
 
 .home-lane-heading {
@@ -389,19 +406,34 @@ watch(() => store.activeWorkspace, async () => {
   overflow: hidden;
 }
 
+.home-lane--active .home-lane-name {
+  color: var(--fg);
+}
+
+/* A bordered badge rather than bracketed text: it is a key you can press, and
+   the box is what makes that legible. Squared corners, per the design. */
 .home-lane-shortcut {
   flex: 0 0 auto;
-  color: var(--accent);
+  min-width: 18px;
+  padding: 0 var(--space-1);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  border-radius: var(--radius-xs);
+  color: color-mix(in srgb, var(--accent) 65%, var(--fg3));
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   font-weight: 700;
+  text-align: center;
+}
+
+.home-lane--active .home-lane-shortcut {
+  border-color: var(--accent);
 }
 
 .home-lane-name {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
-  color: var(--fg);
+  color: var(--fg2);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   font-weight: 700;
@@ -494,7 +526,7 @@ watch(() => store.activeWorkspace, async () => {
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-left: 2px solid var(--accent);
-  border-radius: var(--radius, 10px);
+  border-radius: var(--radius-sm);
   background: var(--bg2);
   color: var(--fg);
   cursor: pointer;
@@ -535,7 +567,8 @@ watch(() => store.activeWorkspace, async () => {
   padding: 7px 10px;
   border: 0;
   border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 0;
+  /* Square against its hue rail, rounded away from it. */
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
   background: transparent;
 }
 

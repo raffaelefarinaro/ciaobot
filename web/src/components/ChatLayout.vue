@@ -48,31 +48,32 @@
             <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
               <div class="empty-home-header">
-                <div class="empty-mark" :class="{ 'empty-mark--compact': store.activeChatsAll.length > 0 }">
-                <button
-                  type="button"
-                  class="empty-face-btn"
-                  :class="{ 'empty-face-btn--compact': store.activeChatsAll.length > 0 }"
-                  aria-label="Say hello"
-                  @click="onFaceClick"
-                  @mouseenter="onFaceEnter"
-                  @mouseleave="onFaceLeave"
-                >
-                  <Transition name="face-bubble">
-                    <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                      {{ speechGreeting }}
-                    </div>
-                  </Transition>
-                  <img
-                    class="empty-face"
-                    :class="{ 'empty-face--compact': store.activeChatsAll.length > 0 }"
-                    :src="faceSrc"
-                    alt=""
-                    draggable="false"
-                  />
-                </button>
+                <!-- With chats on screen the mark is decoration beside a status line, so it
+                     is a plain image: no button, no hover handlers, no greeting bubble. The
+                     bubble belongs to the big first-run face below, where it is the only
+                     thing on the screen and has room to be a greeting. Next to a sentence
+                     that already reads "nothing needs you" it just collided with it. -->
+                <template v-if="store.activeChatsAll.length">
+                  <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
+                  <span class="empty-status-text">{{ homeStatus }}</span>
+                </template>
+                <div v-else class="empty-mark">
+                  <button
+                    type="button"
+                    class="empty-face-btn"
+                    aria-label="Say hello"
+                    @click="onFaceClick"
+                    @mouseenter="onFaceEnter"
+                    @mouseleave="onFaceLeave"
+                  >
+                    <Transition name="face-bubble">
+                      <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                        {{ speechGreeting }}
+                      </div>
+                    </Transition>
+                    <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
+                  </button>
                 </div>
-                <span v-if="store.activeChatsAll.length" class="empty-status-text">{{ homeStatus }}</span>
               </div>
               <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
               <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -133,31 +134,32 @@
           <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
             <div class="empty-home-header">
-              <div class="empty-mark" :class="{ 'empty-mark--compact': store.activeChatsAll.length > 0 }">
-              <button
-                type="button"
-                class="empty-face-btn"
-                :class="{ 'empty-face-btn--compact': store.activeChatsAll.length > 0 }"
-                aria-label="Say hello"
-                @click="onFaceClick"
-                @mouseenter="onFaceEnter"
-                @mouseleave="onFaceLeave"
-              >
-                <Transition name="face-bubble">
-                  <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                    {{ speechGreeting }}
-                  </div>
-                </Transition>
-                <img
-                  class="empty-face"
-                  :class="{ 'empty-face--compact': store.activeChatsAll.length > 0 }"
-                  :src="faceSrc"
-                  alt=""
-                  draggable="false"
-                />
-              </button>
+              <!-- With chats on screen the mark is decoration beside a status line, so it
+                   is a plain image: no button, no hover handlers, no greeting bubble. The
+                   bubble belongs to the big first-run face below, where it is the only
+                   thing on the screen and has room to be a greeting. Next to a sentence
+                   that already reads "nothing needs you" it just collided with it. -->
+              <template v-if="store.activeChatsAll.length">
+                <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
+                <span class="empty-status-text">{{ homeStatus }}</span>
+              </template>
+              <div v-else class="empty-mark">
+                <button
+                  type="button"
+                  class="empty-face-btn"
+                  aria-label="Say hello"
+                  @click="onFaceClick"
+                  @mouseenter="onFaceEnter"
+                  @mouseleave="onFaceLeave"
+                >
+                  <Transition name="face-bubble">
+                    <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                      {{ speechGreeting }}
+                    </div>
+                  </Transition>
+                  <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
+                </button>
               </div>
-              <span v-if="store.activeChatsAll.length" class="empty-status-text">{{ homeStatus }}</span>
             </div>
             <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
             <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -956,12 +958,6 @@ onBeforeUnmount(() => {
   height: 30px;
 }
 
-.empty-face-btn--compact {
-  min-width: var(--touch);
-  min-height: var(--touch);
-  align-items: center;
-  justify-content: center;
-}
 .face-speech-bubble {
   position: absolute;
   bottom: calc(100% + 10px);

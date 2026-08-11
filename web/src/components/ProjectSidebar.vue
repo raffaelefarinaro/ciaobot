@@ -1313,25 +1313,44 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--accent);
 }
 
-.workspace-status-ring,
-.rollup-ring {
+/* Working, at rollup level. Same treatment as the chat transcript's own
+   activity pulse and ChatSignals: a solid accent dot with a halo plus an
+   expanding ring. The outlined ring this replaced was nearly invisible at this
+   size against the sidebar ground. */
+.rollup-ring,
+.workspace-status-ring {
+  position: relative;
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   flex: 0 0 auto;
-  border: 1.5px solid var(--accent);
-  border-radius: 50%;
-}
-
-.workspace-status-core,
-.rollup-ring-core {
-  width: 3px;
-  height: 3px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
   animation: ciao-pulse 1.1s ease-in-out infinite;
+}
+
+.rollup-ring::before,
+.workspace-status-ring::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.45;
+  animation: ciao-ring 1.1s ease-out infinite;
+  pointer-events: none;
+}
+
+/* The inner core is now the dot itself, so the nested span is decorative. */
+.workspace-status-core,
+.rollup-ring-core {
+  display: none;
+}
+
+@keyframes ciao-ring {
+  0% { transform: scale(0.6); opacity: 0.45; }
+  100% { transform: scale(1.6); opacity: 0; }
 }
 
 /* Scrollable area for chats and projects */

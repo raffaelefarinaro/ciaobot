@@ -17,18 +17,15 @@
       class="chat-signal chat-signal--working"
       title="Working"
       aria-label="Working"
-    >
-      <span class="chat-signal-core chat-signal-core--pulse" aria-hidden="true" />
-      <span v-if="density === 'card'" class="chat-signal-label">working</span>
-    </span>
+    ><span class="activity-spinner" aria-hidden="true" /></span>
     <span
       v-else-if="primarySignal === 'agents'"
       class="chat-signal chat-signal--agents"
       :title="`${backgroundCount} background agents running`"
       :aria-label="`${backgroundCount} background agents running`"
     >
-      <span class="chat-signal-core chat-signal-core--pulse" aria-hidden="true" />
-      <span v-if="density === 'card'" class="chat-signal-label">{{ backgroundCount }} agents</span>
+      <span class="activity-spinner" aria-hidden="true" />
+      <span v-if="density === 'card' && backgroundCount > 1" class="chat-signal-count">{{ backgroundCount }}</span>
     </span>
     <span
       v-else-if="primarySignal === 'retry'"
@@ -114,11 +111,14 @@ const loopTitle = computed(() => {
   background: var(--accent);
 }
 
+/* A small squared tag, not a pill. The design this came from used a 4px radius
+   deliberately: the pill shape reads as a count badge, and counts mean something
+   else in this vocabulary. */
 .chat-signals--card .chat-signal--needs {
   width: auto;
   min-height: 20px;
-  padding: 0 7px;
-  border-radius: 10px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
   color: var(--bg);
 }
 
@@ -133,32 +133,45 @@ const loopTitle = computed(() => {
   white-space: nowrap;
 }
 
+/* Working reuses the chat transcript's own activity pulse rather than a
+   bordered pill: a solid accent dot with a halo and an expanding ring. The
+   outlined ring it replaced was nearly invisible at sidebar size, and the
+   card variant carried a redundant "working" label under a tier heading that
+   already said working. Kept in sync with .activity-spinner in ChatPanel.vue —
+   if that changes, change this. */
 .chat-signal--working,
 .chat-signal--agents {
-  width: 10px;
-  height: 10px;
-  border: 1.5px solid var(--accent);
-  border-radius: 50%;
+  gap: var(--space-1);
 }
 
-.chat-signals--card .chat-signal--working,
-.chat-signals--card .chat-signal--agents {
-  width: auto;
-  height: 20px;
-  gap: 5px;
-  padding: 0 7px 0 4px;
-  border-radius: 10px;
-}
-
-.chat-signal-core {
-  width: 3px;
-  height: 3px;
+.activity-spinner {
+  position: relative;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
+  animation: chat-signal-pulse 1.1s ease-in-out infinite;
+  flex-shrink: 0;
 }
 
-.chat-signal-core--pulse {
-  animation: chat-signal-pulse 1.1s ease-in-out infinite;
+.activity-spinner::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.45;
+  animation: chat-signal-ring 1.1s ease-out infinite;
+  pointer-events: none;
+}
+
+/* Only shown for more than one agent, where the number is the whole point. */
+.chat-signal-count {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
 }
 
 .chat-signal--retry {
@@ -178,14 +191,22 @@ const loopTitle = computed(() => {
 }
 
 @keyframes chat-signal-pulse {
-  0%, 100% { opacity: 0.65; transform: scale(0.75); }
-  50% { opacity: 1; transform: scale(1); }
+  0%, 100% { transform: scale(0.55); opacity: 0.35; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes chat-signal-ring {
+  0% { transform: scale(0.6); opacity: 0.45; }
+  100% { transform: scale(1.6); opacity: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-signal-core--pulse {
+  .activity-spinner,
+  .activity-spinner::before {
     animation: none;
-    opacity: 0.65;
   }
+
+  .activity-spinner { opacity: 1; }
+  .activity-spinner::before { opacity: 0.3; }
 }
 </style>
