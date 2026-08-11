@@ -134,19 +134,32 @@ and `ProjectSidebar.vue` (`chatLoopBadge`). Add one computed to the task store
 (`web/src/stores/tasks.ts`), keyed by `web_chat_id`, returning
 `{ count, running }`, and have `ChatSignals` consume it. Delete both copies.
 
-### 1c. Relative time helper
+### 1c. Relative time helper — extract, do not create
 
-New `web/src/lib/relativeTime.ts`:
+**A `formatRelative()` already exists** at `ProjectView.vue:504`, private to that
+component, with a different vocabulary: `just now`, `5m ago`, `3h ago`,
+`3d ago`, then an absolute `Aug 3` past one week. Do not write a second one — the
+app would grow two relative-time dialects that drift apart.
+
+Move it to `web/src/lib/relativeTime.ts` and widen it:
 
 ```
-formatRelative(iso: string, now?: Date): string
+formatRelative(iso: string, opts?: { suffix?: boolean; now?: Date }): string
 ```
 
-Output: `now` (<60s), `12m`, `3h`, `2d`, `3w`, `4mo`. Single unit, no "ago".
-Pure function, injectable `now` so it is testable without fake timers.
+- `suffix: false` (default for dense chat rows) → `now`, `12m`, `3h`, `2d`, `3w`, `4mo`
+- `suffix: true` (keeps `ProjectView`'s file listings reading as they do today)
+  → `just now`, `12m ago`, …
+- injectable `now` so it is testable without fake timers
+- migrate all three `ProjectView` call sites (lines ~146, ~165, ~179) in the same
+  change, and keep its absolute-date fallback past a week for file listings
+
 `last_activity_at` already exists on `ChatInfo` and is currently unused on home.
 
-### 1d. Adopt in both surfaces
+### 1d. Adopt in all four call sites
+
+The chain is duplicated in **four** places, not two. All four must move together;
+adopting a subset is what leaves one chat rendering two ways on one screen.
 
 - `web/src/components/HomeRecentChats.vue` — replace the mark chain
   (lines ~28-38) with `<ChatSignals :chat-id density="card" />`; add the
@@ -155,8 +168,15 @@ Pure function, injectable `now` so it is testable without fake timers.
   (lines ~479-491) with `<ChatSignals :chat-id density="row" />`; apply unread
   title weight to `.chat-title`. Keep the `remote` chip and the `···` actions
   button where they are.
-- Project headers (line ~396-398): replace the dot + badge pair with the
-  filled-dot-plus-digit form from the table.
+- `web/src/components/ProjectView.vue` — the chat rows (lines ~89-92) render the
+  same `spinner-dot` / `needs-input-badge` / `badge` chain. Same `row` density.
+  Note this file also has the binary-unread bug: line ~92 prints
+  `{{ store.chatUnread(...) }}` as a digit that can only ever read `1`.
+- `web/src/components/ChatPanel.vue` — the subchat banner (lines ~191-194)
+  renders the chain **as prose** (`· working`, `· agents running`,
+  `· needs input`, `· unread`). Replace with the `row` density component.
+- Project headers in the sidebar (lines ~396-398): replace the dot + badge pair
+  with the filled-dot-plus-digit form from the table.
 
 Delete the now-unused CSS: `.needs-input-badge`, `.unread-dot`,
 `.spinner-dot.bg-agents`, and the duplicated `.loop-mark` rules. Grep before
@@ -414,7 +434,10 @@ Manual checks, per `CLAUDE.md`:
 ## Acceptance checklist
 
 - [ ] `ChatSignals.vue` is the only place chat state marks are rendered; no mark
-      markup remains in `HomeRecentChats.vue` or `ProjectSidebar.vue`
+      markup remains in `HomeRecentChats.vue`, `ProjectSidebar.vue`,
+      `ProjectView.vue`, or `ChatPanel.vue` (the last renders it as prose today)
+- [ ] Exactly one `formatRelative` exists, in `web/src/lib/`, with
+      `ProjectView.vue`'s three call sites migrated to it
 - [ ] No `?` badge, no amber-vs-accent dot pair anywhere
 - [ ] Chat-level unread is title weight; digits appear only on project and
       workspace rollups
