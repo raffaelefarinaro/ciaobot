@@ -1,4 +1,4 @@
-use mac_usernotifications::{close_delivered, get_delivered_notification_ids, Notification};
+use mac_usernotifications::{Notification, close_delivered, get_delivered_notification_ids};
 use objc2::{AnyThread, define_class, rc::Retained};
 use objc2_foundation::{NSObject, NSObjectProtocol};
 use objc2_user_notifications::{
