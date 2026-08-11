@@ -2,7 +2,11 @@
   <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handleFileLinkClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
-    <!-- Header -->
+    <!-- Header. No page tag: the breadcrumb below already reads
+         `workspace / project / title`, so a "chat" marker beside it would name
+         what the breadcrumb and the transcript underneath it both already say.
+         This is also the most crowded header in the app, so the room goes to the
+         breadcrumb and the action icons instead. -->
     <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
       <template #title>
         <div class="header-left">

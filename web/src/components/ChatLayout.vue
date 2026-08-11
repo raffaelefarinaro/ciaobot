@@ -39,13 +39,13 @@
           />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-            <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
           </div>
           <!-- On mobile, the sidebar already lists every active chat. Showing the
                homepage behind it after closing a chat would just duplicate the
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-            <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
               <div class="empty-home-header">
                 <!-- With chats on screen the mark is decoration beside a status line, so it
@@ -125,13 +125,13 @@
         />
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-          <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
         </div>
         <!-- On mobile, the sidebar already lists every active chat. Showing the
              homepage behind it after closing a chat would just duplicate the
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
             <div class="empty-home-header">
               <!-- With chats on screen the mark is decoration beside a status line, so it

@@ -19,14 +19,9 @@
         </svg>
       </button>
       <template v-if="!collapsed">
-        <button
-          type="button"
-          class="brand wordmark wordmark--sm"
-          :class="{ 'brand--refreshing': refreshing }"
-          @click="onBrandClick"
-          :title="refreshing ? 'Reloading...' : 'Click to reload the latest app build'"
-          :aria-busy="refreshing"
-        ><span class="brand-label">{{ brandLabel }}</span></button>
+        <!-- The wordmark used to sit here, between the toggle and these icons.
+             It is `BrandMark` in the pane header now, where it is centred and
+             does not have to share the sidebar's width. -->
         <div class="nav-links">
           <router-link
             to="/"
@@ -642,7 +637,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
@@ -733,11 +728,6 @@ const moveSubmenu = ref(false)
 const editingProject = ref<string | null>(null)
 const renamingChat = ref<string | null>(null)
 const renameValue = ref('')
-const refreshing = ref(false)
-const BRAND_TEXT = 'ciaobot'
-const PIXEL_CHARS = '█▓▒░▄▀▐▌▆▅▃▂▪▫◆●○·'
-const brandLabel = ref(BRAND_TEXT)
-
 const isAnyChatWorking = computed(() => {
   return Object.values(store.streaming).some(Boolean) ||
          Object.values(store.projectStreaming).some(Boolean) ||
@@ -748,29 +738,6 @@ const hasAutomationWarning = computed(() => {
   return taskStore.schedules.some(s => s.enabled && s.missed) ||
          taskStore.loops.some(l => l.running && (l.last_status === 'error' || l.last_status === 'missing-chat'))
 })
-let brandPixelTimer: ReturnType<typeof setInterval> | null = null
-
-function startBrandPixelAnimation() {
-  stopBrandPixelAnimation()
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-  brandPixelTimer = setInterval(() => {
-    brandLabel.value = BRAND_TEXT
-      .split('')
-      .map((char) => (Math.random() < 0.18 ? char : PIXEL_CHARS[Math.floor(Math.random() * PIXEL_CHARS.length)]))
-      .join('')
-  }, 80)
-}
-
-function stopBrandPixelAnimation() {
-  if (brandPixelTimer !== null) {
-    clearInterval(brandPixelTimer)
-    brandPixelTimer = null
-  }
-  brandLabel.value = BRAND_TEXT
-}
-
-onBeforeUnmount(stopBrandPixelAnimation)
-
 // Destination projects for "Move to..." — same workspace as the chat,
 // excluding the chat's current project. Backend rejects cross-workspace moves.
 const chatMenuChat = computed<ChatInfo | null>(() => {
@@ -876,30 +843,6 @@ async function moveChatToProject(chatId: string, targetProjectId: string) {
   } catch (e) {
     store.pushErrorToast('Could not move chat', `${errorMessage(e)}`)
   }
-}
-
-async function onBrandClick() {
-  if (refreshing.value) return
-  refreshing.value = true
-  startBrandPixelAnimation()
-  try {
-    // Force the service worker to update without unregistering it,
-    // so push subscriptions survive across builds.
-    if ('serviceWorker' in navigator) {
-      const regs = await navigator.serviceWorker.getRegistrations()
-      await Promise.all(regs.map(r => r.update()))
-    }
-    if (typeof caches !== 'undefined') {
-      const keys = await caches.keys()
-      await Promise.all(keys.map(k => caches.delete(k)))
-    }
-  } catch (e) {
-    console.warn('Hard refresh cleanup failed', e)
-  }
-  // Bust HTTP cache too via a query string; replace so no back-button stale entry.
-  const url = new URL(window.location.href)
-  url.searchParams.set('_r', String(Date.now()))
-  window.location.replace(url.toString())
 }
 
 // Auto-expand all projects when they load (and keep new ones expanded)
@@ -1239,47 +1182,6 @@ async function confirmDeleteChat(chatId: string) {
 .toggle-btn:active { transform: scale(0.94); }
 .toggle-btn--collapsed svg { transform: scaleX(-1); }
 
-.brand {
-  /* Inherits .wordmark base from App.vue; override size and add interaction. */
-  font-size: calc(16px * var(--font-scale));
-  cursor: pointer;
-  transition: opacity 120ms var(--ease);
-  min-height: var(--touch);
-  align-items: center;
-  padding: 0 4px;
-  border: 0;
-  background: transparent;
-}
-.brand::before {
-  content: none;
-}
-.brand:hover { opacity: 0.85; }
-.brand:active { opacity: 0.7; }
-.brand-label {
-  display: inline-block;
-  min-width: 7ch;
-  text-align: left;
-}
-.brand--refreshing {
-  opacity: 1;
-  color: var(--accent);
-  pointer-events: none;
-}
-.brand--refreshing .brand-label {
-  animation: brand-pixel-jitter 0.12s steps(2, end) infinite;
-  text-shadow:
-    1px 0 color-mix(in srgb, var(--accent) 75%, transparent),
-    -1px 0 color-mix(in srgb, var(--accent2) 55%, transparent),
-    0 1px color-mix(in srgb, var(--fg) 35%, transparent);
-}
-@keyframes brand-pixel-jitter {
-  0%, 100% { transform: translate(0, 0); }
-  50% { transform: translate(1px, -1px); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .brand--refreshing .brand-label { animation: none; }
-}
-
 /* Pulsing dot used inline next to project / chat names to signal activity.
    A breathing scale+opacity pulse reads as "alive" at a glance, unlike a
    thin two-tone ring spin which is too subtle at this size to notice. */
@@ -1471,7 +1373,20 @@ async function confirmDeleteChat(chatId: string) {
 .nav-links {
   display: flex;
   align-items: center;
-  gap: 4px;
+  /* The wordmark used to take the middle of this row, leaving these four icons
+     huddled at a 4px gap against the right edge. It is in the pane header now, and
+     the ~90px it gives back is spent here: the icons spread across a 200px strip,
+     so each 30px glyph gets ~27px of air and its 44px touch target no longer
+     overlaps its neighbour's. The glyphs stay 30px, because the pane header sizes
+     its own icons to match the sidebar - see the note there.
+     `space-between` over a capped basis rather than a fixed gap, because that
+     degrades in both directions: a sidebar dragged out to 500px does not fling the
+     icons to the far edge (the strip stops at 200px), and one dragged down to its
+     180px minimum packs them back to the --space-1 floor instead of overflowing
+     the rail. The strip is narrower on mobile, where the bell hides - see below. */
+  flex: 0 1 200px;
+  justify-content: space-between;
+  gap: var(--space-1);
   margin-left: auto;
 }
 
@@ -2141,6 +2056,10 @@ async function confirmDeleteChat(chatId: string) {
   }
   .add-chat-btn { opacity: 1; }
   .sidebar-bell { display: none; }
+  /* Three icons here instead of four (the pane header carries the bell on mobile),
+     so the strip narrows to match. Left at 200px it would space three glyphs
+     40px apart and read as scattered rather than spread. */
+  .nav-links { flex-basis: 150px; }
 }
 
 /* Schedules list in sidebar (schedules mode) */

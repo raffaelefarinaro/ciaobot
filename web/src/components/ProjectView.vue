@@ -1,6 +1,6 @@
 <template>
   <div v-if="project" class="project-view">
-    <PaneHeader @open-sidebar="emit('open-sidebar')">
+    <PaneHeader page-tag="project" @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
           <button class="close-btn desktop-only" @click="$emit('close')" title="Close">&times;</button>
