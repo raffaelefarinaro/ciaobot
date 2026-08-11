@@ -700,7 +700,6 @@ class ChatStream:
         entry = None
         if self.pending_capability is not None:
             entry = self.pending_capability.pop(request_id, None)
-        before = len(self._events)
         self._events = [
             ev
             for ev in self._events

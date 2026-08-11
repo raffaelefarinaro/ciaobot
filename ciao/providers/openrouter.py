@@ -223,6 +223,9 @@ def discover_models(
         if anthropic_only and not mid.startswith("anthropic/"):
             continue
         models.append(mid)
+    # Replace, rather than update, so a model removed from the latest catalog
+    # cannot retain a stale capability answer from an earlier refresh.
+    _VISION_MODELS.clear()
     _VISION_MODELS.update(vision)
     return tuple(dict.fromkeys(models)), vision
 

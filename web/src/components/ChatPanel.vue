@@ -2245,13 +2245,14 @@ const activeCapabilityQuestions = computed(() => {
 const capabilityNow = ref(Date.now())
 let capabilityTimer: number | undefined
 watch(activeCapabilityQuestions, (qs) => {
+  capabilityNow.value = Date.now()
   if (qs.length && capabilityTimer === undefined) {
     capabilityTimer = window.setInterval(() => { capabilityNow.value = Date.now() }, 1000)
   } else if (!qs.length && capabilityTimer !== undefined) {
     window.clearInterval(capabilityTimer)
     capabilityTimer = undefined
   }
-})
+}, { immediate: true })
 onBeforeUnmount(() => {
   if (capabilityTimer !== undefined) window.clearInterval(capabilityTimer)
 })

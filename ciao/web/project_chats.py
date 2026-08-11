@@ -4366,7 +4366,7 @@ class ProjectChatManager:
                 if (
                     candidate
                     and candidate != current
-                    and model_supports_vision(candidate)
+                    and self._model_capable(candidate, chat)
                 ):
                     picks.append(candidate)
         elif backend == "openrouter":
@@ -4380,7 +4380,7 @@ class ProjectChatManager:
                     and candidate not in seen
                 ):
                     seen.add(candidate)
-                    if model_supports_vision(candidate):
+                    if self._model_capable(candidate, chat):
                         picks.append(candidate)
             # Fill the rest from the last catalog fetch (vision-capable
             # only), which piggybacks on refresh_openrouter_models.

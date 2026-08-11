@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Literal
 
 from ciao.config import CiaoConfig
 from ciao.models import ImageAttachment, ResultEvent
@@ -364,7 +365,7 @@ def test_ollama_vision_probe_cached_24h(monkeypatch) -> None:
         def __enter__(self) -> FakeResponse:
             return self
 
-        def __exit__(self, *exc) -> bool:
+        def __exit__(self, *exc) -> Literal[False]:
             return False
 
     def fake_urlopen(req, timeout=None):
@@ -447,7 +448,7 @@ def test_openrouter_catalog_flags_vision(monkeypatch) -> None:
         def __enter__(self) -> FakeResponse:
             return self
 
-        def __exit__(self, *exc) -> bool:
+        def __exit__(self, *exc) -> Literal[False]:
             return False
 
     def fake_urlopen(req, timeout=None):
@@ -464,3 +465,27 @@ def test_openrouter_catalog_flags_vision(monkeypatch) -> None:
     assert vision_support_openrouter("deepseek/deepseek-chat", settings) is False
     # Unknown ids (not in the last catalog fetch) are None, not False.
     assert vision_support_openrouter("unknown/model", settings) is None
+
+    # A subsequent refresh replaces the map, so a removed model cannot keep
+    # a stale vision answer from the previous catalog.
+    second_payload = {
+        "data": [{"id": "new/model", "architecture": {"modality": "text"}}]
+    }
+
+    class SecondResponse:
+        def read(self) -> bytes:
+            return json.dumps(second_payload).encode("utf-8")
+
+        def __enter__(self) -> SecondResponse:
+            return self
+
+        def __exit__(self, *exc) -> Literal[False]:
+            return False
+
+    monkeypatch.setattr(
+        or_mod.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: SecondResponse(),
+    )
+    discover_models(settings)
+    assert vision_support_openrouter("anthropic/claude-sonnet-4-6", settings) is None
