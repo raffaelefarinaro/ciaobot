@@ -186,13 +186,14 @@
         class="loop-banner-row"
       >
         <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
+        <!-- State comes from ChatSignals, not prose: this banner used to spell
+             out "· working" / "· needs input", which was a fourth, divergent
+             rendering of the same facts the sidebar and home already draw. -->
         <span class="loop-banner-text">
-          Subchat <strong>{{ child.title || 'untitled' }}</strong>
-          <template v-if="store.isChatStreaming(child.chat_id)"> · working</template>
-          <template v-else-if="store.chatHasBackgroundAgents(child.chat_id)"> · agents running</template>
-          <template v-else-if="store.chatNeedsInput(child.chat_id)"> · needs input</template>
-          <template v-else-if="store.chatUnread(child.chat_id) > 0"> · unread</template>
+          Subchat
+          <strong :class="{ 'subchat-unread': store.chatUnread(child.chat_id) > 0 }">{{ child.title || 'untitled' }}</strong>
         </span>
+        <ChatSignals :chat-id="child.chat_id" density="row" />
         <router-link
           :to="`/chat/${child.chat_id}`"
           class="btn-small loop-banner-manage"
@@ -1021,6 +1022,7 @@ import type { AgentAssetsResponse, CommandsResponse, Loop, Schedule, ModelsRespo
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
+import ChatSignals from './ChatSignals.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import {
@@ -6564,5 +6566,9 @@ details[open] > .activity-summary::before {
   min-width: 0;
 }
 .loop-banner-text strong { color: var(--fg); }
+
+/* Chat-level unread is title weight everywhere; chatUnread() is binary so a
+   digit could only ever read "1". */
+.loop-banner-text strong.subchat-unread { font-weight: 700; }
 .loop-banner-manage { text-decoration: none; }
 </style>

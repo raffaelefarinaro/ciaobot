@@ -272,24 +272,38 @@ plan: `ChatSignals.vue`, `lib/relativeTime.ts`, `lib/homeLanes.ts`, lanes and
 tiers in `HomeRecentChats.vue`, `ChatSignals` adopted in `ProjectSidebar.vue`,
 `workspaceNeedsInput` in the store. 145 tests pass across 25 files.
 
-**Two gaps remain from that commit, and they are the exact drift this document
-exists to prevent:**
+A follow-up commit closed the two gaps that commit left open — both were exactly
+the drift this document exists to prevent, and they are recorded here because the
+shape recurs:
 
-1. **`ChatSignals` is adopted in 2 of 4 call sites.** `ProjectView.vue` still
-   renders its own `spinner-dot` / `needs-input-badge` / `badge` chain (and still
-   prints `chatUnread` as a digit, violating Rule S5). `ChatPanel.vue` still
-   renders the chain as *prose* in the subchat banner (`· working`,
-   `· agents running`, `· needs input`, `· unread`). A half-adopted L2 component
-   is worse than none: the same chat now renders two ways depending on the view.
-2. **Two relative-time dialects now coexist.** `lib/relativeTime.ts` was created
-   compact (`now`, `12m`, `3w`) but `ProjectView.vue:504` still has its own
-   private `formatRelative` (`just now`, `5m ago`, `Aug 3`). The plan called for
-   extracting and widening the existing one with a `suffix` option; instead a
-   second was added alongside.
+1. **`ChatSignals` was adopted in 2 of 4 call sites.** `ProjectView.vue` kept its
+   own `spinner-dot` / `needs-input-badge` / `badge` chain (and printed
+   `chatUnread` as a digit, violating Rule S5); `ChatPanel.vue` rendered the chain
+   as *prose* in the subchat banner. Both now use the component. A half-adopted L2
+   component is worse than none — the same chat renders two ways depending on the
+   view.
+2. **Two relative-time dialects coexisted.** `lib/relativeTime.ts` was created
+   compact while `ProjectView.vue` kept a private `formatRelative`. The shared
+   helper now takes `{ suffix, absoluteAfterDays }` so prose and file-listing
+   forms come from one implementation, and the private copy is gone.
 
-Closing both is the highest-value next change, and it is small: migrate
-`ProjectView.vue` and the `ChatPanel.vue` subchat banner, add the `suffix` option
-to `relativeTime`, delete the private copy.
+**Current state:** all four `ChatSignals` call sites migrated; one
+`formatRelative`. `ChatPanel.vue` and `ProjectView.vue` are otherwise still
+off-system (see §3 Rule S4 on emoji, and the chat-page proposals) — the state
+chain is fixed, the rest of those views is not.
+
+### Known harness breakage (pre-existing, not caused by this work)
+
+`npm run test` currently exits 1 with **all 17 jsdom test files failing to start
+their workers**, so only the 25 non-DOM files actually run. Cause is upstream:
+`jsdom` floats at `^29.1.1`, and `html-encoding-sniffer@6.0.0` does a CJS
+`require()` of `@exodus/bytes@1.15.1`, which is ESM-only.
+
+This predates the branch — `web/package.json` last changed at the v0.7.1 release.
+Until it is fixed, component-level changes can only be verified with
+`npm run build` (which does run `vue-tsc --noEmit`) and `npm run lint`. Worth a
+dedicated fix commit, likely an npm `overrides` pin on `@exodus/bytes`; do not
+fold it into a UI PR.
 
 ---
 
