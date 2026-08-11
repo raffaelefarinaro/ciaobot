@@ -1391,7 +1391,9 @@ async function confirmDeleteChat(chatId: string) {
      expanding label, so the row's width depends on which page you are on. */
   flex: 0 1 auto;
   justify-content: flex-end;
-  gap: var(--space-1);
+  /* Wider than the old icon-only 4px: the active item now ends in text, and a
+     4px gap between a word and the next glyph reads as a collision. */
+  gap: var(--space-2);
   margin-left: auto;
   min-width: 0;
 }
@@ -1433,13 +1435,17 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .nav-item--active .nav-item-label {
-  max-width: 9ch;
+  /* Room for the longest label ("automations", 11 characters) plus a little, so
+     it is never clipped mid-word. At 9ch it read as "automatio" hard against the
+     next glyph. */
+  max-width: 12ch;
   opacity: 1;
 }
 
-/* Truncate the label before the icons are pushed out of the rail. */
+/* Below this the rail cannot hold a full label and every glyph at once, so trade
+   the label away rather than the icons. */
 @media (max-width: 900px) {
-  .nav-item--active .nav-item-label { max-width: 7ch; }
+  .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
 }
 
 .nav-item:hover {

@@ -5386,6 +5386,9 @@ details[open] > .activity-summary::before {
   box-shadow: 0 0 4px var(--accent);
   animation: activity-pulse 1.1s ease-in-out infinite;
   flex-shrink: 0;
+  /* The halo and the expanding ring paint ~3px beyond this element's box, so the
+     row's 8px gap looked like ~5px and the dot read as touching the label. */
+  margin-right: var(--space-1);
 }
 
 .activity-spinner::before {
