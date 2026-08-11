@@ -5240,9 +5240,21 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     if pcm is None:
         return JSONResponse({"chats": [], "attention_count": 0})
 
+    chats = pcm.list_chats()
+    # Delegate completion is internal model-to-model traffic: it wakes the
+    # supervisor, so the PWA deliberately does not report a nested delegate as
+    # a second unread chat. Keep the tray feed on the same rule. An archived or
+    # missing supervisor makes the delegate an orphan, which remains a normal
+    # visible chat and may be unread.
+    active_chat_ids = {
+        candidate.chat_id
+        for candidate in chats
+        if not candidate.archived
+    }
+
     rows: list[dict[str, object]] = []
     attention_count = 0
-    for chat in pcm.list_chats():
+    for chat in chats:
         if chat.archived:
             continue
         project = pcm.get_project(chat.project_id)
@@ -5250,7 +5262,11 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             continue
         activity = chat.last_activity_at or ""
         read = chat.last_read_at or ""
-        unread = bool(activity) and activity > read
+        nested_delegate = bool(
+            getattr(chat, "spawned_from_chat_id", "")
+            and getattr(chat, "spawned_from_chat_id", "") in active_chat_ids
+        )
+        unread = not nested_delegate and bool(activity) and activity > read
         needs_input = _menubar_chat_needs_input(chat.pending_question)
         if unread or needs_input:
             attention_count += 1
