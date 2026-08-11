@@ -18,7 +18,6 @@
               :data-workspace-color="workspaceCrumb.color"
               :title="`Workspace ${workspaceCrumb.name} (press ${workspaceCrumb.key})`"
             >
-              <span v-if="workspaceCrumb.key" class="breadcrumb-key" aria-hidden="true">{{ workspaceCrumb.key }}</span>
               {{ workspaceCrumb.name }}
             </span>
             <span v-if="workspaceCrumb" class="breadcrumb-separator">/</span>
@@ -4445,22 +4444,10 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
 .breadcrumb-workspace {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
-  font-size: var(--text-sm);
+  font-size: var(--text-lg);
   color: var(--accent);
   white-space: nowrap;
   flex-shrink: 0;
-}
-
-.breadcrumb-key {
-  min-width: 15px;
-  padding: 0 3px;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  line-height: 1.3;
-  text-align: center;
 }
 
 @media (max-width: 600px) {
@@ -4486,7 +4473,10 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
 
 .breadcrumb-separator {
   color: var(--fg3);
-  font-size: 16px;
+  /* Same step as the crumb either side of it. The hardcoded 16px here sat
+     visibly smaller than --text-lg once the font scale was applied, and did not
+     move with the Appearance setting at all. */
+  font-size: var(--text-lg);
   user-select: none;
   flex-shrink: 0;
 }

@@ -310,13 +310,18 @@ describe('ChatPanel workspace breadcrumb', () => {
   })
   afterEach(() => vi.restoreAllMocks())
 
-  it('names the workspace with its number key and hue', async () => {
+  // The number badge is gone: it existed to teach the 1-9 shortcut, and it does
+  // that on the home lanes and the sidebar pills where pressing the key visibly
+  // does something. In a chat header there is nothing to switch, so it read as a
+  // number with no referent. The shortcut survives in the tooltip.
+  it('names the workspace and hues it, without a number badge', async () => {
     const { wrapper } = await mountPanel()
     const crumb = wrapper.find('.breadcrumb-workspace')
     expect(crumb.exists()).toBe(true)
-    expect(crumb.text()).toContain('personal')
+    expect(crumb.text()).toBe('personal')
     expect(crumb.attributes('data-workspace-color')).toBe('emerald')
-    expect(wrapper.find('.breadcrumb-key').text()).toBe('1')
+    expect(wrapper.find('.breadcrumb-key').exists()).toBe(false)
+    expect(crumb.attributes('title')).toContain('press 1')
     wrapper.unmount()
   })
 })

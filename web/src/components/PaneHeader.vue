@@ -62,7 +62,9 @@ defineEmits<{ 'open-sidebar': [] }>()
 }
 :deep(.pane-title) {
   font-weight: 600;
-  font-size: 16px;
+  /* Token, not 16px: the breadcrumb beside this uses --text-lg, so a fixed
+     pixel value drifted apart from it as soon as the font scale moved. */
+  font-size: var(--text-lg);
   display: block;
   min-width: 0;
   max-width: 100%;
