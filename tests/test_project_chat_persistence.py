@@ -9,7 +9,7 @@ from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import ProjectChatManager, _cap_reentry_summary
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
@@ -205,3 +205,25 @@ def test_reentry_summary_is_cached_bounded_and_invalidated_by_queue(
     after_message = _make_manager(tmp_path).get_chat(chat.chat_id)
     assert after_message is not None
     assert after_message.reentry_summary == ""
+
+
+def test_reentry_summary_humanizes_fenced_json_and_repairs_cached_bullets() -> None:
+    generated = """```json
+{
+  "repo_source": "insights.py",
+  "crash_timeline": "checked around crash time",
+  "next_step": "review the failing path"
+}
+```"""
+
+    normalized = _cap_reentry_summary(generated)
+    assert normalized == (
+        "• Repo source: insights.py\n"
+        "• Crash timeline: checked around crash time\n"
+        "• Next step: review the failing path"
+    )
+    assert "```" not in normalized
+    assert "{" not in normalized
+
+    cached = "\n".join(f"• {line}" for line in generated.splitlines())
+    assert _cap_reentry_summary(cached) == normalized

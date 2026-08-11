@@ -433,18 +433,96 @@ _REENTRY_SUMMARY_MAX_CHARS = 600
 _REENTRY_SUMMARY_MAX_BULLETS = 4
 
 
+def _reentry_summary_lines(text: str) -> list[str]:
+    """Return summary content without markdown/list wrapper syntax."""
+    lines: list[str] = []
+    for raw_line in (text or "").splitlines():
+        line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", raw_line).strip()
+        if not line or re.fullmatch(r"```(?:[a-zA-Z0-9_-]+)?\s*", line):
+            continue
+        lines.append(line)
+    return lines
+
+
+def _parse_reentry_summary_json(text: str) -> Any | None:
+    """Parse a JSON response, including a fenced or bullet-wrapped object."""
+    cleaned = "\n".join(_reentry_summary_lines(text))
+    candidates = [candidate for candidate in (text.strip(), cleaned) if candidate]
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+        # Apple occasionally adds a short preamble before the structured
+        # response. Decode from the first object/array rather than exposing
+        # that preamble or the JSON punctuation in the UI.
+        for marker in ("{", "["):
+            start = candidate.find(marker)
+            if start == -1:
+                continue
+            try:
+                value, _ = decoder.raw_decode(candidate[start:])
+            except json.JSONDecodeError:
+                continue
+            return value
+    return None
+
+
+def _summary_field_label(key: object) -> str:
+    label = re.sub(r"[_-]+", " ", str(key)).strip()
+    return label[:1].upper() + label[1:] if label else ""
+
+
+def _summary_value_text(value: Any) -> str:
+    """Render a JSON value as compact human-readable text."""
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        parts = [_summary_value_text(item) for item in value]
+        return "; ".join(part for part in parts if part)
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, item in value.items():
+            item_text = _summary_value_text(item)
+            label = _summary_field_label(key)
+            if item_text and label:
+                parts.append(f"{label}: {item_text}")
+        return "; ".join(parts)
+    return str(value)
+
+
+def _reentry_summary_phrases(parsed: Any) -> list[str]:
+    if isinstance(parsed, dict):
+        phrases: list[str] = []
+        for key, value in parsed.items():
+            label = _summary_field_label(key)
+            value_text = _summary_value_text(value)
+            if label and value_text:
+                phrases.append(f"{label}: {value_text}")
+        return phrases
+    if isinstance(parsed, list):
+        return [value for item in parsed if (value := _summary_value_text(item))]
+    value = _summary_value_text(parsed)
+    return [value] if value else []
+
+
 def _cap_reentry_summary(text: str) -> str:
     """Normalize an orientation summary to a small, predictable UI note."""
     raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not raw:
         return ""
 
-    phrases: list[str] = []
-    for line in raw.splitlines():
-        phrase = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
-        if not phrase or phrase.startswith("#"):
-            continue
-        phrases.append(phrase)
+    parsed = _parse_reentry_summary_json(raw)
+    phrases = _reentry_summary_phrases(parsed) if parsed is not None else []
+    if not phrases:
+        phrases = [line for line in _reentry_summary_lines(raw) if not line.startswith("#")]
     if len(phrases) == 1:
         phrases = [
             phrase.strip()
@@ -7781,7 +7859,11 @@ class ProjectChatManager:
         if chat.archived:
             return ""
         if chat.reentry_summary:
-            return chat.reentry_summary
+            normalized = _cap_reentry_summary(chat.reentry_summary)
+            if normalized and normalized != chat.reentry_summary:
+                chat.reentry_summary = normalized
+                self._save(reason="reentry_summary_normalized")
+            return normalized or chat.reentry_summary
 
         revision = chat.reentry_summary_revision
 
