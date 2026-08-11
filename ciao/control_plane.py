@@ -783,16 +783,19 @@ class CiaoControlPlane:
                 f"spawning another.",
             )
         project = self._resolve_project(principal, project_id)
-        chat = self.pcm.create_chat(
-            project.project_id,
-            title=title.strip() or "Delegate",
-            provider=provider,
-            model=model,
-            model_bucket=model_bucket,
-            mode=mode,
-            spawned_from_chat_id=parent.chat_id,
-            delegation_id=delegation_id.strip(),
-        )
+        try:
+            chat = self.pcm.create_chat(
+                project.project_id,
+                title=title.strip() or "Delegate",
+                provider=provider,
+                model=model,
+                model_bucket=model_bucket,
+                mode=mode,
+                spawned_from_chat_id=parent.chat_id,
+                delegation_id=delegation_id.strip(),
+            )
+        except ValueError as exc:
+            raise ControlPlaneError("invalid_model", str(exc)) from exc
         # Same start/queue split as chat_send: a brand-new chat is never
         # streaming, so this normally starts immediately.
         if self.pcm.queue_message(chat.chat_id, prompt.strip()):

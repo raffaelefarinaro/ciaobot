@@ -65,6 +65,7 @@ from ciao.model_tiers import (
     CODEX_FABLE_THINKING_LEVEL,
     canonical_tier,
     is_capability_error,
+    is_tier,
     model_supports_vision,
     model_vision_ambiguous,
     next_tier_for_failure,
@@ -2802,6 +2803,7 @@ class ProjectChatManager:
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
         self._validate_custom_model_runner(chat_model, chat_provider)
+        self._validate_configured_model(model, chat_provider)
         # Claude chats record the bucket explicitly: the workspace only
         # preselects (personal → "personal"), but an explicit picker choice
         # wins and survives project moves. Personal-bucket alias defaults
@@ -2928,6 +2930,13 @@ class ProjectChatManager:
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
         self._validate_custom_model_runner(model or chat.model, provider or chat.provider)
+        # Validate the model id we'll end up with against the provider we'll
+        # end up on, even when only one of the two is being changed.
+        target_provider = provider or chat.provider
+        if model is not None:
+            self._validate_configured_model(model, target_provider)
+        elif provider is not None:
+            self._validate_configured_model(chat.model, target_provider)
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if thinking_level is not None:
@@ -4029,6 +4038,43 @@ class ProjectChatManager:
             raise ValueError(
                 f"Custom provider '{custom.name}' must be used with {custom.runner}"
             )
+
+    def _validate_configured_model(
+        self, model: str | None, provider: str | None
+    ) -> None:
+        """Reject a free-text model id that is not in the configured set.
+
+        ``claude_models`` is the single source of truth populated at startup
+        and on Settings → Models from ``refresh_local_ollama_models``,
+        ``refresh_openrouter_models``, and ``refresh_cloud_ollama_models``.
+        A valid id is therefore either a configured id, a tier alias
+        (``haiku``/``sonnet``/``opus``/``fable``) that ``_resolve_claude_model``
+        expands at dispatch time, a model that ``is_ollama_model`` recognises
+        (covers the local-daemon list and the cloud ``:tag``-shaped ids
+        without forcing callers to pre-merge the two sets), or a
+        ``custom:<id>:<model>`` id routed through a configured custom
+        provider. Codex is skipped because its catalog is async and the
+        Codex CLI already rejects unknown ids with a clear error at the
+        first turn.
+        """
+        if not model:
+            return
+        if provider == "codex":
+            return
+        if provider_for_model(self._config, model) is not None:
+            return
+        if is_tier(model):
+            return
+        if is_ollama_model(model, self._config.ollama):
+            return
+        allowed = list(self._config.claude_models)
+        if model in allowed:
+            return
+        sample = ", ".join(allowed[:8]) if allowed else "(none configured)"
+        raise ValueError(
+            f"Unknown model '{model}' for provider '{provider or 'default'}' "
+            f"(configured models: {sample})"
+        )
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
         """Return the chat's thinking level, or "" when stale.

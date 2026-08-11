@@ -628,3 +628,62 @@ def test_delegate_spawn_rejects_an_empty_prompt(tmp_path: Path) -> None:
         )
 
     assert excinfo.value.code == "empty_prompt"
+
+
+def test_delegate_spawn_rejects_an_unconfigured_model(tmp_path: Path) -> None:
+    """Issue #259: free-text model ids must be validated at dispatch time.
+
+    ``claude_models`` defaults to ``["opus", "sonnet", "haiku"]``; an unknown
+    id like ``deepseek-coder`` must surface as a clear ``invalid_model``
+    error so the caller can correct the dispatch, instead of opening a chat
+    that silently fails on its first turn.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    plane = _control_plane(manager)
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.delegate_spawn(
+            _principal(parent.chat_id, project.project_id),
+            prompt="do the thing",
+            model="deepseek-coder",
+        )
+
+    assert excinfo.value.code == "invalid_model"
+    assert "deepseek-coder" in str(excinfo.value)
+    # The error names valid alternatives so the agent can self-correct.
+    assert "opus" in str(excinfo.value)
+    assert "sonnet" in str(excinfo.value)
+    assert "haiku" in str(excinfo.value)
+
+
+def test_delegate_spawn_accepts_a_configured_model(tmp_path: Path) -> None:
+    """A model id that is in the configured set must pass through cleanly."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    # Stub queue_message so delegate_spawn doesn't fall into the stream
+    # path (which needs a live event loop in this sync test).
+    manager.queue_message = lambda chat_id, text: True  # type: ignore[method-assign]
+    plane = _control_plane(manager)
+
+    result = plane.delegate_spawn(
+        _principal(parent.chat_id, project.project_id),
+        prompt="do the thing",
+        model="haiku",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["model"] == "haiku"
+
+
+def test_create_chat_rejects_an_unconfigured_model(tmp_path: Path) -> None:
+    """The validator runs on every ``create_chat`` path, not just delegates."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown model 'deepseek-coder'"):
+        manager.create_chat(project.project_id, model="deepseek-coder")
