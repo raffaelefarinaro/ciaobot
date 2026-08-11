@@ -101,6 +101,32 @@ def test_send_test_pushes_only_to_local_subscriptions(tmp_path: Path, monkeypatc
     assert result == {"local_subscriptions": 1, "accepted": 1}
 
 
+def test_clear_chat_logs_control_and_pushes_to_every_subscription(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import pywebpush
+
+    endpoints: list[str] = []
+    monkeypatch.setattr(
+        pywebpush,
+        "webpush",
+        lambda **kwargs: endpoints.append(kwargs["subscription_info"]["endpoint"]),
+    )
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
+    manager.add({"endpoint": "https://push.example/local"}, local=True)
+    manager.add({"endpoint": "https://push.example/phone"}, local=False)
+
+    manager.clear_chat("c1")
+
+    entries = _read_log(tmp_path)
+    assert entries[-1]["kind"] == "clear"
+    assert entries[-1]["chat_id"] == "c1"
+    assert endpoints == [
+        "https://push.example/local",
+        "https://push.example/phone",
+    ]
+
+
 def test_remote_push_failure_does_not_lose_local_notification(tmp_path: Path, monkeypatch) -> None:
     """A remote push that fails must not affect the local native banner, and a
     non-404 failure must not prune the subscription."""

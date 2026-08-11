@@ -551,7 +551,9 @@
                       <button v-if="moveTargets.length" @click="openMoveSubmenu()">Move to...</button>
                       <button v-if="chatMenuChat?.retry?.status === 'pending'" @click="stopRetry(chatMenu!)">Stop trying</button>
                       <button v-else @click="setRetry(chatMenu!)">Set to retry</button>
-                      <button @click="doArchiveChat(chatMenu!)">Archive</button>
+                      <button @click="doArchiveChat(chatMenu!)">
+                        {{ archiveMenuLabel(chatMenu!) }}
+                      </button>
                       <button @click="confirmDeleteChat(chatMenu!)">Delete</button>
                     </template>
                     <template v-else>
@@ -650,6 +652,7 @@ import NotificationBell from './NotificationBell.vue'
 import ChatSignals from './ChatSignals.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
+import { archiveMenuLabel as menuLabel, archiveConfirmMessage } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
@@ -832,6 +835,27 @@ function openMoveSubmenu() {
 function closeChatMenus() {
   chatMenu.value = null
   moveSubmenu.value = false
+}
+
+function activeSubchatCount(chatId: string): number {
+  return store.activeDelegatesFor(chatId).length
+}
+
+function archiveMenuLabel(chatId: string): string {
+  return menuLabel(activeSubchatCount(chatId))
+}
+
+// Subchats working right now. Archiving stops them instead of waiting, so the
+// confirm dialog names them first. Background agents count as working: they
+// outlive their turn, so a subchat with no live turn can still be busy.
+function busySubchatCount(chatId: string): number {
+  return store.activeDelegatesFor(chatId).filter(
+    d => store.isChatStreaming(d.chat_id) || store.chatHasBackgroundAgents(d.chat_id),
+  ).length
+}
+
+function archiveConfirmation(chatId: string): string {
+  return archiveConfirmMessage(activeSubchatCount(chatId), busySubchatCount(chatId))
 }
 
 // Reset the submenu whenever the active chat menu changes (open, close,
@@ -1124,11 +1148,16 @@ async function doArchiveChat(chatId: string) {
   chatMenu.value = null
   // This path never asked for confirmation, unlike the chat header's archive
   // button, so archiving from the sidebar menu was a single misclick.
-  if (!await askConfirm('Archive this chat? You can reopen it from the archive.', {
+  if (!await askConfirm(archiveConfirmation(chatId), {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return
-  await store.archiveChat(chatId)
+  try {
+    await store.archiveChat(chatId)
+  } catch {
+    // archiveChat reconnected the sockets and raised an error toast already;
+    // swallow the rejection so it is not an unhandled one.
+  }
 }
 
 async function setRetry(chatId: string) {

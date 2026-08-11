@@ -165,6 +165,12 @@ root; the local `/api/desktop-drop` route consumes it and either returns host
 paths or transfers client files to the host project. Verify both a host
 Finder-to-chat drop and a client-to-host transfer after changing this bridge.
 
+Read mutations are cross-device notification mutations too: the engine emits a
+clear control for the chat, remote PWA service workers close their matching
+notification tag, and the macOS shell removes delivered native banners. Keep
+the desktop notification-log and service-worker tests aligned when changing
+notification identifiers or payload shapes.
+
 ### Rebuilding the shell from Settings → Restart
 
 With `CIAO_DEV_MODE=true`, Settings → Restart also rebuilds this bundle, but only

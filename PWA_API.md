@@ -38,7 +38,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant (local node only) |
 | GET | `/api/chats` | List all chats |
 | GET | `/api/menubar-chats` | Compact chat list for the `Ciaobot.app` tray |
-| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; proxied to the host in client mode) |
+| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; includes read-clear controls and is proxied to the host in client mode) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
@@ -326,7 +326,17 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
   -H 'content-type: application/json' \
   -d '{"turn_index":0,"messages":[{"role":"user","content":"Question"},{"role":"assistant","content":"Answer"}]}'
 
-# Archive — finalises the chat and writes a Markdown transcript. Returns {ok, archived_to}.
+# Archive — finalises the chat and writes a Markdown transcript. If this chat
+# supervises delegate subchats, their active chats are archived too: a subchat
+# that is mid-turn is stopped first, so its unfinished output is discarded
+# rather than written past the archive. Returns
+# {ok, archived_to, archived_chat_ids, stopped_chat_ids, failed_chat_ids,
+# subchats}; one `chat_archived` event is emitted for each chat.
+# The cascade can partly fail, and `ok` only covers the requested chat, so
+# treat `archived_chat_ids` as the authority on what is actually archived —
+# anything absent from it is still live. `stopped_chat_ids` are the subchats
+# whose running turn was cut short (tell the user); `failed_chat_ids` are the
+# ones left active and needing a direct archive.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/archive"
 
 # Mark read — returns {ok, last_read_at}.
@@ -334,6 +344,10 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 
 # Mark all read.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/read-all"
+
+# Read mutations also cancel the delayed push and emit a cross-device clear
+# control. Connected PWAs close the matching service-worker notification tag;
+# the macOS tray removes delivered Ciaobot banners for the chat.
 
 # Deferred retry after provider/session quota errors. action ∈ {set, try_now, stop}.
 # `set` needs the user prompt to replay; automatic quota handling fills this itself.

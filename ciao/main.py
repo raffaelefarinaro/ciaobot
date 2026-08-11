@@ -526,6 +526,22 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app.state.focused_chats = {}
     pcm._push_manager = app.state.push_manager
 
+    # A read mutation is already broadcast to every connected PWA. Fan the
+    # same mutation out to delivered OS notifications in the background: the
+    # macOS companion consumes the runtime log, while Web Push subscriptions
+    # receive a service-worker control message that closes their chat tag.
+    def _clear_notifications(chat_id: str) -> None:
+        pm = app.state.push_manager
+        if pm is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, pm.clear_chat, chat_id)
+        except Exception:
+            logger.exception("Failed scheduling notification clear for %s", chat_id)
+
+    pcm.clear_notifications_cb = _clear_notifications
+
     # Google Workspace token health + server-managed re-login (issue #145).
     from ciao.gws_auth import GwsHealthMonitor, GwsReloginManager
 

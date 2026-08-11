@@ -224,6 +224,21 @@ class PushManager:
         accepted = self._deliver(local, payload)
         return {"local_subscriptions": len(local), "accepted": accepted}
 
+    def clear_chat(self, chat_id: str) -> None:
+        """Clear delivered notifications for ``chat_id`` on every channel.
+
+        The log entry is consumed by the macOS menu-bar companion. The same
+        control payload is sent to every Web Push subscription, including the
+        local browser subscription: service workers can close notifications
+        they previously displayed, but the server cannot do that directly.
+        """
+        chat_id = chat_id.strip()
+        if not chat_id:
+            return
+        payload = {"kind": "clear", "chat_id": chat_id}
+        self._log_notification(payload)
+        self._deliver(list(self._subs), payload)
+
     def _deliver(self, subs: list[dict[str, Any]], payload: dict[str, Any]) -> int:
         """Web Push to the given subscriptions. Returns how many the push
         service *accepted* (2xx) — which is not a guarantee of display. Prunes

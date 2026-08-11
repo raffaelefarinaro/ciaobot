@@ -969,6 +969,59 @@ class ArchiveOutcome:
 
 
 @dataclass(slots=True)
+class DelegateArchiveResult:
+    """What the archive cascade did to one delegate subchat.
+
+    Archiving a supervisor tears its delegates down immediately, so each row
+    has to be reportable: the caller turns these into the API response the PWA
+    uses to decide which children it may mark archived, which running turns to
+    tell the user about, and which children are still live because they failed.
+    """
+
+    chat_id: str
+    archived: bool = False
+    # True when the delegate had a live broker stream that we stopped. The
+    # user is told about these: archiving discarded whatever that turn had
+    # not finished, and that must never be a silent side effect.
+    stopped_mid_turn: bool = False
+    # Non-empty when archiving this delegate raised. The supervisor and the
+    # remaining delegates still archive; this row is how the failure reaches
+    # the user instead of being absorbed into a bare "ok".
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "chat_id": self.chat_id,
+            "archived": self.archived,
+            "stopped_mid_turn": self.stopped_mid_turn,
+            "error": self.error,
+        }
+
+
+@dataclass(slots=True)
+class ChatArchiveResult:
+    """Whole-cascade result: the supervisor's outcome plus one row per delegate.
+
+    ``outcome`` is None for a chat with nothing to write (an empty transcript);
+    the chat is still archived in that case, which is why the delegate rows live
+    out here rather than on ``ArchiveOutcome`` — an empty supervisor must still
+    report what it did to its subchats.
+    """
+
+    outcome: ArchiveOutcome | None
+    delegates: list[DelegateArchiveResult] = field(default_factory=list)
+
+    def archived_ids(self) -> list[str]:
+        return [row.chat_id for row in self.delegates if row.archived]
+
+    def stopped_ids(self) -> list[str]:
+        return [row.chat_id for row in self.delegates if row.stopped_mid_turn]
+
+    def failed_ids(self) -> list[str]:
+        return [row.chat_id for row in self.delegates if row.error]
+
+
+@dataclass(slots=True)
 class ScheduleRunOutcome:
     completed: bool = False
     is_error: bool = False
@@ -1103,6 +1156,10 @@ class ProjectChatManager:
         # AskUserQuestion. The headless CLI auto-cancels with empty answers,
         # so we notify the user so they can answer in the next turn.
         self.notify_question_cb: Optional[Callable[[str, str], None]] = None
+        # Fired after a read mutation so the macOS companion and remote PWA
+        # service workers can dismiss already-delivered OS notifications for
+        # that chat.
+        self.clear_notifications_cb: Optional[Callable[[str], None]] = None
         # Per-chat pending push tasks. Pushes are scheduled with a short
         # delay (CIAO_PUSH_DELAY_SECONDS, default 30s) so that reading the
         # chat on any device within the window suppresses the buzz. New
@@ -3348,25 +3405,178 @@ class ProjectChatManager:
 
     # ── Session management ───────────────────────────────────────────────
 
-    def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
+    async def archive_chat(self, chat_id: str) -> ChatArchiveResult | None:
         """Archive a chat's transcript and mark it as archived.
 
         Also disconnects any live provider and reclaims provider-side session
         storage (Claude SDK JSONL blob, Codex ``thread/delete``). The markdown
-        transcript in the vault is the durable record.
+        transcript in the vault is the durable record. Active delegate
+        subchats are archived as part of the same operation, so a supervisor
+        cannot leave its nested work chats running or visible on their own.
 
-        Returns an ArchiveOutcome carrying the archive path plus a
-        pre-filtered JSONL string captured before blob deletion, so the
-        route handler can dispatch post-archive insights extraction
-        without racing against the disk reclaim.
+        A delegate that is mid-turn is stopped *before* its transcript is
+        snapshotted. Archiving deletes the provider session and consumes the
+        in-progress transcript, so anything the turn emitted afterwards used to
+        be written into a chat nobody could reopen. Stopping first keeps the
+        archive honest about where the turn ended. The archive is still
+        immediate — it is not deferred until the delegate finishes — so the
+        result records which delegates were running and the caller warns the
+        user that their unfinished work was discarded.
+
+        Returns a ChatArchiveResult wrapping the primary chat's ArchiveOutcome
+        (archive path plus a pre-filtered JSONL string captured before blob
+        deletion, so the caller can dispatch post-archive insights extraction
+        without racing against the disk reclaim) and one row per delegate.
+        None means the chat does not exist.
         """
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
-        self._revoke_mcp_chat(chat_id)
-        ctx = ChatContext.for_web(chat_id)
-        # Capture turn count before archive_session consumes the in-memory
-        # transcript; capture the filtered JSONL before blob deletion.
+        # Delegates are intentionally not allowed to nest today, but walking
+        # descendants keeps the archive invariant safe for older/corrupt
+        # registries and for any future relaxation of that rule.
+        delegate_ids = self._delegate_descendant_ids(chat_id)
+        outcome = await self._archive_single_chat(chat_id)
+        result = ChatArchiveResult(outcome=outcome)
+
+        # The route/control-plane caller runs post-processing for the primary
+        # chat. Do the same for each automatically archived subchat here so
+        # its insights, trajectory, and FTS indexing are not skipped.
+        for delegate_id in delegate_ids:
+            delegate = self._chats.get(delegate_id)
+            if delegate is None or delegate.archived:
+                continue
+            row = DelegateArchiveResult(chat_id=delegate_id)
+            result.delegates.append(row)
+            # Stop first, then archive. Both steps await, so re-read the row
+            # afterwards: another archive, a delete, or the delegate finishing
+            # on its own can all land while we are suspended.
+            row.stopped_mid_turn = await self._stop_delegate_for_archive(delegate_id)
+            delegate = self._chats.get(delegate_id)
+            if delegate is None:
+                continue
+            if delegate.archived:
+                row.archived = True
+                continue
+            delegate_project = self._projects.get(delegate.project_id)
+            try:
+                delegate_outcome = await self._archive_single_chat(
+                    delegate_id, save=False
+                )
+            except Exception as exc:  # noqa: BLE001 — one bad subchat must not strand the rest
+                # The supervisor is already archived and saved at this point.
+                # Letting this propagate would 500 the caller, skip the
+                # supervisor's own post-processing, and leave the remaining
+                # subchats running, so absorb it and keep going. The error is
+                # recorded on the row so the caller can still report it: this
+                # delegate may be half-archived (MCP grant revoked, `archived`
+                # never set) and _reconcile_half_archived_chats cannot heal it,
+                # because that only repairs rows with an archive on disk.
+                logger.exception(
+                    "Archiving delegate subchat %s of %s failed",
+                    delegate_id,
+                    chat_id,
+                )
+                row.error = str(exc) or exc.__class__.__name__
+                continue
+            row.archived = True
+            if delegate_outcome is None:
+                continue
+            try:
+                self.run_archive_postprocess(
+                    delegate_id,
+                    delegate_outcome,
+                    delegate,
+                    delegate_project,
+                )
+            except Exception:  # noqa: BLE001 — child cleanup must not undo parent archive
+                logger.exception(
+                    "Archive postprocess failed for delegate subchat %s",
+                    delegate_id,
+                )
+        # One write for every delegate archived above, which each deferred it.
+        # Unconditional: a subchat that raised out of _archive_single_chat may
+        # still have mutated the registry before it failed, and leaving that
+        # unsaved is what makes a half-archived row unrecoverable.
+        if delegate_ids:
+            self._save()
+        return result
+
+    # How long to let a stopped delegate's stream actually wind down before
+    # snapshotting its transcript. This is not "wait until the delegate is
+    # done" — the stop has already been requested and the turn is over; this
+    # only covers the round trip for the provider to acknowledge it, so the
+    # final chunk lands in the archive instead of after it. Bounded so a
+    # wedged provider cannot hold the archive (or the request) open.
+    _DELEGATE_STOP_GRACE_S = 2.0
+    _DELEGATE_STOP_POLL_S = 0.05
+
+    async def _stop_delegate_for_archive(self, chat_id: str) -> bool:
+        """End a delegate's in-flight turn ahead of archiving it.
+
+        Returns True when the delegate actually had a live stream, which is the
+        fact the user is warned about — not whether the stop call succeeded. A
+        failed stop still leaves a chat that was running when we archived it.
+        """
+        if self._broker.get(chat_id) is None:
+            return False
+        try:
+            await self.stop_chat(chat_id)
+        except Exception:  # noqa: BLE001 — a failed stop must not block the archive
+            logger.exception(
+                "Stopping delegate subchat %s before archive failed", chat_id
+            )
+            return True
+        deadline = time.monotonic() + self._DELEGATE_STOP_GRACE_S
+        while self._broker.get(chat_id) is not None:
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "Delegate subchat %s was still streaming %.1fs after stop; "
+                    "archiving anyway",
+                    chat_id,
+                    self._DELEGATE_STOP_GRACE_S,
+                )
+                break
+            await asyncio.sleep(self._DELEGATE_STOP_POLL_S)
+        return True
+
+    def _delegate_descendant_ids(self, parent_chat_id: str) -> list[str]:
+        """Return active delegate descendants in parent-before-child order."""
+        descendants: list[str] = []
+        pending = [parent_chat_id]
+        seen = {parent_chat_id}
+        while pending:
+            current_parent = pending.pop(0)
+            for child in self.delegates_for_chat(current_parent):
+                if child.chat_id in seen:
+                    continue
+                seen.add(child.chat_id)
+                # Traverse through an already-archived delegate rather than
+                # stopping at it: pruning here left its own active children
+                # running and orphaned, which is the exact case this walk
+                # exists to cover in legacy or corrupt registries. Only the
+                # returned list skips archived rows; the walk does not.
+                pending.append(child.chat_id)
+                if child.archived:
+                    continue
+                descendants.append(child.chat_id)
+        return descendants
+
+    def _read_archive_inputs(
+        self, chat_id: str, ctx: ChatContext, chat: ChatInfo
+    ) -> tuple[int, str | None, Path | None]:
+        """Disk half of archiving one chat, safe to run off the event loop.
+
+        Everything here is file I/O keyed by this chat's own context and session
+        id — read the turn count and the filtered JSONL, then render and write
+        the markdown archive. It touches no shared in-memory state and no
+        asyncio primitives, which is what lets ``_archive_single_chat`` hand it
+        to a worker thread.
+
+        Ordering matters: the turn count has to be taken before
+        ``archive_session`` consumes the in-progress transcript, and the
+        filtered JSONL before the caller deletes the session blob.
+        """
         turn_count = self._transcripts.peek_turn_count(ctx, chat.provider)
         filtered_jsonl: str | None = None
         if chat.session_id and chat.provider == "claude":
@@ -3391,6 +3601,40 @@ class ProjectChatManager:
             session_id=chat.session_id,
             provider=chat.provider,
         )
+        return turn_count, filtered_jsonl, result
+
+    async def _archive_single_chat(
+        self, chat_id: str, *, save: bool = True
+    ) -> ArchiveOutcome | None:
+        """Archive one chat without cascading to its delegate children.
+
+        ``save=False`` lets the cascade defer the registry write: archiving a
+        supervisor with six delegates otherwise rewrote the whole registry seven
+        times, which is wasted IO and widens the window for a partial write to
+        land mid-cascade. The caller must ``_save()`` once when the loop ends.
+        The ``chat_archived`` event still fires per chat so the PWA updates as
+        each one completes.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        self._revoke_mcp_chat(chat_id)
+        ctx = ChatContext.for_web(chat_id)
+        # Reading a large session JSONL and rendering the markdown transcript is
+        # the expensive part, and a supervisor cascade does it once per chat. On
+        # the loop that froze every other request and every streaming turn for
+        # the whole cascade, so it runs in a worker thread. Awaited before
+        # anything else happens, so archive order and the chat_archived event
+        # sequence are unchanged.
+        turn_count, filtered_jsonl, result = await asyncio.to_thread(
+            self._read_archive_inputs, chat_id, ctx, chat
+        )
+        # The await above is a suspension point, so the chat may have been
+        # deleted while the transcript was being written. Marking a row that is
+        # no longer in the registry archived (and publishing chat_archived for
+        # it) would resurrect a deleted chat in the PWA sidebar.
+        if self._chats.get(chat_id) is not chat:
+            return None
         if chat.retry_status:
             self._clear_chat_retry(chat)
         self._cancel_pending_push(chat_id)
@@ -3406,7 +3650,8 @@ class ProjectChatManager:
                 chat.archive_path = str(result.relative_to(self._config.workspace_root))
             except ValueError:
                 chat.archive_path = str(result)
-        self._save()
+        if save:
+            self._save()
         self._events.publish({
             "type": "chat_archived",
             "chat_id": chat_id,
@@ -5878,6 +6123,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
+        was_unread = (chat.last_activity_at or "") > (chat.last_read_at or "")
         chat.last_read_at = _now_iso()
         self._save()
         self._cancel_pending_push(chat_id)
@@ -5886,6 +6132,11 @@ class ProjectChatManager:
             "chat_id": chat_id,
             "last_read_at": chat.last_read_at,
         })
+        if was_unread and self.clear_notifications_cb is not None:
+            try:
+                self.clear_notifications_cb(chat_id)
+            except Exception:
+                logger.exception("clear_notifications_cb failed for %s", chat_id)
         return chat
 
     def mark_all_read(self) -> list[str]:
@@ -5911,6 +6162,11 @@ class ProjectChatManager:
                     "chat_id": cid,
                     "last_read_at": now,
                 })
+                if self.clear_notifications_cb is not None:
+                    try:
+                        self.clear_notifications_cb(cid)
+                    except Exception:
+                        logger.exception("clear_notifications_cb failed for %s", cid)
         return touched
 
     # ── Delayed push scheduler ───────────────────────────────────────────
@@ -7369,7 +7625,10 @@ class ProjectChatManager:
                 self._projects.get(chat_meta.project_id) if chat_meta else None
             )
             try:
-                archive_outcome = self.archive_chat(target_id)
+                archive_result = await self.archive_chat(target_id)
+                archive_outcome = (
+                    archive_result.outcome if archive_result is not None else None
+                )
             except Exception:  # noqa: BLE001
                 logger.exception("Auto-archive failed for schedule chat %s", target_id)
                 archive_outcome = None

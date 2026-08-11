@@ -171,8 +171,8 @@
         <button
           class="archive-btn touch-hit"
           @click="doArchive"
-          title="Archive chat"
-          aria-label="Archive chat"
+          :title="archiveActionLabel"
+          :aria-label="archiveActionLabel"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         </button>
@@ -1123,6 +1123,7 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import ChatSignals from './ChatSignals.vue'
 import { colorForWorkspace } from '../lib/workspaceColors'
+import { archiveActionLabel as archiveLabel, archiveConfirmMessage } from '../lib/archiveCopy'
 import AppIcon, { type AppIconName } from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
@@ -1570,10 +1571,7 @@ const delegateParent = computed(() => {
 })
 const delegateChildren = computed(() => {
   const cid = chat.value?.chat_id
-  if (!cid) return []
-  return store.chats.filter(
-    c => c.spawned_from_chat_id === cid && !c.archived && c.local !== false,
-  )
+  return cid ? store.activeDelegatesFor(cid) : []
 })
 
 // ── Context bar ─────────────────────────────────────────────────────
@@ -1676,6 +1674,25 @@ const dockDeferred = computed<DockItem[]>(() => {
   }
   return items
 })
+
+const activeDelegateCount = computed(() => {
+  const cid = chat.value?.chat_id
+  // store.activeDelegatesFor is the single definition; the inline copy here
+  // dropped the local !== false guard and over-counted remote subchats.
+  return cid ? store.activeDelegatesFor(cid).length : 0
+})
+// Subchats working right now. Archiving stops them rather than waiting, so the
+// confirm dialog has to name them before the user commits. Background agents
+// count as working: they outlive the turn that spawned them, so a subchat with
+// no live turn can still have real work in flight.
+const busyDelegateCount = computed(() => {
+  const cid = chat.value?.chat_id
+  if (!cid) return 0
+  return store.activeDelegatesFor(cid).filter(
+    d => store.isChatStreaming(d.chat_id) || store.chatHasBackgroundAgents(d.chat_id),
+  ).length
+})
+const archiveActionLabel = computed(() => archiveLabel(activeDelegateCount.value))
 onMounted(() => {
   taskStore.fetchLoops().catch(() => {})
   taskStore.fetchSchedules().catch(() => {})
@@ -4027,11 +4044,18 @@ watch(showModelPicker, (open) => {
 })
 
 async function doArchive() {
-  if (!await askConfirm('Archive this chat? You can reopen it from the archive.', {
+  const message = archiveConfirmMessage(activeDelegateCount.value, busyDelegateCount.value)
+  if (!await askConfirm(message, {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return
-  await store.archiveChat(chat.value.chat_id)
+  try {
+    await store.archiveChat(chat.value.chat_id)
+  } catch {
+    // archiveChat already reconnected the sockets and raised an error toast.
+    // Keep the pane open so the still-live chat stays reachable.
+    return
+  }
   // Notify ChatLayout so it closes the chat pane.
   emit('close')
 }
