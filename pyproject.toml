@@ -50,7 +50,20 @@ ciao-package-smoke = "ciao.package_smoke:main"
 ciao-prepare-release = "ciao.release:main"
 
 [tool.setuptools]
-packages = ["ciao", "ciao.context", "ciao.observability", "ciao.providers", "ciao.stock", "ciao.web"]
+# Auto-discover every subpackage of the engine so a new top-level module
+# (e.g. ciao/native_sidecar.py) is included in the wheel without a manual
+# edit here. Anything dropped into ciao/ that is not a private name (no
+# leading underscore) becomes part of the published package, which is the
+# behavior the release pipeline needs to avoid shipping a wheel that
+# references a module the installer never sees.
+#
+# Without this, the Homebrew 0.7.0 install referenced
+# ciao.native_sidecar.is_apple_model from ciao/insights.py but the file
+# itself was missing from the wheel, and every archive job crashed with
+# AttributeError (issue #256).
+[tool.setuptools.packages.find]
+include = ["ciao*"]
+namespaces = false
 
 [tool.setuptools.package-data]
 "ciao" = ["system_prompt.md"]

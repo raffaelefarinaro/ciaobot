@@ -97,8 +97,19 @@ def test_pyproject_packages_stock_data() -> None:
     pyproject = Path(__file__).parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
 
-    assert "ciao.stock" in data["tool"]["setuptools"]["packages"]
-    package_data = data["tool"]["setuptools"]["package-data"]
+    setuptools = data["tool"]["setuptools"]
+    # Either an explicit `packages` list (legacy) or `packages.find` with an
+    # include that covers ciao.* (current, see issue #256). The test guards
+    # that the ciao.stock subpackage is reachable, not which mechanism
+    # declares it.
+    if "packages" in setuptools and isinstance(setuptools["packages"], list):
+        assert "ciao.stock" in setuptools["packages"]
+    else:
+        find_cfg = setuptools.get("packages", {}).get("find", {})
+        includes = find_cfg.get("include", [])
+        assert any(inc.rstrip("*") + ".stock" == "ciao.stock" or inc == "ciao.stock" for inc in includes), find_cfg
+
+    package_data = setuptools["package-data"]
     assert "agents/*.md" in package_data["ciao.stock"]
     assert "commands/*.md" in package_data["ciao.stock"]
     assert "skills/.gitkeep" in package_data["ciao.stock"]
