@@ -57,6 +57,24 @@
       <template v-if="archivedChats.length"> · {{ archivedChats.length }} archived</template>
     </p>
 
+    <nav class="project-tabs" aria-label="Project sections">
+      <button
+        v-for="tab in projectTabs"
+        :key="tab.key"
+        type="button"
+        class="project-tab"
+        :class="{ active: activeTab === tab.key }"
+        :aria-selected="activeTab === tab.key"
+        :data-tab="tab.key"
+        role="tab"
+        @click="activeTab = tab.key"
+      >
+        {{ tab.label }}
+        <span v-if="tab.count !== undefined" class="tab-count">{{ tab.count }}</span>
+      </button>
+    </nav>
+
+    <template v-if="activeTab === 'overview'">
     <section class="card">
       <div class="card-header">
         <h3>project context</h3>
@@ -227,6 +245,73 @@
         >Next</button>
       </div>
     </section>
+    </template>
+
+    <section v-else-if="activeTab === 'loops'" class="card automation-card">
+      <div class="card-header">
+        <div>
+          <h3>loops ({{ projectLoops.length }})</h3>
+          <p class="card-hint">Prompts that repeat inside a chat in this project.</p>
+        </div>
+      </div>
+      <div v-if="projectLoops.length" class="automation-list">
+        <button
+          v-for="loop in projectLoops"
+          :key="loop.loop_id"
+          type="button"
+          class="automation-row"
+          @click="openAutomation(loop.loop_id)"
+        >
+          <span class="automation-row-main">
+            <span class="automation-title">{{ loop.title || promptTitle(loop.prompt) }}</span>
+            <span class="automation-status" :class="{ running: loop.running }">
+              {{ loop.running ? 'running' : 'stopped' }}
+            </span>
+          </span>
+          <span class="automation-row-meta">
+            <span>every {{ loop.interval_minutes }} min</span>
+            <span class="dot">·</span>
+            <span>{{ loopTargetLabel(loop) }}</span>
+            <span class="dot">·</span>
+            <span>last {{ automationTimestamp(loop.last_run_at) }}</span>
+          </span>
+        </button>
+      </div>
+      <div v-else class="empty-row">// no loops send prompts into this project</div>
+    </section>
+
+    <section v-else-if="activeTab === 'schedules'" class="card automation-card">
+      <div class="card-header">
+        <div>
+          <h3>schedules ({{ projectSchedules.length }})</h3>
+          <p class="card-hint">Scheduled prompts delivered to this project or one of its chats.</p>
+        </div>
+      </div>
+      <div v-if="projectSchedules.length" class="automation-list">
+        <button
+          v-for="schedule in projectSchedules"
+          :key="schedule.schedule_id"
+          type="button"
+          class="automation-row"
+          @click="openAutomation(schedule.schedule_id)"
+        >
+          <span class="automation-row-main">
+            <span class="automation-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
+            <span class="automation-status" :class="{ running: schedule.enabled }">
+              {{ schedule.enabled ? 'enabled' : 'paused' }}
+            </span>
+          </span>
+          <span class="automation-row-meta">
+            <span>{{ scheduleFrequencyLabel(schedule) }}</span>
+            <span class="dot">·</span>
+            <span>{{ scheduleTargetLabel(schedule) }}</span>
+            <span class="dot">·</span>
+            <span>next {{ automationTimestamp(schedule.next_run) }}</span>
+          </span>
+        </button>
+      </div>
+      <div v-else class="empty-row">// no schedules deliver prompts to this project</div>
+    </section>
   </div>
   <div v-else class="empty-state">// project not found.</div>
 </template>
@@ -235,6 +320,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { askConfirm } from '../lib/confirm'
 import { formatRelative } from '../lib/relativeTime'
@@ -243,7 +329,7 @@ import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
 import ChatSignals from './ChatSignals.vue'
 import AppIcon from './AppIcon.vue'
-import type { ChatInfo } from '../lib/types'
+import type { ChatInfo, Loop, Schedule } from '../lib/types'
 
 interface ProjectFile {
   path: string
@@ -257,9 +343,18 @@ const props = defineProps<{ projectId: string }>()
 const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 
 const store = useProjectStore()
+const taskStore = useTaskStore()
 const router = useRouter()
 
 const project = computed(() => store.projects.find(p => p.project_id === props.projectId) || null)
+
+type ProjectTab = 'overview' | 'loops' | 'schedules'
+const activeTab = ref<ProjectTab>('overview')
+const projectTabs = computed(() => [
+  { key: 'overview' as const, label: 'Overview' },
+  { key: 'loops' as const, label: 'Loops', count: projectLoops.value.length },
+  { key: 'schedules' as const, label: 'Schedules', count: projectSchedules.value.length },
+])
 
 watch(project, (p) => {
   if (p && p.workspace && p.workspace !== store.activeWorkspace) {
@@ -268,6 +363,16 @@ watch(project, (p) => {
 }, { immediate: true })
 
 const allChats = computed(() => store.chats.filter(c => c.project_id === props.projectId))
+const projectChatIds = computed(() => new Set(allChats.value.map(chat => chat.chat_id)))
+const projectLoops = computed(() =>
+  taskStore.loops.filter(loop => projectChatIds.value.has(loop.web_chat_id)),
+)
+const projectSchedules = computed(() =>
+  taskStore.schedules.filter(schedule =>
+    schedule.web_project_id === props.projectId
+      || (schedule.web_chat_id !== null && projectChatIds.value.has(schedule.web_chat_id)),
+  ),
+)
 const activeChats = computed(() =>
   allChats.value
     // Hide remote chats (session lives on another device, not openable here).
@@ -298,6 +403,46 @@ const workspaceHue = computed(() =>
 
 function chatActivity(chat: ChatInfo): string {
   return chatActivityTimestamp(chat)
+}
+
+function promptTitle(prompt: string): string {
+  const first = prompt.split('\n')[0].trim()
+  return first.length > 60 ? first.slice(0, 57) + '...' : first
+}
+
+function loopTargetLabel(loop: Loop): string {
+  return loop.context_label || allChats.value.find(chat => chat.chat_id === loop.web_chat_id)?.title || 'Unavailable chat'
+}
+
+function scheduleTargetLabel(schedule: Schedule): string {
+  if (schedule.web_project_id === props.projectId) return 'new chat per run'
+  if (schedule.web_chat_id) {
+    return allChats.value.find(chat => chat.chat_id === schedule.web_chat_id)?.title
+      || schedule.context_label
+      || 'Unavailable chat'
+  }
+  return schedule.context_label || 'General'
+}
+
+function scheduleFrequencyLabel(schedule: Schedule): string {
+  if (schedule.frequency === 'once') return `once · ${schedule.run_at_date || 'date pending'}`
+  if (schedule.frequency === 'manual') return 'manual'
+  if (schedule.frequency === 'monthly') return `monthly · day ${schedule.day_of_month || '—'}`
+  if (schedule.frequency === 'weekly') {
+    return schedule.days_of_week?.length ? `weekly · ${schedule.days_of_week.join(', ')}` : 'weekly'
+  }
+  return 'daily'
+}
+
+function automationTimestamp(iso: string | null | undefined): string {
+  if (!iso) return 'never'
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+function openAutomation(id: string): void {
+  router.push(`/schedules/${id}`)
 }
 
 const ARCHIVED_PER_PAGE = 10
@@ -550,7 +695,10 @@ async function reloadAll() {
 onMounted(reloadAll)
 // Re-fetch when the user navigates between projects without unmounting
 // the component (Vue keeps it alive across :projectId changes).
-watch(() => props.projectId, reloadAll)
+watch(() => props.projectId, async () => {
+  activeTab.value = 'overview'
+  await reloadAll()
+})
 </script>
 
 <style scoped>
@@ -672,6 +820,46 @@ watch(() => props.projectId, reloadAll)
   color: var(--fg3);
 }
 
+.project-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0;
+  overflow-x: auto;
+}
+
+.project-tab {
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font: 600 var(--text-sm) var(--font);
+  white-space: nowrap;
+}
+.project-tab:hover { color: var(--fg); background: var(--bg3); }
+.project-tab.active {
+  border-bottom-color: var(--accent);
+  color: var(--fg);
+}
+.tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg3);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.project-tab.active .tab-count { background: var(--accent2); color: var(--fg); }
+
 .card {
   background: var(--bg2);
   border: 1px solid var(--border);
@@ -696,6 +884,12 @@ watch(() => props.projectId, reloadAll)
   text-transform: uppercase;
   letter-spacing: 0.4px;
   color: var(--fg2);
+}
+
+.card-hint {
+  margin: 4px 0 0;
+  color: var(--fg3);
+  font-size: var(--text-xs);
 }
 
 .card-actions {
@@ -801,6 +995,54 @@ watch(() => props.projectId, reloadAll)
   color: var(--fg2);
   font-style: italic;
   padding: 4px 0;
+}
+
+.automation-card { min-height: 180px; }
+.automation-list { display: flex; flex-direction: column; }
+.automation-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.automation-row:last-child { border-bottom: none; }
+.automation-row:hover { background: var(--bg3); }
+.automation-row:focus-visible,
+.project-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.automation-row-main,
+.automation-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.automation-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-base);
+}
+.automation-status {
+  flex-shrink: 0;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.35px;
+}
+.automation-status.running { color: var(--success); }
+.automation-row-meta {
+  flex-wrap: wrap;
+  color: var(--fg2);
+  font-size: var(--text-xs);
 }
 
 .empty-state {
@@ -911,5 +1153,7 @@ watch(() => props.projectId, reloadAll)
 @media (max-width: 768px) {
   .project-stats { grid-template-columns: repeat(2, 1fr); }
   .file-meta { display: none; }
+  .automation-row-meta { display: block; line-height: 1.5; }
+  .automation-row-meta .dot { margin: 0 4px; }
 }
 </style>

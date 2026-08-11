@@ -49,6 +49,7 @@ function seed() {
   store.bootstrapped = true
   const taskStore = useTaskStore()
   taskStore.loops = [] as unknown as typeof taskStore.loops
+  taskStore.schedules = [] as unknown as typeof taskStore.schedules
   return store
 }
 
@@ -100,5 +101,120 @@ describe('ProjectView chat rows', () => {
     store.activeWorkspace = 'personal'
     const wrapper = await mountView()
     expect(wrapper.find('.chat-signals').attributes('data-workspace-color')).toBe('emerald')
+  })
+
+  it('lists only loops and schedules associated with the project', async () => {
+    seed()
+    const taskStore = useTaskStore()
+    taskStore.loops = [{
+      loop_id: 'loop-project',
+      prompt: 'Check the project PRs',
+      web_chat_id: 'chat-read',
+      created_at: '2026-08-01T00:00:00Z',
+      interval_minutes: 10,
+      title: 'PR watcher',
+      autostart: false,
+      last_run_at: '',
+      last_status: '',
+      running: true,
+      context_label: 'Read chat',
+      next_run: null,
+    }, {
+      loop_id: 'loop-other',
+      prompt: 'Check another project',
+      web_chat_id: 'chat-missing',
+      created_at: '2026-08-01T00:00:00Z',
+      interval_minutes: 20,
+      title: 'Other watcher',
+      autostart: false,
+      last_run_at: '',
+      last_status: '',
+      running: false,
+      context_label: 'Other chat',
+      next_run: null,
+    }] as unknown as typeof taskStore.loops
+    taskStore.schedules = [{
+      schedule_id: 'schedule-project',
+      daily_time_utc: '09:00',
+      prompt: 'Send the daily brief',
+      chat_id: 0,
+      created_at: '2026-08-01T00:00:00Z',
+      timezone_name: 'Europe/Zurich',
+      last_triggered_on: '',
+      days_of_week: null,
+      thread_id: null,
+      context_label: '',
+      frequency: 'daily',
+      day_of_month: null,
+      run_at_date: null,
+      web_chat_id: null,
+      web_project_id: 'project-1',
+      workspace: 'personal',
+      model: '',
+      next_run: null,
+      last_expected_run: null,
+      missed: false,
+      enabled: true,
+      archive_policy: 'manual',
+    }, {
+      schedule_id: 'schedule-chat',
+      daily_time_utc: '10:00',
+      prompt: 'Send the chat brief',
+      chat_id: 0,
+      created_at: '2026-08-01T00:00:00Z',
+      timezone_name: 'Europe/Zurich',
+      last_triggered_on: '',
+      days_of_week: null,
+      thread_id: null,
+      context_label: '',
+      frequency: 'weekly',
+      day_of_month: null,
+      run_at_date: null,
+      web_chat_id: 'chat-read',
+      web_project_id: null,
+      workspace: 'personal',
+      model: '',
+      next_run: null,
+      last_expected_run: null,
+      missed: false,
+      enabled: false,
+      archive_policy: 'manual',
+    }, {
+      schedule_id: 'schedule-other',
+      daily_time_utc: '11:00',
+      prompt: 'Send another brief',
+      chat_id: 0,
+      created_at: '2026-08-01T00:00:00Z',
+      timezone_name: 'Europe/Zurich',
+      last_triggered_on: '',
+      days_of_week: null,
+      thread_id: null,
+      context_label: '',
+      frequency: 'daily',
+      day_of_month: null,
+      run_at_date: null,
+      web_chat_id: 'chat-missing',
+      web_project_id: null,
+      workspace: 'personal',
+      model: '',
+      next_run: null,
+      last_expected_run: null,
+      missed: false,
+      enabled: true,
+      archive_policy: 'manual',
+    }] as unknown as typeof taskStore.schedules
+
+    const wrapper = await mountView()
+
+    await wrapper.get('[data-tab="loops"]').trigger('click')
+    expect(wrapper.get('.automation-card').text()).toContain('PR watcher')
+    expect(wrapper.get('.automation-card').text()).not.toContain('Other watcher')
+    expect(wrapper.get('[data-tab="loops"]').text()).toContain('1')
+
+    await wrapper.get('[data-tab="schedules"]').trigger('click')
+    expect(wrapper.get('.automation-card').text()).toContain('Send the daily brief')
+    expect(wrapper.get('.automation-card').text()).toContain('Send the chat brief')
+    expect(wrapper.get('.automation-card').text()).not.toContain('Send another brief')
+    expect(wrapper.get('[data-tab="schedules"]').text()).toContain('2')
   })
 })
