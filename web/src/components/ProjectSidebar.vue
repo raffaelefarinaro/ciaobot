@@ -1513,7 +1513,7 @@ async function confirmDeleteChat(chatId: string) {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
 
@@ -1654,6 +1654,17 @@ async function confirmDeleteChat(chatId: string) {
   letter-spacing: inherit;
 }
 .project-name:hover { color: var(--fg); }
+
+/* The project header is a text button, not a flex row, so the state marks sit
+   flush against the last letter of the name. Space them the same 6px .badge
+   already gives itself, and align them to the text rather than the baseline.
+   Scoped here on purpose: the workspace pill puts the same marks in a flex row
+   with a gap, where a margin would double up. */
+.project-name .rollup-needs-dot,
+.project-name .rollup-ring {
+  margin-left: var(--space-2);
+  vertical-align: middle;
+}
 
 .edit-input {
   flex: 1;
@@ -1799,11 +1810,14 @@ async function confirmDeleteChat(chatId: string) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workspace-status-core,
-  .rollup-ring-core { animation: none; opacity: 0.65; }
+  .rollup-ring,
+  .workspace-status-ring { animation: none; }
+  .rollup-ring::before,
+  .workspace-status-ring::before { animation: none; opacity: 0.3; }
 }
 
 /* Shimmer placeholder shown in the sidebar while the server auto-titles
