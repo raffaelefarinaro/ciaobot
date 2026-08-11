@@ -93,6 +93,7 @@ from ciao.providers.codex import (
 )
 from ciao.providers.routing import intended_backend, routing_env_for_model
 from ciao.custom_providers import (
+    encode_model,
     env_for_model as custom_env_for_model,
     load_custom_providers,
     provider_for_model,
@@ -4085,8 +4086,17 @@ class ProjectChatManager:
             return
         if provider == "codex":
             return
-        if provider_for_model(self._config, model) is not None:
-            return
+        custom = provider_for_model(self._config, model)
+        if custom is not None:
+            # A provider with an explicit model list must be used with one
+            # of its members, else the typo reaches the endpoint on the
+            # first turn (#259). An empty list means no catalog to check
+            # against (e.g. an LM Studio endpoint serving dynamic models),
+            # so any id for that provider stays valid.
+            if not custom.models or model in {
+                encode_model(custom.id, m) for m in custom.models
+            }:
+                return
         if is_tier(model):
             return
         # Ollama: membership in the local daemon list, the cloud allowlist /

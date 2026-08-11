@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -797,3 +798,57 @@ def test_create_chat_accepts_statically_configured_openrouter_model(
         project.project_id, model="meta-llama/llama-4-maverick"
     )
     assert chat.model == "meta-llama/llama-4-maverick"
+
+
+def _write_custom_provider(tmp_path: Path, *, provider_id: str, models: list[str]) -> None:
+    """Register a custom provider in the worktree config's tracked file."""
+    path = tmp_path / ".ciao" / "custom_providers.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "providers": [{
+                "id": provider_id,
+                "name": provider_id,
+                "url": "http://localhost:1234/v1",
+                "runner": "claude",
+                "models": models,
+            }]
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_create_chat_custom_provider_requires_member_model(tmp_path: Path) -> None:
+    """A ``custom:<id>:<model>`` id must name one of the provider's models.
+
+    ``provider_for_model`` only verifies the provider id exists; the
+    validator must also check the encoded model against the provider's
+    configured list, else the typo reaches the endpoint on the first
+    turn (#259).
+    """
+    _write_custom_provider(tmp_path, provider_id="lm-studio", models=["qwen2.5-coder"])
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown model 'custom:lm-studio:typo'"):
+        manager.create_chat(project.project_id, model="custom:lm-studio:typo")
+
+    chat = manager.create_chat(project.project_id, model="custom:lm-studio:qwen2.5-coder")
+    assert chat.model == "custom:lm-studio:qwen2.5-coder"
+
+
+def test_create_chat_custom_provider_without_model_list_accepts_any(
+    tmp_path: Path,
+) -> None:
+    """An empty custom-provider model list means no catalog to check.
+
+    Endpoints like LM Studio serve dynamic model names, so an operator
+    may configure a provider without enumerating models; any id for that
+    provider stays valid (#259).
+    """
+    _write_custom_provider(tmp_path, provider_id="lm-studio", models=[])
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+
+    chat = manager.create_chat(project.project_id, model="custom:lm-studio:anything")
+    assert chat.model == "custom:lm-studio:anything"
