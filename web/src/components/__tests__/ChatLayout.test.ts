@@ -885,6 +885,60 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
+  // Reported in review: activeChatId stays populated when Settings is opened
+  // from a chat, so a chat-first Esc ran closeChat() on a chat that was not on
+  // screen - disconnecting it, and deleting it outright when it was an unused
+  // draft with an unsent composer message.
+  it('leaves a retained hidden chat alone when escaping Settings', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = 'chat-1'
+    await router.push('/settings')
+    await flushPromises()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(store.activeChatId).toBe('chat-1')
+    wrapper.unmount()
+  })
+
+  it('does the same escaping Automations', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = 'chat-1'
+    await router.push('/schedules')
+    await flushPromises()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(store.activeChatId).toBe('chat-1')
+    wrapper.unmount()
+  })
+
+  // A popover that handled Escape itself must not also navigate away.
+  it('defers to a nested control that consumed Escape', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = null
+    await router.push('/settings')
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    event.preventDefault()
+    window.dispatchEvent(event)
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/settings')
+    wrapper.unmount()
+  })
+
   it('closes the chat with Esc on a project route too', async () => {
     // viewMode is 'project' on /project/:projectId, but it is the same layout
     // with the same open chat. Gating the shortcut on viewMode === 'chat' made

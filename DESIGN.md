@@ -171,7 +171,7 @@ Shadows are reserved for content that genuinely floats above another interaction
 
 ## Shapes
 
-The shape language is compact and gently rounded. Standard controls and cards use a 10px radius, small nested elements use 6px, and modals use 14px. Fully rounded shapes are limited to badges, status dots, avatars, and true pill selectors.
+The shape language is compact and gently rounded. Standard controls and cards use a 10px radius, small nested elements use 6px, and modals use 14px. A tighter 4px radius (`--radius-xs`) is reserved for small squared tags that must not be mistaken for count badges: the needs-you state chip and the workspace key badges. Fully rounded shapes are limited to badges, status dots, avatars, and true pill selectors.
 
 Borders are structural, not decorative. Active navigation is marked by a slim pink edge plus a tonal background. Do not mix exaggerated rounding, glass effects, or unrelated shape styles into the same view.
 

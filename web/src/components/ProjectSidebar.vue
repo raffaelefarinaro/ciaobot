@@ -65,7 +65,18 @@
             </svg>
                       <span class="nav-item-label" aria-hidden="true">automations</span>
           </router-link>
-          <router-link to="/settings" class="nav-item touch-hit" active-class="nav-item--active" title="settings" aria-label="settings">
+          <!-- mode, not active-class: every settings tab is its own route
+               (/settings/providers, /settings/models, ...) and none of them match
+               the /settings record, so active-class left this item inactive on
+               nearly every settings page - and with it the label collapsed. The
+               sibling links already key off mode for the same reason. -->
+          <router-link
+            to="/settings"
+            class="nav-item touch-hit"
+            :class="{ 'nav-item--active': mode === 'settings' }"
+            title="settings"
+            aria-label="settings"
+          >
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -100,7 +111,11 @@
           @click="selectAutomationWorkspace(workspace.name)"
         >
           <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-          {{ workspaceLabel(workspace.name) }}
+          <!-- Wrapped, not a bare text node: the buttons are nowrap so a long
+               workspace name needs a shrinkable element to ellipse inside, or it
+               overflows into its neighbour. The button's title carries the full
+               name. -->
+          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
           <span
             v-if="missedCountFor(workspace.name) > 0"
             class="badge badge--missed"

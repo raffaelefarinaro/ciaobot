@@ -271,10 +271,17 @@ function relativeActivity(chat: ChatInfo): string {
 }
 
 function chatItemClasses(tier: HomeTierKey, chat: ChatInfo): string[] {
+  // Age only dims the tiers where age is the whole story. An unread chat is
+  // surfaced precisely because it wants reading, and one that has been waiting a
+  // week is the most likely to be missed - fading it to 55% made the row look
+  // disabled and undid the reason it was pulled out of quiet. Same for anything
+  // needing you or working, which are about now rather than when.
+  const dimByAge = tier === 'quiet' || tier === 'older'
+  const age = dimByAge ? ageBucket(chatActivityTimestamp(chat)) : 'fresh'
   return [
     `home-chat-item--${tier}`,
-    ageBucket(chatActivityTimestamp(chat)) === 'week' ? 'home-chat-item--week-old' : '',
-    ageBucket(chatActivityTimestamp(chat)) === 'older' ? 'home-chat-item--old' : '',
+    age === 'week' ? 'home-chat-item--week-old' : '',
+    age === 'older' ? 'home-chat-item--old' : '',
     chat.local === false ? 'remote' : '',
   ].filter(Boolean)
 }
@@ -570,10 +577,15 @@ watch(() => store.activeWorkspace, async () => {
   transform: translateY(1px);
 }
 
+/* Positive offset, so the ring sits clear of the card edge. At -1px it was drawn
+   inside the border and merged with the accent rail on the left, which is the
+   one place a keyboard user most needs to see where focus is. Kept to a single
+   ring - the old two-ring treatment was what made the rows read as boxes inside
+   boxes - with a --bg gap so it separates on any surface. */
 .home-chat-item:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: -1px;
-  box-shadow: none;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--bg);
 }
 
 .home-chat-item--needsYou {

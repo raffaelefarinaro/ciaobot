@@ -674,12 +674,33 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     // The confirm dialog and the file viewer own Esc while they are up.
     if (pendingConfirm.value || fileViewer.isOpen) return
+    // A nested control that handled the key already, without claiming it. Popups
+    // like ModelSelector close on Esc but do not stopPropagation, and treating
+    // that press as "go home" both discarded their dismissal and navigated away
+    // from half-finished settings edits.
+    if (e.defaultPrevented) return
+
+    // Settings and Automations come first, ahead of any chat handling.
+    // activeChatId deliberately stays populated when either is opened from a
+    // chat, so checking the chat first meant Esc ran closeChat() on a chat that
+    // was not even on screen - disconnecting it, and deleting it outright when it
+    // was an unused draft with an unsent composer message. Leaving the view is
+    // what the key means there.
+    //
+    // Project routes stay chat-first on purpose: Esc closing the chat you opened
+    // through a project is long-standing, tested behaviour, and a project page is
+    // one press further from home either way.
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules') {
+      e.preventDefault()
+      void router.push('/')
+      return
+    }
     if (store.activeChat) {
       e.preventDefault()
       closeChat()
       return
     }
-    if (viewMode.value !== 'chat' || projectIdParam.value) {
+    if (projectIdParam.value) {
       e.preventDefault()
       void router.push('/')
       return

@@ -105,6 +105,13 @@ const hasTitle = computed(() => !!slots.title)
 @container chat-split (max-width: 420px) {
   .header-center { display: none; }
 }
+
+/* Very narrow viewports: drop the mark outright rather than clip it. The trail's
+   controls cannot shrink, so something has to go, and the mark is the only thing
+   here that is not an action. */
+@media (max-width: 460px) {
+  .header-center { display: none; }
+}
 /* Kept in the document, not on the screen. The page now names itself next to
    its own nav icon in the sidebar, which is where it was asked for, so a second
    copy here beside the wordmark was the same fact twice. It stays rendered
@@ -276,6 +283,14 @@ const hasTitle = computed(() => !!slots.title)
     grid-column: 2;
     grid-row: 1;
     justify-content: center;
+    /* The track shrinks but the wordmark does not, so on the tightest headers -
+       an automation detail at 375px, where the trail already holds Run now,
+       overflow and the bell, and worse again at a raised font scale - it
+       overran the hamburger and the actions. Let it disappear instead: it is
+       decoration plus a reload shortcut, and a clipped control is a lost
+       action. Same trade the split-view rule above makes. */
+    min-width: 0;
+    overflow: hidden;
   }
   .header-trail {
     grid-column: 3;
