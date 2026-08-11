@@ -189,7 +189,7 @@ When your message mentions a name that appears in the vault index, the agent get
 - Completed turns surface touched files as clickable `Outputs` chips below the final reply. Expand `Activity` to inspect the chronological notes, tool calls, and file cards; click a file for history, diff, and restore.
 - Pin a document beside the chat and add line-level comments on the preview, dictated or typed (attached to your next message, like chat comments).
 - Rich previews: images inline, PDFs in a built-in viewer, PowerPoint (`.pptx`) converted to PDF for display (requires LibreOffice on the machine running Ciaobot).
-- Interactive HTML artifacts: ask for a dashboard, chart, annotated diff, or timeline and you get one self-contained `.html` page rendered live beside the chat, with a Preview/Code toggle. It runs in a sandboxed frame with no network access, so an artifact works offline and cannot reach the app's API or your session.
+- Interactive HTML artifacts: ask for a dashboard, chart, annotated diff, timeline, or audio comparison and you get one self-contained `.html` page rendered live beside the chat, with a Preview/Code toggle. It runs in a sandboxed frame with no network access, so an artifact works offline and cannot reach the app's API or your session. Audio and video must be embedded as `data:` URLs.
 - Create, edit, and restore vault files from the UI, with snapshots behind every agent edit.
 
 **Memory, vault, and insight extraction**

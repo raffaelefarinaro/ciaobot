@@ -3541,14 +3541,15 @@ _WORKSPACE_HTML_EXTS = frozenset({".html", ".htm"})
 # The net effect: an artifact can render and respond to clicks, and has no way
 # to reach /api/*, phone home, or read anything of the user's.
 #
-# Deliberately absent until a real artifact needs them: `allow-popups`,
-# `media-src`, and `blob:` sources. Add on evidence, not in advance.
+# `allow-popups` and `blob:` sources remain absent. Self-contained audio/video
+# artifacts use data URLs, so media access is allowed only for embedded data.
 _ARTIFACT_CSP = "; ".join(
     [
         "default-src 'none'",
         "script-src 'unsafe-inline'",
         "style-src 'unsafe-inline'",
         "img-src data:",
+        "media-src data:",
         "font-src data:",
         "connect-src 'none'",
         "form-action 'none'",

@@ -98,6 +98,7 @@ def test_artifact_cannot_reach_the_network(workspace: Path) -> None:
         "default-src 'none'",
         "connect-src 'none'",   # fetch / XHR / WebSocket / EventSource
         "img-src data:",        # no https: image beacon
+        "media-src data:",      # self-contained audio/video only
         "form-action 'none'",
         "base-uri 'none'",
     ):
