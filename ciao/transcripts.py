@@ -876,22 +876,25 @@ def get_session_messages_full(
     """
     import sys
 
-    def _fallback():
+    def _fallback(gsm=get_session_messages):
+        # Prefer a caller-supplied getter so tests that replace
+        # sys.modules["claude_agent_sdk"] still reach their mock instead of the
+        # statically imported SDK binding from module import time.
         if limit is None and offset == 0:
-            return get_session_messages(session_id, directory=directory)
+            return gsm(session_id, directory=directory)
         try:
-            return get_session_messages(
+            return gsm(
                 session_id, directory=directory, limit=limit, offset=offset
             )
         except TypeError:
-            return get_session_messages(session_id, directory=directory)
+            return gsm(session_id, directory=directory)
 
     if get_session_messages is not _sdk_get_session_messages:
         return _fallback()
 
     sdk = sys.modules.get("claude_agent_sdk")
     if sdk and hasattr(sdk, "get_session_messages") and not hasattr(sdk, "_internal"):
-        return _fallback()
+        return _fallback(sdk.get_session_messages)
 
     try:
         from claude_agent_sdk._internal.sessions import (
