@@ -488,13 +488,13 @@ def _summary_value_text(value: Any) -> str:
         parts = [_summary_value_text(item) for item in value]
         return "; ".join(part for part in parts if part)
     if isinstance(value, dict):
-        parts: list[str] = []
+        field_parts: list[str] = []
         for key, item in value.items():
             item_text = _summary_value_text(item)
             label = _summary_field_label(key)
             if item_text and label:
-                parts.append(f"{label}: {item_text}")
-        return "; ".join(parts)
+                field_parts.append(f"{label}: {item_text}")
+        return "; ".join(field_parts)
     return str(value)
 
 
