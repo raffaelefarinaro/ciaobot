@@ -4061,12 +4061,12 @@ class ProjectChatManager:
 
         if effective.startswith("custom:"):
             provider_id = effective.split(":", 1)[1]
-            target = getattr(self._config, "custom_routing", {}).get(provider_id, {}).get(
-                canonical_tier(model), model
-            )
-            if target and target != model:
-                return target
-            return canonical_tier(model) if is_tier(model) else (target or model)
+            custom_target = getattr(self._config, "custom_routing", {}).get(
+                provider_id, {}
+            ).get(canonical_tier(model), model)
+            if custom_target and custom_target != model:
+                return cast(str, custom_target)
+            return canonical_tier(model) if is_tier(model) else custom_target
 
         if not self._bucket_routes_to_ollama(effective):
             return canonical_tier(model) if is_tier(model) else model
@@ -7731,7 +7731,7 @@ class ProjectChatManager:
                 raise ValueError("Read-aloud is macOS-only.")
             raise ValueError(
                 "Read-aloud is unavailable. Install the desktop app with "
-                "`ciao desktop install`."
+                "the Ciaobot one-line installer."
             )
         try:
             speaker = SystemSpeaker(
