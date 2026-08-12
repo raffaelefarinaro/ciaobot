@@ -123,6 +123,22 @@ fi
 # shim would mix CPython 3.12 extension modules with another interpreter.
 export PATH="$root/bin${PATH:+:$PATH}"
 export PYTHONPATH="$site${PYTHONPATH:+:$PYTHONPATH}"
+# Python writes __pycache__ next to the sources it imports, and those sources
+# live inside the signed app bundle. Left alone, the first run adds files the
+# code signature does not seal, so `codesign -v` fails on an app that has only
+# been used. Redirect the cache out of the bundle rather than disabling it, so
+# startup stays warm.
+if [ -z "${PYTHONPYCACHEPREFIX:-}" ]; then
+    cache_root=${XDG_CACHE_HOME:-${HOME:+$HOME/Library/Caches}}
+    if [ -n "$cache_root" ]; then
+        PYTHONPYCACHEPREFIX="$cache_root/Ciaobot/pycache"
+    fi
+fi
+if [ -n "${PYTHONPYCACHEPREFIX:-}" ]; then
+    export PYTHONPYCACHEPREFIX
+else
+    export PYTHONDONTWRITEBYTECODE=1
+fi
 exec "$python" -m ciao.cli "$@"
 LAUNCHER
 chmod 755 "$output/bin/ciao"

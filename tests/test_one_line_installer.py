@@ -84,6 +84,38 @@ def test_installer_starts_and_persists_the_menu_bar_agent() -> None:
     assert 'launchctl kickstart "gui/$uid/Ciaobot"' in script
 
 
+def test_installer_retries_until_the_menu_bar_agent_names_the_new_app() -> None:
+    # bootout is asynchronous, so a bootstrap issued immediately after it can
+    # fail outright, or appear to succeed while launchd still holds the stale
+    # job — which names the bundle this install just moved aside. Swallowing
+    # either outcome leaves an updated install with no menu-bar app, and that
+    # is invisible until the user looks for the tray icon.
+    script = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+
+    reload_block = script[script.rindex('launchctl bootout "gui/$uid/Ciaobot"') :]
+    assert 'grep -qF "$desktop_executable"' in reload_block
+    assert "the menu-bar LaunchAgent did not load" in reload_block
+    assert reload_block.index('launchctl bootstrap "gui/$uid" "$desktop_plist"') < (
+        reload_block.index('grep -qF "$desktop_executable"')
+    )
+    # The retry re-issues the bootout, so a stale job cannot survive the loop.
+    assert reload_block.count('launchctl bootout "gui/$uid/Ciaobot"') == 1
+    assert "grep" in script[: script.index("[ \"$(uname -s)\" = \"Darwin\" ]")]
+
+
+def test_bundled_launcher_keeps_bytecode_out_of_the_signed_bundle() -> None:
+    # The runtime is sealed by the app's code signature. Bytecode written next
+    # to the bundled sources adds unsealed files, so `codesign -v` fails after
+    # the first run.
+    script = (REPO_ROOT / "scripts" / "build-bundled-runtime.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'PYTHONPYCACHEPREFIX="$cache_root/Ciaobot/pycache"' in script
+    assert "export PYTHONPYCACHEPREFIX" in script
+    assert "export PYTHONDONTWRITEBYTECODE=1" in script
+
+
 def test_fresh_install_defers_workspace_creation_to_onboarding() -> None:
     script = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
 

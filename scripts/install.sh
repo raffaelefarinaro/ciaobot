@@ -49,7 +49,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-for command in curl tar shasum mktemp mkdir mv find sw_vers awk uname id launchctl pgrep sed; do
+for command in curl tar shasum mktemp mkdir mv find sw_vers awk uname id launchctl pgrep sed grep; do
     command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done
 
@@ -215,8 +215,27 @@ if [ "$no_start" -eq 0 ]; then
     uid=$(id -u)
     # Reload the app agent after an update so launchd does not retain the old
     # executable path. kickstart without -k starts it only when it is absent.
-    launchctl bootout "gui/$uid/Ciaobot" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/$uid" "$desktop_plist" >/dev/null 2>&1 || true
+    # bootout is asynchronous. A bootstrap that lands before it finishes either
+    # fails outright or finds the stale job still registered -- and that job
+    # still names the bundle this install just moved aside, so kickstart would
+    # try to run a path that no longer exists. Both failures were previously
+    # swallowed, leaving an updated install with no menu-bar app. Retry until
+    # the loaded job names the new executable, and say so if it never does.
+    attempts=0
+    while :; do
+        launchctl bootout "gui/$uid/Ciaobot" >/dev/null 2>&1 || true
+        launchctl bootstrap "gui/$uid" "$desktop_plist" >/dev/null 2>&1 || true
+        if launchctl print "gui/$uid/Ciaobot" 2>/dev/null \
+            | grep -qF "$desktop_executable"; then
+            break
+        fi
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 15 ]; then
+            echo "Ciaobot installer: the menu-bar LaunchAgent did not load; open Ciaobot.app manually" >&2
+            break
+        fi
+        sleep 1
+    done
     launchctl kickstart "gui/$uid/Ciaobot" >/dev/null 2>&1 || true
 fi
 
