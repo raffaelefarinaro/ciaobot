@@ -2822,11 +2822,6 @@ class ProjectChatManager:
         # default can't create a delegate that fails on its first turn
         # (#259).
         self._validate_configured_model(chat_model, chat_provider)
-        # Sweep any other empty chats before creating a new one. Opening a
-        # fresh "New Chat" signals the user has moved on from whatever they
-        # had open and never sent, so we don't let empty shells pile up.
-        self._cleanup_empty_chats()
-        cid = f"chat-{_uuid8()}"
         # Claude chats record the bucket explicitly: the workspace only
         # preselects (personal → "personal"), but an explicit picker choice
         # wins and survives project moves. Personal-bucket alias defaults
@@ -2835,7 +2830,10 @@ class ProjectChatManager:
         chat_bucket = ""
         if chat_provider == "claude":
             chat_bucket = self._effective_bucket(model_bucket or "", project_id)
-            if (self._bucket_routes_to_ollama(chat_bucket) or chat_bucket == "openrouter") and model is None:
+            if (
+                (self._bucket_routes_to_ollama(chat_bucket) or chat_bucket == "openrouter")
+                and (model is None or model_bucket is not None)
+            ):
                 chat_model = self._resolve_claude_model(
                     chat_model, chat_bucket, project_id
                 )
@@ -2846,6 +2844,13 @@ class ProjectChatManager:
             # check above (#259).
             self._validate_custom_model_runner(chat_model, chat_provider)
             self._validate_configured_model(chat_model, chat_provider)
+        # Sweep any other empty chats only after all model and routing-bucket
+        # validation has succeeded. Opening a fresh "New Chat" signals the
+        # user has moved on from whatever they had open and never sent, so we
+        # don't let empty shells pile up; a rejected request must not delete
+        # those drafts as a side effect (#259).
+        self._cleanup_empty_chats()
+        cid = f"chat-{_uuid8()}"
         chat = ChatInfo(
             chat_id=cid,
             project_id=project_id,
