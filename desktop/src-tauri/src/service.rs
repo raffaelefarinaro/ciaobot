@@ -27,9 +27,9 @@ fn resolve_ciao_from(path_value: Option<&str>, preferred: &[PathBuf]) -> Option<
 }
 
 fn bundled_ciao_from(executable: Option<&Path>) -> Option<PathBuf> {
-    let app_bundle = executable?.ancestors().find(|path| {
-        path.extension().and_then(|value| value.to_str()) == Some("app")
-    })?;
+    let app_bundle = executable?
+        .ancestors()
+        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))?;
     let candidate = app_bundle.join("Contents/Resources/ciao-runtime/bin/ciao");
     candidate.is_file().then_some(candidate)
 }
