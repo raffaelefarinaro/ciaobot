@@ -35,6 +35,17 @@ class RestartDrainingError(RuntimeError):
     def __init__(self, message: str = RESTART_DRAIN_MESSAGE) -> None:
         super().__init__(message)
 
+
+class UnknownModelError(ValueError):
+    """A model id that is not in the configured set.
+
+    Raised by ``ProjectChatManager._validate_configured_model``. Distinct
+    from the other ``ValueError``s ``create_chat`` raises (unknown provider,
+    bucket, control surface) so the MCP delegate boundary can translate only
+    the model failure to ``invalid_model`` and leave the rest as
+    ``invalid_request`` (#259).
+    """
+
 try:  # pragma: no cover - Ciaobot targets Unix; fallback keeps imports portable.
     import fcntl
 except ImportError:  # pragma: no cover
@@ -65,6 +76,7 @@ from ciao.model_tiers import (
     CODEX_FABLE_THINKING_LEVEL,
     canonical_tier,
     is_capability_error,
+    is_tier,
     model_supports_vision,
     model_vision_ambiguous,
     next_tier_for_failure,
@@ -74,13 +86,14 @@ from ciao.providers.ollama import (
     is_ollama_model,
     vision_support_ollama,
 )
-from ciao.providers.openrouter import vision_support_openrouter
+from ciao.providers.openrouter import is_openrouter_model, vision_support_openrouter
 from ciao.providers.codex import (
     CodexProvider,
     codex_collab_tree_counts,
 )
 from ciao.providers.routing import intended_backend, routing_env_for_model
 from ciao.custom_providers import (
+    encode_model,
     env_for_model as custom_env_for_model,
     load_custom_providers,
     provider_for_model,
@@ -1879,11 +1892,27 @@ class ProjectChatManager:
                 f"To begin, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
             )
 
-        chat = self.create_chat(
-            project_id,
-            title=title,
-            model=self._config.claude_default_model,
-        )
+        # Prefer the workspace's configured routing bucket so a wizard-selected
+        # Ollama/OpenRouter install keeps using that backend for onboarding.
+        # Use the haiku tier alias (valid after resolve) and only fall back to
+        # the Anthropic ``work`` bucket when the preferred route fails
+        # validation — e.g. a stale hand-edited credential that would otherwise
+        # crash startup (#259).
+        preferred_bucket = self._effective_bucket("", project_id)
+        try:
+            chat = self.create_chat(
+                project_id,
+                title=title,
+                model="haiku",
+                model_bucket=preferred_bucket,
+            )
+        except UnknownModelError:
+            chat = self.create_chat(
+                project_id,
+                title=title,
+                model="haiku",
+                model_bucket="work",
+            )
         chat.handover_context_pending = True
         chat.handover_messages = [
             {"role": "user", "content": user_msg},
@@ -2960,11 +2989,8 @@ class ProjectChatManager:
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if control_surface not in {None, "", "legacy", "mcp", "auto"}:
             raise ValueError(f"Unknown control surface '{control_surface}'")
-        # Sweep any other empty chats before creating a new one. Opening a
-        # fresh "New Chat" signals the user has moved on from whatever they
-        # had open and never sent, so we don't let empty shells pile up.
-        self._cleanup_empty_chats()
-        cid = f"chat-{_uuid8()}"
+        # Resolve the effective model/provider before any side effects, so a
+        # rejected model can't leave unrelated empty chats deleted (#259).
         # Per-workspace default: personal projects can default to Ollama
         # models, work to Anthropic, etc. Explicit ``model`` arg wins.
         project = self._projects.get(project_id)
@@ -2974,7 +3000,6 @@ class ProjectChatManager:
         chat_provider = provider
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
-        self._validate_custom_model_runner(chat_model, chat_provider)
         # Claude chats record the bucket explicitly: the workspace only
         # preselects (personal → "personal"), but an explicit picker choice
         # wins and survives project moves. Personal-bucket alias defaults
@@ -2983,10 +3008,25 @@ class ProjectChatManager:
         chat_bucket = ""
         if chat_provider == "claude":
             chat_bucket = self._effective_bucket(model_bucket or "", project_id)
-            if (self._bucket_routes_to_ollama(chat_bucket) or chat_bucket == "openrouter") and model is None:
-                chat_model = self._resolve_claude_model(
-                    chat_model, chat_bucket, project_id
-                )
+        resolve_model = not (
+            model is not None
+            and model_bucket is None
+            and chat_bucket == "personal"
+        )
+        chat_model, _ = self._resolve_and_validate_chat_model(
+            chat_model,
+            chat_provider,
+            chat_bucket,
+            project_id,
+            resolve_model=resolve_model,
+        )
+        # Sweep any other empty chats only after all model and routing-bucket
+        # validation has succeeded. Opening a fresh "New Chat" signals the
+        # user has moved on from whatever they had open and never sent, so we
+        # don't let empty shells pile up; a rejected request must not delete
+        # those drafts as a side effect (#259).
+        self._cleanup_empty_chats()
+        cid = f"chat-{_uuid8()}"
         chat = ChatInfo(
             chat_id=cid,
             project_id=project_id,
@@ -3100,7 +3140,7 @@ class ProjectChatManager:
         )
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
-        self._validate_custom_model_runner(model or chat.model, provider or chat.provider)
+        target_provider = provider or chat.provider
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if thinking_level is not None:
@@ -3113,7 +3153,8 @@ class ProjectChatManager:
                     f"Unknown thinking level '{thinking_level}' for provider "
                     f"'{target_provider}' (allowed: {', '.join(allowed)})"
                 )
-        moved_from: str | None = None
+
+        target_project_id = project_id if project_id is not None else chat.project_id
         if project_id is not None and project_id != chat.project_id:
             if chat.archived:
                 raise ValueError("Cannot move an archived chat")
@@ -3126,12 +3167,38 @@ class ProjectChatManager:
                     "Cannot move chat across workspaces "
                     f"({current.workspace} → {target.workspace})"
                 )
+
+        changes_model = (
+            model is not None
+            or provider is not None
+            or model_bucket is not None
+        )
+        new_model = model if model is not None else chat.model
+        requested_bucket = (
+            model_bucket if model_bucket is not None else chat.model_bucket
+        )
+        effective_bucket = ""
+        if changes_model:
+            resolve_model = not (
+                model is not None
+                and model_bucket is None
+                and requested_bucket == "personal"
+            )
+            new_model, effective_bucket = self._resolve_and_validate_chat_model(
+                new_model,
+                target_provider,
+                requested_bucket,
+                target_project_id,
+                resolve_model=resolve_model,
+            )
+
+        moved_from: str | None = None
+        if project_id is not None and project_id != chat.project_id:
             moved_from = chat.project_id
             chat.project_id = project_id
         if title is not None:
             chat.title = title
-        if model is not None or provider is not None or model_bucket is not None:
-            new_model = model if model is not None else chat.model
+        if changes_model:
             new_provider = provider if provider is not None else chat.provider
             new_bucket = model_bucket if model_bucket is not None else chat.model_bucket
             # Cross-provider switches mid-chat would silently break: the
@@ -3151,7 +3218,7 @@ class ProjectChatManager:
                 chat.provider, chat.model, new_provider, new_model,
                 project_id=chat.project_id,
                 old_bucket=chat.model_bucket,
-                new_bucket=new_bucket,
+                new_bucket=effective_bucket or new_bucket,
             ):
                 raise ValueError(
                     "Can't switch providers or model backends once a chat has "
@@ -3413,8 +3480,19 @@ class ProjectChatManager:
         clean_model = (model or "").strip()
         if not clean_model:
             raise ValueError("Model is required")
+        if not self._model_bucket_allowed(model_bucket):
+            raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if self._broker.get(chat_id) is not None:
             raise ValueError("Cannot hand over while a turn is running")
+
+        target_bucket = model_bucket if provider == "claude" else ""
+        resolved_model, effective_bucket = self._resolve_and_validate_chat_model(
+            clean_model,
+            provider,
+            target_bucket,
+            chat.project_id,
+        )
+
         self._revoke_mcp_chat(chat_id)
 
         old_provider = chat.provider
@@ -3425,23 +3503,19 @@ class ProjectChatManager:
                 old_provider=old_provider,
                 old_model=old_model,
                 new_provider=provider,
-                new_model=clean_model,
+                new_model=resolved_model,
             )
         )
-        if not self._model_bucket_allowed(model_bucket):
-            raise ValueError(f"Unknown model bucket '{model_bucket}'")
         chat.handover_messages = rows
         chat.handover_context_pending = True
         chat.provider = provider
-        chat.model = clean_model
-        # Bucket only applies to Claude; explicit choice wins, otherwise
-        # the workspace preselects on the next resolution ("" = auto).
-        chat.model_bucket = model_bucket if provider == "claude" else ""
+        chat.model = resolved_model
+        chat.model_bucket = effective_bucket
         # Thinking levels are provider-native and don't carry across, except
         # that the Codex Fable preset is defined as Sol with Ultra effort.
         chat.thinking_level = (
             CODEX_FABLE_THINKING_LEVEL
-            if provider == "codex" and canonical_tier(clean_model) == "fable"
+            if provider == "codex" and canonical_tier(resolved_model) == "fable"
             else ""
         )
         chat.session_id = ""
@@ -4338,7 +4412,7 @@ class ProjectChatManager:
 
     def _resolve_claude_model(self, model: str, bucket: str, project_id: str) -> str:
         """Resolve picker aliases to Ollama, OpenRouter, or custom-provider models."""
-        from ciao.model_tiers import tier_model
+        from ciao.model_tiers import canonical_tier, is_tier, tier_model
 
         effective = self._effective_bucket(bucket, project_id)
         if effective == "openrouter":
@@ -4351,17 +4425,20 @@ class ProjectChatManager:
             )
             if target != model:
                 return target
-            return model
+            return canonical_tier(model) if is_tier(model) else model
 
         if effective.startswith("custom:"):
             provider_id = effective.split(":", 1)[1]
-            target = getattr(self._config, "custom_routing", {}).get(provider_id, {}).get(
-                canonical_tier(model), model
-            )
-            return target or model
+            custom_target = getattr(self._config, "custom_routing", {}).get(
+                provider_id, {}
+            ).get(canonical_tier(model), model)
+            if custom_target and custom_target != model:
+                return cast(str, custom_target)
+            return canonical_tier(model) if is_tier(model) else custom_target
 
         if not self._bucket_routes_to_ollama(effective):
-            return model
+            return canonical_tier(model) if is_tier(model) else model
+
         target = tier_model(
             model,
             haiku=self._config.ollama.haiku_model,
@@ -4369,9 +4446,55 @@ class ProjectChatManager:
             opus=self._config.ollama.opus_model,
             fable=self._config.ollama.fable_model,
         )
-        if target and is_ollama_model(target, self._config.ollama):
+        if effective == "personal" and not is_ollama_model(
+            target, self._config.ollama
+        ):
+            # personal is the legacy workspace fallback, not an explicit
+            # configured backend. Preserve its historical Anthropic alias
+            # fallback when no Ollama backend is present; explicit ollama
+            # workspace buckets still return the target so validation rejects
+            # a stale route before chat creation (#259).
+            return canonical_tier(model) if is_tier(model) else model
+
+        # Return the configured target even when Ollama is unavailable. The
+        # validator must see the effective routed id so it can reject a stale
+        # bucket instead of accepting the bare tier alias and failing later
+        # when the provider starts (#259).
+        if target and target != model:
             return target
-        return model
+        return canonical_tier(model) if is_tier(model) else (target or model)
+
+    def _resolve_and_validate_chat_model(
+        self,
+        model: str,
+        provider: str,
+        model_bucket: str | None,
+        project_id: str,
+        *,
+        resolve_model: bool = True,
+    ) -> tuple[str, str]:
+        """Resolve a chat model through its effective bucket, then validate it.
+
+        The order matters: aliases such as opus can resolve to an
+        unavailable OpenRouter, Ollama, or custom-provider target. Validating
+        the alias first would accept the request even though the model that
+        the provider will actually run is invalid.
+        """
+        from ciao.model_tiers import canonical_tier, is_tier
+
+        effective_bucket = ""
+        resolved_model = (model or "").strip()
+        if is_tier(resolved_model):
+            resolved_model = canonical_tier(resolved_model)
+        if provider == "claude":
+            effective_bucket = self._effective_bucket(model_bucket or "", project_id)
+            if resolve_model:
+                resolved_model = self._resolve_claude_model(
+                    resolved_model, effective_bucket, project_id
+                )
+        self._validate_custom_model_runner(resolved_model, provider)
+        self._validate_configured_model(resolved_model, provider)
+        return resolved_model, effective_bucket
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""
@@ -4390,6 +4513,118 @@ class ProjectChatManager:
             raise ValueError(
                 f"Custom provider '{custom.name}' must be used with {custom.runner}"
             )
+
+    def _validate_configured_model(
+        self, model: str | None, provider: str | None
+    ) -> None:
+        """Reject a free-text model id that is not in the configured set.
+
+        ``claude_models`` is the single source of truth populated at startup
+        and on Settings → Models from ``refresh_local_ollama_models``,
+        ``refresh_openrouter_models``, and ``refresh_cloud_ollama_models``.
+        A valid id is therefore either a configured id, a tier alias
+        (``haiku``/``sonnet``/``opus``/``fable``) that ``_resolve_claude_model``
+        expands at dispatch time, an Ollama model that is in the local
+        daemon list, the cloud allowlist / discovered catalog, or a
+        configured tier target whose backend is actually available, an
+        OpenRouter model from the static allowlist or tier targets (valid
+        even when catalog discovery failed and never merged them into
+        ``claude_models``), or a ``custom:<id>:<model>`` id routed through
+        a configured custom provider. Native Codex ids are skipped because
+        the catalog is async and the Codex CLI already rejects unknown ids
+        with a clear error at the first turn; ``custom:``-prefixed ids
+        still flow through the custom-provider membership check before
+        that exemption fires.
+        """
+        if not model:
+            return
+        custom = provider_for_model(self._config, model)
+        if custom is not None:
+            # A provider with an explicit model list must be used with one
+            # of its members, else the typo reaches the endpoint on the
+            # first turn (#259). An empty list means no catalog to check
+            # against (e.g. an LM Studio endpoint serving dynamic models),
+            # so any id for that provider stays valid. Custom Codex models
+            # are checked here too, so a codex-routed typo never bypasses
+            # this validator.
+            if not custom.models or model in {
+                encode_model(custom.id, m) for m in custom.models
+            }:
+                return
+        elif model.startswith("custom:"):
+            # A ``custom:``-prefixed id whose provider was deleted or never
+            # configured would otherwise fall through to the native Codex
+            # exemption, sending the encoded id to the Codex CLI and
+            # failing on its first turn. Reject up front (#259).
+            raise UnknownModelError(
+                f"Unknown custom model '{model}' (provider not registered)"
+            )
+        if provider == "codex" and custom is None:
+            # Exempt only native Codex ids (no ``custom:`` prefix): the
+            # catalog is async and the Codex CLI rejects unknown ids with a
+            # clear error at the first turn. A rejected custom id must not
+            # be rescued by this exemption, else the typo reaches the
+            # endpoint anyway (#259).
+            return
+        if is_tier(model):
+            return
+        # Ollama: membership in the local daemon list, the cloud allowlist /
+        # discovered catalog, or a configured tier target whose backend is
+        # actually available. Default tier targets like ``minimax-m3:cloud``
+        # are filled in even when no Ollama backend is configured, so
+        # accepting them unconditionally lets the id reach a Claude
+        # provider with no Ollama routing overrides and fail on its first
+        # turn (#259). Cloud catalog membership is gated on a real cloud
+        # API key so an ``CIAO_OLLAMA_MODELS`` allowlist entry does not
+        # sneak through when no Ollama backend is actually configured.
+        ollama = self._config.ollama
+        cloud_available = bool(ollama.api_key) and ollama.api_key != "ollama"
+        ollama_tier_targets = {
+            ollama.haiku_model,
+            ollama.sonnet_model,
+            ollama.opus_model,
+            ollama.fable_model,
+            ollama.title_model,
+        }
+        if (
+            is_local_ollama_model(model, ollama)
+            or (cloud_available and model in ollama.models)
+            or (cloud_available and model in ollama_tier_targets)
+        ):
+            return
+        # Fallback set: ``claude_models`` (filtered to drop Ollama cloud-shaped
+        # entries when no cloud API key is set, since ``CiaoConfig.from_env``
+        # merges ``CIAO_OLLAMA_MODELS`` into the picker and lets a
+        # cloud-shaped id sneak in here even when the earlier Ollama checks
+        # rejected it) plus the OpenRouter static allowlist and tier
+        # targets, both gated on ``openrouter.available`` (#259).
+        openrouter = self._config.openrouter
+        claude_models = [
+            m
+            for m in self._config.claude_models
+            if (openrouter.available or not is_openrouter_model(m, openrouter))
+            and (
+                cloud_available
+                or is_local_ollama_model(m, ollama)
+                or ":" not in m
+            )
+        ]
+        allowed = list(claude_models)
+        if openrouter.available:
+            allowed += list(openrouter.models)
+            allowed += [
+                openrouter.haiku_model,
+                openrouter.sonnet_model,
+                openrouter.opus_model,
+                openrouter.fable_model,
+            ]
+        if model in allowed:
+            return
+        sample = ", ".join(allowed[:8]) if allowed else "(none configured)"
+        raise UnknownModelError(
+            f"Unknown model '{model}' for provider '{provider or 'default'}' "
+            f"(configured models: {sample})"
+        )
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
         """Return the chat's thinking level, or "" when stale.
