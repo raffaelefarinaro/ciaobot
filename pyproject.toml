@@ -19,7 +19,9 @@ dependencies = [
   "python-dotenv==1.2.2",
   "pyyaml==6.0.3",
   "pywebpush==2.3.0",
-  "cryptography==49.0.0",
+  # 49.0.0 dropped the macOS universal2 wheel; keep Intel bundled builds
+  # binary-only until the upstream release restores one.
+  "cryptography==48.0.0",
   # `websockets` is already pulled in transitively by uvicorn[standard].
   "httpx==0.28.1",
   "python-pptx==1.0.2",
