@@ -47,6 +47,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/archive` | Archive chat |
 | POST | `/api/chats/{chat_id}/continue` | Create a new active chat continuing from this archived one |
 | POST | `/api/chats/{chat_id}/read` | Mark chat read |
+| POST | `/api/chats/{chat_id}/draft-claim` | Claim/release this client's unsent draft |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
@@ -311,17 +312,25 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats/$CID" \
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
 
-# has_unsent_draft (boolean) — whether a client is holding composer text that
-# has not been sent. Only the flag is shared; the draft itself stays in the
-# browser that typed it. It exists because the emptiness rule lives on the
-# server (`user_turn_count` never reaches the client) and three paths act on
-# it: DELETE ?only_if_empty=1, the sweep in chat creation, and the sweep at
-# startup. A chat with the flag set is never swept, so a typed-but-unsent
-# prompt is not deleted out from under the user. The engine clears it when the
-# text becomes a turn; clients report transitions, not keystrokes. A
-# non-boolean value is a 400.
-curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats/$CID" \
-  -H 'content-type: application/json' -d '{"has_unsent_draft":true}'
+# Draft claim — "this client is holding unsent content for this chat".
+# Body: client_id (stable per browser), active (boolean). Only the claim is
+# shared; the draft text itself stays in the browser that typed it. It exists
+# because the emptiness rule lives on the server (`user_turn_count` never
+# reaches the client) and three paths act on it: DELETE ?only_if_empty=1, the
+# sweep in chat creation, and the sweep at startup. A chat with a live claim is
+# never swept, so a typed-but-unsent prompt is not deleted out from under the
+# user.
+#
+# Claims are per client and expire after 14 days. Per client, so two browsers
+# open on the same new chat cannot cancel each other — clearing the composer on
+# one leaves the other's claim, and its draft, intact. Expiring, so a browser
+# that claimed and never came back cannot pin an empty chat in the sidebar
+# forever. Clients re-assert on mount, so a live draft never ages out. The
+# engine drops every claim once the text becomes a turn. Chat payloads expose
+# the derived `has_unsent_draft` boolean, never the claim map. A missing
+# client_id or non-boolean active is a 400; an unknown chat is a 404.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/draft-claim" \
+  -H 'content-type: application/json' -d '{"client_id":"browser-1","active":true}'
 
 # Handover — switch model/backend inside the same visible chat.
 # Body keys: provider = claude|codex, model, model_bucket (Claude only), messages

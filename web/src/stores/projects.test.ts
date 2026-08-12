@@ -663,7 +663,7 @@ describe('chat closing and re-entry orientation', () => {
     expect(store.chats).toHaveLength(1)
   })
 
-  test('reports a draft to the server only when the flag flips', async () => {
+  test('claims a draft for this client only when the flag flips', async () => {
     const store = useProjectStore()
     const chatId = 'chat-draft-report'
     store.chats = [{
@@ -677,39 +677,70 @@ describe('chat closing and re-entry orientation', () => {
       created_at: '',
       archived: false,
     }]
-    apiPatch.mockResolvedValue({})
+    apiPost.mockResolvedValue({})
 
-    // The composer writes its local draft on every keystroke; only the
-    // transitions are worth a request.
+    // The composer re-asserts on every mount and on every content change; only
+    // the transitions are worth a request.
     await store.setChatDraftState(chatId, true)
     await store.setChatDraftState(chatId, true)
     await store.setChatDraftState(chatId, true)
 
-    expect(apiPatch).toHaveBeenCalledTimes(1)
-    expect(apiPatch).toHaveBeenCalledWith(`/api/chats/${chatId}`, { has_unsent_draft: true })
+    const claims = apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))
+    expect(claims).toHaveLength(1)
+    expect(claims[0][0]).toBe(`/api/chats/${chatId}/draft-claim`)
+    expect(claims[0][1]).toMatchObject({ active: true })
+    // Tagged with this browser, so releasing here cannot cancel another
+    // device's claim on the same chat.
+    expect(typeof claims[0][1].client_id).toBe('string')
+    expect(claims[0][1].client_id.length).toBeGreaterThan(0)
     expect(store.chats[0].has_unsent_draft).toBe(true)
 
     await store.setChatDraftState(chatId, false)
 
-    expect(apiPatch).toHaveBeenCalledTimes(2)
-    expect(apiPatch).toHaveBeenLastCalledWith(`/api/chats/${chatId}`, { has_unsent_draft: false })
+    const after = apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))
+    expect(after).toHaveLength(2)
+    expect(after[1][1]).toMatchObject({ active: false })
     expect(store.chats[0].has_unsent_draft).toBe(false)
   })
 
-  test('retries the draft report after a failed request', async () => {
+  test('retries the claim after a failed request', async () => {
     const store = useProjectStore()
     const chatId = 'chat-draft-retry'
     store.chats = []
-    apiPatch.mockRejectedValueOnce(new Error('offline'))
+    apiPost.mockRejectedValueOnce(new Error('offline'))
 
     await store.setChatDraftState(chatId, true)
-    expect(apiPatch).toHaveBeenCalledTimes(1)
+    const first = apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))
+    expect(first).toHaveLength(1)
 
-    // The failed state must not be remembered as reported, or the chat would
-    // stay sweepable for the rest of the session.
-    apiPatch.mockResolvedValue({})
+    // A failed claim must not be remembered as reported, or the chat would stay
+    // sweepable for the rest of the session.
+    apiPost.mockResolvedValue({})
     await store.setChatDraftState(chatId, true)
-    expect(apiPatch).toHaveBeenCalledTimes(2)
+    expect(apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))).toHaveLength(2)
+  })
+
+  test('serialises claim and release so they cannot cross on the wire', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-draft-order'
+    store.chats = []
+    const order: boolean[] = []
+    let releaseFirst: (() => void) | null = null
+    apiPost.mockImplementation((_path: string, body: { active: boolean }) => {
+      order.push(body.active)
+      if (body.active) return new Promise<unknown>(resolve => { releaseFirst = () => resolve({}) })
+      return Promise.resolve({})
+    })
+
+    // Type one character then immediately delete it: the release must wait for
+    // the claim, or the server can be left claimed by a client holding nothing.
+    const claiming = store.setChatDraftState(chatId, true)
+    const releasing = store.setChatDraftState(chatId, false)
+    await vi.waitFor(() => expect(releaseFirst).not.toBeNull())
+    releaseFirst!()
+    await Promise.all([claiming, releasing])
+
+    expect(order).toEqual([true, false])
   })
 
   test('keeps a chat the server declines to delete', async () => {

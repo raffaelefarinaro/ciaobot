@@ -11,7 +11,10 @@ localStorage key nothing could reach again.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -21,8 +24,8 @@ from starlette.testclient import TestClient
 from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.project_chats import ProjectChatManager
-from ciao.web.routes_api import chat_detail
+from ciao.web.project_chats import _DRAFT_CLAIM_TTL_S, ProjectChatManager
+from ciao.web.routes_api import chat_detail, chat_draft_claim
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
@@ -49,10 +52,10 @@ def test_a_chat_with_an_unsent_draft_is_not_empty(tmp_path: Path) -> None:
 
     assert manager.is_empty_chat(chat.chat_id) is True
 
-    manager.set_unsent_draft(chat.chat_id, True)
+    manager.set_draft_claim(chat.chat_id, "client-a", True)
     assert manager.is_empty_chat(chat.chat_id) is False
 
-    manager.set_unsent_draft(chat.chat_id, False)
+    manager.set_draft_claim(chat.chat_id, "client-a", False)
     assert manager.is_empty_chat(chat.chat_id) is True
 
 
@@ -61,7 +64,7 @@ def test_creating_another_chat_does_not_sweep_away_a_draft(tmp_path: Path) -> No
     manager = _make_manager(tmp_path)
     project = manager.create_project("Drafts", workspace="work")
     drafted = manager.create_chat(project.project_id, title="New Chat")
-    manager.set_unsent_draft(drafted.chat_id, True)
+    manager.set_draft_claim(drafted.chat_id, "client-a", True)
 
     manager.create_chat(project.project_id, title="New Chat")
 
@@ -84,11 +87,11 @@ def test_the_draft_flag_survives_a_restart(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Drafts", workspace="work")
     chat = manager.create_chat(project.project_id, title="New Chat")
-    manager.set_unsent_draft(chat.chat_id, True)
+    manager.set_draft_claim(chat.chat_id, "client-a", True)
 
     reloaded = _make_manager(tmp_path)
 
-    assert reloaded._chats[chat.chat_id].has_unsent_draft is True
+    assert reloaded._chats[chat.chat_id].draft_claims != {}
     assert reloaded.is_empty_chat(chat.chat_id) is False
 
 
@@ -100,16 +103,16 @@ def test_state_written_before_the_field_existed_loads_as_no_draft(
     manager = _make_manager(tmp_path)
     project = manager.create_project("Drafts", workspace="work")
     chat = manager.create_chat(project.project_id, title="Kept by its title")
-    manager.set_unsent_draft(chat.chat_id, True)
+    manager.set_draft_claim(chat.chat_id, "client-a", True)
 
     path = manager._path
     data = json.loads(path.read_text(encoding="utf-8"))
-    del data["chats"][chat.chat_id]["has_unsent_draft"]
+    del data["chats"][chat.chat_id]["draft_claims"]
     path.write_text(json.dumps(data), encoding="utf-8")
 
     reloaded = _make_manager(tmp_path)
 
-    assert reloaded._chats[chat.chat_id].has_unsent_draft is False
+    assert reloaded._chats[chat.chat_id].draft_claims == {}
 
 
 def test_setting_the_same_value_twice_is_idempotent(tmp_path: Path) -> None:
@@ -117,23 +120,26 @@ def test_setting_the_same_value_twice_is_idempotent(tmp_path: Path) -> None:
     project = manager.create_project("Drafts", workspace="work")
     chat = manager.create_chat(project.project_id, title="New Chat")
 
-    assert manager.set_unsent_draft(chat.chat_id, True) is not None
-    assert manager.set_unsent_draft(chat.chat_id, True) is not None
-    assert manager._chats[chat.chat_id].has_unsent_draft is True
+    assert manager.set_draft_claim(chat.chat_id, "client-a", True) is not None
+    assert manager.set_draft_claim(chat.chat_id, "client-a", True) is not None
+    assert manager._chats[chat.chat_id].draft_claims != {}
 
 
 def test_setting_a_draft_on_a_missing_chat_returns_none(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
 
-    assert manager.set_unsent_draft("nope", True) is None
+    assert manager.set_draft_claim("nope", "client-a", True) is None
 
 
 def _make_client(manager: ProjectChatManager) -> TestClient:
     app = Starlette(
         routes=[
+            Route("/api/chats/{chat_id}", chat_detail, methods=["PATCH", "DELETE"]),
             Route(
-                "/api/chats/{chat_id}", chat_detail, methods=["PATCH", "DELETE"]
-            )
+                "/api/chats/{chat_id}/draft-claim",
+                chat_draft_claim,
+                methods=["POST"],
+            ),
         ]
     )
     app.state.project_chat_manager = manager
@@ -141,14 +147,19 @@ def _make_client(manager: ProjectChatManager) -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
-def test_patch_reports_the_draft_and_delete_then_declines(tmp_path: Path) -> None:
+def test_claiming_then_releasing_round_trips_through_the_route(
+    tmp_path: Path,
+) -> None:
     """The round trip the composer actually performs."""
     manager = _make_manager(tmp_path)
     project = manager.create_project("Drafts", workspace="work")
     chat = manager.create_chat(project.project_id, title="New Chat")
     client = _make_client(manager)
 
-    res = client.patch(f"/api/chats/{chat.chat_id}", json={"has_unsent_draft": True})
+    res = client.post(
+        f"/api/chats/{chat.chat_id}/draft-claim",
+        json={"client_id": "browser-1", "active": True},
+    )
     assert res.status_code == 200
     assert res.json()["has_unsent_draft"] is True
 
@@ -158,18 +169,131 @@ def test_patch_reports_the_draft_and_delete_then_declines(tmp_path: Path) -> Non
     assert chat.chat_id in manager._chats
 
     # Clearing the composer hands it back to the sweep.
-    client.patch(f"/api/chats/{chat.chat_id}", json={"has_unsent_draft": False})
+    client.post(
+        f"/api/chats/{chat.chat_id}/draft-claim",
+        json={"client_id": "browser-1", "active": False},
+    )
     res = client.delete(f"/api/chats/{chat.chat_id}?only_if_empty=1")
     assert res.json()["deleted"] is True
 
 
-def test_patch_rejects_a_non_boolean_draft_flag(tmp_path: Path) -> None:
+def test_the_response_exposes_the_flag_not_the_claim_internals(
+    tmp_path: Path,
+) -> None:
+    """One browser has no business seeing another's client id."""
     manager = _make_manager(tmp_path)
     project = manager.create_project("Drafts", workspace="work")
     chat = manager.create_chat(project.project_id, title="New Chat")
     client = _make_client(manager)
 
-    res = client.patch(f"/api/chats/{chat.chat_id}", json={"has_unsent_draft": "yes"})
+    payload = client.post(
+        f"/api/chats/{chat.chat_id}/draft-claim",
+        json={"client_id": "browser-1", "active": True},
+    ).json()
 
-    assert res.status_code == 400
-    assert manager._chats[chat.chat_id].has_unsent_draft is False
+    assert payload["has_unsent_draft"] is True
+    assert "draft_claims" not in payload
+
+
+def test_the_route_rejects_a_missing_client_or_non_boolean_active(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+    client = _make_client(manager)
+
+    assert client.post(
+        f"/api/chats/{chat.chat_id}/draft-claim", json={"active": True}
+    ).status_code == 400
+    assert client.post(
+        f"/api/chats/{chat.chat_id}/draft-claim",
+        json={"client_id": "browser-1", "active": "yes"},
+    ).status_code == 400
+    assert manager._chats[chat.chat_id].draft_claims == {}
+
+
+def test_an_unknown_chat_is_a_404(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    client = _make_client(manager)
+
+    res = client.post(
+        "/api/chats/nope/draft-claim", json={"client_id": "browser-1", "active": True}
+    )
+
+    assert res.status_code == 404
+
+
+def test_one_client_releasing_leaves_another_clients_claim(tmp_path: Path) -> None:
+    """The failure the shared boolean had: phone holds a draft, desktop types a
+    character and deletes it, and the phone's prompt is swept away."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+
+    manager.set_draft_claim(chat.chat_id, "phone", True)
+    manager.set_draft_claim(chat.chat_id, "desktop", True)
+    manager.set_draft_claim(chat.chat_id, "desktop", False)
+
+    assert manager.is_empty_chat(chat.chat_id) is False
+
+    manager.set_draft_claim(chat.chat_id, "phone", False)
+    assert manager.is_empty_chat(chat.chat_id) is True
+
+
+def test_a_stale_claim_stops_protecting_the_chat(tmp_path: Path) -> None:
+    """The other failure: a browser that claimed and never came back must not
+    pin an empty chat in the sidebar forever."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+
+    long_ago = datetime.now(UTC) - timedelta(seconds=_DRAFT_CLAIM_TTL_S + 60)
+    manager._chats[chat.chat_id].draft_claims = {"ghost": long_ago.isoformat()}
+
+    assert manager.is_empty_chat(chat.chat_id) is True
+
+
+def test_a_fresh_claim_survives_beside_a_stale_one(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+
+    long_ago = datetime.now(UTC) - timedelta(seconds=_DRAFT_CLAIM_TTL_S + 60)
+    manager._chats[chat.chat_id].draft_claims = {"ghost": long_ago.isoformat()}
+    manager.set_draft_claim(chat.chat_id, "phone", True)
+
+    assert manager.is_empty_chat(chat.chat_id) is False
+    # Writing a claim also prunes the dead one, so the map cannot grow forever.
+    assert list(manager._chats[chat.chat_id].draft_claims) == ["phone"]
+
+
+def test_an_unparseable_timestamp_is_treated_as_stale(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+
+    manager._chats[chat.chat_id].draft_claims = {"corrupt": "not-a-timestamp"}
+
+    # Dropping it sweeps one chat early; keeping it would make the chat
+    # unreclaimable forever.
+    assert manager.is_empty_chat(chat.chat_id) is True
+
+
+def test_sending_clears_every_claim(tmp_path: Path) -> None:
+    """The server-authoritative half: once the text is a turn, no claim stands,
+    even one made by a client that has since gone away."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+    manager.set_draft_claim(chat.chat_id, "phone", True)
+    manager.set_draft_claim(chat.chat_id, "desktop", True)
+
+    async def drain() -> None:
+        with contextlib.suppress(Exception):
+            async for _ in manager.stream_chat(chat.chat_id, "hello"):
+                break
+
+    asyncio.run(drain())
+
+    assert manager._chats[chat.chat_id].draft_claims == {}

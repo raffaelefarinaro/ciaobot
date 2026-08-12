@@ -2369,10 +2369,6 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
-    if "has_unsent_draft" in body and not isinstance(body["has_unsent_draft"], bool):
-        return JSONResponse(
-            {"error": "has_unsent_draft must be a boolean"}, status_code=400
-        )
     if "control_surface" in body:
         surface = str(body.get("control_surface") or "").strip()
         if surface not in {"", "legacy", "mcp", "auto"}:
@@ -2396,11 +2392,6 @@ async def chat_detail(request: Request) -> JSONResponse:
             thinking_level=body.get("thinking_level"),
             model_bucket=body.get("model_bucket"),
         )
-        if chat is not None and "has_unsent_draft" in body:
-            # Deliberately not routed through update_chat: a draft toggle must
-            # not drag the composer's keystrokes through model resolution and
-            # bucket validation.
-            chat = pcm.set_unsent_draft(chat_id, body["has_unsent_draft"]) or chat
         if chat is not None and "control_surface" in body:
             changed = chat.control_surface != surface
             chat.control_surface = surface
@@ -2579,6 +2570,33 @@ async def chat_mark_read(request: Request) -> JSONResponse:
     if chat is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"ok": True, "last_read_at": chat.last_read_at})
+
+
+async def chat_draft_claim(request: Request) -> JSONResponse:
+    """Claim or release "this client holds an unsent draft for this chat".
+
+    Its own route rather than a PATCH field: a composer transition must not run
+    the model/bucket resolution `update_chat` does, and a claim is scoped to the
+    calling client, which the generic chat-update shape has no place for.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected object"}, status_code=400)
+    client_id = str(body.get("client_id") or "").strip()
+    active = body.get("active")
+    if not client_id:
+        return JSONResponse({"error": "client_id is required"}, status_code=400)
+    if not isinstance(active, bool):
+        return JSONResponse({"error": "active must be a boolean"}, status_code=400)
+    chat = pcm.set_draft_claim(chat_id, client_id, active)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(chat.to_dict(local=pcm.is_session_local(chat)))
 
 
 async def chats_mark_all_read(request: Request) -> JSONResponse:

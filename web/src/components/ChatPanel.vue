@@ -1259,10 +1259,6 @@ watch(inputText, (text) => {
     promptHistoryIndex.value = -1
     promptHistoryDraft.value = ''
     writeChatDraft(draftChatId, text)
-    // The draft lives in this browser, but the server owns the rule that
-    // decides whether an untouched New Chat gets swept away - so it has to know
-    // one exists. The store only sends this when the boolean actually flips.
-    void store.setChatDraftState(draftChatId, Boolean(text.trim()))
   }
 }, { flush: 'sync' })
 
@@ -1349,6 +1345,20 @@ const canSend = computed(() =>
     || store.pendingComments.length
     || store.pendingChatComments.length),
 )
+// The draft lives in this browser, but the server owns the rule that decides
+// whether an untouched New Chat gets swept away, so it has to know one exists.
+// Keyed off canSend rather than the text alone: a chat holding only a pasted
+// screenshot or a staged comment is just as much a draft, and losing it strands
+// the attachment under a deleted chat id.
+//
+// immediate, so a draft restored into the composer on mount is re-asserted. The
+// text is put back as the ref's initial value, which fires no watcher — without
+// this a claim that never reached the server (offline, host restarting) would
+// stay missing until the sweep deleted the chat.
+watch(canSend, hasContent => {
+  void store.setChatDraftState(draftChatId, hasContent)
+}, { immediate: true })
+
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
 const showStopAction = computed(() => store.isStreaming && !canSend.value)

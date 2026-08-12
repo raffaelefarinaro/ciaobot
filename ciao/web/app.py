@@ -52,6 +52,7 @@ from ciao.web.routes_api import (
     chat_fork,
     chat_handover,
     chat_images,
+    chat_draft_claim,
     chat_mark_read,
     chat_messages,
     chat_reentry_summary,
@@ -236,6 +237,9 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/archive", chat_archive, methods=["POST"]),
         Route("/api/chats/{chat_id}/continue", chat_continue, methods=["POST"]),
         Route("/api/chats/{chat_id}/read", chat_mark_read, methods=["POST"]),
+        Route(
+            "/api/chats/{chat_id}/draft-claim", chat_draft_claim, methods=["POST"]
+        ),
         Route("/api/chats/{chat_id}/retry", chat_retry, methods=["POST"]),
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
         Route("/api/chats/{chat_id}/messages", chat_messages, methods=["GET"]),

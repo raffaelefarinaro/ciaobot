@@ -15,6 +15,7 @@ import {
 import { archiveFailedToast, archiveStoppedToast } from '../lib/archiveCopy'
 import { errorMessage } from '../lib/errorMessage'
 import { readChatDraft } from '../lib/chatDrafts'
+import { clientId } from '../lib/clientId'
 import type {
   ArchiveChatResponse,
   ProjectInfo,
@@ -1620,14 +1621,18 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx >= 0) chats.value[idx] = c
   }
 
-  // Tell the server whether this browser is holding unsent composer text, so
-  // its emptiness rule stops deleting a chat whose only content is a typed but
-  // unsent prompt. Reported on transitions only - the composer writes its local
-  // draft on every keystroke, but the server only needs the boolean, so this is
-  // two requests per draft rather than one per key. Failures are swallowed: the
-  // draft is still safe locally, and a lost flag only restores today's
-  // behaviour.
+  // Claim, for this browser, that it holds unsent content for a chat, so the
+  // server's emptiness rule stops deleting a chat whose only content is a typed
+  // but unsent prompt. The draft text never leaves this browser; only the claim
+  // does, tagged with our client id so clearing a composer here cannot cancel a
+  // claim another device made for its own draft.
+  //
+  // Requests are chained per chat rather than fired independently: a claim and
+  // its release are one character apart when someone types and immediately
+  // deletes, and if those crossed on the wire the chat could be left claimed by
+  // a client that is no longer holding anything.
   const reportedDraftState = new Map<string, boolean>()
+  const draftClaimQueue = new Map<string, Promise<void>>()
 
   async function setChatDraftState(
     chatId: string | null | undefined,
@@ -1640,12 +1645,27 @@ export const useProjectStore = defineStore('projects', () => {
     reportedDraftState.set(chatId, hasDraft)
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (chat) chat.has_unsent_draft = hasDraft
-    try {
-      await api.patch<ChatInfo>(`/api/chats/${chatId}`, { has_unsent_draft: hasDraft })
-    } catch {
-      // Let the next transition retry; nothing the user typed is at risk here.
-      reportedDraftState.delete(chatId)
-    }
+    const previous = draftClaimQueue.get(chatId) ?? Promise.resolve()
+    const next = previous
+      .catch(() => {})
+      .then(async () => {
+        try {
+          await api.post(`/api/chats/${chatId}/draft-claim`, {
+            client_id: clientId(),
+            active: hasDraft,
+          })
+        } catch {
+          // Forget it so the next assertion retries. The composer re-asserts on
+          // every mount, so a claim lost to a restart or a dropped connection
+          // is re-made the next time the chat is opened rather than being
+          // silently missing until the sweep deletes the chat.
+          if (reportedDraftState.get(chatId) === hasDraft) {
+            reportedDraftState.delete(chatId)
+          }
+        }
+      })
+    draftClaimQueue.set(chatId, next)
+    await next
   }
 
   async function handoverChat(
