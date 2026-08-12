@@ -114,6 +114,21 @@ def _write_if_missing(path: Path, text: str) -> None:
         path.write_text(text, encoding="utf-8")
 
 
+def _launchd_program_arguments(executable: str) -> str:
+    """Render the arguments needed to start either a ciao launcher or Python."""
+
+    name = Path(executable).name.lower()
+    arguments = (
+        ["-m", "ciao.cli", "run"]
+        if name == "python" or name.startswith("python3")
+        else ["run"]
+    )
+    return "\n".join(
+        f"        <string>{html.escape(argument, quote=False)}</string>"
+        for argument in arguments
+    )
+
+
 def _render_launchd_plist(
     *,
     workspace: Path,
@@ -137,6 +152,7 @@ def _render_launchd_plist(
             str((runtime_root or (workspace / ".runtime")).resolve()), quote=False
         ),
         "{{CIAO_EXECUTABLE}}": html.escape(executable, quote=False),
+        "{{CIAO_PROGRAM_ARGUMENTS}}": _launchd_program_arguments(executable),
         "{{CIAO_PORT}}": html.escape(str(port), quote=False),
         "{{CIAO_PATH}}": html.escape(resolved_path, quote=False),
     }

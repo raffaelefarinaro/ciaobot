@@ -411,6 +411,21 @@ def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     with (launch_agents / "com.ciao.server.plist").open("rb") as handle:
         plist = plistlib.load(handle)
     assert plist["ProgramArguments"][0] == engine
+    assert plist["ProgramArguments"][1:] == ["run"]
+
+
+def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> None:
+    launch_agents = tmp_path / "LaunchAgents"
+
+    cli.setup_workspace(
+        tmp_path / "workspace",
+        launch_agents_dir=launch_agents,
+        python_path="/opt/ciao/bin/python3.12",
+    )
+
+    with (launch_agents / "com.ciao.server.plist").open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["ProgramArguments"][1:] == ["-m", "ciao.cli", "run"]
 
 
 def _write_desktop_app(app_dir: Path) -> Path:

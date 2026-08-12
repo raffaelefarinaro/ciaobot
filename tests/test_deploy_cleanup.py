@@ -34,9 +34,9 @@ def test_deploy_plist_points_at_packaged_cli_template() -> None:
     assert "{{CIAO_RUNTIME_ROOT}}" in text
     assert "{{CIAO_PORT}}" in text
     assert "{{CIAO_PATH}}" in text
+    assert "{{CIAO_PROGRAM_ARGUMENTS}}" in text
     assert "<string>{{CIAO_EXECUTABLE}}</string>" in text
     assert "<string>ciao.cli</string>" not in text
-    assert "<string>run</string>" in text
 
 
 def test_render_launchd_plist_substitutes_path() -> None:
@@ -60,6 +60,8 @@ def test_render_launchd_plist_substitutes_path() -> None:
     assert "/tmp/ciao-ws/.runtime" in out
     assert "<key>PATH</key>" in out
     assert "/opt/homebrew/bin:/usr/bin:/bin" in out
+    assert "<string>-m</string>" in out
+    assert "<string>ciao.cli</string>" in out
 
 
 def test_render_launchd_plist_preserves_custom_runtime_root() -> None:
