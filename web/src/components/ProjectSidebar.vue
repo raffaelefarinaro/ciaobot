@@ -1460,7 +1460,9 @@ async function confirmDeleteChat(chatId: string) {
   /* min-width, not width: the active item grows to fit its label. */
   min-width: 30px;
   height: 30px;
-  padding: 0 var(--space-1);
+  /* Keep the vertical padding supplied by .touch-hit: the visible 30px
+     control still needs the shared 44px touch target. */
+  padding-inline: var(--space-1);
   border-radius: var(--radius-sm);
   position: relative;
   isolation: isolate;
@@ -1624,7 +1626,7 @@ async function confirmDeleteChat(chatId: string) {
   height: 16px;
   padding: 0 3px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-xs);
   color: var(--fg3);
   font-size: 10px;
   line-height: 1;
@@ -1717,7 +1719,7 @@ async function confirmDeleteChat(chatId: string) {
   height: 14px;
   padding: 0 5px;
   margin-left: 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg3);
   color: var(--fg2);
   font-size: calc(9px * var(--font-scale));

@@ -106,6 +106,14 @@ const hasTitle = computed(() => !!slots.title)
   .header-center { display: none; }
 }
 
+/* A wide viewport can still leave this pane narrow when the sidebar has been
+   dragged near its maximum. The header's action trail is unshrinkable, so
+   hide the decorative brand/tag based on the pane width as well as the
+   viewport width. */
+@container chat-pane (max-width: 460px) {
+  .header-center { display: none; }
+}
+
 /* Very narrow viewports: drop the mark outright rather than clip it. The trail's
    controls cannot shrink, so something has to go, and the mark is the only thing
    here that is not an action. */
