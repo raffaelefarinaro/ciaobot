@@ -41,7 +41,6 @@ jobs:
           test -x "$app/Contents/MacOS/ciaobot-desktop"
           test -x "$app/Contents/Resources/ciao-runtime/bin/ciao"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$HOME/Library/LaunchAgents/com.ciao.server.plist")" = "$app/Contents/Resources/ciao-runtime/bin/ciao"
           test "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$HOME/Library/LaunchAgents/Ciaobot.plist")" = "$app/Contents/MacOS/ciaobot-desktop"
           test "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:1' "$HOME/Library/LaunchAgents/Ciaobot.plist")" = "--background"
           launchctl print "gui/$(id -u)/Ciaobot" >/dev/null

@@ -281,6 +281,32 @@ fn requires_confirmation(result: &service::ServiceResult) -> bool {
         .unwrap_or(false)
 }
 
+// Restart the separate Python LaunchAgent after the app bundle has been
+// replaced. The app updater only restarts this Tauri process; without this
+// kickstart the server keeps executing the old bundle from the same plist path.
+// A fresh bootstrap install has no server plist yet, so there is nothing to
+// restart until onboarding finishes setup.
+fn restart_engine_after_app_update(app: &AppHandle) -> Result<(), String> {
+    let server_plist = app
+        .state::<DesktopModel>()
+        .runtime
+        .read()
+        .map_err(|_| "Could not read the current Ciaobot runtime.".to_string())?
+        .server_plist
+        .clone();
+    if !server_plist.is_file() {
+        return Ok(());
+    }
+    let binary = service::resolve_ciao(env::var("PATH").ok().as_deref())
+        .ok_or_else(|| "The bundled Ciaobot engine was not found.".to_string())?;
+    let result = service::invoke(&binary, "restart", &["--force"])?;
+    if result.ok {
+        Ok(())
+    } else {
+        Err(result.message)
+    }
+}
+
 // Second half of the unified update. There is no bundled window left to emit
 // progress to, so failures surface as a dialog. Only restart when something
 // actually changed — otherwise "Update…" would bounce a healthy app for nothing.
@@ -294,6 +320,7 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
                 .download_and_install(|_, _| {}, || {})
                 .await
                 .map_err(|error| format!("Update {version} could not be installed: {error}"))?;
+            restart_engine_after_app_update(&app)?;
             app.restart()
         }
         // The engine moved but the app did not: restart so both halves come

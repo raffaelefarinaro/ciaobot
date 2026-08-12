@@ -59,7 +59,8 @@ download_runtime() {
         --no-compile \
         --target "$output/site-packages/$arch" \
         "$repo_root"
-    if ! "$python_bin" -c 'import pydantic_core; from pydantic_core import core_schema' >/dev/null 2>&1; then
+    if ! PYTHONPATH="$output/site-packages/$arch" \
+        "$python_bin" -c 'import pydantic_core; from pydantic_core import core_schema' >/dev/null 2>&1; then
         echo "Bundled ${arch} runtime cannot import pydantic-core" >&2
         exit 1
     fi

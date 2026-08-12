@@ -43,6 +43,7 @@ def test_runtime_builder_probes_pydantic_core_for_each_architecture() -> None:
 
     assert "import pydantic_core" in script
     assert "Bundled ${arch} runtime cannot import pydantic-core" in script
+    assert 'PYTHONPATH="$output/site-packages/$arch"' in script
 
 
 def test_installer_requires_native_verification_before_extraction() -> None:
@@ -104,6 +105,7 @@ def test_release_smoke_only_runs_with_a_published_version() -> None:
     assert "workflow_call:" in workflow
     assert "workflow_dispatch:" in workflow
     assert "pull_request:" not in workflow
+    assert 'LaunchAgents/com.ciao.server.plist")' not in workflow
 
 
 def test_ci_prepares_cross_arch_toolchains_before_runtime_build() -> None:
