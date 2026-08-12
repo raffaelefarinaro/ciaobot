@@ -76,6 +76,7 @@ pub fn spawn_bootstrap(binary: &Path, workspace: Option<&Path>) -> Result<(), St
     command
         .arg("run")
         .env("CIAO_NO_BROWSER", "1")
+        .env("CIAO_BOOTSTRAP_LAUNCHD_HANDOFF", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

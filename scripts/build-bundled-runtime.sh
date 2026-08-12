@@ -22,6 +22,18 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 : "${CIAO_PYTHON_X86_64_URL:?CIAO_PYTHON_X86_64_URL is required}"
 : "${CIAO_PYTHON_X86_64_SHA256:?CIAO_PYTHON_X86_64_SHA256 is required}"
 
+command -v uv >/dev/null 2>&1 || {
+    echo "uv is required to export the checked-in uv.lock for the bundled runtime" >&2
+    exit 1
+}
+requirements="$tmp/runtime-requirements.txt"
+uv export \
+    --frozen \
+    --no-dev \
+    --no-emit-project \
+    --format requirements.txt \
+    --output-file "$requirements"
+
 rm -rf "$output"
 mkdir -p "$output/python" "$output/site-packages" "$output/bin"
 
@@ -57,6 +69,15 @@ download_runtime() {
         --disable-pip-version-check \
         --no-cache-dir \
         --no-compile \
+        --target "$output/site-packages/$arch" \
+        --require-hashes \
+        -r "$requirements"
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+        "$python_bin" -m pip install \
+        --disable-pip-version-check \
+        --no-cache-dir \
+        --no-compile \
+        --no-deps \
         --target "$output/site-packages/$arch" \
         "$repo_root"
     if ! PYTHONPATH="$output/site-packages/$arch" \

@@ -5363,11 +5363,16 @@ def _setup_finish_origin_allowed(request: Request) -> bool:
 
 
 def _interactive_foreground_run() -> bool:
-    """True when this server was started from an interactive terminal."""
+    """True when setup can hand the bootstrap server to launchd.
+
+    The bundled desktop app deliberately starts bootstrap with no terminal
+    attached, but it still owns the one-time onboarding process and must hand
+    the configured server to the LaunchAgent when setup completes.
+    """
     try:
-        return sys.stderr.isatty()
+        return sys.stderr.isatty() or os.environ.get("CIAO_BOOTSTRAP_LAUNCHD_HANDOFF") == "1"
     except (AttributeError, ValueError):
-        return False
+        return os.environ.get("CIAO_BOOTSTRAP_LAUNCHD_HANDOFF") == "1"
 
 
 def _schedule_launchd_server_handoff() -> bool:

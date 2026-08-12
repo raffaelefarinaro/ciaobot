@@ -412,6 +412,9 @@ def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
         plist = plistlib.load(handle)
     assert plist["ProgramArguments"][0] == engine
     assert plist["ProgramArguments"][1:] == ["run"]
+    assert plist["EnvironmentVariables"]["CIAO_NATIVE_SIDECAR"] == (
+        "/Applications/Ciaobot.app/Contents/MacOS/ciaobot-native"
+    )
 
 
 def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> None:
@@ -426,6 +429,7 @@ def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> 
     with (launch_agents / "com.ciao.server.plist").open("rb") as handle:
         plist = plistlib.load(handle)
     assert plist["ProgramArguments"][1:] == ["-m", "ciao.cli", "run"]
+    assert plist["EnvironmentVariables"]["CIAO_NATIVE_SIDECAR"] == ""
 
 
 def _write_desktop_app(app_dir: Path) -> Path:

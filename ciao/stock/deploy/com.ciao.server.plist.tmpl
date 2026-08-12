@@ -13,7 +13,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>{{CIAO_EXECUTABLE}}</string>
-{{CIAO_PROGRAM_ARGUMENTS}}
+{{LAUNCHD_PROGRAM_ARGUMENTS}}
     </array>
 
     <key>WorkingDirectory</key>
@@ -29,6 +29,8 @@
         <string>{{CIAO_PORT}}</string>
         <key>PATH</key>
         <string>{{CIAO_PATH}}</string>
+        <key>CIAO_NATIVE_SIDECAR</key>
+        <string>{{CIAO_NATIVE_SIDECAR}}</string>
     </dict>
 
     <!-- Deliberately no LimitLoadToSessionType. It looks like the fix for

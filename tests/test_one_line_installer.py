@@ -49,6 +49,17 @@ def test_runtime_builder_probes_pydantic_core_for_each_architecture() -> None:
     assert 'PYTHONPATH="$output/site-packages/$arch"' in script
 
 
+def test_runtime_builder_installs_from_the_frozen_hashed_lock_export() -> None:
+    script = (REPO_ROOT / "scripts" / "build-bundled-runtime.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "uv export" in script
+    assert "--frozen" in script
+    assert "--require-hashes" in script
+    assert "-r \"$requirements\"" in script
+
+
 def test_installer_requires_native_verification_before_extraction() -> None:
     script = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
 

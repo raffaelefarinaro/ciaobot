@@ -28,6 +28,8 @@ jobs:
           sudo xcode-select -s "$newest"
           xcodebuild -version
           swiftc --version
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci
@@ -39,37 +41,14 @@ jobs:
       - name: Resolve pinned Python runtimes
         id: python-runtime
         shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Bump deliberately when refreshing the embedded runtime; the URLs
-          # and hashes below are resolved from this immutable upstream tag.
-          release_tag="20260807"
-          metadata="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/${release_tag}")"
-          resolve_asset() {
-            local platform="$1"
-            local asset url digest
-            asset="$(jq -r --arg platform "$platform" '[.assets[] | select(.name | startswith("cpython-3.12.")) | select(.name | endswith($platform + "-install_only_stripped.tar.gz"))] | max_by(.name) | .name' <<<"$metadata")"
-            test -n "$asset" -a "$asset" != "null"
-            url="$(jq -r --arg asset "$asset" '.assets[] | select(.name == $asset) | .browser_download_url' <<<"$metadata")"
-            digest="$(jq -r --arg asset "$asset" '.assets[] | select(.name == $asset) | .digest // ""' <<<"$metadata")"
-            if [[ "$digest" == sha256:* ]]; then
-              digest="${digest#sha256:}"
-            else
-              echo "No upstream digest for $asset; computing one from the pinned URL" >&2
-              digest="$(curl -fsSL "$url" | shasum -a 256 | awk '{print $1}')"
-            fi
-            printf '%s\n%s\n' "$url" "$digest"
-          }
-          arm64_result="$(resolve_asset aarch64-apple-darwin)"
-          x86_64_result="$(resolve_asset x86_64-apple-darwin)"
+          . scripts/pinned-python-runtime.env
           {
-            echo "release_tag=$release_tag"
-            echo "arm64_url=$(printf '%s\n' "$arm64_result" | sed -n '1p')"
-            echo "arm64_sha256=$(printf '%s\n' "$arm64_result" | sed -n '2p')"
-            echo "x86_64_url=$(printf '%s\n' "$x86_64_result" | sed -n '1p')"
-            echo "x86_64_sha256=$(printf '%s\n' "$x86_64_result" | sed -n '2p')"
+            echo "arm64_url=$CIAO_PYTHON_ARM64_URL"
+            echo "arm64_sha256=$CIAO_PYTHON_ARM64_SHA256"
+            echo "x86_64_url=$CIAO_PYTHON_X86_64_URL"
+            echo "x86_64_sha256=$CIAO_PYTHON_X86_64_SHA256"
           } >> "$GITHUB_OUTPUT"
       - name: Build embedded Ciaobot runtime
         env:

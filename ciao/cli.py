@@ -129,6 +129,16 @@ def _launchd_program_arguments(executable: str) -> str:
     )
 
 
+def _bundled_sidecar_path(executable: str) -> str:
+    """Return the sidecar beside a bundled engine, when one is identifiable."""
+
+    executable_path = Path(executable).expanduser()
+    for ancestor in (executable_path, *executable_path.parents):
+        if ancestor.suffix == ".app":
+            return str(ancestor / "Contents" / "MacOS" / "ciaobot-native")
+    return ""
+
+
 def _render_launchd_plist(
     *,
     workspace: Path,
@@ -152,7 +162,10 @@ def _render_launchd_plist(
             str((runtime_root or (workspace / ".runtime")).resolve()), quote=False
         ),
         "{{CIAO_EXECUTABLE}}": html.escape(executable, quote=False),
-        "{{CIAO_PROGRAM_ARGUMENTS}}": _launchd_program_arguments(executable),
+        "{{LAUNCHD_PROGRAM_ARGUMENTS}}": _launchd_program_arguments(executable),
+        "{{CIAO_NATIVE_SIDECAR}}": html.escape(
+            _bundled_sidecar_path(executable), quote=False
+        ),
         "{{CIAO_PORT}}": html.escape(str(port), quote=False),
         "{{CIAO_PATH}}": html.escape(resolved_path, quote=False),
     }

@@ -34,7 +34,7 @@ def test_deploy_plist_points_at_packaged_cli_template() -> None:
     assert "{{CIAO_RUNTIME_ROOT}}" in text
     assert "{{CIAO_PORT}}" in text
     assert "{{CIAO_PATH}}" in text
-    assert "{{CIAO_PROGRAM_ARGUMENTS}}" in text
+    assert "{{LAUNCHD_PROGRAM_ARGUMENTS}}" in text
     assert "<string>{{CIAO_EXECUTABLE}}</string>" in text
     assert "<string>ciao.cli</string>" not in text
 

@@ -49,7 +49,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-for command in curl tar shasum mktemp mkdir mv find sw_vers awk uname id launchctl; do
+for command in curl tar shasum mktemp mkdir mv find sw_vers awk uname id launchctl pgrep sed; do
     command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done
 
@@ -91,6 +91,15 @@ download() {
     curl -fsSL --retry 3 --connect-timeout 15 "$1" -o "$2"
 }
 
+xml_escape() {
+    # The path is XML character data, so these three characters are the only
+    # ones that can change the meaning of the plist document.
+    printf '%s' "$1" | sed \
+        -e 's/&/\&amp;/g' \
+        -e 's/</\&lt;/g' \
+        -e 's/>/\&gt;/g'
+}
+
 if [ "$dry_run" -eq 1 ]; then
     echo "Would download: $base/$archive_name"
     echo "Would install into: $app_dir/Ciaobot.app"
@@ -126,6 +135,22 @@ extracted="$stage/Ciaobot.app"
     || fail "bundled Ciaobot runtime self-check failed"
 
 if [ -e "$destination" ]; then
+    # A manually launched app is not necessarily owned by the LaunchAgent, so
+    # booting that agent out alone would leave the old single-instance process
+    # alive across the bundle swap. Ask the app to quit, then wait for the
+    # executable to disappear before moving the old bundle aside.
+    if command -v osascript >/dev/null 2>&1; then
+        osascript -e 'tell application id "local.ciaobot.app" to quit' \
+            >/dev/null 2>&1 || true
+    fi
+    uid=$(id -u)
+    launchctl bootout "gui/$uid/Ciaobot" >/dev/null 2>&1 || true
+    attempts=0
+    while pgrep -x ciaobot-desktop >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 30 ] || fail "Ciaobot is still running; quit it and retry"
+        sleep 1
+    done
     rm -rf "$backup"
     mv "$destination" "$backup" || fail "could not move the existing Ciaobot.app aside"
 fi
@@ -154,6 +179,7 @@ mkdir -p "$HOME/Library/LaunchAgents"
 # service-only launch cannot leave the user without a tray icon. The app owns
 # this plist too, so the menu action can still disable it later.
 desktop_executable="$destination/Contents/MacOS/ciaobot-desktop"
+desktop_executable_xml=$(xml_escape "$desktop_executable")
 desktop_plist_tmp="$desktop_plist.tmp.$$"
 {
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
@@ -161,7 +187,7 @@ desktop_plist_tmp="$desktop_plist.tmp.$$"
     printf '%s\n' '<plist version="1.0"><dict>'
     printf '%s\n' '<key>Label</key><string>Ciaobot</string>'
     printf '%s\n' '<key>ProgramArguments</key><array>'
-    printf '<string>%s</string>\n' "$desktop_executable"
+    printf '<string>%s</string>\n' "$desktop_executable_xml"
     printf '%s\n' '<string>--background</string></array>'
     printf '%s\n' '<key>RunAtLoad</key><true/>'
     printf '%s\n' '</dict></plist>'
