@@ -51,7 +51,7 @@ def _observation(scenario: str, *, provider: str, memory: bool = False) -> ChatO
         if memory
         else ("projects_list", "agent"),
         mcp_errors=0,
-        mcp_result_paths=("memory-vault/personal/Workspace/People/Ada.md",)
+        mcp_result_paths=("personal/Workspace/People/Ada.md",)
         if memory
         else (),
         mcp_tool_durations_ms=(4, 8),
