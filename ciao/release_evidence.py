@@ -571,7 +571,7 @@ def diff_inventories(
 
 
 def _sample_metrics(provider: str, observation: ChatObservation) -> dict[str, Any]:
-    metrics = normalize_usage_metrics(provider, observation.usage)
+    metrics: dict[str, Any] = normalize_usage_metrics(provider, observation.usage)
     metrics.update(
         {
             "elapsed_ms": observation.elapsed_ms,
@@ -733,7 +733,11 @@ def compare_summaries(
         new = after[key]
         old_pass_rate = _pass_rate(old)
         new_pass_rate = _pass_rate(new)
-        if new_pass_rate < old_pass_rate:
+        if (
+            old_pass_rate is not None
+            and new_pass_rate is not None
+            and new_pass_rate < old_pass_rate
+        ):
             flags.append({"kind": "quality_regression", "key": list(key)})
         for field_name in ("elapsed_ms", "provider_duration_ms", "input_tokens", "output_tokens", "context_pct"):
             old_value = old.get(field_name, {}).get("median")
