@@ -622,3 +622,113 @@ def test_configured_workspace_provider_preselects_ollama_bucket_and_tier(tmp_pat
     assert chat.model_bucket == "ollama"
     assert chat.model == "minimax-m3:cloud"
     assert pcm._runtime_model_for_chat(chat) == "minimax-m3:cloud"
+
+
+def test_onboarding_chat_keeps_openrouter_workspace_bucket(tmp_path: Path) -> None:
+    """Wizard-selected OpenRouter must not be forced onto Anthropic work."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        openrouter=OpenRouterSettings(api_key="sk-or"),
+        workspaces={
+            "home": WorkspaceConfig(
+                name="home",
+                vault_root="vaults/home",
+                model_bucket="openrouter",
+                gws_profile="personal",
+            )
+        },
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("General", workspace="home")
+
+    pcm._create_onboarding_chat(project.project_id)
+
+    chat = next(iter(pcm._chats.values()))
+    assert chat.provider == "claude"
+    assert chat.model_bucket == "openrouter"
+    assert chat.model == "anthropic/claude-haiku-latest"
+    assert chat.handover_context_pending is True
+
+
+def test_onboarding_chat_keeps_ollama_workspace_bucket(tmp_path: Path) -> None:
+    """Wizard-selected Ollama must not be forced onto Anthropic work."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        ollama=OLLAMA,
+        workspaces={
+            "home": WorkspaceConfig(
+                name="home",
+                vault_root="vaults/home",
+                model_bucket="ollama",
+                gws_profile="personal",
+            )
+        },
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("General", workspace="home")
+
+    pcm._create_onboarding_chat(project.project_id)
+
+    chat = next(iter(pcm._chats.values()))
+    assert chat.provider == "claude"
+    assert chat.model_bucket == "ollama"
+    assert chat.model == OLLAMA.haiku_model
+    assert chat.handover_context_pending is True
+
+
+def test_onboarding_chat_falls_back_to_work_when_bucket_invalid(
+    tmp_path: Path,
+) -> None:
+    """Stale OpenRouter credentials must not crash bootstrap chat creation."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        openrouter=OpenRouterSettings(api_key=""),
+        workspaces={
+            "home": WorkspaceConfig(
+                name="home",
+                vault_root="vaults/home",
+                model_bucket="openrouter",
+                gws_profile="personal",
+            )
+        },
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("General", workspace="home")
+
+    pcm._create_onboarding_chat(project.project_id)
+
+    chat = next(iter(pcm._chats.values()))
+    assert chat.provider == "claude"
+    assert chat.model_bucket == "work"
+    assert chat.model == "haiku"
+    assert chat.handover_context_pending is True

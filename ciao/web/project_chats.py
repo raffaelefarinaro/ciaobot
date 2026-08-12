@@ -1719,20 +1719,27 @@ class ProjectChatManager:
                 f"To begin, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
             )
 
-        # A system bootstrap chat must always be creatable, so it uses a
-        # guaranteed-valid tier alias rather than the workspace default: a
-        # stale hand-edited default would otherwise crash the server at
-        # startup instead of surfacing as a create_chat error the user can
-        # fix in Settings (#259).
-        chat = self.create_chat(
-            project_id,
-            title=title,
-            model="haiku",
-            # The bootstrap chat must not inherit a stale workspace routing
-            # bucket: its tier alias is intentionally guaranteed-valid so a
-            # removed backend credential cannot prevent startup.
-            model_bucket="work",
-        )
+        # Prefer the workspace's configured routing bucket so a wizard-selected
+        # Ollama/OpenRouter install keeps using that backend for onboarding.
+        # Use the haiku tier alias (valid after resolve) and only fall back to
+        # the Anthropic ``work`` bucket when the preferred route fails
+        # validation — e.g. a stale hand-edited credential that would otherwise
+        # crash startup (#259).
+        preferred_bucket = self._effective_bucket("", project_id)
+        try:
+            chat = self.create_chat(
+                project_id,
+                title=title,
+                model="haiku",
+                model_bucket=preferred_bucket,
+            )
+        except UnknownModelError:
+            chat = self.create_chat(
+                project_id,
+                title=title,
+                model="haiku",
+                model_bucket="work",
+            )
         chat.handover_context_pending = True
         chat.handover_messages = [
             {"role": "user", "content": user_msg},
