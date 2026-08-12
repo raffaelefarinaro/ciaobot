@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import os
-import shutil
+import importlib.util
 import subprocess
 import sys
 import tomllib
@@ -76,45 +75,45 @@ def test_pyproject_ships_pwa_static_files() -> None:
     assert "static/**/*" in package_data["ciao.web"]
 
 
-@pytest.mark.skipif(shutil.which("git") is None, reason="git is required to read the repo tree")
-def test_wheel_bundles_every_ciao_module(tmp_path: Path) -> None:
-    """Build the wheel from the working tree and assert every ciao/*.py file is in it.
-
-    Regression for issue #256: the Homebrew 0.7.0 install shipped
-    ciao/insights.py referencing ciao.native_sidecar.is_apple_model, but
-    ciao/native_sidecar.py was missing from the wheel. The fix moves
-    [tool.setuptools] from an explicit packages list to packages.find so
-    new top-level modules are auto-included; this test guards the contract.
-    """
+@pytest.mark.skipif(importlib.util.find_spec("build") is None, reason="build is required")
+def test_release_wheel_bundles_every_ciao_module(tmp_path: Path) -> None:
+    """Build the release wheel and keep its Python modules aligned with ciao/."""
     repo = Path(__file__).resolve().parents[1]
     outdir = tmp_path / "wheels"
-    outdir.mkdir(parents=True, exist_ok=True)
+    outdir.mkdir()
 
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "wheel", "--no-deps", "--wheel-dir", str(outdir), "."],
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--no-isolation",
+            "--outdir",
+            str(outdir),
+        ],
         cwd=repo,
         capture_output=True,
         text=True,
         check=False,
     )
-    assert result.returncode == 0, f"pip wheel failed:\n{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, f"python -m build failed:\n{result.stdout}\n{result.stderr}"
 
     wheels = sorted(outdir.glob("*.whl"))
     assert wheels, f"no wheel produced in {outdir}"
 
-    expected_modules: set[str] = set()
-    for path in (repo / "ciao").rglob("*.py"):
-        if path.name == "__init__.py":
-            continue
-        # Skip names that are not meant to be importable: dunder, private.
-        if any(part.startswith("_") for part in path.relative_to(repo / "ciao").parts):
-            continue
-        expected_modules.add(str(path.relative_to(repo)).replace(os.sep, "/"))
+    ciao_root = repo / "ciao"
+    expected_modules = {
+        path.relative_to(repo).as_posix()
+        for path in ciao_root.rglob("*.py")
+        if path.name != "__init__.py"
+        and not any(part.startswith("_") for part in path.relative_to(ciao_root).parts)
+    }
+    assert "ciao/native_sidecar.py" in expected_modules
 
-    assert expected_modules, "no ciao/*.py modules found in the repo"
-
-    with zipfile.ZipFile(wheels[-1]) as zf:
-        bundled = {name for name in zf.namelist() if name.startswith("ciao/")}
+    with zipfile.ZipFile(wheels[-1]) as wheel:
+        bundled = set(wheel.namelist())
 
     missing = sorted(expected_modules - bundled)
-    assert not missing, f"wheel is missing modules: {missing}\n(wheel: {sorted(b for b in bundled if b.endswith('.py'))})"
+    assert not missing, f"wheel is missing modules: {missing}"
+    assert "ciao/native_sidecar.py" in bundled
