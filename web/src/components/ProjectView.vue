@@ -350,11 +350,6 @@ const project = computed(() => store.projects.find(p => p.project_id === props.p
 
 type ProjectTab = 'overview' | 'loops' | 'schedules'
 const activeTab = ref<ProjectTab>('overview')
-const projectTabs = computed(() => [
-  { key: 'overview' as const, label: 'Overview' },
-  { key: 'loops' as const, label: 'Loops', count: projectLoops.value.length },
-  { key: 'schedules' as const, label: 'Schedules', count: projectSchedules.value.length },
-])
 
 watch(project, (p) => {
   if (p && p.workspace && p.workspace !== store.activeWorkspace) {
@@ -373,6 +368,11 @@ const projectSchedules = computed(() =>
       || (schedule.web_chat_id !== null && projectChatIds.value.has(schedule.web_chat_id)),
   ),
 )
+const projectTabs = computed(() => [
+  { key: 'overview' as const, label: 'Overview' },
+  { key: 'loops' as const, label: 'Loops', count: projectLoops.value.length },
+  { key: 'schedules' as const, label: 'Schedules', count: projectSchedules.value.length },
+])
 const activeChats = computed(() =>
   allChats.value
     // Hide remote chats (session lives on another device, not openable here).
