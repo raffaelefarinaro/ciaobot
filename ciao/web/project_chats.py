@@ -7393,13 +7393,18 @@ class ProjectChatManager:
                 logger.info("Schedule attention classifier %s", note)
             try:
                 from ciao.providers.oneshot import run_oneshot
+                from ciao.insights import _insights_timeout_s, is_context_overflow
 
+                # Same env-tunable budget as the insights job: the slow
+                # Ollama Cloud model measures 214-253s on a successful call,
+                # so a hard 60s window turned tail latency into a guaranteed
+                # TimeoutError and the classifier ran 6/6 in error.
                 text = await run_oneshot(
                     user_prompt,
                     system_prompt=system_prompt,
                     model=model,
                     env=env,
-                    timeout_s=60.0,
+                    timeout_s=_insights_timeout_s(),
                     provider=classifier_provider,
                     cwd=self._config.workspace_root,
                 )
@@ -7417,10 +7422,24 @@ class ProjectChatManager:
             except Exception as exc:  # noqa: BLE001
                 run.status = "error"
                 run.error = (str(exc).strip() or type(exc).__name__)[:1000]
-                logger.exception(
-                    "Schedule attention classifier failed with model %s; keeping chat visible",
-                    model,
-                )
+                # Distinguish a deterministic 400-style overflow from a
+                # transient timeout. The payload is already trimmed to
+                # final_text[-6000:] so an overflow here is rare, but
+                # recording the class lets the job history tell transient
+                # tail-latency from a real context-window problem.
+                if is_context_overflow(exc):
+                    run.extra["context_overflow"] = True
+                    logger.warning(
+                        "Schedule attention classifier hit the context window "
+                        "with model %s; keeping chat visible",
+                        model,
+                    )
+                else:
+                    logger.exception(
+                        "Schedule attention classifier failed with model %s; "
+                        "keeping chat visible",
+                        model,
+                    )
                 return True
 
     def prepare_schedule_chat(

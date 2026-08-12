@@ -214,3 +214,54 @@ async def test_schedule_attention_classifier_records_bare_timeout_type(
     row = _job_rows(tmp_path)[0]
     assert row["status"] == "error"
     assert row["error"] == "TimeoutError"
+
+
+async def test_schedule_attention_classifier_uses_insights_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The classifier shares the insights job's env-tunable budget.
+
+    The slow Ollama Cloud model measures 214-253s on a successful call;
+    a hard 60s window turns tail latency into a guaranteed TimeoutError.
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_oneshot(*args, **kwargs):
+        captured["timeout_s"] = kwargs["timeout_s"]
+        return '{"needs_user": false, "reason": "routine"}'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    monkeypatch.setenv("CIAO_INSIGHTS_TIMEOUT_S", "900")
+
+    needs_user = await _manager_for_classifier()._schedule_run_needs_user(
+        _entry(), ScheduleRunOutcome(completed=True, final_text="done")
+    )
+
+    assert needs_user is False
+    assert captured["timeout_s"] == 900.0
+
+
+async def test_schedule_attention_classifier_records_context_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 400-style overflow is recorded on the run, not as a generic error.
+
+    The classifier payload is already trimmed to final_text[-6000:], so an
+    overflow here is rare, but the run should still surface the failure
+    class so the Automation page can tell a context-window problem from a
+    transient timeout.
+    """
+    async def fake_oneshot(*args, **kwargs):
+        raise RuntimeError("API Error 400 Message too long: 9999 > 4096")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    needs_user = await _manager_for_classifier()._schedule_run_needs_user(
+        _entry(), ScheduleRunOutcome(completed=True, final_text="done")
+    )
+
+    # Conservative: keep the chat visible on classifier failure.
+    assert needs_user is True
+    row = _job_rows(tmp_path)[0]
+    assert row["status"] == "error"
+    assert row["extra"]["context_overflow"] is True
