@@ -3300,8 +3300,19 @@ class ProjectChatManager:
         clean_model = (model or "").strip()
         if not clean_model:
             raise ValueError("Model is required")
+        if not self._model_bucket_allowed(model_bucket):
+            raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if self._broker.get(chat_id) is not None:
             raise ValueError("Cannot hand over while a turn is running")
+
+        target_bucket = model_bucket if provider == "claude" else ""
+        resolved_model, effective_bucket = self._resolve_and_validate_chat_model(
+            clean_model,
+            provider,
+            target_bucket,
+            chat.project_id,
+        )
+
         self._revoke_mcp_chat(chat_id)
 
         old_provider = chat.provider
@@ -3312,23 +3323,19 @@ class ProjectChatManager:
                 old_provider=old_provider,
                 old_model=old_model,
                 new_provider=provider,
-                new_model=clean_model,
+                new_model=resolved_model,
             )
         )
-        if not self._model_bucket_allowed(model_bucket):
-            raise ValueError(f"Unknown model bucket '{model_bucket}'")
         chat.handover_messages = rows
         chat.handover_context_pending = True
         chat.provider = provider
-        chat.model = clean_model
-        # Bucket only applies to Claude; explicit choice wins, otherwise
-        # the workspace preselects on the next resolution ("" = auto).
-        chat.model_bucket = model_bucket if provider == "claude" else ""
+        chat.model = resolved_model
+        chat.model_bucket = effective_bucket
         # Thinking levels are provider-native and don't carry across, except
         # that the Codex Fable preset is defined as Sol with Ultra effort.
         chat.thinking_level = (
             CODEX_FABLE_THINKING_LEVEL
-            if provider == "codex" and canonical_tier(clean_model) == "fable"
+            if provider == "codex" and canonical_tier(resolved_model) == "fable"
             else ""
         )
         chat.session_id = ""
@@ -4037,7 +4044,7 @@ class ProjectChatManager:
 
     def _resolve_claude_model(self, model: str, bucket: str, project_id: str) -> str:
         """Resolve picker aliases to Ollama, OpenRouter, or custom-provider models."""
-        from ciao.model_tiers import tier_model
+        from ciao.model_tiers import canonical_tier, is_tier, tier_model
 
         effective = self._effective_bucket(bucket, project_id)
         if effective == "openrouter":
@@ -4050,17 +4057,20 @@ class ProjectChatManager:
             )
             if target != model:
                 return target
-            return model
+            return canonical_tier(model) if is_tier(model) else model
 
         if effective.startswith("custom:"):
             provider_id = effective.split(":", 1)[1]
             target = getattr(self._config, "custom_routing", {}).get(provider_id, {}).get(
                 canonical_tier(model), model
             )
-            return target or model
+            if target and target != model:
+                return target
+            return canonical_tier(model) if is_tier(model) else (target or model)
 
         if not self._bucket_routes_to_ollama(effective):
-            return model
+            return canonical_tier(model) if is_tier(model) else model
+
         target = tier_model(
             model,
             haiku=self._config.ollama.haiku_model,
@@ -4071,17 +4081,20 @@ class ProjectChatManager:
         if effective == "personal" and not is_ollama_model(
             target, self._config.ollama
         ):
-            # ``personal`` is the legacy workspace fallback, not an explicit
+            # personal is the legacy workspace fallback, not an explicit
             # configured backend. Preserve its historical Anthropic alias
-            # fallback when no Ollama backend is present; explicit ``ollama``
+            # fallback when no Ollama backend is present; explicit ollama
             # workspace buckets still return the target so validation rejects
             # a stale route before chat creation (#259).
-            return model
+            return canonical_tier(model) if is_tier(model) else model
+
         # Return the configured target even when Ollama is unavailable. The
         # validator must see the effective routed id so it can reject a stale
         # bucket instead of accepting the bare tier alias and failing later
         # when the provider starts (#259).
-        return target or model
+        if target and target != model:
+            return target
+        return canonical_tier(model) if is_tier(model) else (target or model)
 
     def _resolve_and_validate_chat_model(
         self,
@@ -4094,13 +4107,17 @@ class ProjectChatManager:
     ) -> tuple[str, str]:
         """Resolve a chat model through its effective bucket, then validate it.
 
-        The order matters: aliases such as ``opus`` can resolve to an
+        The order matters: aliases such as opus can resolve to an
         unavailable OpenRouter, Ollama, or custom-provider target. Validating
         the alias first would accept the request even though the model that
         the provider will actually run is invalid.
         """
+        from ciao.model_tiers import canonical_tier, is_tier
+
         effective_bucket = ""
-        resolved_model = model
+        resolved_model = (model or "").strip()
+        if is_tier(resolved_model):
+            resolved_model = canonical_tier(resolved_model)
         if provider == "claude":
             effective_bucket = self._effective_bucket(model_bucket or "", project_id)
             if resolve_model:
