@@ -317,7 +317,11 @@ fn restart_engine_after_app_update(app: &AppHandle) -> Result<(), String> {
     let result = service::invoke(
         &binary,
         action,
-        if action == "restart" { &["--force"][..] } else { &[][..] },
+        if action == "restart" {
+            &["--force"][..]
+        } else {
+            &[][..]
+        },
     )?;
     if result.ok {
         Ok(())
