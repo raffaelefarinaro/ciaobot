@@ -283,6 +283,11 @@ watch(showStartup, (show) => {
   --radius-lg: 14px;
   --radius-pill: 999px; /* fully rounded ends: pills, count badges, chips */
   --touch: 44px;        /* min hit area on touch devices */
+  /* Width of the home screen's content column. Shared because the status row
+     and the lanes under it must start on the same left edge, and when this
+     lived as a number in each component they drifted (1040 vs 1320) and the
+     row sat neither centred nor aligned. */
+  --home-max: 1320px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;

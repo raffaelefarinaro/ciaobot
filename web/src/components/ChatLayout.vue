@@ -719,6 +719,11 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   if (e.key.startsWith('Arrow')) {
     // Arrows keep deferring to text fields, or they would break caret movement.
     if (store.activeChat || isTypingTarget(e.target)) return
+    // ...and to any open menu that already consumed the key. The Escape branch
+    // above checks this; without the same check here, an arrow inside the home
+    // lane's project menu moved the menu's focus *and* roamed the chat grid,
+    // leaving the menu open with focus somewhere else entirely.
+    if (e.defaultPrevented) return
     if (homeRecentRef.value?.onArrow(e.key)) e.preventDefault()
     return
   }
@@ -949,10 +954,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   width: 100%;
-  /* Matches .home-recent in HomeRecentChats: both are centred, so a narrower cap
-     here left the status row starting 140px inside the lanes below it - reading
-     as neither centred on the page nor aligned to the content. */
-  max-width: 1320px;
+  max-width: var(--home-max);
   min-height: 44px;
   gap: 10px;
   margin: 0 auto;

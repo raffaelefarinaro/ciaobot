@@ -4908,6 +4908,9 @@ class ProjectChatManager:
     def _model_capable(self, model: str, chat: ChatInfo) -> bool:
         """Whether ``model`` can accept image input.
 
+        Synchronous and network-blocking on its slow path: call it through
+        ``asyncio.to_thread`` from async code, or it parks the event loop.
+
         Fast path: the built-in vision table classifies most ids. Only
         genuinely ambiguous ids (unknown Ollama/OpenRouter models the table
         has no token for) take the slow path, which consults the cached
@@ -5124,15 +5127,14 @@ class ProjectChatManager:
                         # The answer arrives over the chat websocket, so its
                         # model_id is client input like any other. Persisting it
                         # unchecked left the chat pinned to an id no provider is
-                        # configured for, and every later turn failed on it -
-                        # the exact hole create/update/handover were reworked to
-                        # close. Only the ids this question actually offered are
-                        # acceptable; anything else falls through to the same
-                        # system bubble as a declined question.
+                        # configured for, failing every later turn - the hole
+                        # create/update/handover were reworked to close. Accept
+                        # only ids this question rendered, including the current
+                        # model's disabled entry (picking it is a no-op that
+                        # falls through to normal dispatch below). Anything else
+                        # ends in the same system bubble as a declined question.
                         offered = {
-                            str(entry.get("id") or "")
-                            for entry in candidates
-                            if not entry.get("disabled")
+                            str(entry.get("id") or "") for entry in candidates
                         }
                         if picked and picked not in offered:
                             logger.warning(

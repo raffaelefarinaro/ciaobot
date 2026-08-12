@@ -65,23 +65,43 @@ async function updateBadge(state) {
   return total
 }
 
+// Not every push belongs to a chat — the Google Workspace token-health push has
+// no chat_id — so unread counts for those live under one shared key.
+function unreadKey(chatId) {
+  return chatId || '_'
+}
+
 async function incUnread(chatId) {
   const state = await readUnread()
-  const key = chatId || '_'
+  const key = unreadKey(chatId)
   state[key] = (state[key] || 0) + 1
   await writeUnread(state)
   await updateBadge(state)
 }
 
+// Targeted, never wildcard. '' used to mean "clear everything" here, which made
+// every caller that forwarded a notification's chat_id one missing field away
+// from wiping the user's entire unread state: the chat-less token-health banner
+// did exactly that when tapped or swiped. Clearing all of it is a separate,
+// explicit call now, and an empty id clears the shared bucket it was counted in.
 async function clearUnread(chatId) {
   const state = await readUnread()
-  if (chatId) {
-    delete state[chatId]
-  } else {
-    for (const k of Object.keys(state)) delete state[k]
-  }
+  delete state[unreadKey(chatId)]
   await writeUnread(state)
   await updateBadge(state)
+}
+
+async function clearAllUnread() {
+  await writeUnread({})
+  await updateBadge({})
+}
+
+// Everything one delivered notification should clear. Sibling banners and the
+// pending target are per-chat, so they only apply when there is a chat.
+async function clearNotificationUnread(chatId) {
+  await clearUnread(chatId)
+  if (!chatId) return
+  await Promise.all([closeNotifications(chatId), clearPendingTarget(chatId)])
 }
 
 // Replace the SW unread cache wholesale with the page's view of truth.
@@ -193,20 +213,12 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close()
   const chatId = event.notification.data?.chat_id || ''
   if (event.action === 'dismiss') {
-    event.waitUntil(
-      (async () => {
-        await clearUnread(chatId)
-        await closeNotifications(chatId)
-        await clearPendingTarget(chatId)
-      })()
-    )
+    event.waitUntil(clearNotificationUnread(chatId))
     return
   }
   const url = chatId ? `/chat/${encodeURIComponent(chatId)}` : '/'
   event.waitUntil((async () => {
-    await clearUnread(chatId)
-    await closeNotifications(chatId)
-    await clearPendingTarget(chatId)
+    await clearNotificationUnread(chatId)
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
     for (const client of clients) {
       if ('focus' in client) {
@@ -232,18 +244,7 @@ self.addEventListener('notificationclick', (event) => {
 
 self.addEventListener('notificationclose', (event) => {
   const chatId = event.notification.data?.chat_id || ''
-  // Not every notification belongs to a chat: the Google Workspace token-health
-  // push carries no chat_id. Passing '' on to these helpers is the *wildcard*
-  // form - it deletes every unread entry, zeroes the app badge, and closes every
-  // other Ciaobot banner - so swiping away one unrelated banner discarded the
-  // unread state of chats the user had never opened. A dismissal can only ever
-  // speak for its own chat.
-  if (!chatId) return
-  event.waitUntil(Promise.all([
-    clearUnread(chatId),
-    closeNotifications(chatId),
-    clearPendingTarget(chatId),
-  ]))
+  event.waitUntil(clearNotificationUnread(chatId))
 })
 
 // Page tells us a chat is now in focus -> clear its badge.
@@ -256,8 +257,10 @@ self.addEventListener('message', (event) => {
       clearPendingTarget(msg.chat_id || ''),
     ]))
   } else if (msg.type === 'clear-badge') {
+    // The one caller that genuinely means everything, and now the only one that
+    // can say so.
     event.waitUntil(Promise.all([
-      clearUnread(''),
+      clearAllUnread(),
       closeNotifications(''),
       clearPendingTarget(),
     ]))

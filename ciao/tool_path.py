@@ -27,7 +27,7 @@ _START = "__CIAO_PATH_START__"
 _END = "__CIAO_PATH_END__"
 
 
-def _common_tool_dirs() -> list[str]:
+def common_tool_dirs() -> list[str]:
     """Best-effort fallback dirs when the shell probe fails or is incomplete."""
     home = Path.home()
     dirs = [
@@ -77,7 +77,7 @@ def login_shell_path() -> str:
             if d and d not in seen:
                 seen.add(d)
                 ordered.append(d)
-    for d in _common_tool_dirs():
+    for d in common_tool_dirs():
         if d and os.path.isdir(d) and d not in seen:
             seen.add(d)
             ordered.append(d)

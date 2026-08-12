@@ -223,17 +223,21 @@ if [ "$no_start" -eq 0 ]; then
     # the loaded job names the new executable, and say so if it never does.
     attempts=0
     while :; do
-        launchctl bootout "gui/$uid/Ciaobot" >/dev/null 2>&1 || true
-        launchctl bootstrap "gui/$uid" "$desktop_plist" >/dev/null 2>&1 || true
+        # Check before acting, not after: if the loaded job already names the
+        # new executable there is nothing to do, and tearing it down first
+        # would mean a mis-detection (a future launchctl print format, an
+        # escaped path) repeatedly booting out an agent that was working.
         if launchctl print "gui/$uid/Ciaobot" 2>/dev/null \
             | grep -qF "$desktop_executable"; then
             break
         fi
-        attempts=$((attempts + 1))
         if [ "$attempts" -ge 15 ]; then
             echo "Ciaobot installer: the menu-bar LaunchAgent did not load; open Ciaobot.app manually" >&2
             break
         fi
+        attempts=$((attempts + 1))
+        launchctl bootout "gui/$uid/Ciaobot" >/dev/null 2>&1 || true
+        launchctl bootstrap "gui/$uid" "$desktop_plist" >/dev/null 2>&1 || true
         sleep 1
     done
     launchctl kickstart "gui/$uid/Ciaobot" >/dev/null 2>&1 || true

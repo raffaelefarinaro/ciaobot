@@ -22,25 +22,25 @@
               <template v-if="laneSummaryRest(lane)"><span v-if="laneNeedsCount(lane)"> · </span>{{ laneSummaryRest(lane) }}</template>
             </span>
           </div>
-          <div v-if="laneNewAction(lane)" class="home-lane-new-split">
+          <div v-if="lane.newAction" class="home-lane-new-split">
             <button
               type="button"
               class="home-lane-new"
-              :class="{ 'home-lane-new--split': laneProjects(lane).length > 1 }"
+              :class="{ 'home-lane-new--split': lane.projects.length > 1 }"
               :data-workspace-color="lane.color"
-              :disabled="laneNewAction(lane)!.isCreating"
+              :disabled="lane.newAction.isCreating"
               :aria-label="`New chat in ${lane.label || 'workspace'}`"
-              @click="emit('new-workspace-chat', laneNewAction(lane)!)"
-            >{{ laneNewAction(lane)!.isCreating ? '...' : '+ new' }}</button>
+              @click="emit('new-workspace-chat', lane.newAction)"
+            >{{ lane.newAction.isCreating ? '...' : '+ new' }}</button>
             <!-- Dimmed at rest rather than hover-revealed: the PWA is used on
                  phones, where there is no hover, so a hover-only affordance is
                  simply missing. Hover and focus bring it up to full strength. -->
             <button
-              v-if="laneProjects(lane).length > 1"
+              v-if="lane.projects.length > 1"
               type="button"
               class="home-lane-new-caret"
               :data-workspace-color="lane.color"
-              :disabled="laneNewAction(lane)!.isCreating"
+              :disabled="lane.newAction.isCreating"
               :aria-label="`Choose a project for a new chat in ${lane.label || 'workspace'}`"
               aria-haspopup="menu"
               :aria-expanded="openProjectLane === lane.key"
@@ -52,9 +52,13 @@
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
+            <!-- prevent, not stop: ChatLayout's window-level handler defers to
+                 any key a nested popup already consumed, which is the same
+                 contract ModelSelector relies on for Esc. Stopping propagation
+                 here would make this menu the one popup playing by its own
+                 rules. -->
             <div
               v-if="openProjectLane === lane.key"
-              :ref="(element) => setProjectMenuRef(lane.key, element as HTMLElement | null)"
               class="home-lane-project-menu"
               role="menu"
               @keydown.esc.prevent="closeProjectMenu({ restoreFocus: true })"
@@ -62,7 +66,7 @@
               @keydown.up.prevent="moveProjectMenuFocus(-1)"
             >
               <button
-                v-for="project in laneProjects(lane)"
+                v-for="project in lane.projects"
                 :key="project.project_id"
                 type="button"
                 role="menuitem"
@@ -151,7 +155,6 @@ const store = useProjectStore()
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
 const openProjectLane = ref<string | null>(null)
-const projectMenus = ref<Record<string, HTMLElement>>({})
 
 function closeProjectMenuOnOutsideClick(event: MouseEvent): void {
   if (!openProjectLane.value) return
@@ -171,6 +174,8 @@ interface HomeLane {
   shortcut: number | string
   color: WorkspaceColorId
   chats: ChatInfo[]
+  newAction: NewWorkspaceChatAction | null
+  projects: ProjectInfo[]
   tiers: HomeTiers
 }
 
@@ -230,6 +235,13 @@ function makeLane(
     shortcut,
     color,
     chats,
+    // Derived once per lanes recompute rather than per template read. The
+    // header asks for both several times (the button, its disabled state, the
+    // caret's existence, the menu's v-for), and this component re-renders on
+    // every streaming tick, so leaving them as template calls meant a find and
+    // a sort per lane per tick for data that only moves when projects do.
+    newAction: newActionFor(workspace),
+    projects: projectsFor(workspace),
     tiers: groupHomeTiers(
       chats,
       chatId => store.chatNeedsInput(chatId),
@@ -287,26 +299,21 @@ function laneSummaryRest(lane: HomeLane): string {
   return parts.join(' · ')
 }
 
-function laneNewAction(lane: HomeLane): NewWorkspaceChatAction | null {
-  if (!lane.workspace || lane.workspace === 'unknown') return null
+function newActionFor(workspace: string | null): NewWorkspaceChatAction | null {
+  if (!workspace || workspace === 'unknown') return null
   const projectId = store.projects.find(
-    project => project.name === 'General' && project.workspace === lane.workspace,
+    project => project.name === 'General' && project.workspace === workspace,
   )?.project_id || ''
   if (!projectId) return null
-  return {
-    workspace: lane.workspace,
-    projectId,
-    isCreating: Boolean(store.creatingChatProjectIds[projectId]),
-  }
+  return { workspace, projectId, isCreating: Boolean(store.creatingChatProjectIds[projectId]) }
 }
 
 // Projects a new chat can be started in, in the sidebar's own order but with
 // General hoisted: it is what plain "+ new" creates in, so it belongs first.
-function laneProjects(lane: HomeLane): ProjectInfo[] {
-  if (!lane.workspace || lane.workspace === 'unknown') return []
+function projectsFor(workspace: string | null): ProjectInfo[] {
+  if (!workspace || workspace === 'unknown') return []
   return store.projects
-    .filter(project => project.workspace === lane.workspace)
-    .slice()
+    .filter(project => project.workspace === workspace)
     .sort((a, b) => {
       if (a.name === 'General' && b.name !== 'General') return -1
       if (b.name === 'General' && a.name !== 'General') return 1
@@ -317,7 +324,7 @@ function laneProjects(lane: HomeLane): ProjectInfo[] {
 function openProjectMenu(lane: HomeLane): void {
   openProjectLane.value = lane.key
   void nextTick(() => {
-    projectMenuItems(lane.key)[0]?.focus()
+    projectMenuItems()[0]?.focus()
   })
 }
 
@@ -341,32 +348,33 @@ function closeProjectMenu(options: { restoreFocus?: boolean } = {}): void {
   })
 }
 
-function projectMenuItems(laneKey: string): HTMLElement[] {
-  const menu = projectMenus.value[laneKey]
-  if (!menu) return []
+// Only one menu is ever open, and it lives inside its lane — which laneElements
+// already tracks for arrow-key roaming and the outside-click test. A second ref
+// registry just for the menu would be a parallel lifecycle to keep in sync.
+function projectMenuItems(): HTMLElement[] {
+  const laneKey = openProjectLane.value
+  const lane = laneKey ? laneElements.value[laneKey] : null
+  if (!lane) return []
   return Array.from(
-    menu.querySelectorAll<HTMLElement>('.home-lane-project-option:not([disabled])'),
+    lane.querySelectorAll<HTMLElement>('.home-lane-project-option:not([disabled])'),
   )
 }
 
 function moveProjectMenuFocus(step: number): void {
-  const laneKey = openProjectLane.value
-  if (!laneKey) return
-  const items = projectMenuItems(laneKey)
+  const items = projectMenuItems()
   if (!items.length) return
   const current = items.indexOf(document.activeElement as HTMLElement)
   const next = (current + step + items.length) % items.length
   items[next]?.focus()
 }
 
-function setProjectMenuRef(laneKey: string, element: HTMLElement | null): void {
-  if (element) projectMenus.value[laneKey] = element
-  else delete projectMenus.value[laneKey]
-}
-
 function createChatInProject(lane: HomeLane, projectId: string): void {
   if (!lane.workspace) return
-  closeProjectMenu()
+  // restoreFocus for the same reason Esc does it: the menu item being clicked
+  // is the focused element, so unmounting it drops focus on <body>. Creating a
+  // chat usually navigates away, but it can fail or be slow, and a keyboard
+  // user must not be left at the top of the document either way.
+  closeProjectMenu({ restoreFocus: true })
   emit('new-workspace-chat', {
     workspace: lane.workspace,
     projectId,
@@ -487,7 +495,7 @@ watch(() => store.activeWorkspace, async () => {
 <style scoped>
 .home-recent {
   width: 100%;
-  max-width: 1320px;
+  max-width: var(--home-max);
   margin: 0 auto;
   text-align: left;
   /* Stacking is decided by the width the lanes actually get, not the window's.

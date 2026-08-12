@@ -270,6 +270,44 @@ describe('HomeRecentChats new-chat project picker', () => {
     wrapper.unmount()
   })
 
+  // ChatLayout binds arrows on window to roam the chat grid, and defers to any
+  // key a nested popup already consumed. The menu therefore has to mark arrows
+  // handled, or focus lands on a chat card while the menu stays open — and
+  // Enter then opens an unrelated chat.
+  it('marks arrow keys handled so the chat grid does not roam', async () => {
+    const wrapper = await mountHome()
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    await lane.find('.home-lane-new-caret').trigger('click')
+    await nextTick()
+
+    const options = lane.findAll('.home-lane-project-option')
+    expect(document.activeElement).toBe(options[0].element)
+
+    const seen: KeyboardEvent[] = []
+    const spy = (event: Event) => seen.push(event as KeyboardEvent)
+    window.addEventListener('keydown', spy)
+    await lane.find('.home-lane-project-menu').trigger('keydown.down')
+    window.removeEventListener('keydown', spy)
+
+    expect(document.activeElement).toBe(options[1].element)
+    expect(seen.at(-1)?.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('returns focus to the caret after picking a project', async () => {
+    const wrapper = await mountHome()
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    const caret = lane.find('.home-lane-new-caret')
+    await caret.trigger('click')
+    await nextTick()
+
+    await lane.findAll('.home-lane-project-option')[1].trigger('click')
+    await nextTick()
+
+    expect(document.activeElement).toBe(caret.element)
+    wrapper.unmount()
+  })
+
   it('hides the caret when the workspace has only one project', async () => {
     const store = seedChats()
     store.projects = store.projects.filter(

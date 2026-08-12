@@ -92,14 +92,18 @@ def test_installer_retries_until_the_menu_bar_agent_names_the_new_app() -> None:
     # is invisible until the user looks for the tray icon.
     script = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
 
-    reload_block = script[script.rindex('launchctl bootout "gui/$uid/Ciaobot"') :]
+    reload_block = script[script.index('if [ "$no_start" -eq 0 ]; then') :]
     assert 'grep -qF "$desktop_executable"' in reload_block
     assert "the menu-bar LaunchAgent did not load" in reload_block
-    assert reload_block.index('launchctl bootstrap "gui/$uid" "$desktop_plist"') < (
-        reload_block.index('grep -qF "$desktop_executable"')
+    # Verify before acting: a job that already names the new executable must not
+    # be torn down, or a mis-detection would boot a working agent out on every
+    # one of the retries.
+    assert reload_block.index('grep -qF "$desktop_executable"') < (
+        reload_block.index('launchctl bootout "gui/$uid/Ciaobot"')
     )
-    # The retry re-issues the bootout, so a stale job cannot survive the loop.
-    assert reload_block.count('launchctl bootout "gui/$uid/Ciaobot"') == 1
+    assert reload_block.index('launchctl bootout "gui/$uid/Ciaobot"') < (
+        reload_block.index('launchctl bootstrap "gui/$uid" "$desktop_plist"')
+    )
     assert "grep" in script[: script.index("[ \"$(uname -s)\" = \"Darwin\" ]")]
 
 

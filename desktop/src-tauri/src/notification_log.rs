@@ -77,11 +77,19 @@ impl NotificationLogTail {
             .iter()
             .map(entry_ts)
             .fold(None::<f64>, |acc, ts| Some(acc.map_or(ts, |a| a.max(ts))));
-        let fresh: Vec<Value> = entries
-            .iter()
-            .filter(|entry| !self.seen.contains(&entry_id(entry)))
-            .cloned()
-            .collect();
+        // Against the *old* seen set, and skipped entirely while priming, which
+        // asks with cursor 0.0 and would otherwise deep-clone the whole log only
+        // to drop it. It has to be built before `self.seen` is replaced below,
+        // or every entry sharing the newest timestamp would filter itself out.
+        let fresh: Vec<Value> = if priming {
+            Vec::new()
+        } else {
+            entries
+                .iter()
+                .filter(|entry| !self.seen.contains(&entry_id(entry)))
+                .cloned()
+                .collect()
+        };
 
         if let Some(newest) = newest {
             // The cursor is inclusive, so entries sharing the newest timestamp

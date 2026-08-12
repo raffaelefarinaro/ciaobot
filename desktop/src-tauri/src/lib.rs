@@ -355,6 +355,20 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
                     &app,
                     &format!("engine restart after app update FAILED: {error}"),
                 );
+                // Blocking: the `?` this replaced at least produced an error
+                // dialog, and `app.restart()` below would outrun a
+                // fire-and-forget one. Safe here - this is a spawned async
+                // task, not the main thread.
+                show_error_blocking(
+                    &app,
+                    "Engine restart failed",
+                    format!(
+                        "The app was updated, but the Ciaobot engine did not \
+                         restart:\n\n{error}\n\nCiaobot will restart now. If \
+                         the engine stays down, use Restart engine in the menu \
+                         bar."
+                    ),
+                );
             }
             app.restart()
         }
@@ -778,6 +792,18 @@ fn show_error(app: &AppHandle, title: &str, message: impl Into<String>) {
         .title(title)
         .kind(MessageDialogKind::Error)
         .show(|_| {});
+}
+
+// Same dialog, but it does not return until the user dismisses it. For the one
+// caller that is about to end the process: `app.restart()` tears everything
+// down before a `.show()` callback could paint, so the user would never see it.
+// Only safe off the main thread.
+fn show_error_blocking(app: &AppHandle, title: &str, message: impl Into<String>) {
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
 }
 
 fn show_info(app: &AppHandle, title: &str, message: impl Into<String>) {
