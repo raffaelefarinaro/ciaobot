@@ -1253,12 +1253,18 @@ const hostHandoverError = ref('')
 // ChatLayout keys this panel by chat id, so each instance owns one draft.
 // Persist synchronously to avoid losing the last keystroke when switching
 // chats immediately after typing.
+// Mirrors what writeChatDraft actually persisted, so the draft claim below can
+// tell recoverable text from text merely displayed (prompt-history recall sets
+// the composer without persisting it).
+const persistedDraftText = ref(Boolean(readChatDraft(draftChatId).trim()))
+
 watch(inputText, (text) => {
   inputRevision.value += 1
   if (!settingPromptHistoryText) {
     promptHistoryIndex.value = -1
     promptHistoryDraft.value = ''
     writeChatDraft(draftChatId, text)
+    persistedDraftText.value = Boolean(text.trim())
   }
 }, { flush: 'sync' })
 
@@ -1347,17 +1353,39 @@ const canSend = computed(() =>
 )
 // The draft lives in this browser, but the server owns the rule that decides
 // whether an untouched New Chat gets swept away, so it has to know one exists.
-// Keyed off canSend rather than the text alone: a chat holding only a pasted
-// screenshot or a staged comment is just as much a draft, and losing it strands
-// the attachment under a deleted chat id.
 //
+// Deliberately not canSend: that is true for text recalled from prompt history,
+// which is shown in the composer but never written to the local draft store, so
+// claiming on it would protect a chat on the strength of content no browser
+// actually holds. This tracks what is really recoverable — the persisted draft,
+// plus staged images and comments.
+const hasRecoverableContent = computed(() =>
+  !!(persistedDraftText.value
+    || store.pendingImages.length
+    || store.pendingComments.length
+    || store.pendingChatComments.length),
+)
+
 // immediate, so a draft restored into the composer on mount is re-asserted. The
 // text is put back as the ref's initial value, which fires no watcher — without
 // this a claim that never reached the server (offline, host restarting) would
 // stay missing until the sweep deleted the chat.
-watch(canSend, hasContent => {
+watch(hasRecoverableContent, hasContent => {
   void store.setChatDraftState(draftChatId, hasContent)
 }, { immediate: true })
+
+// A claim expires server-side, and a tab left open for weeks never changes its
+// boolean, so nothing would re-assert it. Refresh whenever the tab comes back to
+// the foreground: that covers a PWA left running far longer than the TTL.
+function refreshDraftClaimOnWake(): void {
+  if (document.visibilityState !== 'visible') return
+  if (!hasRecoverableContent.value) return
+  void store.setChatDraftState(draftChatId, true, { refresh: true })
+}
+onMounted(() => document.addEventListener('visibilitychange', refreshDraftClaimOnWake))
+onBeforeUnmount(() =>
+  document.removeEventListener('visibilitychange', refreshDraftClaimOnWake),
+)
 
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.

@@ -1637,28 +1637,41 @@ export const useProjectStore = defineStore('projects', () => {
   async function setChatDraftState(
     chatId: string | null | undefined,
     hasDraft: boolean,
+    options: { refresh?: boolean } = {},
   ): Promise<void> {
     // Same nullable id as writeChatDraft takes: the composer reads it from
     // activeChatId, which is null between chats.
     if (!chatId) return
-    if (reportedDraftState.get(chatId) === hasDraft) return
+    const reported = reportedDraftState.get(chatId)
+    if (!options.refresh && reported === hasDraft) return
+    // Never release a claim this tab did not make. The client id is per browser
+    // profile, but staged images and comments are per tab, so a second tab
+    // opening the same chat sees an empty composer and would otherwise release
+    // the claim protecting the first tab's screenshot.
+    if (!hasDraft && reported !== true) return
     reportedDraftState.set(chatId, hasDraft)
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    if (chat) chat.has_unsent_draft = hasDraft
     const previous = draftClaimQueue.get(chatId) ?? Promise.resolve()
     const next = previous
       .catch(() => {})
       .then(async () => {
         try {
-          await api.post(`/api/chats/${chatId}/draft-claim`, {
+          const updated = await api.post<ChatInfo>(`/api/chats/${chatId}/draft-claim`, {
             client_id: clientId(),
             active: hasDraft,
           })
+          // Take the server's answer rather than assuming our own: it aggregates
+          // every client's claim, so releasing ours does not mean the chat is
+          // unclaimed - another device may still hold a draft, and pretending
+          // otherwise makes this tab treat the chat as discardable.
+          const chat = chats.value.find(c => c.chat_id === chatId)
+          if (chat && typeof updated?.has_unsent_draft === 'boolean') {
+            chat.has_unsent_draft = updated.has_unsent_draft
+          }
         } catch {
           // Forget it so the next assertion retries. The composer re-asserts on
-          // every mount, so a claim lost to a restart or a dropped connection
-          // is re-made the next time the chat is opened rather than being
-          // silently missing until the sweep deletes the chat.
+          // open and on wake, so a claim lost to a restart or a dropped
+          // connection is re-made rather than staying silently missing until
+          // the sweep deletes the chat.
           if (reportedDraftState.get(chatId) === hasDraft) {
             reportedDraftState.delete(chatId)
           }

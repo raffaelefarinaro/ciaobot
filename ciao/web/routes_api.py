@@ -2369,6 +2369,21 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
+    if "has_unsent_draft" in body:
+        # This briefly lived as a PATCH field before becoming a per-client claim
+        # with its own route. A client still running the old bundle would
+        # otherwise get a 200 for a field nothing applies, record the draft as
+        # reported, never retry, and lose it to the next sweep. Fail loudly.
+        return JSONResponse(
+            {
+                "error": (
+                    "has_unsent_draft is no longer accepted here. Use "
+                    "POST /api/chats/{chat_id}/draft-claim with client_id and "
+                    "active, and reload the page to pick up the new client."
+                )
+            },
+            status_code=400,
+        )
     if "control_surface" in body:
         surface = str(body.get("control_surface") or "").strip()
         if surface not in {"", "legacy", "mcp", "auto"}:

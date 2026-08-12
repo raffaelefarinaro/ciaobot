@@ -677,10 +677,16 @@ describe('chat closing and re-entry orientation', () => {
       created_at: '',
       archived: false,
     }]
-    apiPost.mockResolvedValue({})
+    // The server aggregates every client's claim, so its answer is the truth
+    // about whether the chat is protected - not this tab's local guess.
+    apiPost.mockImplementation((path: string, body: { active: boolean }) =>
+      String(path).endsWith('/draft-claim')
+        ? Promise.resolve({ has_unsent_draft: body.active })
+        : Promise.resolve({}),
+    )
 
-    // The composer re-asserts on every mount and on every content change; only
-    // the transitions are worth a request.
+    // The composer re-asserts on open and on wake; only transitions are worth
+    // a request.
     await store.setChatDraftState(chatId, true)
     await store.setChatDraftState(chatId, true)
     await store.setChatDraftState(chatId, true)
@@ -717,6 +723,36 @@ describe('chat closing and re-entry orientation', () => {
     // sweepable for the rest of the session.
     apiPost.mockResolvedValue({})
     await store.setChatDraftState(chatId, true)
+    expect(apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))).toHaveLength(2)
+  })
+
+  test('does not release a claim this tab never made', async () => {
+    // The client id is per browser profile but staged content is per tab, so a
+    // second tab opening the chat must not release the claim protecting the
+    // first tab's screenshot.
+    const store = useProjectStore()
+    const chatId = 'chat-other-tab'
+    store.chats = []
+    apiPost.mockResolvedValue({ has_unsent_draft: false })
+
+    await store.setChatDraftState(chatId, false)
+
+    expect(apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))).toHaveLength(0)
+  })
+
+  test('re-asserts a claim on demand even when the flag has not changed', async () => {
+    // A tab left open for weeks never flips its boolean, so without this its
+    // claim would expire at the server TTL and the chat would be swept.
+    const store = useProjectStore()
+    const chatId = 'chat-refresh'
+    store.chats = []
+    apiPost.mockResolvedValue({ has_unsent_draft: true })
+
+    await store.setChatDraftState(chatId, true)
+    await store.setChatDraftState(chatId, true)
+    expect(apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))).toHaveLength(1)
+
+    await store.setChatDraftState(chatId, true, { refresh: true })
     expect(apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))).toHaveLength(2)
   })
 

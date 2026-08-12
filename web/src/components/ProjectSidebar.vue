@@ -1518,14 +1518,23 @@ async function confirmDeleteChat(chatId: string) {
   .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
 }
 
-/* The row needs roughly: toggle (44) + active item with label (~118) + two bare
-   items (88) + bell (44) + gaps (24) + padding (16). Under that the flex row
+/* The row's contents need roughly: toggle (44) + active item with label (~118)
+   + two bare items (88) + bell (44) + gaps (24) = 318. Under that the flex row
    shrinks the only thing that can give - the label - and "automations" rendered
    as "automation" jammed against the pill edge. Drop the label instead of
    clipping a word in half; the icon and its tooltip still say what it is.
    Keyed to the header's own width, so a user who drags the sidebar narrow (or
-   kept a width saved from before it grew) gets the icons-only row. */
-@container (max-width: 334px) {
+   kept a width saved from before it grew) gets the icons-only row.
+
+   A container query resolves against the container's *content* box, so this
+   compares against 318 with the header's own 16px padding already excluded -
+   not against the sidebar's outer width. At the 340px default the header
+   measures 340 - 1 (sidebar border) - 16 = 323, which clears it.
+
+   Known limit: the cap above is in ch and this threshold is in px, so at a
+   large --font-scale the label can outgrow the budget and clip again. Fixing
+   that properly needs measurement rather than a breakpoint. */
+@container (max-width: 317px) {
   .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
 }
 

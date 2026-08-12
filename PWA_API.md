@@ -325,7 +325,8 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats
 # open on the same new chat cannot cancel each other — clearing the composer on
 # one leaves the other's claim, and its draft, intact. Expiring, so a browser
 # that claimed and never came back cannot pin an empty chat in the sidebar
-# forever. Clients re-assert on mount, so a live draft never ages out. The
+# forever. Clients re-assert when the chat is opened and whenever the tab
+# returns to the foreground, so a draft in use does not age out. The
 # engine drops every claim once the text becomes a turn. Chat payloads expose
 # the derived `has_unsent_draft` boolean, never the claim map. A missing
 # client_id or non-boolean active is a 400; an unknown chat is a 404.

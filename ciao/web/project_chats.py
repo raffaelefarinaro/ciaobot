@@ -243,6 +243,44 @@ _CC_CHAT_PREFIX = "chat-cc-"
 _DRAFT_CLAIM_TTL_S = 14 * 24 * 60 * 60
 
 
+def _claim_needs_refresh(stamp: str) -> bool:
+    """Whether a re-asserted claim is old enough to be worth persisting again.
+
+    A day, against a 14-day TTL: far enough from expiry that a client which
+    keeps re-asserting can never lose its claim, and rare enough that opening a
+    chat does not rewrite the state file every time.
+    """
+    try:
+        claimed_at = datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return True
+    if claimed_at.tzinfo is None:
+        claimed_at = claimed_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) - claimed_at >= timedelta(days=1)
+
+
+def _load_draft_claims(chat_data: dict) -> dict[str, str]:
+    """Draft claims from persisted chat state, tolerating older and odd shapes.
+
+    Migration: the first cut of this feature stored a single
+    ``has_unsent_draft`` boolean. A user who upgrades while holding an unsent
+    prompt would otherwise have the chat fall straight back to "empty" and be
+    swept on the next cleanup — losing exactly the draft the flag was protecting
+    — so a truthy legacy flag becomes a claim under a synthetic client id, aged
+    from now and expiring like any other.
+
+    A non-dict value degrades to no claims rather than raising: ``_load`` only
+    catches JSON and OS errors, so an AttributeError here would take the engine
+    down over one malformed chat record.
+    """
+    raw = chat_data.get("draft_claims")
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()}
+    if raw is None and chat_data.get("has_unsent_draft"):
+        return {"legacy-unsent-draft": _now_iso()}
+    return {}
+
+
 def _fresh_draft_claims(claims: dict[str, str]) -> dict[str, str]:
     """Claims still inside the TTL, dropping stale and unparseable ones.
 
@@ -1454,10 +1492,7 @@ class ProjectChatManager:
                     cd.get("last_activity_at", cd.get("created_at", "")),
                 ),
                 user_turn_count=cd.get("user_turn_count", 0),
-                draft_claims={
-                    str(k): str(v)
-                    for k, v in (cd.get("draft_claims") or {}).items()
-                },
+                draft_claims=_load_draft_claims(cd),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
@@ -3122,6 +3157,13 @@ class ProjectChatManager:
             return None
         claims = dict(_fresh_draft_claims(chat.draft_claims))
         if active:
+            # Clients re-assert on open and on wake, which is what keeps a live
+            # draft from ageing out — but rewriting the timestamp every time
+            # would rewrite the whole state file for a no-op. Only refresh once
+            # the claim is old enough that the difference matters.
+            existing = claims.get(client_id)
+            if existing is not None and not _claim_needs_refresh(existing):
+                return chat
             claims[client_id] = _now_iso()
         else:
             claims.pop(client_id, None)

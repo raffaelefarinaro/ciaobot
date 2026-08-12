@@ -297,3 +297,86 @@ def test_sending_clears_every_claim(tmp_path: Path) -> None:
     asyncio.run(drain())
 
     assert manager._chats[chat.chat_id].draft_claims == {}
+
+
+def test_a_legacy_boolean_flag_becomes_a_claim(tmp_path: Path) -> None:
+    """The first cut of this feature stored a boolean. Dropping it on upgrade
+    would sweep away the very draft it was protecting."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+
+    path = manager._path
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["chats"][chat.chat_id]["draft_claims"]
+    data["chats"][chat.chat_id]["has_unsent_draft"] = True
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    reloaded = _make_manager(tmp_path)
+
+    assert reloaded.is_empty_chat(chat.chat_id) is False
+
+
+def test_a_malformed_claims_value_degrades_instead_of_crashing(
+    tmp_path: Path,
+) -> None:
+    """_load catches only JSON and OS errors, so a bad shape here would take the
+    engine down over one chat record."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Kept by its title")
+
+    path = manager._path
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["chats"][chat.chat_id]["draft_claims"] = ["not", "a", "dict"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    reloaded = _make_manager(tmp_path)
+
+    assert reloaded._chats[chat.chat_id].draft_claims == {}
+
+
+def test_reasserting_a_fresh_claim_does_not_rewrite_state(tmp_path: Path) -> None:
+    """Clients re-assert on every open and wake; that must not rewrite the whole
+    state file each time."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+    manager.set_draft_claim(chat.chat_id, "browser-1", True)
+
+    stamp = manager._chats[chat.chat_id].draft_claims["browser-1"]
+    mtime = manager._path.stat().st_mtime_ns
+
+    manager.set_draft_claim(chat.chat_id, "browser-1", True)
+
+    assert manager._chats[chat.chat_id].draft_claims["browser-1"] == stamp
+    assert manager._path.stat().st_mtime_ns == mtime
+
+
+def test_an_ageing_claim_is_refreshed_on_reassertion(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+
+    two_days_ago = datetime.now(UTC) - timedelta(days=2)
+    manager._chats[chat.chat_id].draft_claims = {"browser-1": two_days_ago.isoformat()}
+
+    manager.set_draft_claim(chat.chat_id, "browser-1", True)
+
+    refreshed = manager._chats[chat.chat_id].draft_claims["browser-1"]
+    assert refreshed != two_days_ago.isoformat()
+    assert manager.is_empty_chat(chat.chat_id) is False
+
+
+def test_the_retired_patch_field_is_rejected(tmp_path: Path) -> None:
+    """A client on the old bundle must fail loudly rather than believe it
+    reported a draft that nothing applied."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+    client = _make_client(manager)
+
+    res = client.patch(f"/api/chats/{chat.chat_id}", json={"has_unsent_draft": True})
+
+    assert res.status_code == 400
+    assert "draft-claim" in res.json()["error"]
