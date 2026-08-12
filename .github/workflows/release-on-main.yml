@@ -57,6 +57,9 @@ jobs:
           pattern = rf"^## v{re.escape(version)} -.*?(?=^## v|\Z)"
           match = re.search(pattern, text, flags=re.MULTILINE | re.DOTALL)
           notes = match.group(0).strip() if match else f"Release v{version}"
+          evidence = Path(f"release-evidence/v{version}/REPORT.md")
+          if evidence.is_file():
+              notes += "\n\n## Public release evidence\n\n" + evidence.read_text(encoding="utf-8").strip()
           Path("release-notes.md").write_text(notes + "\n", encoding="utf-8")
           PY
 

@@ -2435,6 +2435,107 @@ def _scaffold_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _eval_release_command(argv: list[str]) -> int:
+    from ciao.release_evidence import (
+        ReleaseEvidenceError,
+        run_release_evidence,
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="ciao eval release",
+        description="Run the public release-evidence scorecard.",
+    )
+    parser.add_argument("--suite", type=Path, default=Path("evals/release.json"))
+    parser.add_argument("--workspace", type=Path, default=Path("."))
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--from-ref")
+    parser.add_argument("--to-ref", default="HEAD")
+    parser.add_argument("--rationale-file", type=Path)
+    parser.add_argument(
+        "--vault-root",
+        type=Path,
+        help="Explicit opt-in vault to copy into isolated runs; source paths are redacted.",
+    )
+    parser.add_argument(
+        "--mode",
+        action="append",
+        choices=["cold", "warm", "restart"],
+        dest="modes",
+        help="Execution mode; repeat to select multiple modes. Defaults to all.",
+    )
+    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--startup-timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="Write evidence and return success even when a provider/scenario fails.",
+    )
+    args = parser.parse_args(argv)
+    rationale = ""
+    if args.rationale_file:
+        try:
+            rationale = args.rationale_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"Could not read rationale file: {exc}", file=sys.stderr)
+            return 2
+    try:
+        result = run_release_evidence(
+            suite_path=args.suite,
+            workspace=args.workspace,
+            output=args.output,
+            version=args.version,
+            baseline_summary=args.baseline,
+            from_ref=args.from_ref,
+            to_ref=args.to_ref,
+            rationale=rationale,
+            modes=tuple(args.modes or ("cold", "warm", "restart")),
+            repeats=args.repeats,
+            startup_timeout_s=args.startup_timeout,
+            require_complete=not args.allow_incomplete,
+            external_vault=args.vault_root,
+        )
+    except (ReleaseEvidenceError, OSError, ValueError) as exc:
+        print(f"Release evidence failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Release evidence: {args.output.expanduser().resolve()}")
+    print(f"Scenarios: {len(result.summary.get('groups', []))} aggregate groups")
+    if result.advisory_flags:
+        print("Advisory flags:")
+        for flag in result.advisory_flags:
+            print(f"- {flag}")
+    return 0
+
+
+def _eval_compare_command(argv: list[str]) -> int:
+    from ciao.release_evidence import ReleaseEvidenceError, compare_summary_files
+
+    parser = argparse.ArgumentParser(
+        prog="ciao eval compare",
+        description="Compare two public release-evidence summaries.",
+    )
+    parser.add_argument("--baseline", type=Path, required=True)
+    parser.add_argument("--current", type=Path, required=True)
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    args = parser.parse_args(argv)
+    try:
+        comparison = compare_summary_files(args.baseline, args.current)
+    except (ReleaseEvidenceError, OSError, ValueError) as exc:
+        print(f"Eval comparison failed: {exc}", file=sys.stderr)
+        return 2
+    if args.as_json:
+        print(json.dumps(comparison, indent=2, sort_keys=True))
+    else:
+        flags = comparison.get("flags", [])
+        print(f"Release comparison: {len(flags)} flag(s)")
+        for flag in flags:
+            print(f"- {flag.get('kind')}: {flag.get('key', '')}")
+    # Performance/cache changes are advisory. Malformed input is the only
+    # comparison failure; correctness flags are surfaced for the release PR.
+    return 0
+
+
 
 def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
@@ -2446,6 +2547,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:2] == ["eval", "release"]:
+        return _eval_release_command(argv_list[2:])
+    if argv_list[:2] == ["eval", "compare"]:
+        return _eval_compare_command(argv_list[2:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

@@ -36,6 +36,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
+      - name: Attach public release evidence
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          evidence="release-evidence/${TAG}/"
+          test -f "${evidence}summary.json"
+          gh release upload "$TAG" \
+            "${evidence}summary.json" \
+            "${evidence}changes.json" \
+            "${evidence}REPORT.md" \
+            "${evidence}rationale.md" \
+            --clobber
 
   build-desktop:
     runs-on: macos-latest

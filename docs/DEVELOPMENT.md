@@ -77,13 +77,15 @@ On each GitHub release, `publish.yml` updates the tap automatically. Add a repo-
 - **Release prep:** from a clean checkout, run:
 
 ```bash
-scripts/prepare-release --apply --create-pr --ready
+scripts/prepare-release --apply --run-release-evals --create-pr --ready
 ```
 
   That cuts `release/vX.Y.Z` from `develop`, aligns the Python, PWA, desktop
   npm/Cargo/Tauri versions and lockfiles, refreshes `CHANGELOG.md`, runs release
-  checks, and opens a PR into `main`. Use `--bump minor` or `--version X.Y.Z`
-  when needed.
+  checks, runs the Claude/Codex release scorecard, commits sanitized evidence
+  under `release-evidence/vX.Y.Z/`, and opens a PR into `main`. Use
+  `--bump minor` or `--version X.Y.Z` when needed. Live release evals require
+  both provider logins and may spend provider tokens.
 
 - **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the wheel, publishes to PyPI, and updates the Homebrew tap. A follow-up job merges `main` back into `develop`.
 
@@ -279,6 +281,41 @@ After every scenario, the output directory contains atomic `results.json` and
 error, routing, selected/effective model, normalized tools, usage, token
 totals, and timings. Live runs use the existing provider login and are not part
 of the normal credential-free test suite.
+
+### Public release evidence
+
+Release scorecards use the schema-version-2 suite in `evals/release.json`.
+They run both supported providers three times in cold, warm, and restart
+mode. Cold runs use a fresh isolated workspace; warm runs repeat the measured
+turns in one chat; restart runs preserve the synthetic vault while starting a
+new server and chat.
+
+```bash
+ciao eval release \
+  --suite evals/release.json \
+  --workspace . \
+  --version 0.0.0 \
+  --output release-evidence/v0.0.0 \
+  --from-ref v0.0.0
+
+ciao eval compare \
+  --baseline release-evidence/vPREVIOUS/summary.json \
+  --current release-evidence/vCURRENT/summary.json
+```
+
+The generated `REPORT.md`, `summary.json`, `changes.json`, and
+`rationale.md` are sanitized public artifacts. They contain aggregate
+context/cache/token/latency metrics, tool and memory-source summaries, and
+structural skill/MCP changes, but never prompts, model answers, vault content,
+tool arguments, or credentials. Performance and cache regressions are
+advisory; missing provider coverage and correctness failures stop release
+preparation. Merging the release PR publishes the report in the GitHub release
+notes and uploads the evidence as release assets.
+
+Synthetic vault fixtures are the default. A local, sanitized vault can be used
+for a private operator run with `--vault-root /path/to/vault`; external source
+paths are hashed in the resulting public evidence and the vault is never copied
+into the repository or release assets.
 
 The Settings → Automations list is registry-driven: `GET /api/automation` carries
 each job's static `trigger` sentence, `schedule_id`, `one_time`, `uses_model`,

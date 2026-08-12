@@ -48,6 +48,8 @@ ciao/                          Python backend (Starlette).
   control_surfaces.py          Read previously promoted per-provider legacy-vs-MCP decisions for per-chat Auto.
   eval_runner.py               Reusable isolated full-chat runner and provider-neutral observation telemetry.
   evals.py                     Strict declarative eval schema, target staging, assertions, reports, and suite execution.
+  release_evidence.py          Release scorecards, provider metrics, inventory diffs, sanitization, and comparisons.
+  release_evidence.py          Release scorecards, provider metrics, inventory diffs, sanitization, and comparisons.
   signals.py                   Restart / deploy signals.
   instance_lock.py             Process-lifetime lock for one backend per runtime directory (`.runtime/server.lock`).
   execution_modes.py           Claude permission mode normalization.

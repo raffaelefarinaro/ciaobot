@@ -46,6 +46,8 @@ class ChatObservation:
     provider_tools: tuple[str, ...]
     mcp_tools: tuple[str, ...]
     mcp_errors: int
+    mcp_result_paths: tuple[str, ...] = ()
+    mcp_tool_durations_ms: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,6 +598,17 @@ def run_chat_turn(
             ),
             mcp_tools=tuple(str(row.get("tool") or "") for row in mcp_rows),
             mcp_errors=sum(row.get("status") != "ok" for row in mcp_rows),
+            mcp_result_paths=tuple(
+                str(path)
+                for row in mcp_rows
+                for path in (row.get("result_paths") or [])
+                if isinstance(path, str)
+            ),
+            mcp_tool_durations_ms=tuple(
+                int(row.get("duration_ms") or 0)
+                for row in mcp_rows
+                if isinstance(row.get("duration_ms"), (int, float))
+            ),
         )
         completed = True
         return observation
