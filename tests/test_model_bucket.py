@@ -283,6 +283,39 @@ def test_explicit_openrouter_alias_requires_api_key(tmp_path):
         )
 
 
+def test_inherited_openrouter_alias_requires_api_key(tmp_path):
+    """An inherited routing bucket must resolve explicit tier aliases too."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        openrouter=OpenRouterSettings(api_key=""),
+        workspaces={
+            "client": WorkspaceConfig(
+                name="client",
+                vault_root="vaults/client",
+                model_bucket="openrouter",
+                gws_profile="work",
+            )
+        },
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("client", workspace="client")
+
+    with pytest.raises(
+        ValueError, match="Unknown model 'anthropic/claude-opus-latest'"
+    ):
+        pcm.create_chat(project.project_id, model="opus")
+
+
 def test_failed_bucket_validation_preserves_empty_chats(tmp_path):
     """A rejected bucket must not clean up an existing empty draft."""
     runtime = tmp_path / ".runtime"

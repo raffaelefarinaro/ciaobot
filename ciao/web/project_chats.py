@@ -1728,6 +1728,10 @@ class ProjectChatManager:
             project_id,
             title=title,
             model="haiku",
+            # The bootstrap chat must not inherit a stale workspace routing
+            # bucket: its tier alias is intentionally guaranteed-valid so a
+            # removed backend credential cannot prevent startup.
+            model_bucket="work",
         )
         chat.handover_context_pending = True
         chat.handover_messages = [
@@ -2831,8 +2835,12 @@ class ProjectChatManager:
         if chat_provider == "claude":
             chat_bucket = self._effective_bucket(model_bucket or "", project_id)
             if (
-                (self._bucket_routes_to_ollama(chat_bucket) or chat_bucket == "openrouter")
-                and (model is None or model_bucket is not None)
+                self._bucket_routes_to_ollama(chat_bucket)
+                or chat_bucket == "openrouter"
+            ) and (
+                model is None
+                or model_bucket is not None
+                or chat_bucket == "openrouter"
             ):
                 chat_model = self._resolve_claude_model(
                     chat_model, chat_bucket, project_id
