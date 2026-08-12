@@ -15,6 +15,7 @@ from claude_agent_sdk import (
     SessionMessage,
     delete_session,
     get_session_messages,
+    get_session_messages as _sdk_get_session_messages,
     get_subagent_messages,
     list_sessions,
     list_subagents,
@@ -644,9 +645,9 @@ def _parse_jsonl_session(
     directory = session_info.cwd or str(path.parent)
 
     try:
-        messages = get_session_messages(session_id, directory=directory)
+        messages = get_session_messages_full(session_id, directory=directory)
     except Exception:  # noqa: BLE001 — SDK can raise a variety of I/O errors
-        logger.exception("get_session_messages failed for %s", session_id)
+        logger.exception("get_session_messages_full failed for %s", session_id)
         return None
 
     if not messages:
@@ -861,3 +862,143 @@ def extract_cli_transcripts(
     )
 
     return created
+
+
+def get_session_messages_full(
+    session_id: str,
+    directory: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[SessionMessage]:
+    """Reads a session's conversation messages from its JSONL transcript file,
+    stitching history across autocompact / compact_boundary entries by following
+    both `parentUuid` and `logicalParentUuid`.
+    """
+    import sys
+
+    def _fallback():
+        if limit is None and offset == 0:
+            return get_session_messages(session_id, directory=directory)
+        try:
+            return get_session_messages(
+                session_id, directory=directory, limit=limit, offset=offset
+            )
+        except TypeError:
+            return get_session_messages(session_id, directory=directory)
+
+    if get_session_messages is not _sdk_get_session_messages:
+        return _fallback()
+
+    sdk = sys.modules.get("claude_agent_sdk")
+    if sdk and hasattr(sdk, "get_session_messages") and not hasattr(sdk, "_internal"):
+        return _fallback()
+
+    try:
+        from claude_agent_sdk._internal.sessions import (
+            _is_visible_message,
+            _parse_transcript_entries,
+            _read_session_file,
+            _to_session_message,
+            _validate_uuid,
+        )
+    except (ImportError, AttributeError):
+        return get_session_messages(session_id, directory=directory, limit=limit, offset=offset)
+
+    if not _validate_uuid(session_id):
+        return []
+
+    try:
+        content = _read_session_file(session_id, directory)
+    except Exception:
+        content = None
+
+    if not content:
+        return get_session_messages(session_id, directory=directory, limit=limit, offset=offset)
+
+    try:
+        entries = _parse_transcript_entries(content)
+        if not entries:
+            return []
+
+        by_uuid = {e["uuid"]: e for e in entries if "uuid" in e and isinstance(e["uuid"], str)}
+        entry_index = {e["uuid"]: i for i, e in enumerate(entries) if "uuid" in e and isinstance(e["uuid"], str)}
+
+        parent_uuids: set[str] = set()
+        for e in entries:
+            p = e.get("parentUuid")
+            if p and isinstance(p, str):
+                parent_uuids.add(p)
+
+        terminals = [
+            e for e in entries
+            if "uuid" in e and isinstance(e["uuid"], str) and e["uuid"] not in parent_uuids
+        ]
+
+        leaves: list[dict] = []
+        for terminal in terminals:
+            cur: dict | None = terminal
+            seen: set[str] = set()
+            while cur is not None:
+                uid = cur.get("uuid")
+                if not uid or not isinstance(uid, str) or uid in seen:
+                    break
+                seen.add(uid)
+                if cur.get("type") in ("user", "assistant"):
+                    leaves.append(cur)
+                    break
+                parent = cur.get("parentUuid") or cur.get("logicalParentUuid")
+                cur = by_uuid.get(parent) if parent and isinstance(parent, str) else None
+
+        if not leaves:
+            return []
+
+        main_leaves = [
+            leaf
+            for leaf in leaves
+            if not leaf.get("isSidechain")
+            and not leaf.get("teamName")
+            and not leaf.get("isMeta")
+        ]
+
+        def _pick_best(candidates: list[dict]) -> dict:
+            best = candidates[0]
+            best_idx = entry_index.get(best.get("uuid", ""), -1)
+            for item in candidates[1:]:
+                cur_idx = entry_index.get(item.get("uuid", ""), -1)
+                if cur_idx > best_idx:
+                    best = item
+                    best_idx = cur_idx
+            return best
+
+        leaf = _pick_best(main_leaves) if main_leaves else _pick_best(leaves)
+
+        chain: list[dict] = []
+        seen = set()
+        cur = leaf
+        while cur is not None:
+            uid = cur.get("uuid")
+            if not uid or not isinstance(uid, str) or uid in seen:
+                break
+            seen.add(uid)
+            chain.append(cur)
+            parent = cur.get("parentUuid") or cur.get("logicalParentUuid")
+            cur = by_uuid.get(parent) if parent and isinstance(parent, str) else None
+
+        chain.reverse()
+        visible = [e for e in chain if _is_visible_message(e)]
+        messages: list[SessionMessage] = []
+        for e in visible:
+            msg = _to_session_message(e)
+            if e.get("isCompactSummary") and isinstance(msg.message, dict):
+                msg.message["isCompactSummary"] = True
+            messages.append(msg)
+
+        if limit is not None and limit > 0:
+            return messages[offset : offset + limit]
+        if offset > 0:
+            return messages[offset:]
+        return messages
+    except Exception:
+        logger.exception("get_session_messages_full custom chain failed for %s; falling back", session_id)
+        return get_session_messages(session_id, directory=directory, limit=limit, offset=offset)
+
