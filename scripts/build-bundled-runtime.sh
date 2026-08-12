@@ -88,6 +88,7 @@ if [ ! -x "$python" ] || [ ! -d "$site" ]; then
     exit 1
 fi
 export CIAO_BUNDLED_APP=1
+export CIAO_ENGINE_PATH="$root/bin/ciao"
 # The app bundle contains the engine, not the user's data.  Keep the bundle
 # as the fallback for direct, workspace-less CLI invocations, but let the
 # LaunchAgent point the service at the user's workspace runtime.

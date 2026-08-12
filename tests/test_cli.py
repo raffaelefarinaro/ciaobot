@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 
 import pytest
@@ -392,6 +393,24 @@ def test_setup_no_auth_opts_out_of_password_protection(tmp_path: Path) -> None:
     env_lines = (workspace / ".env").read_text(encoding="utf-8").splitlines()
     assert "PWA_AUTH_REQUIRED=false" in env_lines
     assert "PWA_AUTH_REQUIRED=true" not in env_lines
+
+
+def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao"
+    monkeypatch.setenv("CIAO_ENGINE_PATH", engine)
+    launch_agents = tmp_path / "LaunchAgents"
+
+    cli.setup_workspace(
+        tmp_path / "workspace",
+        launch_agents_dir=launch_agents,
+        python_path=None,
+    )
+
+    with (launch_agents / "com.ciao.server.plist").open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["ProgramArguments"][0] == engine
 
 
 def _write_desktop_app(app_dir: Path) -> Path:

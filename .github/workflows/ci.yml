@@ -113,13 +113,13 @@ jobs:
           fi
           printf '%s\n%s\n' "$url" "$digest"
         }
-        mapfile -t arm64 < <(resolve_asset aarch64-apple-darwin)
-        mapfile -t x86_64 < <(resolve_asset x86_64-apple-darwin)
+        arm64_result="$(resolve_asset aarch64-apple-darwin)"
+        x86_64_result="$(resolve_asset x86_64-apple-darwin)"
         {
-          echo "arm64_url=${arm64[0]}"
-          echo "arm64_sha256=${arm64[1]}"
-          echo "x86_64_url=${x86_64[0]}"
-          echo "x86_64_sha256=${x86_64[1]}"
+          echo "arm64_url=$(printf '%s\n' "$arm64_result" | sed -n '1p')"
+          echo "arm64_sha256=$(printf '%s\n' "$arm64_result" | sed -n '2p')"
+          echo "x86_64_url=$(printf '%s\n' "$x86_64_result" | sed -n '1p')"
+          echo "x86_64_sha256=$(printf '%s\n' "$x86_64_result" | sed -n '2p')"
         } >> "$GITHUB_OUTPUT"
 
     - name: Build embedded Ciaobot runtime

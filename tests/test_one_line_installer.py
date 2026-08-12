@@ -34,6 +34,7 @@ def test_bundled_launcher_keeps_child_ciao_commands_on_matching_runtime() -> Non
 
     assert 'export PATH="$root/bin${PATH:+:$PATH}"' in script
     assert 'export PYTHONPATH="$site${PYTHONPATH:+:$PYTHONPATH}"' in script
+    assert 'export CIAO_ENGINE_PATH="$root/bin/ciao"' in script
 
 
 def test_runtime_builder_probes_pydantic_core_for_each_architecture() -> None:
@@ -92,6 +93,7 @@ def test_release_workflows_do_not_publish_removed_install_channels() -> None:
     assert "pypi:" not in workflows
     assert ".dmg" not in workflows.lower()
     assert "brew install" not in workflows
+    assert "mapfile" not in workflows
 
 
 def test_release_smoke_only_runs_with_a_published_version() -> None:

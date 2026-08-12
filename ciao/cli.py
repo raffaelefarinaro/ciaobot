@@ -855,7 +855,13 @@ def setup_workspace(
 
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
-    resolved_engine = python_path or sys.executable
+    # The bundled launcher exports its own entrypoint so onboarding does not
+    # write the embedded interpreter directly into launchd as ``python run``.
+    resolved_engine = (
+        python_path
+        or os.environ.get("CIAO_ENGINE_PATH", "").strip()
+        or sys.executable
+    )
     # The one-time login token for the PWA. Written unconditionally: the setup
     # summary prints it as a login URL, and the Tauri app redeems it on first
     # launch. It used to be created as a side effect of writing the launcher
@@ -1729,8 +1735,11 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--push-contact", help="Web Push contact to write when .env is new.")
     setup_parser.add_argument(
         "--python",
-        default=sys.executable,
-        help="Python executable used by the generated LaunchAgent.",
+        default=None,
+        help=(
+            "Executable used by the generated LaunchAgent (defaults to the "
+            "bundled ciao launcher, or the current Python outside a bundle)."
+        ),
     )
     setup_parser.add_argument(
         "--port",
