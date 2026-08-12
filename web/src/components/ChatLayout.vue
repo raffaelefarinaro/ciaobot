@@ -949,7 +949,10 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   width: 100%;
-  max-width: 1040px;
+  /* Matches .home-recent in HomeRecentChats: both are centred, so a narrower cap
+     here left the status row starting 140px inside the lanes below it - reading
+     as neither centred on the page nor aligned to the content. */
+  max-width: 1320px;
   min-height: 44px;
   gap: 10px;
   margin: 0 auto;

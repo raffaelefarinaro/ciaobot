@@ -1460,9 +1460,13 @@ async function confirmDeleteChat(chatId: string) {
   /* min-width, not width: the active item grows to fit its label. */
   min-width: 30px;
   height: 30px;
-  /* Keep the vertical padding supplied by .touch-hit: the visible 30px
-     control still needs the shared 44px touch target. */
-  padding-inline: var(--space-1);
+  /* Padding is left to .touch-hit, uniformly. Trading the inline half down to
+     var(--space-1) packed the rail by 6px per item, but .touch-hit paints its
+     pill by insetting that padding on every side: at 4px the highlight landed
+     3px *inside* the glyph, clipping the icon instead of padding it, and the
+     matching negative margin shrank each item's footprint to 24px. Uniform
+     padding restores the 30px control with a 44px touch target, and matches
+     the bell beside it, which never overrode this. */
   border-radius: var(--radius-sm);
   position: relative;
   isolation: isolate;
