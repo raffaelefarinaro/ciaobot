@@ -800,6 +800,23 @@ def test_create_chat_accepts_statically_configured_openrouter_model(
     assert chat.model == "meta-llama/llama-4-maverick"
 
 
+def test_create_chat_rejects_openrouter_id_in_fallback_without_api_key(
+    tmp_path: Path,
+) -> None:
+    """An OpenRouter-shaped fallback id requires OpenRouter credentials."""
+    from ciao.providers.openrouter import OpenRouterSettings
+
+    manager = _make_manager(
+        tmp_path,
+        claude_models=["opus", "sonnet", "haiku", "vendor/model"],
+        openrouter=OpenRouterSettings(api_key=""),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown model 'vendor/model'"):
+        manager.create_chat(project.project_id, model="vendor/model")
+
+
 def _write_custom_provider(
     tmp_path: Path, *, provider_id: str, models: list[str], runner: str = "claude"
 ) -> None:
@@ -900,6 +917,26 @@ def test_create_chat_accepts_ollama_tier_target_with_backend(
 
     chat = manager.create_chat(project.project_id, model="kimi-k2.7-code:cloud")
     assert chat.model == "kimi-k2.7-code:cloud"
+
+
+def test_create_chat_rejects_cloud_ollama_tier_with_only_local_backend(
+    tmp_path: Path,
+) -> None:
+    """A local daemon must not make cloud-only tier targets valid."""
+    from ciao.providers.ollama import OllamaSettings
+
+    manager = _make_manager(
+        tmp_path,
+        ollama=OllamaSettings(
+            api_key="",
+            local_models=("llama3.1:latest",),
+            opus_model="minimax-m3:cloud",
+        ),
+    )
+    project = manager.create_project("Delegates", workspace="work")
+
+    with pytest.raises(ValueError, match="Unknown model 'minimax-m3:cloud'"):
+        manager.create_chat(project.project_id, model="minimax-m3:cloud")
 
 
 def test_create_chat_rejects_unmatched_custom_codex_model(tmp_path: Path) -> None:

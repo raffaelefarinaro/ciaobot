@@ -86,7 +86,7 @@ from ciao.providers.ollama import (
     is_ollama_model,
     vision_support_ollama,
 )
-from ciao.providers.openrouter import vision_support_openrouter
+from ciao.providers.openrouter import is_openrouter_model, vision_support_openrouter
 from ciao.providers.codex import (
     CodexProvider,
     codex_collab_tree_counts,
@@ -4126,23 +4126,18 @@ class ProjectChatManager:
         # API key so an ``CIAO_OLLAMA_MODELS`` allowlist entry does not
         # sneak through when no Ollama backend is actually configured.
         ollama = self._config.ollama
-        local_available = bool(ollama.local_models)
         cloud_available = bool(ollama.api_key) and ollama.api_key != "ollama"
-        backend_available = local_available or cloud_available
+        ollama_tier_targets = {
+            ollama.haiku_model,
+            ollama.sonnet_model,
+            ollama.opus_model,
+            ollama.fable_model,
+            ollama.title_model,
+        }
         if (
             is_local_ollama_model(model, ollama)
             or (cloud_available and model in ollama.models)
-            or (
-                backend_available
-                and model
-                in {
-                    ollama.haiku_model,
-                    ollama.sonnet_model,
-                    ollama.opus_model,
-                    ollama.fable_model,
-                    ollama.title_model,
-                }
-            )
+            or (cloud_available and model in ollama_tier_targets)
         ):
             return
         # Fallback set: ``claude_models`` (filtered to drop Ollama cloud-shaped
@@ -4155,9 +4150,12 @@ class ProjectChatManager:
         claude_models = [
             m
             for m in self._config.claude_models
-            if cloud_available
-            or is_local_ollama_model(m, ollama)
-            or ":" not in m
+            if (openrouter.available or not is_openrouter_model(m, openrouter))
+            and (
+                cloud_available
+                or is_local_ollama_model(m, ollama)
+                or ":" not in m
+            )
         ]
         allowed = list(claude_models)
         if openrouter.available:
