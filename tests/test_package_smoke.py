@@ -38,7 +38,12 @@ def test_package_smoke_runs_build_install_and_installed_probe(tmp_path: Path) ->
         repo,
     ) in commands
     assert any(cmd[:3] == [sys.executable, "-m", "venv"] for cmd, _cwd in commands)
-    assert any(cmd[1:3] == ["-m", "pip"] and "ciao-0.2.0-py3-none-any.whl" in cmd[-1] for cmd, _cwd in commands)
+    assert any(
+        cmd[1:3] == ["-m", "pip"]
+        and "--force-reinstall" in cmd
+        and "ciao-0.2.0-py3-none-any.whl" in cmd[-1]
+        for cmd, _cwd in commands
+    )
     assert any(cmd[1] == "-c" and "import ciao" in cmd[2] for cmd, _cwd in commands)
     assert any(cmd[1] == "-c" and "if True:" in cmd[2] for cmd, _cwd in commands)
 

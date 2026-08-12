@@ -104,10 +104,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
 | GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
-| POST | `/api/package/update` | Upgrade ciaobot (`brew upgrade ciaobot` or latest release wheel) and restart |
+| POST | `/api/package/update` | Return app-owned update guidance; production updates replace the signed Ciaobot.app bundle and restart |
 | GET | `/api/device/package-status` | Same as `/api/package/status`, but never proxied: in client mode this reports *this* machine's install while `/api/package/status` reports the host's |
 | GET | `/api/device/changelog` | Commits between this machine's installed version and the latest release (never proxied) |
-| POST | `/api/device/update` | Upgrade and restart *this* machine, not the host it mirrors (never proxied) |
+| POST | `/api/device/update` | Return app-owned update guidance for *this* machine, not the host it mirrors (never proxied) |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |

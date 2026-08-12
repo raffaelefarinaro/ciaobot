@@ -70,7 +70,6 @@ async def test_startup_persists_normalized_registry_only_after_lock(
     monkeypatch.delenv("CIAO_WORKSPACES", raising=False)
     monkeypatch.setattr(main.CiaoConfig, "from_env", lambda: config)
     monkeypatch.setattr(instance_lock, "WorkspaceInstanceLock", RecordingLock)
-    monkeypatch.setattr(main, "_ensure_homebrew_on_path", lambda: None)
     monkeypatch.setattr(main, "_run_server_locked", run_server_locked)
 
     assert await main._async_main() == 0

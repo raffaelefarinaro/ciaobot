@@ -373,6 +373,26 @@ def update_engine(
                 "requires_confirmation": True,
             },
         )
+    bundled_engine = bool(
+        runtime.python_path
+        and "Ciaobot.app/Contents/Resources/ciao-runtime"
+        in str(runtime.python_path)
+    )
+    if bundled_engine:
+        return ServiceResult(
+            False,
+            "update-engine",
+            "The bundled engine updates together with Ciaobot.app.",
+            {
+                **asdict(runtime),
+                "already_current": True,
+                "bundled": True,
+                "command": (
+                    "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/"
+                    "releases/latest/download/install.sh | sh"
+                ),
+            },
+        )
     result = update_package()
     if not result.get("ok"):
         # A no-op upgrade is not a failure for callers that update the engine

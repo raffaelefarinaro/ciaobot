@@ -109,7 +109,17 @@ def run_package_smoke(
 
     runner([sys.executable, "-m", "venv", str(venv_dir)], cwd=root)
     python = _venv_python(venv_dir)
-    runner([str(python), "-m", "pip", "install", str(wheels[-1])], cwd=root)
+    runner(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--force-reinstall",
+            str(wheels[-1]),
+        ],
+        cwd=root,
+    )
 
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)

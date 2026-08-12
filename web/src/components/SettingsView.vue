@@ -703,8 +703,8 @@
                   </template>
                   <template v-else>
                     <span class="hint--warn">
-                      Read-aloud is unavailable. Install the desktop app with
-                      <code>ciao desktop install</code>.
+                      Read-aloud is unavailable. Install Ciaobot with the
+                      one-line installer from the release page.
                     </span>
                   </template>
                 </span>

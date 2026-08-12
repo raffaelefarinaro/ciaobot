@@ -26,14 +26,31 @@ fn resolve_ciao_from(path_value: Option<&str>, preferred: &[PathBuf]) -> Option<
         .find(|candidate| candidate.is_file())
 }
 
+fn bundled_ciao_from(executable: Option<&Path>) -> Option<PathBuf> {
+    let app_bundle = executable?.ancestors().find(|path| {
+        path.extension().and_then(|value| value.to_str()) == Some("app")
+    })?;
+    let candidate = app_bundle.join("Contents/Resources/ciao-runtime/bin/ciao");
+    candidate.is_file().then_some(candidate)
+}
+
 pub fn resolve_ciao(path_value: Option<&str>) -> Option<PathBuf> {
-    resolve_ciao_from(
-        path_value,
-        &[
-            PathBuf::from("/opt/homebrew/bin/ciao"),
-            PathBuf::from("/usr/local/bin/ciao"),
-        ],
-    )
+    if let Some(binary) = bundled_ciao_from(env::current_exe().ok().as_deref()) {
+        return Some(binary);
+    }
+    if let Ok(binary) = env::var("CIAO_ENGINE_PATH") {
+        let candidate = PathBuf::from(binary);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    // The PATH fallback is for local development only. A packaged app must
+    // always resolve its engine from Contents/Resources so another system
+    // installation cannot silently become the engine for this app.
+    if env::var_os("CIAO_DEV_MODE").is_some() {
+        return resolve_ciao_from(path_value, &[]);
+    }
+    None
 }
 
 pub fn invoke(binary: &Path, action: &str, extra: &[&str]) -> Result<ServiceResult, String> {
@@ -86,6 +103,26 @@ mod tests {
         assert_eq!(
             resolve_ciao_from(path.to_str(), &[]).as_deref(),
             Some(binary.as_path())
+        );
+    }
+
+    #[test]
+    fn resolves_engine_from_the_app_bundle() {
+        let temp = tempdir().unwrap();
+        let executable = temp
+            .path()
+            .join("Ciaobot.app/Contents/MacOS/ciaobot-desktop");
+        let bundled = temp
+            .path()
+            .join("Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        fs::write(&executable, "").unwrap();
+        fs::write(&bundled, "").unwrap();
+
+        assert_eq!(
+            bundled_ciao_from(Some(&executable)).as_deref(),
+            Some(bundled.as_path())
         );
     }
 }

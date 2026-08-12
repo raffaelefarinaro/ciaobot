@@ -102,7 +102,7 @@ def sidecar_path() -> Path | None:
     return Path(found) if found else None
 
 
-# Cached probe, keyed on the resolved binary. `ciao desktop install` runs in a
+# Cached probe, keyed on the resolved binary. The one-line installer runs in a
 # separate CLI process, so a server that started before Ciaobot.app existed
 # would otherwise answer "not installed" until it was restarted -- a cache miss
 # on the path appearing is what lets the install be picked up live. Locating the
@@ -218,7 +218,7 @@ def unavailable_reason(name: str, *, subject: str) -> str:
     if sys.platform != "darwin":
         return f"{subject} is only available on macOS"
     if sidecar_path() is None:
-        return "Ciaobot.app is not installed; run `ciao desktop install`"
+        return "Ciaobot.app is not installed; run the one-line installer from the release page"
     return f"{subject} is unavailable on this machine"
 
 
@@ -328,7 +328,7 @@ async def run(
     if binary is None:
         raise SidecarError(
             "the ciaobot-native helper is not installed; "
-            "install the desktop app with `ciao desktop install`"
+            "install Ciaobot with the one-line installer from the release page"
         )
     return await _run_process(
         [str(binary), *args], stdin=stdin, timeout=timeout
@@ -443,7 +443,7 @@ async def respond(
     if binary is None:
         raise SidecarError(
             "the ciaobot-native helper is not installed; "
-            "install the desktop app with `ciao desktop install`"
+            "install Ciaobot with the one-line installer from the release page"
         )
     # Generation is the one subcommand that has to cross into the user
     # session; hear/speak work fine from the agent. Keeping the hop here

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -29,10 +30,9 @@ def _github_repo() -> str:
 def latest_release_url(repo: str | None = None) -> str:
     """Return the GitHub API URL for the latest release of the app repo.
 
-    Used where the JSON payload is needed (e.g. resolving the wheel asset to
-    download for an update). This hits ``api.github.com`` and is therefore
-    subject to the REST API rate limit, so it is only used on demand — never
-    for the recurring update check (see ``latest_release_redirect_url``).
+    Retained for release metadata consumers that need the JSON payload. This
+    hits ``api.github.com`` and is therefore subject to the REST API rate limit;
+    the recurring update check uses ``latest_release_redirect_url`` instead.
     """
     repo = (repo or _github_repo()).strip("/")
     return f"https://api.github.com/repos/{repo}/releases/latest"
@@ -255,58 +255,8 @@ def package_changelog(
     }
 
 
-def _resolve_brew() -> str | None:
-    import shutil
-    from pathlib import Path
-
-    brew = shutil.which("brew")
-    if brew:
-        return brew
-    for path in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
-        if Path(path).is_file():
-            return path
-    return None
-
-
-def _is_homebrew_cellar_path(path: Path) -> bool:
-    text = str(path)
-    return "Cellar/ciaobot" in text or "Cellar/ciao/" in text
-
-
-def _brew_installed_version(brew: str) -> str:
-    """Return the Cellar version of ``ciaobot`` per Homebrew, or "" if unknown."""
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            [brew, "list", "--versions", "ciaobot"],
-            capture_output=True, text=True, timeout=15, check=False,
-        )
-    except Exception:
-        return ""
-    parts = result.stdout.strip().split()
-    return parts[-1] if len(parts) >= 2 else ""
-
-
-def _pip_show_version(python_exe: str) -> str:
-    """Return the installed ``ciaobot`` version per ``pip show``, or "" if unknown."""
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            [python_exe, "-m", "pip", "show", "ciaobot"],
-            capture_output=True, text=True, timeout=15, check=False,
-        )
-    except Exception:
-        return ""
-    for line in result.stdout.splitlines():
-        if line.startswith("Version:"):
-            return line.split(":", 1)[1].strip()
-    return ""
-
-
 def detect_install_mode() -> str:
-    """Return "homebrew", "pip_venv", "editable", or "unknown"."""
+    """Return the runtime distribution mode used by the current process."""
     import sys
     from pathlib import Path
 
@@ -322,37 +272,12 @@ def detect_install_mode() -> str:
 
     try:
         executable = Path(sys.executable).resolve()
-        if _is_homebrew_cellar_path(executable):
-            return "homebrew"
-        if ciao_file is not None and _is_homebrew_cellar_path(ciao_file):
-            return "homebrew"
+        if os.environ.get("CIAO_BUNDLED_APP") or "Ciaobot.app/Contents/Resources/ciao-runtime" in str(executable):
+            return "bundled_app"
     except Exception:
         pass
 
-    if sys.prefix != sys.base_prefix:
-        return "pip_venv"
-
     return "unknown"
-
-
-def _stable_executable() -> str:
-    """Interpreter path that survives versioned upgrades.
-
-    Homebrew: map ``.../Cellar/<pkg>/<version>/...`` to the
-    ``<prefix>/opt/<pkg>/...`` symlink that brew repoints on upgrade, so a
-    probe subprocess runs the *current* install even after the keg this
-    process started from was deleted. Other layouts return ``sys.executable``
-    unchanged (pip/uv rewrite the same venv in place).
-    """
-    import sys
-    from pathlib import Path
-
-    m = re.match(r"(.*)/Cellar/([^/]+)/[^/]+/(.*)$", sys.executable)
-    if m:
-        stable = Path(f"{m.group(1)}/opt/{m.group(2)}/{m.group(3)}")
-        if stable.exists():
-            return str(stable)
-    return sys.executable
 
 
 _VERSION_OUTPUT_RE = re.compile(r"[0-9][0-9A-Za-z.\-+]*")
@@ -361,19 +286,15 @@ _VERSION_OUTPUT_RE = re.compile(r"[0-9][0-9A-Za-z.\-+]*")
 def installed_version(timeout_s: float = 10.0) -> str | None:
     """Version of the package currently on disk, probed in a fresh process.
 
-    The running process pinned ``ciao.__version__`` at import time; after an
-    upgrade rewrote site-packages (pip/uv) or swapped the Homebrew keg, only a
-    fresh interpreter sees the new code. Runs isolated (``-I``) so a repo
-    checkout in cwd or PYTHONPATH can't shadow the installed package. Returns
-    ``None`` whenever the probe can't answer (interpreter missing, import
-    error, timeout, junk output) — callers must fail open, never restart on a
-    failed probe alone.
+    The running process pins ``ciao.__version__`` at import time; a fresh
+    interpreter is the only reliable way to observe a development install that
+    changed on disk. Returns ``None`` whenever the probe cannot answer.
     """
     import subprocess
 
     try:
         result = subprocess.run(
-            [_stable_executable(), "-I", "-c", "import ciao; print(ciao.__version__)"],
+            [sys.executable, "-I", "-c", "import ciao; print(ciao.__version__)"],
             capture_output=True,
             text=True,
             timeout=timeout_s,
@@ -392,12 +313,9 @@ class InstallWatcher:
     Two independent signals, checked by the caller on its own schedule:
 
     - :meth:`check_files` — the package directory this process imported from
-      no longer exists (brew swapped/deleted the keg). Definitive; restart
-      immediately.
-    - :meth:`check_version` — a fresh-subprocess probe reports a different
-      version than the running one on **two consecutive readings** (debounce:
-      a single flaky probe never triggers a restart). Covers in-place
-      pip/uv upgrades where the files survive but the process is stale.
+      no longer exists. Definitive; restart immediately.
+    - :meth:`check_version` — an optional development probe reports a
+      different version on **two consecutive readings**.
 
     Both return a human-readable restart reason, or ``None``.
     """
@@ -433,14 +351,10 @@ class InstallWatcher:
 def running_install_present() -> bool:
     """False when the running install's files were swapped out from under it.
 
-    A bare ``brew upgrade ciaobot`` (or ``brew cleanup``) removes the versioned
-    Cellar keg this already-running process imported ``ciao`` from — e.g.
-    ``.../Cellar/ciaobot/0.4.14/...`` — while the launchd symlink moves to the
-    new keg. The live process keeps resolving packaged resources (index.html,
-    stock schedules) into the deleted directory and 500s until relaunched. A
-    missing ``ciao/__init__.py`` at the imported path is the tell. Only
-    meaningful for versioned installs; pip upgrades rewrite files in place, so
-    the path never disappears.
+    A missing ``ciao/__init__.py`` at the imported path means a development
+    checkout or runtime was removed while the server was running. The guard is
+    intentionally conservative and fails open if the import location cannot be
+    inspected.
     """
     from pathlib import Path
 
@@ -452,49 +366,17 @@ def running_install_present() -> bool:
         return True
 
 
-def _latest_wheel_url(
-    *,
-    opener: Callable[..., AbstractContextManager[Any]],
-    timeout: float,
-) -> tuple[str, str]:
-    """Return (wheel_url, error) for the latest GitHub release."""
-    source = latest_release_url()
-    try:
-        with opener(_github_request(source), timeout=timeout) as response:
-            raw = response.read()
-        payload = json.loads(raw.decode("utf-8"))
-    except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
-        return "", f"Could not fetch the latest release from {source}: {exc}"
-
-    assets = payload.get("assets") if isinstance(payload, dict) else None
-    if isinstance(assets, list):
-        for asset in assets:
-            if not isinstance(asset, dict):
-                continue
-            url = asset.get("browser_download_url")
-            if isinstance(url, str) and str(asset.get("name", url)).endswith(".whl"):
-                return url, ""
-    return "", "The latest release has no .whl asset."
-
-
 def update_package(
     *,
     opener: Callable[..., AbstractContextManager[Any]] = urllib.request.urlopen,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
-    """Perform package upgrade based on active install mode.
+    """Explain how the current distribution is updated.
 
-    Upgrades install the wheel asset of the latest GitHub release. The
-    package is intentionally never upgraded from the PyPI index: the
-    ``ciao`` name there belongs to an unrelated project.
+    Production installs are updated atomically by the Tauri app updater or by
+    re-running the signed one-line installer. There is no package-manager
+    branch here anymore.
     """
-    import sys
-    import subprocess
-
-    manual_command = (
-        "pip install -U <wheel from "
-        f"https://github.com/{_github_repo()}/releases/latest>"
-    )
     mode = detect_install_mode()
     if mode == "editable":
         return {
@@ -503,102 +385,17 @@ def update_package(
             "error": "Editable checkouts must be updated manually via 'git pull'.",
             "command": "git pull",
         }
-
-    before_version = ""
-    check_version: Callable[[], str] = lambda: ""
-    if mode == "homebrew":
-        brew = _resolve_brew()
-        if not brew:
-            return {
-                "ok": False,
-                "mode": mode,
-                "error": "Homebrew 'brew' command not found in PATH.",
-                "command": "brew upgrade ciaobot",
-            }
-        # `brew upgrade` auto-updates tap metadata itself, but that's
-        # throttled (HOMEBREW_AUTO_UPDATE_SECS, default 24h). Right after a
-        # release goes out, the local formula cache can still resolve to the
-        # old version, making the upgrade a silent no-op. Force a refresh
-        # first; best-effort, since a failed/offline refresh shouldn't block
-        # the upgrade attempt itself.
-        try:
-            subprocess.run(
-                [brew, "update", "--quiet"],
-                capture_output=True, text=True, timeout=60, check=False,
-            )
-        except Exception:
-            pass
-        cmd = [brew, "upgrade", "ciaobot"]
-        check_version = lambda: _brew_installed_version(brew)
-        before_version = check_version()
-    elif mode == "pip_venv":
-        wheel_url, error = _latest_wheel_url(opener=opener, timeout=timeout)
-        if not wheel_url:
-            return {
-                "ok": False,
-                "mode": mode,
-                "error": f"{error} Please upgrade manually.",
-                "command": manual_command,
-            }
-        cmd = [sys.executable, "-m", "pip", "install", "-U", wheel_url]
-        check_version = lambda: _pip_show_version(sys.executable)
-        before_version = check_version()
-    else:
+    if mode == "bundled_app":
         return {
             "ok": False,
+            "already_current": True,
             "mode": mode,
-            "error": f"Unknown install mode '{mode}'. Please upgrade manually.",
-            "command": manual_command,
+            "error": "The bundled app and engine update together through Ciaobot.app.",
+            "command": "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh",
         }
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
-        if result.returncode == 0:
-            after_version = check_version()
-            if before_version and after_version and before_version == after_version:
-                # Exit 0 doesn't mean an upgrade happened: e.g. Homebrew reports
-                # success and no-ops when the tap formula hasn't caught up yet
-                # with the GitHub release the update banner is checking against,
-                # so the version never advances and the banner never clears.
-                # `ok` stays False so the update banner does not clear on a
-                # no-op, but callers that merely need to know "nothing to do
-                # here" (the desktop's combined engine+app update) should not
-                # treat this as a failure — hence the structured flag rather
-                # than matching on the message text.
-                return {
-                    "ok": False,
-                    "already_current": True,
-                    "version": after_version,
-                    "mode": mode,
-                    "error": (
-                        f"Still on {after_version} after running the upgrade — the "
-                        "package source has no newer version available yet. If "
-                        "this keeps happening, the release may not have "
-                        "propagated to it; try again shortly."
-                    ),
-                    "output": output,
-                    "command": " ".join(cmd),
-                }
-            return {
-                "ok": True,
-                "mode": mode,
-                "output": output,
-                "command": " ".join(cmd),
-            }
-        else:
-            return {
-                "ok": False,
-                "mode": mode,
-                "error": f"Command exited with code {result.returncode}.",
-                "output": output,
-                "command": " ".join(cmd),
-            }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "mode": mode,
-            "error": str(exc),
-            "command": " ".join(cmd),
-        }
-
+    return {
+        "ok": False,
+        "mode": mode,
+        "error": "This checkout is not a supported production installation.",
+        "command": "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh",
+    }

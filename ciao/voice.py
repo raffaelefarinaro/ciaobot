@@ -177,7 +177,7 @@ class SystemSpeaker:
         if not apple_speech_available():
             raise ValueError(
                 "system speech synthesis is unavailable; "
-                "install the desktop app with `ciao desktop install`"
+                "install Ciaobot with the one-line installer from the release page"
             )
         self._voice = (voice or "").strip()
         self._locale = locale or "en-US"

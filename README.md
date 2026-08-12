@@ -8,97 +8,43 @@ Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspac
 
 ## Install
 
-**macOS 13+ ([Homebrew](https://brew.sh))** — recommended:
+**macOS 13+** — the supported end-user installation is:
 
 ```bash
-brew install raffaelefarinaro/ciaobot/ciaobot
-ciao run
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-Then open `http://localhost:8443` and follow the setup wizard. Finishing it
-installs `Ciaobot.app` for you — into `/Applications`, or `~/Applications` on a
-non-admin account — so there is no separate app install step. (Installing the
-fully qualified formula grants Homebrew trust only to the Ciaobot engine.)
+The installer is per-user: it puts a self-contained `Ciaobot.app` in
+`~/Applications`, preserves an existing configured workspace, and starts the
+tray app through its per-user `Ciaobot` LaunchAgent. On a clean machine it
+starts bootstrap mode instead, so the first-run
+onboarding asks where to create or adopt a workspace and which password to set;
+it never hides a generated password in a new directory. It bundles Ciaobot's
+Python runtime and dependencies, so Python, `pip`, Homebrew, `sudo`, and a
+separate DMG are not required.
 
-There is no Gatekeeper prompt on this path. macOS only assesses bundles carrying
-a download *quarantine* flag, which browsers and Homebrew casks set but a
-command-line download does not — so the ad-hoc signed app launches directly.
-Because Apple's notarization check is therefore not what guards the download,
-the installer verifies the release's minisign signature against the same key the
-in-app updater uses, and refuses to install anything that fails.
+The installer verifies the signed release archive before extracting it. Ciaobot
+is currently ad-hoc signed and not notarized, so macOS may still show a
+Gatekeeper warning when the app is first opened. Apple Developer credentials
+are not required; release signatures protect the artifact but do not provide
+Apple trust.
 
-If the download fails — offline, proxy, firewall — setup says so and continues
-with the menu-bar launcher instead of failing. Install the app whenever you like:
+Updates normally come from the app's **Update…** action, which replaces the app
+and bundled engine together. Re-running the installer is also supported for
+recovery or a pinned version:
 
 ```bash
-ciao desktop install
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh \
+  | sh -s -- --version 0.8.0
 ```
 
-Pass `--no-desktop-app` to `ciao setup` to skip it deliberately. Later updates
-come from the app's own **Update…** action, which updates the engine and desktop
-app together.
+For security-conscious users, download `install.sh` first, inspect it, and run
+it locally instead of piping it directly to `sh`.
 
-Already using the Homebrew engine from an earlier release? Move to the app
-without recreating your workspace:
-
-```bash
-brew update
-brew trust --formula raffaelefarinaro/ciaobot/ciaobot
-brew upgrade ciaobot
-ciao desktop install
-```
-
-(An existing workspace has already been through setup, so the app install is the
-one step left — hence running it directly here.)
-
-If `Ciaobot.app` is already installed, `ciao desktop install` stops rather than
-writing over it — update from the app instead, or remove it first with
-`ciao desktop uninstall`. (Overwriting another app's bundle from a terminal needs
-macOS App Management permission; letting the app update itself does not.)
-
-<details>
-<summary>Installing via the Homebrew cask instead</summary>
-
-The cask still exists and pins the same release:
-
-```bash
-brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
-```
-
-Homebrew quarantines what it downloads, so this path *does* hit the Gatekeeper
-block — the app is ad-hoc signed and not notarized, and macOS reports *"Apple
-could not verify Ciaobot is free of malware"*. Open `Ciaobot.app` once to trigger
-the block, then go to **System Settings → Privacy & Security** and scroll to
-**Security**:
-
-<img src="docs/gatekeeper-open-anyway.png" alt="System Settings, Privacy &amp; Security, Security section, with the Open Anyway button highlighted" width="620">
-
-Click **Open Anyway**, authenticate, then launch the app again and confirm
-**Open**. Control-clicking the app and choosing **Open** does *not* clear this
-dialog — Apple removed that bypass in macOS 15 — and the **Open Anyway** button
-only appears for about an hour after a blocked launch, so re-trigger the block if
-you don't see it. Do not disable Gatekeeper. `ciao desktop install` avoids all of
-this.
-
-</details>
-
-Upgrade the engine in the same sitting. The engine and app ship from one tag and
-are meant to report the same version; a split between them surfaces as an opaque
-`Invalid desktop-service response`, because the app resolves the `ciao`
-executable from fixed Homebrew paths.
-
-The first app launch reuses the existing workspace and server LaunchAgent,
-removes the retired menu-bar helper, and moves the old `Ciaobot Server.app` to
-the Trash once the engine is reachable. Browser-installed PWA shortcuts are
-left alone.
-
-**Any platform ([PyPI](https://pypi.org/project/ciaobot/))** — or macOS without Homebrew; requires Python 3.12 or newer:
-
-```bash
-python3.13 -m venv ~/.ciaobot-venv
-~/.ciaobot-venv/bin/pip install ciaobot
-~/.ciaobot-venv/bin/ciao run
-```
+Existing workspace files, credentials, schedules, and runtime data stay in
+place when the installer replaces an older installation. Future updates use
+the app updater or this installer. Browser-installed PWA shortcuts are left
+alone.
 
 Then open `http://localhost:8443` and follow the setup wizard:
 
@@ -106,7 +52,9 @@ Then open `http://localhost:8443` and follow the setup wizard:
 - **Dashboard password** — Ciaobot is password-protected by default: this is what you type to open it, and what another device needs to connect as a client. Change it later in Settings → PWA password.
 - **Model provider** — Claude Code, Codex, or another configured backend.
 
-The wizard writes config, initializes the workspace as a git repo (with a `.gitignore` for secrets and runtime state), and installs the macOS engine LaunchAgent. A cask installation uses `Ciaobot.app`; package-only installs retain the legacy recovery launcher during the migration release.
+The wizard writes config, initializes the workspace as a git repo (with a
+`.gitignore` for secrets and runtime state), and keeps the bundled engine
+LaunchAgent in sync.
 
 For scripted setups: `ciao setup --workspace <dir> --auth-token <password>` (a random password is generated into `.env` when omitted; `--no-auth` opts out of protection entirely). If a setup link returns `invalid setup token`, mint a fresh one with `ciao setup-url --workspace <dir>`.
 
@@ -152,7 +100,7 @@ What that looks like in practice:
 - **A vault you own** — durable knowledge as plain markdown with wikilinks and an `INDEX.md`, inspired by [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Browse in [Obsidian](https://obsidian.md/) or any editor; sync via GitHub, Drive, or iCloud.
 - **Skills, subagents, and commands** — packaged defaults, extensible from Settings or workspace files (see [What ships by default](#what-ships-by-default)).
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
-- **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS, `Ciaobot.app` owns the window, menu bar, native notifications, and desktop updates while the engine runs as a background service.
+- **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app app updates. On macOS, `Ciaobot.app` owns the window, menu bar, native notifications, and desktop updates while the bundled engine runs as a background service.
 - **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
 - **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, delegates, schedules, loops, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
 
@@ -224,7 +172,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 **App surface**
 
-- Installable PWA with web-push notifications and in-app package updates.
+- Installable PWA with web-push notifications and in-app app updates.
 - macOS desktop app: one Dock window and menu-bar companion with native notifications, updates, and a launchd-managed engine.
 - A local HTTP API an in-chat agent can drive (create chats, subagents, commands — see [PWA_API.md](PWA_API.md)).
 

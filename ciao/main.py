@@ -32,23 +32,6 @@ from ciao.web.push import PushManager
 logger = logging.getLogger(__name__)
 
 
-def _ensure_homebrew_on_path() -> None:
-    """Prepend Homebrew bin dirs to PATH when missing.
-
-    launchd launches the server with a minimal PATH (roughly
-    ``/usr/bin:/bin:/usr/sbin:/sbin``) that omits Homebrew, so subprocess
-    calls to ``npm``, ``node``, Homebrew's ``git``/``pip``, etc. fail with
-    FileNotFoundError. Prepending the standard Homebrew directories lets the
-    deploy/upgrade subprocess steps find those tools regardless of how the
-    service was started. Adding a non-existent directory is harmless.
-    """
-    extra = ["/opt/homebrew/bin", "/usr/local/bin"]
-    parts = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
-    prepend = [d for d in extra if d not in parts]
-    if prepend:
-        os.environ["PATH"] = os.pathsep.join([*prepend, *parts])
-
-
 _PhaseStatus = Literal["pending", "in_progress", "done", "failed"]
 
 
@@ -224,7 +207,6 @@ async def _wait_for_chat_drain(
 
 
 async def _async_main() -> int:
-    _ensure_homebrew_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
     config = CiaoConfig.from_env()
 
@@ -960,26 +942,14 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         asyncio.create_task(_startup_error_triage())
 
     # ── Stale-install self-heal ──────────────────────────────
-    # Two upgrade shapes leave this process running old code after a bare
-    # `brew upgrade ciaobot` / `pip install -U` outside the app's own Update
-    # button:
-    #  1. Homebrew swaps/deletes the Cellar keg — packaged files this process
-    #     resolves (index.html, stock schedules) vanish and requests 500
-    #     until relaunch. Detected by the vanished package directory (60s).
-    #  2. pip/uv rewrite site-packages in place — the files survive, but only
-    #     a fresh interpreter sees the new code. Detected by a version probe
-    #     (fresh subprocess via the upgrade-stable interpreter path) every
-    #     5 minutes, debounced to two consistent readings.
-    # request_restart drains active chats first; launchd / `ciao run` then
-    # relaunch onto the current install (the LaunchAgent uses the stable
-    # /opt/homebrew/opt/... symlink). Editable checkouts skip the version
-    # probe so a dev server doesn't bounce when release prep bumps
-    # __version__ in the working tree.
+    # Production updates replace the complete app bundle atomically and then
+    # restart the LaunchAgent. Keep the file-presence guard for development
+    # checkouts; the packaged app updater owns production replacement.
     async def _watch_installed_version() -> None:
-        from ciao.package_version import InstallWatcher, detect_install_mode
+        from ciao.package_version import InstallWatcher
 
         watcher = InstallWatcher()
-        probe_upgrades = detect_install_mode() in ("homebrew", "pip_venv")
+        probe_upgrades = False
         tick = 0
         while True:
             await asyncio.sleep(60)

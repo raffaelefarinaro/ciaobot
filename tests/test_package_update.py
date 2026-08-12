@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
-import sys
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -14,322 +11,60 @@ from ciao.package_version import detect_install_mode, update_package
 from ciao.web.routes_node import package_update_endpoint
 
 
-class _Response:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def read(self) -> bytes:
-        return json.dumps(self._payload).encode("utf-8")
+def test_detect_install_mode_bundled_app(monkeypatch) -> None:
+    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
+    assert detect_install_mode() == "bundled_app"
 
 
-def _release_opener(payload: dict):
-    def opener(request, timeout: float):
-        return _Response(payload)
-
-    return opener
-
-
-def test_detect_install_mode_homebrew(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(Path, "is_file", lambda self: False)
-    monkeypatch.setattr(Path, "is_dir", lambda self: False)
-
-    cellar = tmp_path / "opt" / "homebrew" / "Cellar" / "ciaobot" / "0.4.5" / "libexec"
-    cellar.mkdir(parents=True)
-    python = cellar / "bin" / "python3.12"
-    python.parent.mkdir(parents=True)
-    python.touch()
-
-    monkeypatch.setattr(sys, "executable", str(python))
-    monkeypatch.setattr(sys, "prefix", str(cellar))
-    monkeypatch.setattr(sys, "base_prefix", "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12")
-    assert detect_install_mode() == "homebrew"
-
-
-def test_detect_install_mode(tmp_path, monkeypatch) -> None:
-    # Disable editable check by mocking Path methods
-    monkeypatch.setattr(Path, "is_file", lambda self: False)
-    monkeypatch.setattr(Path, "is_dir", lambda self: False)
-
-    # Test venv check when not editable
-    monkeypatch.setattr(sys, "prefix", "/foo/venv")
-    monkeypatch.setattr(sys, "base_prefix", "/foo/python")
-    assert detect_install_mode() == "pip_venv"
-
-    # Test unknown when not in venv
-    monkeypatch.setattr(sys, "prefix", "/foo/python")
-    monkeypatch.setattr(sys, "base_prefix", "/foo/python")
+def test_detect_install_mode_unknown_without_package_manager(monkeypatch) -> None:
+    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
     assert detect_install_mode() == "unknown"
 
 
-def test_update_package_homebrew_upgrade(monkeypatch) -> None:
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
-    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
+def test_update_package_points_bundled_app_at_installer(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "bundled_app")
 
-    calls: list[list[str]] = []
+    result = update_package()
 
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        result = MagicMock()
-        result.stderr = ""
-        result.returncode = 0
-        if cmd[1:] == ["upgrade", "ciaobot"]:
-            result.stdout = "==> Upgrading ciaobot"
-        else:
-            upgraded = any(c[1:] == ["upgrade", "ciaobot"] for c in calls[:-1])
-            result.stdout = "ciaobot 0.4.7" if upgraded else "ciaobot 0.4.6"
-        return result
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-    res = update_package()
-    assert res["ok"] is True
-    assert ["/opt/homebrew/bin/brew", "upgrade", "ciaobot"] in calls
+    assert result["ok"] is False
+    assert result["already_current"] is True
+    assert result["mode"] == "bundled_app"
+    assert "install.sh" in result["command"]
 
 
-def test_update_package_homebrew_noop_reports_failure(monkeypatch) -> None:
-    # brew upgrade can exit 0 without installing anything when the tap
-    # formula hasn't caught up with the GitHub release yet — that must not
-    # be reported as a successful update (it would restart the app for
-    # nothing and leave the "update available" banner stuck forever).
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
-    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
-
-    def fake_run(cmd, **kwargs):
-        result = MagicMock()
-        result.stderr = ""
-        result.returncode = 0
-        result.stdout = "Warning: ciaobot 0.4.6 already installed" if cmd[1:] == ["upgrade", "ciaobot"] else "ciaobot 0.4.6"
-        return result
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-    res = update_package()
-    assert res["ok"] is False
-    assert "0.4.6" in res["error"]
-    # ok=False keeps the banner honest, but the desktop's combined engine+app
-    # update needs to tell "nothing to do" apart from a real failure without
-    # matching on the message text.
-    assert res["already_current"] is True
-    assert res["version"] == "0.4.6"
-
-
-def test_update_package_homebrew_failure_is_not_flagged_already_current(monkeypatch) -> None:
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
-    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
-
-    def fake_run(cmd, **kwargs):
-        result = MagicMock()
-        result.returncode = 1
-        result.stdout = ""
-        result.stderr = "Error: something broke"
-        return result
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-    res = update_package()
-    assert res["ok"] is False
-    assert res.get("already_current") is not True
-
-
-def test_update_package_homebrew_refreshes_tap_before_upgrade(monkeypatch) -> None:
-    # brew upgrade's own auto-update is throttled, so right after a release
-    # goes out the local formula cache can still be stale even though a
-    # newer version already exists upstream. Force a refresh first so the
-    # upgrade doesn't silently no-op against cached metadata.
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
-    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
-
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        result = MagicMock()
-        result.stderr = ""
-        result.returncode = 0
-        if cmd[1:] == ["upgrade", "ciaobot"]:
-            result.stdout = "==> Upgrading ciaobot"
-        else:
-            upgraded = any(c[1:] == ["upgrade", "ciaobot"] for c in calls[:-1])
-            result.stdout = "ciaobot 0.4.7" if upgraded else "ciaobot 0.4.6"
-        return result
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-    res = update_package()
-    assert res["ok"] is True
-
-    update_call = calls.index(["/opt/homebrew/bin/brew", "update", "--quiet"])
-    upgrade_call = calls.index(["/opt/homebrew/bin/brew", "upgrade", "ciaobot"])
-    assert update_call < upgrade_call
-
-
-def test_update_package_homebrew_upgrade_survives_refresh_failure(monkeypatch) -> None:
-    # A failed/offline tap refresh must not block the upgrade attempt itself.
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
-    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
-
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        if cmd[1:] == ["update", "--quiet"]:
-            raise TimeoutError("brew update timed out")
-        result = MagicMock()
-        result.stderr = ""
-        result.returncode = 0
-        if cmd[1:] == ["upgrade", "ciaobot"]:
-            result.stdout = "==> Upgrading ciaobot"
-        else:
-            upgraded = any(c[1:] == ["upgrade", "ciaobot"] for c in calls[:-1])
-            result.stdout = "ciaobot 0.4.7" if upgraded else "ciaobot 0.4.6"
-        return result
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-    res = update_package()
-    assert res["ok"] is True
-    assert ["/opt/homebrew/bin/brew", "upgrade", "ciaobot"] in calls
-
-
-def test_update_package_homebrew_without_brew(monkeypatch) -> None:
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
-    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: None)
-
-    res = update_package()
-    assert res["ok"] is False
-    assert res["mode"] == "homebrew"
-    assert "brew upgrade ciaobot" in res["command"]
-
-
-def test_update_package_editable(monkeypatch) -> None:
+def test_update_package_editable_requires_git_pull(monkeypatch) -> None:
     monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "editable")
-    res = update_package()
-    assert res["ok"] is False
-    assert "git pull" in res["command"]
-    assert "Editable checkouts must be updated manually" in res["error"]
+
+    result = update_package()
+
+    assert result["ok"] is False
+    assert result["command"] == "git pull"
+    assert "Editable checkouts" in result["error"]
 
 
-def test_update_package_pip_venv_installs_release_wheel(monkeypatch) -> None:
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "pip_venv")
-
-    wheel_url = (
-        "https://github.com/raffaelefarinaro/ciaobot/releases/download/"
-        "v0.3.0/ciao-0.3.0-py3-none-any.whl"
-    )
-    opener = _release_opener({
-        "tag_name": "v0.3.0",
-        "assets": [
-            {"name": "ciao-0.3.0.tar.gz", "browser_download_url": wheel_url[:-4] + ".tar.gz"},
-            {"name": "ciao-0.3.0-py3-none-any.whl", "browser_download_url": wheel_url},
-        ],
-    })
-
-    install_cmd = [sys.executable, "-m", "pip", "install", "-U", wheel_url]
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        result = MagicMock()
-        result.stderr = ""
-        result.returncode = 0
-        if cmd == install_cmd:
-            result.stdout = "Successfully installed ciao-0.3.0"
-        else:
-            upgraded = any(c == install_cmd for c in calls[:-1])
-            result.stdout = "Version: 0.3.0" if upgraded else "Version: 0.2.0"
-        return result
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-    res = update_package(opener=opener)
-    assert res["ok"] is True
-    assert install_cmd in calls
-    assert wheel_url in res["command"]
-    assert "pip install -U ciao" not in res["command"].replace(wheel_url, "")
-    assert "Successfully installed ciao-0.3.0" in res["output"]
-
-
-def test_update_package_pip_venv_noop_reports_failure(monkeypatch) -> None:
-    # `pip install -U <wheel>` exits 0 without reinstalling when the same
-    # version is already present — that must surface as a failed update
-    # rather than a restart that leaves the banner stuck.
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "pip_venv")
-
-    wheel_url = (
-        "https://github.com/raffaelefarinaro/ciaobot/releases/download/"
-        "v0.3.0/ciao-0.3.0-py3-none-any.whl"
-    )
-    opener = _release_opener({
-        "tag_name": "v0.3.0",
-        "assets": [{"name": "ciao-0.3.0-py3-none-any.whl", "browser_download_url": wheel_url}],
-    })
-
-    def fake_run(cmd, **kwargs):
-        result = MagicMock()
-        result.stderr = ""
-        result.returncode = 0
-        if cmd[-2:] == ["show", "ciaobot"]:
-            result.stdout = "Version: 0.3.0"
-        else:
-            result.stdout = "Requirement already satisfied"
-        return result
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-    res = update_package(opener=opener)
-    assert res["ok"] is False
-    assert "0.3.0" in res["error"]
-
-
-def test_update_package_pip_venv_without_wheel_asset(monkeypatch) -> None:
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "pip_venv")
-
-    def fail_run(*args, **kwargs):  # pragma: no cover - must not be called
-        raise AssertionError("pip must not run without a wheel asset")
-
-    monkeypatch.setattr("subprocess.run", fail_run)
-    opener = _release_opener({"tag_name": "v0.3.0", "assets": []})
-
-    res = update_package(opener=opener)
-    assert res["ok"] is False
-    assert "no .whl asset" in res["error"]
-    assert "releases/latest" in res["command"]
-
-
-def test_update_package_pip_venv_release_fetch_failure(monkeypatch) -> None:
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "pip_venv")
-
-    from urllib.error import URLError
-
-    def opener(request, timeout: float):
-        raise URLError("offline")
-
-    res = update_package(opener=opener)
-    assert res["ok"] is False
-    assert "Could not fetch the latest release" in res["error"]
-    assert "releases/latest" in res["command"]
-
-
-def test_package_update_endpoint_success() -> None:
+def test_package_update_endpoint_explains_app_owned_updates() -> None:
     app = Starlette(
         routes=[Route("/api/package/update", package_update_endpoint, methods=["POST"])]
     )
-    app.state.config = CiaoConfig.from_env({
-        "PWA_AUTH_TOKEN": "test-token",
-        "CIAO_PUSH_CONTACT": "mailto:owner@example.com",
-    })
-    
-    restarts = []
-    app.state.request_restart = restarts.append
-
-    with patch("ciao.web.routes_node.update_package") as mock_update:
-        mock_update.return_value = {
-            "ok": True,
-            "mode": "pip_venv",
-            "output": "Successfully upgraded",
-            "command": "pip install -U ciao",
+    app.state.config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "test-token",
+            "PWA_AUTH_REQUIRED": "false",
+            "CIAO_WORKSPACE": "/tmp/ciaobot-test-workspace",
         }
-        
-        resp = TestClient(app).post("/api/package/update")
-        assert resp.status_code == 200
-        assert resp.json()["ok"] is True
-        assert restarts == [] # Async task is scheduled to restart after 2 seconds
+    )
+
+    with patch(
+        "ciao.web.routes_node.update_package",
+        return_value={
+            "ok": False,
+            "already_current": True,
+            "mode": "bundled_app",
+            "error": "The bundled app and engine update together through Ciaobot.app.",
+            "command": "curl -fsSL .../install.sh | sh",
+        },
+    ):
+        response = TestClient(app).post("/api/package/update")
+
+    assert response.status_code == 400
+    assert response.json()["mode"] == "bundled_app"

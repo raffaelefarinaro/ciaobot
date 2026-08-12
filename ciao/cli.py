@@ -114,42 +114,29 @@ def _write_if_missing(path: Path, text: str) -> None:
         path.write_text(text, encoding="utf-8")
 
 
-def _stable_python_path(python_path: str) -> str:
-    """Map a Homebrew Cellar interpreter to its upgrade-stable opt path.
-
-    `brew upgrade` deletes the old keg, so a LaunchAgent pinned to
-    .../Cellar/<pkg>/<version>/... dies with it (the running server loses
-    its site-packages and every request 500s until the agents are
-    re-rendered). The <prefix>/opt/<pkg> symlink always points at the
-    currently installed keg, so plists must record that instead.
-    """
-    import re
-
-    m = re.match(r"(.*)/Cellar/([^/]+)/[^/]+/(.*)$", python_path)
-    if not m:
-        return python_path
-    stable = Path(f"{m.group(1)}/opt/{m.group(2)}/{m.group(3)}")
-    return str(stable) if stable.exists() else python_path
-
-
 def _render_launchd_plist(
     *,
     workspace: Path,
-    python_path: str,
+    python_path: str | None = None,
+    engine_path: str | None = None,
+    runtime_root: Path | None = None,
     port: int,
     path: str = "",
     template_name: str = "com.ciao.server.plist.tmpl",
 ) -> str:
-    python_path = _stable_python_path(python_path)
+    executable = engine_path or python_path or sys.executable
     template = resources.files("ciao.stock").joinpath(
         "deploy", template_name
     ).read_text(encoding="utf-8")
-    # Under launchd the default PATH omits Homebrew, so subprocess calls to
-    # npm/node/git fail. Bake the user's PATH from setup time into the plist.
+    # Under launchd the default PATH is minimal. Bake the user's development
+    # PATH from setup time into the plist for optional deploy tooling.
     resolved_path = path or os.environ.get("PATH", "")
     replacements = {
         "{{CIAO_WORKSPACE}}": html.escape(str(workspace), quote=False),
-        "{{CIAO_PYTHON}}": html.escape(python_path, quote=False),
+        "{{CIAO_RUNTIME_ROOT}}": html.escape(
+            str((runtime_root or (workspace / ".runtime")).resolve()), quote=False
+        ),
+        "{{CIAO_EXECUTABLE}}": html.escape(executable, quote=False),
         "{{CIAO_PORT}}": html.escape(str(port), quote=False),
         "{{CIAO_PATH}}": html.escape(resolved_path, quote=False),
     }
@@ -162,7 +149,9 @@ def _write_launchd_plist(
     *,
     workspace: Path,
     launch_agents_dir: Path,
-    python_path: str,
+    python_path: str | None = None,
+    engine_path: str | None = None,
+    runtime_root: Path | None = None,
     port: int,
     path: str = "",
     plist_name: str = "com.ciao.server.plist",
@@ -173,6 +162,8 @@ def _write_launchd_plist(
         _render_launchd_plist(
             workspace=workspace,
             python_path=python_path,
+            engine_path=engine_path,
+            runtime_root=runtime_root,
             port=port,
             path=path,
             template_name=f"{plist_name}.tmpl",
@@ -242,7 +233,7 @@ def _path_export_hint() -> str | None:
     """
 
     # Not .resolve(): a venv's bin/python is a symlink to the base interpreter,
-    # and resolving it would report the base (e.g. Homebrew) bin dir instead of
+    # and resolving it would report the base interpreter's bin dir instead of
     # the venv's own bin/ where the `ciao` entry point actually lives.
     bin_dir = Path(sys.executable).parent
     entries = {
@@ -297,7 +288,7 @@ _LEGACY_APP_BUNDLE_NAMES = (
     "Ciaobot Menu Bar.app",
     "Ciaobot Server.app",
 )
-# Executable inside the Tauri desktop app (the Homebrew cask's Ciaobot.app).
+# Executable inside the Tauri desktop app.
 _DESKTOP_EXECUTABLE_NAME = "ciaobot-desktop"
 
 
@@ -308,7 +299,7 @@ def _is_our_app_bundle(app_root: Path) -> bool:
     ``local.ciaobot.app`` identifier our pre-rename launcher used, so the
     bundle id cannot tell them apart. Misidentifying it is destructive rather
     than merely wasteful: the launcher we write is named ``Ciaobot Server.app``,
-    so ``_remove_legacy_app_shortcuts`` deletes the cask's app and never puts
+    so ``_remove_legacy_app_shortcuts`` must never delete the native app and
     anything back in its place, leaving a running process on a bundle that no
     longer exists on disk. The executable name is the discriminator.
     """
@@ -347,103 +338,6 @@ def _remove_legacy_app_shortcuts(app_dir: Path) -> bool:
         except OSError:
             print(f"Could not remove legacy app shortcut at {legacy}", file=sys.stderr)
     return removed
-
-
-def _app_search_roots() -> tuple[Path, ...]:
-    """Directories macOS installs app bundles into, per-user first.
-
-    Delegates to native_sidecar, which needs the same list to find the bundled
-    helper -- one definition so the two can never disagree. Tests monkeypatch
-    this name, which still works because callers here look it up by name.
-    """
-
-    from ciao.native_sidecar import app_bundle_roots
-
-    return app_bundle_roots()
-
-
-def _desktop_app_installed(app_dir: Path | None = None) -> bool:
-    """Whether the authoritative Tauri ``Ciaobot.app`` is installed.
-
-    ``app_dir`` narrows the check to one directory. The default scans every
-    standard root, because the desktop app and a leftover launcher need not
-    share one: a non-admin account keeps the launcher in ``~/Applications``
-    while the cask installs into ``/Applications``.
-    """
-
-    roots = (
-        (Path(app_dir).expanduser(),) if app_dir is not None else _app_search_roots()
-    )
-    return any(
-        (root / "Ciaobot.app" / "Contents" / "MacOS" / _DESKTOP_EXECUTABLE_NAME).is_file()
-        for root in roots
-    )
-
-
-def _open_desktop_app(app_dir: Path) -> None:
-    """Open the freshly installed app so the menu bar appears without a hunt.
-
-    Best effort and quiet: a failure here costs the user one double-click, and
-    setup has already succeeded by this point.
-    """
-
-    bundle = Path(app_dir) / "Ciaobot.app"
-    if sys.platform != "darwin" or not bundle.is_dir():
-        return
-    try:
-        subprocess.run(
-            ["/usr/bin/open", "-a", str(bundle)],
-            check=False,
-            capture_output=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError):
-        # Costs the user one double-click; setup has already succeeded.
-        pass
-
-
-def _install_desktop_app_quietly(app_dir: Path) -> bool:
-    """Install ``Ciaobot.app`` during setup. Returns whether it is now present.
-
-    Best effort by design: setup runs on a laptop that may be offline or behind
-    a proxy, and a failed download must not cost the user their workspace. On
-    failure the workspace and the engine LaunchAgent are still set up and the
-    PWA is reachable at localhost -- there is simply no menu bar until
-    `ciao desktop install` succeeds. (There is no launcher fallback any more:
-    the rumps bundle that used to fill that gap was removed.)
-
-    Skipped on non-macOS, when ``CIAO_SKIP_DESKTOP_APP`` is set (release smoke
-    tests install the cask instead), and in dev mode, where the bundle is built
-    from the checkout by ``desktop_build`` rather than downloaded.
-    """
-
-    if sys.platform != "darwin":
-        return False
-    if os.environ.get("CIAO_SKIP_DESKTOP_APP", "").strip():
-        return False
-    if os.environ.get("CIAO_DEV_MODE", "").strip():
-        return False
-
-    from ciao import desktop_install
-
-    print("Installing Ciaobot.app (verifying its signature)...")
-    try:
-        result = desktop_install.install_desktop_app(
-            app_dir=app_dir,
-            # The LaunchAgent is not written yet and the app starts the engine
-            # on launch; opening it here would race the rest of setup.
-            open_after_install=False,
-        )
-    except (desktop_install.InstallError, desktop_install.SignatureError, OSError) as exc:
-        print(f"Could not install Ciaobot.app: {exc}", file=sys.stderr)
-        print(
-            "Setup will continue without it. To install it later, run: "
-            "ciao desktop install",
-            file=sys.stderr,
-        )
-        return False
-    print(f"Installed Ciaobot {result['version']} to {result['path']}")
-    return True
 
 
 _LSREGISTER = (
@@ -729,7 +623,6 @@ def setup_workspace(
     port: int = 8443,
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
-    install_desktop_app: bool = True,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -830,6 +723,11 @@ def setup_workspace(
                 encoding="utf-8",
             )
             written.append(env_path)
+
+    runtime_value = existing_env.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime"
+    runtime_root = Path(runtime_value).expanduser()
+    if not runtime_root.is_absolute():
+        runtime_root = root / runtime_root
 
     stock = resources.files("ciao.stock")
     stock_commands = stock.joinpath("commands")
@@ -957,26 +855,7 @@ def setup_workspace(
 
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
-    resolved_python = python_path or sys.executable
-    # An explicit --app-dir means "operate on this directory only" (CI, tests,
-    # headless installs). A default install is the real machine, so look in
-    # every standard root: a non-admin account writes the launcher into
-    # ~/Applications, where the /Applications cask would go unnoticed.
-    desktop_installed = _desktop_app_installed(app_root_dir) or (
-        app_dir is None and _desktop_app_installed()
-    )
-    # Make the desktop app the default outcome of setup, so `brew install` plus
-    # one run is the whole install. Only on a real machine: an explicit app_dir
-    # means tests, CI, or a headless install, none of which should reach out to
-    # GitHub. Failure here is not a setup failure — the legacy launcher branch
-    # below is still a working install.
-    installed_now = False
-    if install_desktop_app and not desktop_installed and app_dir is None:
-        installed_now = _install_desktop_app_quietly(app_root_dir)
-    # The rumps menu-bar launcher that used to stand in for the desktop app is
-    # gone: Ciaobot.app is the menu bar now, and setup installs it above. When
-    # that could not happen (offline, non-macOS) the engine still runs under
-    # launchd and the PWA is reachable at localhost — there is just no tray.
+    resolved_engine = python_path or sys.executable
     # The one-time login token for the PWA. Written unconditionally: the setup
     # summary prints it as a login URL, and the Tauri app redeems it on first
     # launch. It used to be created as a side effect of writing the launcher
@@ -985,7 +864,8 @@ def setup_workspace(
     written.append(_write_launchd_plist(
         workspace=root,
         launch_agents_dir=launch_dir,
-        python_path=resolved_python,
+        engine_path=resolved_engine,
+        runtime_root=runtime_root,
         port=port,
         path=os.environ.get("PATH", ""),
         plist_name="com.ciao.server.plist",
@@ -994,14 +874,6 @@ def setup_workspace(
     # a previous version; remove them rather than leaving orphans behind.
     _remove_legacy_app_shortcuts(app_root_dir)
     _disable_legacy_menubar_agent(launch_dir)
-
-    # Launch the app once setup is otherwise done. The retired menu-bar agent
-    # had RunAtLoad, so the tray used to appear immediately and at every login;
-    # installing the bundle without opening it left a fresh setup with no tray
-    # at all until the user found it in Finder. Opening it here, after the
-    # LaunchAgent exists, also lets the app register its own login item.
-    if installed_now:
-        _open_desktop_app(app_root_dir)
 
     ensure_workspace_git(root)
     # A vault outside the workspace (existing notes folder) gets its own
@@ -1100,7 +972,6 @@ def _setup_command(args: argparse.Namespace) -> int:
         port=args.port,
         launch_agents_dir=args.launch_agents_dir,
         app_dir=args.app_dir,
-        install_desktop_app=not args.no_desktop_app,
     )
     for path in written:
         print(path)
@@ -1733,7 +1604,6 @@ def _desktop_command(args: argparse.Namespace) -> int:
     from ciao import desktop_install
 
     as_json = bool(getattr(args, "as_json", False))
-    action = args.desktop_action
     explicit_dir = getattr(args, "app_dir", None)
     app_dir = Path(explicit_dir).expanduser() if explicit_dir else _default_app_dir()
 
@@ -1746,26 +1616,6 @@ def _desktop_command(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        if action == "install":
-            # desktop_install refuses to overwrite a bundle in its own target
-            # directory; this catches the split-root case, where the app sits in
-            # ~/Applications while /Applications is writable (or vice versa).
-            if explicit_dir is None and _desktop_app_installed():
-                raise desktop_install.InstallError(
-                    "Ciaobot.app is already installed. Update it from the app "
-                    "(menu bar -> Update), or run `ciao desktop uninstall` first."
-                )
-            result = desktop_install.install_desktop_app(
-                app_dir=app_dir, version=getattr(args, "version", "") or ""
-            )
-            return report(
-                result,
-                [
-                    f"Installed Ciaobot {result['version']} to {result['path']}",
-                    f"Signature verified ({result['trusted_comment']})",
-                    "No Gatekeeper approval needed; the app should already be open.",
-                ],
-            )
         result = desktop_install.uninstall_desktop_app(app_dir=app_dir)
         return report(
             result,
@@ -1775,7 +1625,7 @@ def _desktop_command(args: argparse.Namespace) -> int:
                 else f"Nothing to remove at {result['path']}"
             ],
         )
-    except (desktop_install.InstallError, desktop_install.SignatureError) as exc:
+    except desktop_install.InstallError as exc:
         if as_json:
             print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
         else:
@@ -1821,37 +1671,26 @@ def build_parser() -> argparse.ArgumentParser:
     login_parser.set_defaults(func=_desktop_service_command)
 
     # Separate from `desktop-service`, which controls the launchd engine. This
-    # group manages the Ciaobot.app bundle itself, which used to be a Homebrew
-    # cask; installing it here instead avoids the download quarantine that made
-    # Gatekeeper block first launch. See ciao/desktop_install.py.
+    # group only manages removal of an old app bundle. Installation and updates
+    # are owned by scripts/install.sh and the signed Tauri updater.
     desktop_parser = subparsers.add_parser(
         "desktop",
-        help="Install or remove the Ciaobot.app desktop bundle.",
+        help="Remove an installed Ciaobot.app desktop bundle.",
     )
     desktop_sub = desktop_parser.add_subparsers(dest="desktop_action", required=True)
-    desktop_install_parser = desktop_sub.add_parser(
-        "install",
-        help="Download, verify and install Ciaobot.app (no Gatekeeper prompt).",
-    )
-    desktop_install_parser.add_argument(
-        "--version",
-        default="",
-        help="Release to install (defaults to the latest stable release).",
-    )
     desktop_uninstall_parser = desktop_sub.add_parser(
         "uninstall",
         help="Remove the installed Ciaobot.app bundle.",
     )
-    for action_parser in (desktop_install_parser, desktop_uninstall_parser):
-        action_parser.add_argument(
-            "--app-dir",
-            type=Path,
-            default=None,
-            help="Directory holding Ciaobot.app (defaults to /Applications, "
-            "or ~/Applications on a non-admin account).",
-        )
-        action_parser.add_argument("--json", action="store_true", dest="as_json")
-        action_parser.set_defaults(func=_desktop_command)
+    desktop_uninstall_parser.add_argument(
+        "--app-dir",
+        type=Path,
+        default=None,
+        help="Directory holding Ciaobot.app (defaults to /Applications, "
+        "or ~/Applications on a non-admin account).",
+    )
+    desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
+    desktop_uninstall_parser.set_defaults(func=_desktop_command)
 
     setup_parser = subparsers.add_parser(
         "setup",
@@ -1910,17 +1749,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Directory where Ciaobot Server.app is written. Defaults to "
-            "/Applications when writable, else ~/Applications."
-        ),
-    )
-    setup_parser.add_argument(
-        "--no-desktop-app",
-        action="store_true",
-        help=(
-            "Skip downloading and installing Ciaobot.app. Setup falls back to "
-            "the menu-bar launcher; install the app later with "
-            "`ciao desktop install`."
+            "Directory to scan for legacy launcher bundles during migration. "
+            "Defaults to /Applications when writable, else ~/Applications."
         ),
     )
     setup_parser.add_argument(
@@ -2017,7 +1847,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     smoke_parser = subparsers.add_parser(
         "package-smoke",
-        help="Build, install, and smoke-test the Ciaobot wheel.",
+        help="Build, install, and smoke-test the Ciaobot package.",
     )
     smoke_parser.add_argument("args", nargs=argparse.REMAINDER)
     smoke_parser.set_defaults(func=lambda args: package_smoke.main(args.args))

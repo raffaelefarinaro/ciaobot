@@ -1,0 +1,11 @@
+[package]
+name = "ciaobot-installer-verify"
+version = "0.8.0"
+description = "Verify Ciaobot release archives before installation"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+base64 = "0.22"
+minisign-verify = "0.2.5"
