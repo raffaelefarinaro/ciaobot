@@ -94,11 +94,10 @@
       </template>
     </div>
 
+    <!-- No section title here: the nav pill above already names this view, and
+         the create action sits in the footer like the chat sidebar's, so both
+         modes put "make a new one" in the same place. -->
     <template v-if="!collapsed && (mode === 'schedules')">
-      <div class="sidebar-section-header">
-        <span class="sidebar-section-title">automations</span>
-        <button class="btn-small" @click="emit('new-schedule')" title="New automation">+ New</button>
-      </div>
       <div class="workspace-toggle">
         <button
           v-for="workspace in store.workspaceOptions"
@@ -249,6 +248,10 @@
             </div>
           </div>
         </template>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="add-automation-btn" @click="emit('new-schedule')">+ New Automation</button>
       </div>
     </template>
 
@@ -1191,8 +1194,11 @@ async function confirmDeleteChat(chatId: string) {
 
 <style scoped>
 .sidebar {
-  width: 280px;
-  min-width: 280px;
+  /* Fallback only: ChatLayout sets the real width inline (drag-resizable,
+     remembered per user). Matches DEFAULT_SIDEBAR_WIDTH so the two agree
+     before that inline style applies. */
+  width: 340px;
+  min-width: 340px;
   background: var(--bg2);
   border-right: 1px solid var(--border);
   display: flex;
@@ -1215,6 +1221,10 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Queried below so the nav label answers to the width it actually has -
+     the sidebar is drag-resizable and remembers its width per user, so a
+     viewport media query cannot know whether "automations" fits. */
+  container-type: inline-size;
   /* Keep the collapsed rail aligned with the expanded nav and pane headers. */
   height: 61px;
   flex-shrink: 0;
@@ -1498,13 +1508,24 @@ async function confirmDeleteChat(chatId: string) {
   /* Room for the longest label ("automations", 11 characters) plus a little, so
      it is never clipped mid-word. At 9ch it read as "automatio" hard against the
      next glyph. */
-  max-width: 12ch;
+  max-width: 13ch;
   opacity: 1;
 }
 
 /* Below this the rail cannot hold a full label and every glyph at once, so trade
    the label away rather than the icons. */
 @media (max-width: 900px) {
+  .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
+}
+
+/* The row needs roughly: toggle (44) + active item with label (~118) + two bare
+   items (88) + bell (44) + gaps (24) + padding (16). Under that the flex row
+   shrinks the only thing that can give - the label - and "automations" rendered
+   as "automation" jammed against the pill edge. Drop the label instead of
+   clipping a word in half; the icon and its tooltip still say what it is.
+   Keyed to the header's own width, so a user who drags the sidebar narrow (or
+   kept a width saved from before it grew) gets the icons-only row. */
+@container (max-width: 334px) {
   .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
 }
 
@@ -2032,7 +2053,8 @@ async function confirmDeleteChat(chatId: string) {
   box-sizing: border-box;
 }
 
-.add-project-btn {
+.add-project-btn,
+.add-automation-btn {
   flex: 1;
   height: var(--touch);
   padding: 6px;
@@ -2050,7 +2072,8 @@ async function confirmDeleteChat(chatId: string) {
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
 
-.add-project-btn:hover {
+.add-project-btn:hover,
+.add-automation-btn:hover {
   background: var(--bg);
   border-color: var(--accent);
   color: var(--fg);
@@ -2228,6 +2251,11 @@ async function confirmDeleteChat(chatId: string) {
 }
 .schedules-list {
   display: flex;
+  /* Fills the space between the workspace toggle and the footer, so the create
+     button pins to the bottom exactly like the chat sidebar's. min-height:0 is
+     what lets it actually scroll inside a column flex parent. */
+  flex: 1;
+  min-height: 0;
   flex-direction: column;
   overflow-y: auto;
   padding: 8px 8px 12px;

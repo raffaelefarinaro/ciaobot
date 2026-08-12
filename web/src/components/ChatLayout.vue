@@ -224,7 +224,11 @@ const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
 // Settings → Appearance so the +/- buttons and the shortcuts stay in sync.
 const fontScale = useFontScale()
 
-const DEFAULT_SIDEBAR_WIDTH = 280
+// Wide enough for the nav row to show the active item's label ("automations" is
+// the longest) beside all four glyphs. At 280 the row could not fit it and the
+// label was clipped mid-word; below ~334 the header now drops the label rather
+// than cutting it, so this is the width at which the labelled row is intact.
+const DEFAULT_SIDEBAR_WIDTH = 340
 const MIN_SIDEBAR_WIDTH = 180
 const MAX_SIDEBAR_WIDTH = 500
 const SIDEBAR_SNAP_THRESHOLD = 15 // px
