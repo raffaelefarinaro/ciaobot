@@ -146,6 +146,7 @@ def package_status(
         "current_version": current_version,
         "latest_version": latest,
         "update_available": update_available,
+        "mode": detect_install_mode(),
         "source": source,
         "error": error,
     }
@@ -260,22 +261,29 @@ def detect_install_mode() -> str:
     import sys
     from pathlib import Path
 
-    try:
-        import ciao
-
-        ciao_file = Path(ciao.__file__).resolve()
-        project_root = ciao_file.parent.parent
-        if (project_root / "pyproject.toml").is_file() and (project_root / ".git").is_dir():
-            return "editable"
-    except Exception:
-        ciao_file = None
-
+    # The bundled marker is authoritative. The embedded runtime imports the
+    # same ``ciao`` package as a source checkout, so checking the checkout
+    # first misclassifies a bundled app during development and in tests.
     try:
         executable = Path(sys.executable).resolve()
         if os.environ.get("CIAO_BUNDLED_APP") or "Ciaobot.app/Contents/Resources/ciao-runtime" in str(executable):
             return "bundled_app"
     except Exception:
         pass
+
+    try:
+        import ciao
+
+        ciao_file = Path(ciao.__file__).resolve()
+        project_root = ciao_file.parent.parent
+        git_marker = project_root / ".git"
+        if (
+            (project_root / "pyproject.toml").is_file()
+            and (git_marker.is_dir() or git_marker.is_file())
+        ):
+            return "editable"
+    except Exception:
+        ciao_file = None
 
     return "unknown"
 

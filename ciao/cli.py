@@ -267,12 +267,8 @@ def _print_setup_summary(workspace: Path, port: int) -> None:
 
 
 def _default_app_dir() -> Path:
-    """Prefer /Applications (what Finder's sidebar shows) when writable;
-    non-admin accounts fall back to the per-user folder."""
+    """Return the per-user app directory used by the release installer."""
 
-    system_apps = Path("/Applications")
-    if os.access(system_apps, os.W_OK):
-        return system_apps
     return Path.home() / "Applications"
 
 
@@ -1611,7 +1607,17 @@ def _desktop_command(args: argparse.Namespace) -> int:
 
     as_json = bool(getattr(args, "as_json", False))
     explicit_dir = getattr(args, "app_dir", None)
-    app_dir = Path(explicit_dir).expanduser() if explicit_dir else _default_app_dir()
+    if explicit_dir:
+        app_dir = Path(explicit_dir).expanduser()
+    else:
+        app_dir = _default_app_dir()
+        system_app_dir = Path("/Applications")
+        if not (app_dir / desktop_install.APP_BUNDLE_NAME).exists() and (
+            system_app_dir / desktop_install.APP_BUNDLE_NAME
+        ).exists():
+            # Older installs used /Applications. Keep uninstall able to find
+            # those bundles while new installs consistently use ~/Applications.
+            app_dir = system_app_dir
 
     def report(payload: dict[str, object], lines: list[str]) -> int:
         if as_json:

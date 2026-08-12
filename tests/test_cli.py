@@ -598,11 +598,7 @@ def test_setup_skips_legacy_companion_when_tauri_app_is_installed(
     assert not (apps / "Ciaobot Server.app").exists()
 
 
-def test_default_app_dir_prefers_system_applications(monkeypatch) -> None:
-    monkeypatch.setattr(cli.os, "access", lambda path, mode: True)
-    assert cli._default_app_dir() == Path("/Applications")
-
-    monkeypatch.setattr(cli.os, "access", lambda path, mode: False)
+def test_default_app_dir_matches_the_release_installer() -> None:
     assert cli._default_app_dir() == Path.home() / "Applications"
 
 

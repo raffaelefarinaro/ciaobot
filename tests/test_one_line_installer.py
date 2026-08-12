@@ -35,6 +35,8 @@ def test_bundled_launcher_keeps_child_ciao_commands_on_matching_runtime() -> Non
     assert 'export PATH="$root/bin${PATH:+:$PATH}"' in script
     assert 'export PYTHONPATH="$site${PYTHONPATH:+:$PYTHONPATH}"' in script
     assert 'export CIAO_ENGINE_PATH="$root/bin/ciao"' in script
+    assert "unset CIAO_RUNTIME_ROOT" in script
+    assert 'CIAO_RUNTIME_ROOT="${CIAO_RUNTIME_ROOT:-$root}"' not in script
 
 
 def test_runtime_builder_probes_pydantic_core_for_each_architecture() -> None:

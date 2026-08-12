@@ -89,10 +89,14 @@ if [ ! -x "$python" ] || [ ! -d "$site" ]; then
 fi
 export CIAO_BUNDLED_APP=1
 export CIAO_ENGINE_PATH="$root/bin/ciao"
-# The app bundle contains the engine, not the user's data.  Keep the bundle
-# as the fallback for direct, workspace-less CLI invocations, but let the
-# LaunchAgent point the service at the user's workspace runtime.
-export CIAO_RUNTIME_ROOT="${CIAO_RUNTIME_ROOT:-$root}"
+# The app bundle contains the engine, not mutable user data. A configured
+# LaunchAgent supplies CIAO_RUNTIME_ROOT from the user's workspace; leave it
+# unset for workspace-less bootstrap so CiaoConfig uses its external default.
+if [ -n "${CIAO_RUNTIME_ROOT:-}" ]; then
+    export CIAO_RUNTIME_ROOT
+else
+    unset CIAO_RUNTIME_ROOT
+fi
 # Child agent commands must resolve to this matching Python runtime too.  In
 # particular, inheriting this process's PYTHONPATH into a Homebrew/repo ciao
 # shim would mix CPython 3.12 extension modules with another interpreter.

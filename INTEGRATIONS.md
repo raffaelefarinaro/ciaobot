@@ -223,6 +223,9 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_RUNTIME_ROOT` (optional): runtime-state directory. `Ciaobot.app` reads
   this from the configured workspace `.env` and resolves a relative value
   against the workspace.
+- `CIAO_ENGINE_PATH` (internal): bundled engine path inherited by onboarding
+  and desktop helpers; it is normally supplied by `Ciaobot.app`, not set by
+  operators.
 - `CIAO_DESKTOP_SERVER_URL` (development only): overrides desktop runtime
   discovery for a local Tauri development server target.
 - Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same host via `Origin` or `Referer`.

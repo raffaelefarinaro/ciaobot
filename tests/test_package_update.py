@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import types
 from unittest.mock import patch
 
 from starlette.applications import Starlette
@@ -16,8 +18,15 @@ def test_detect_install_mode_bundled_app(monkeypatch) -> None:
     assert detect_install_mode() == "bundled_app"
 
 
-def test_detect_install_mode_unknown_without_package_manager(monkeypatch) -> None:
+def test_detect_install_mode_unknown_without_package_manager(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "ciao",
+        types.SimpleNamespace(
+            __file__=str(tmp_path / "site-packages" / "ciao" / "__init__.py")
+        ),
+    )
     assert detect_install_mode() == "unknown"
 
 

@@ -62,6 +62,7 @@ def test_package_status_reports_available_update() -> None:
         "current_version": "0.2.0",
         "latest_version": "0.3.0",
         "update_available": True,
+        "mode": "editable",
         "source": latest_release_redirect_url(),
         "error": "",
     }
