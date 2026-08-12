@@ -214,6 +214,33 @@ def test_plan_mode_rejects_mutation_before_control_plane_call(tmp_path: Path) ->
     assert control_plane.create_calls == 0
 
 
+def test_vault_search_telemetry_keeps_only_relative_result_paths(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+    _token, principal = service.registry.issue(
+        chat_id="chat-1",
+        project_id="project-1",
+        workspace="personal",
+        provider="claude",
+    )
+
+    service._record_tool_call(
+        name="vault_search",
+        principal=principal,
+        status="ok",
+        error_code="",
+        duration_ms=7,
+        value={
+            "ok": True,
+            "data": [{"path": "memory-vault/personal/Workspace/Ada.md"}],
+        },
+    )
+
+    record = json.loads(service._telemetry_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["result_count"] == 1
+    assert record["result_paths"] == ["memory-vault/personal/Workspace/Ada.md"]
+    assert "content" not in record
+
+
 def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
     service, _control_plane = _service(tmp_path)
     names = set(service.status()["tools"])

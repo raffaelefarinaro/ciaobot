@@ -6,6 +6,7 @@ import argparse
 import html
 import http.cookiejar
 import json
+import math
 import os
 import plistlib
 import re
@@ -2292,14 +2293,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run agent evaluation scenarios.",
     )
     eval_parser.add_argument(
+        "--suite",
+        type=Path,
+        required=True,
+        help="Path to one schema-version-1 JSON eval suite.",
+    )
+    eval_parser.add_argument(
         "--workspace",
         type=Path,
-        default=Path("."),
-        help="Workspace root. Defaults to current directory.",
+        required=True,
+        help="Source workspace containing the selected targets.",
     )
     eval_parser.add_argument(
         "--filter",
-        help="Filter scenarios by substring match on name.",
+        help="Case-sensitive scenario-name substring, preserving suite order.",
+    )
+    eval_parser.add_argument(
+        "--provider",
+        choices=["claude", "codex"],
+        help="Provider override applied above scenario and suite defaults.",
+    )
+    eval_parser.add_argument(
+        "--model",
+        help="Model override applied above scenario and suite defaults.",
+    )
+    eval_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("eval-results"),
+        help="Report directory. Defaults to ./eval-results.",
+    )
+    eval_parser.add_argument(
+        "--turn-timeout",
+        type=float,
+        default=300.0,
+        metavar="SECONDS",
+        help="Maximum duration of each live chat turn.",
+    )
+    eval_parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="Maximum duration of each isolated server startup.",
     )
     eval_parser.set_defaults(func=_eval_command)
 
@@ -2328,29 +2364,52 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _eval_command(args: argparse.Namespace) -> int:
-    from ciao.evals import run_eval_suite
+    from ciao.evals import (
+        EvalRunOverrides,
+        EvalReportError,
+        EvalSchemaError,
+        EvalTargetError,
+        run_eval_suite,
+    )
 
-    workspace = Path(args.workspace).resolve()
-    scenario_filter = getattr(args, "filter", None)
-    results = run_eval_suite(workspace, scenario_filter=scenario_filter)
-    if not results:
-        print("No eval scenarios found.")
-        return 0
+    if (
+        not math.isfinite(args.turn_timeout)
+        or args.turn_timeout <= 0
+        or not math.isfinite(args.startup_timeout)
+        or args.startup_timeout <= 0
+    ):
+        print("Eval timeouts must be greater than zero.", file=sys.stderr)
+        return 2
+    if args.model is not None and not args.model.strip():
+        print("Eval model override must not be empty.", file=sys.stderr)
+        return 2
+    try:
+        run = run_eval_suite(
+            Path(args.suite),
+            Path(args.workspace),
+            Path(args.output),
+            name_filter=args.filter,
+            overrides=EvalRunOverrides(
+                provider=args.provider,
+                model=args.model,
+            ),
+            turn_timeout_s=args.turn_timeout,
+            startup_timeout_s=args.startup_timeout,
+        )
+    except EvalReportError as exc:
+        print(f"Eval execution failed: {exc}", file=sys.stderr)
+        return 1
+    except (EvalSchemaError, EvalTargetError, OSError, ValueError) as exc:
+        print(f"Invalid eval request: {exc}", file=sys.stderr)
+        return 2
 
-    passed_count = sum(1 for r in results if r.passed)
-    total_count = len(results)
-
-    print(f"Eval Suite Results ({passed_count}/{total_count} passed):")
-    for r in results:
-        status = "PASS" if r.passed else "FAIL"
-        print(f"  [{status}] {r.scenario_name} ({r.duration_s:.2f}s)")
-        if r.error:
-            print(f"        Error: {r.error}")
-        for pres in r.pattern_results:
-            p_status = "OK" if pres["matched"] else "FAIL"
-            print(f"        Pattern '{pres['pattern']}': {p_status}")
-
-    return 0 if passed_count == total_count else 1
+    passed_count = sum(record.status == "passed" for record in run.records)
+    print(
+        f"Eval suite {run.suite.name}: "
+        f"{passed_count}/{len(run.records)} scenarios passed."
+    )
+    print(f"Reports: {Path(args.output).expanduser().resolve()}")
+    return run.exit_code
 
 
 def _scaffold_command(args: argparse.Namespace) -> int:
@@ -2364,11 +2423,116 @@ def _scaffold_command(args: argparse.Namespace) -> int:
         print(f"Scaffolded subagent package at {folder}")
     elif target_type == "eval":
         from ciao.evals import scaffold_eval
-        target = scaffold_eval(workspace, name)
+        try:
+            target = scaffold_eval(workspace, name)
+        except (FileExistsError, OSError, ValueError) as exc:
+            print(f"Cannot scaffold eval: {exc}", file=sys.stderr)
+            return 2
         print(f"Scaffolded eval scenario at {target}")
     else:
         print(f"Unknown scaffold target type: {target_type}", file=sys.stderr)
         return 1
+    return 0
+
+
+def _eval_release_command(argv: list[str]) -> int:
+    from ciao.release_evidence import (
+        ReleaseEvidenceError,
+        run_release_evidence,
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="ciao eval release",
+        description="Run the public release-evidence scorecard.",
+    )
+    parser.add_argument("--suite", type=Path, default=Path("evals/release.json"))
+    parser.add_argument("--workspace", type=Path, default=Path("."))
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--from-ref")
+    parser.add_argument("--to-ref", default="HEAD")
+    parser.add_argument("--rationale-file", type=Path)
+    parser.add_argument(
+        "--vault-root",
+        type=Path,
+        help="Explicit opt-in vault to copy into isolated runs; source paths are redacted.",
+    )
+    parser.add_argument(
+        "--mode",
+        action="append",
+        choices=["cold", "warm", "restart"],
+        dest="modes",
+        help="Execution mode; repeat to select multiple modes. Defaults to all.",
+    )
+    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--startup-timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="Write evidence and return success even when a provider/scenario fails.",
+    )
+    args = parser.parse_args(argv)
+    rationale = ""
+    if args.rationale_file:
+        try:
+            rationale = args.rationale_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"Could not read rationale file: {exc}", file=sys.stderr)
+            return 2
+    try:
+        result = run_release_evidence(
+            suite_path=args.suite,
+            workspace=args.workspace,
+            output=args.output,
+            version=args.version,
+            baseline_summary=args.baseline,
+            from_ref=args.from_ref,
+            to_ref=args.to_ref,
+            rationale=rationale,
+            modes=tuple(args.modes or ("cold", "warm", "restart")),
+            repeats=args.repeats,
+            startup_timeout_s=args.startup_timeout,
+            require_complete=not args.allow_incomplete,
+            external_vault=args.vault_root,
+        )
+    except (ReleaseEvidenceError, OSError, ValueError) as exc:
+        print(f"Release evidence failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Release evidence: {args.output.expanduser().resolve()}")
+    print(f"Scenarios: {len(result.summary.get('groups', []))} aggregate groups")
+    if result.advisory_flags:
+        print("Advisory flags:")
+        for flag in result.advisory_flags:
+            print(f"- {flag}")
+    return 0
+
+
+def _eval_compare_command(argv: list[str]) -> int:
+    from ciao.release_evidence import ReleaseEvidenceError, compare_summary_files
+
+    parser = argparse.ArgumentParser(
+        prog="ciao eval compare",
+        description="Compare two public release-evidence summaries.",
+    )
+    parser.add_argument("--baseline", type=Path, required=True)
+    parser.add_argument("--current", type=Path, required=True)
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    args = parser.parse_args(argv)
+    try:
+        comparison = compare_summary_files(args.baseline, args.current)
+    except (ReleaseEvidenceError, OSError, ValueError) as exc:
+        print(f"Eval comparison failed: {exc}", file=sys.stderr)
+        return 2
+    if args.as_json:
+        print(json.dumps(comparison, indent=2, sort_keys=True))
+    else:
+        flags = comparison.get("flags", [])
+        print(f"Release comparison: {len(flags)} flag(s)")
+        for flag in flags:
+            print(f"- {flag.get('kind')}: {flag.get('key', '')}")
+    # Performance/cache changes are advisory. Malformed input is the only
+    # comparison failure; correctness flags are surfaced for the release PR.
     return 0
 
 
@@ -2383,6 +2547,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:2] == ["eval", "release"]:
+        return _eval_release_command(argv_list[2:])
+    if argv_list[:2] == ["eval", "compare"]:
+        return _eval_compare_command(argv_list[2:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

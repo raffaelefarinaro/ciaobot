@@ -36,7 +36,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
-
   build-desktop:
     runs-on: macos-latest
     if: github.event_name == 'release'
