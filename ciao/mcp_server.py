@@ -1181,7 +1181,11 @@ class CiaoMcpService:
                     "done" means.
                 title: Short sidebar label, e.g. "Fix #238 NSIRD drop".
                 model: Model for the delegate, e.g. a cheaper or specialized
-                    one. Omit to inherit the workspace default.
+                    one. Must be in the configured model set for the resolved
+                    provider (Ollama local/cloud, OpenRouter, or Anthropic
+                    tier alias). Unknown ids are rejected with `invalid_model`
+                    and a list of valid alternatives. Omit to inherit the
+                    workspace default.
                 delegation_id: Shared tag for delegates dispatched as one
                     batch, so their completion reports group together.
             """

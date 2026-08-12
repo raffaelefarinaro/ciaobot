@@ -2958,10 +2958,7 @@ async def chat_messages(request: Request) -> JSONResponse:
             return JSONResponse(handover_messages + archived)
         return JSONResponse(handover_messages)
 
-    try:
-        from claude_agent_sdk import get_session_messages
-    except ImportError:
-        return JSONResponse({"error": "SDK not available"}, status_code=500)
+    from ciao.transcripts import get_session_messages_full
 
     result: list[dict] = []
     # A chat can rotate through more than one SDK session file within the
@@ -2975,7 +2972,7 @@ async def chat_messages(request: Request) -> JSONResponse:
         if not sid:
             continue
         try:
-            segment = get_session_messages(sid, directory=str(config.workspace_root))
+            segment = get_session_messages_full(sid, directory=str(config.workspace_root))
         except (FileNotFoundError, ValueError):
             # This segment's file doesn't exist on this machine (remote chat,
             # or pruned after rotating away). Skip it rather than blanking
@@ -3142,6 +3139,12 @@ async def chat_messages(request: Request) -> JSONResponse:
             # same rule, so the two turn counters stay aligned.
             if subagent_tracking.is_synthesis_nudge(content):
                 result.append({"role": "system", "content": _SYNTHESIS_NUDGE_LABEL})
+                continue
+            is_compact = (
+                isinstance(m.message, dict) and bool(m.message.get("isCompactSummary"))
+            ) or content.startswith("This session is being continued from a previous conversation")
+            if is_compact:
+                result.append({"role": "system", "content": content})
                 continue
         entry: dict = {
             "role": m.type,
