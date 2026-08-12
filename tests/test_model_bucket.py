@@ -316,6 +316,77 @@ def test_inherited_openrouter_alias_requires_api_key(tmp_path):
         pcm.create_chat(project.project_id, model="opus")
 
 
+def test_inherited_ollama_alias_requires_backend(tmp_path):
+    """An inherited Ollama bucket must resolve before validation."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        ollama=OllamaSettings(api_key="", models=()),
+        workspaces={
+            "client": WorkspaceConfig(
+                name="client",
+                vault_root="vaults/client",
+                model_bucket="ollama",
+                gws_profile="work",
+            )
+        },
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("client", workspace="client")
+
+    with pytest.raises(
+        ValueError, match="Unknown model 'minimax-m3:cloud'"
+    ):
+        pcm.create_chat(project.project_id, model="opus")
+
+
+def test_update_chat_validates_bucket_resolved_model_before_mutating(tmp_path):
+    """A failed bucket-resolved update leaves the chat unchanged."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        openrouter=OpenRouterSettings(api_key="sk-or"),
+        workspaces={
+            "client": WorkspaceConfig(
+                name="client",
+                vault_root="vaults/client",
+                model_bucket="openrouter",
+                gws_profile="work",
+            )
+        },
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("client", workspace="client")
+    chat = pcm.create_chat(project.project_id, model="opus", model_bucket="work")
+    before = (chat.model, chat.provider, chat.model_bucket)
+
+    config.openrouter = OpenRouterSettings(api_key="")
+    with pytest.raises(
+        ValueError, match="Unknown model 'anthropic/claude-opus-latest'"
+    ):
+        pcm.update_chat(chat.chat_id, model="opus", model_bucket="openrouter")
+
+    assert (chat.model, chat.provider, chat.model_bucket) == before
+
+
 def test_failed_bucket_validation_preserves_empty_chats(tmp_path):
     """A rejected bucket must not clean up an existing empty draft."""
     runtime = tmp_path / ".runtime"

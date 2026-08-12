@@ -2820,12 +2820,6 @@ class ProjectChatManager:
         chat_provider = provider
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
-        self._validate_custom_model_runner(chat_model, chat_provider)
-        # Validate the effective model (the workspace default when ``model``
-        # is omitted), not just the explicit arg, so a stale workspace
-        # default can't create a delegate that fails on its first turn
-        # (#259).
-        self._validate_configured_model(chat_model, chat_provider)
         # Claude chats record the bucket explicitly: the workspace only
         # preselects (personal → "personal"), but an explicit picker choice
         # wins and survives project moves. Personal-bucket alias defaults
@@ -2834,24 +2828,18 @@ class ProjectChatManager:
         chat_bucket = ""
         if chat_provider == "claude":
             chat_bucket = self._effective_bucket(model_bucket or "", project_id)
-            if (
-                self._bucket_routes_to_ollama(chat_bucket)
-                or chat_bucket == "openrouter"
-            ) and (
-                model is None
-                or model_bucket is not None
-                or chat_bucket == "openrouter"
-            ):
-                chat_model = self._resolve_claude_model(
-                    chat_model, chat_bucket, project_id
-                )
-            # The workspace bucket can be persisted independently of backend
-            # credentials. Revalidate after resolving a tier alias so a
-            # stale OpenRouter bucket cannot turn ``opus`` into an
-            # unavailable ``owner/model`` id after the pre-resolution tier
-            # check above (#259).
-            self._validate_custom_model_runner(chat_model, chat_provider)
-            self._validate_configured_model(chat_model, chat_provider)
+        resolve_model = not (
+            model is not None
+            and model_bucket is None
+            and chat_bucket == "personal"
+        )
+        chat_model, _ = self._resolve_and_validate_chat_model(
+            chat_model,
+            chat_provider,
+            chat_bucket,
+            project_id,
+            resolve_model=resolve_model,
+        )
         # Sweep any other empty chats only after all model and routing-bucket
         # validation has succeeded. Opening a fresh "New Chat" signals the
         # user has moved on from whatever they had open and never sent, so we
@@ -2972,14 +2960,7 @@ class ProjectChatManager:
         )
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
-        self._validate_custom_model_runner(model or chat.model, provider or chat.provider)
-        # Validate the model id we'll end up with against the provider we'll
-        # end up on, even when only one of the two is being changed.
         target_provider = provider or chat.provider
-        if model is not None:
-            self._validate_configured_model(model, target_provider)
-        elif provider is not None:
-            self._validate_configured_model(chat.model, target_provider)
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if thinking_level is not None:
@@ -2992,7 +2973,8 @@ class ProjectChatManager:
                     f"Unknown thinking level '{thinking_level}' for provider "
                     f"'{target_provider}' (allowed: {', '.join(allowed)})"
                 )
-        moved_from: str | None = None
+
+        target_project_id = project_id if project_id is not None else chat.project_id
         if project_id is not None and project_id != chat.project_id:
             if chat.archived:
                 raise ValueError("Cannot move an archived chat")
@@ -3005,12 +2987,38 @@ class ProjectChatManager:
                     "Cannot move chat across workspaces "
                     f"({current.workspace} → {target.workspace})"
                 )
+
+        changes_model = (
+            model is not None
+            or provider is not None
+            or model_bucket is not None
+        )
+        new_model = model if model is not None else chat.model
+        requested_bucket = (
+            model_bucket if model_bucket is not None else chat.model_bucket
+        )
+        effective_bucket = ""
+        if changes_model:
+            resolve_model = not (
+                model is not None
+                and model_bucket is None
+                and requested_bucket == "personal"
+            )
+            new_model, effective_bucket = self._resolve_and_validate_chat_model(
+                new_model,
+                target_provider,
+                requested_bucket,
+                target_project_id,
+                resolve_model=resolve_model,
+            )
+
+        moved_from: str | None = None
+        if project_id is not None and project_id != chat.project_id:
             moved_from = chat.project_id
             chat.project_id = project_id
         if title is not None:
             chat.title = title
-        if model is not None or provider is not None or model_bucket is not None:
-            new_model = model if model is not None else chat.model
+        if changes_model:
             new_provider = provider if provider is not None else chat.provider
             new_bucket = model_bucket if model_bucket is not None else chat.model_bucket
             # Cross-provider switches mid-chat would silently break: the
@@ -3030,7 +3038,7 @@ class ProjectChatManager:
                 chat.provider, chat.model, new_provider, new_model,
                 project_id=chat.project_id,
                 old_bucket=chat.model_bucket,
-                new_bucket=new_bucket,
+                new_bucket=effective_bucket or new_bucket,
             ):
                 raise ValueError(
                     "Can't switch providers or model backends once a chat has "
@@ -4060,9 +4068,48 @@ class ProjectChatManager:
             opus=self._config.ollama.opus_model,
             fable=self._config.ollama.fable_model,
         )
-        if target and is_ollama_model(target, self._config.ollama):
-            return target
-        return model
+        if effective == "personal" and not is_ollama_model(
+            target, self._config.ollama
+        ):
+            # ``personal`` is the legacy workspace fallback, not an explicit
+            # configured backend. Preserve its historical Anthropic alias
+            # fallback when no Ollama backend is present; explicit ``ollama``
+            # workspace buckets still return the target so validation rejects
+            # a stale route before chat creation (#259).
+            return model
+        # Return the configured target even when Ollama is unavailable. The
+        # validator must see the effective routed id so it can reject a stale
+        # bucket instead of accepting the bare tier alias and failing later
+        # when the provider starts (#259).
+        return target or model
+
+    def _resolve_and_validate_chat_model(
+        self,
+        model: str,
+        provider: str,
+        model_bucket: str | None,
+        project_id: str,
+        *,
+        resolve_model: bool = True,
+    ) -> tuple[str, str]:
+        """Resolve a chat model through its effective bucket, then validate it.
+
+        The order matters: aliases such as ``opus`` can resolve to an
+        unavailable OpenRouter, Ollama, or custom-provider target. Validating
+        the alias first would accept the request even though the model that
+        the provider will actually run is invalid.
+        """
+        effective_bucket = ""
+        resolved_model = model
+        if provider == "claude":
+            effective_bucket = self._effective_bucket(model_bucket or "", project_id)
+            if resolve_model:
+                resolved_model = self._resolve_claude_model(
+                    resolved_model, effective_bucket, project_id
+                )
+        self._validate_custom_model_runner(resolved_model, provider)
+        self._validate_configured_model(resolved_model, provider)
+        return resolved_model, effective_bucket
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""

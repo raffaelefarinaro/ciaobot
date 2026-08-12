@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -705,6 +705,27 @@ def test_create_chat_validates_the_workspace_default_model(tmp_path: Path) -> No
         manager.create_chat(project.project_id, title="New Chat")
 
 
+def test_create_chat_validates_an_inherited_ollama_alias(tmp_path: Path) -> None:
+    """An inherited Ollama bucket must validate the resolved tier target."""
+    from ciao.providers.ollama import OllamaSettings
+
+    manager = _make_manager(
+        tmp_path,
+        ollama=OllamaSettings(api_key="", models=()),
+        workspaces={
+            "client": WorkspaceConfig(
+                name="client",
+                vault_root="vaults/client",
+                model_bucket="ollama",
+            )
+        },
+    )
+    project = manager.create_project("Delegates", workspace="client")
+
+    with pytest.raises(ValueError, match="Unknown model 'minimax-m3:cloud'"):
+        manager.create_chat(project.project_id, model="opus")
+
+
 def test_create_chat_invalid_model_does_not_cleanup_empty_chats(
     tmp_path: Path,
 ) -> None:
@@ -871,6 +892,36 @@ def test_create_chat_custom_provider_without_model_list_accepts_any(
 
     chat = manager.create_chat(project.project_id, model="custom:lm-studio:anything")
     assert chat.model == "custom:lm-studio:anything"
+
+
+def test_create_chat_validates_custom_bucket_alias_target(tmp_path: Path) -> None:
+    """Custom routing buckets must validate their resolved tier target."""
+    _write_custom_provider(tmp_path, provider_id="lm-studio", models=["qwen2.5-coder"])
+    manager = _make_manager(
+        tmp_path,
+        custom_routing={
+            "lm-studio": {"opus": "custom:lm-studio:removed-model"},
+        },
+        workspaces={
+            "client": WorkspaceConfig(
+                name="client",
+                vault_root="vaults/client",
+                model_bucket="custom:lm-studio",
+            )
+        },
+    )
+    project = manager.create_project("Delegates", workspace="client")
+
+    with pytest.raises(
+        ValueError, match="Unknown model 'custom:lm-studio:removed-model'"
+    ):
+        manager.create_chat(project.project_id, model="opus")
+
+    manager._config.custom_routing = {
+        "lm-studio": {"opus": "custom:lm-studio:qwen2.5-coder"},
+    }
+    chat = manager.create_chat(project.project_id, model="opus")
+    assert chat.model == "custom:lm-studio:qwen2.5-coder"
 
 
 def test_create_chat_rejects_ollama_tier_target_without_backend(
