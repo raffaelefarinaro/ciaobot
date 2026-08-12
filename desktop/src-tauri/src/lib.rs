@@ -343,7 +343,19 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
                 .download_and_install(|_, _| {}, || {})
                 .await
                 .map_err(|error| format!("Update {version} could not be installed: {error}"))?;
-            restart_engine_after_app_update(&app)?;
+            // The bundle has already been swapped on disk at this point, so the
+            // running process is the *old* app. Propagating a restart failure
+            // out of here skipped `app.restart()` and left exactly that: a new
+            // bundle on disk, an old app in memory, and a half-restarted
+            // engine — the desktop-service version mismatch this whole path
+            // exists to avoid. Surface the engine failure, then restart anyway;
+            // the fresh process runs the engine start-up path again.
+            if let Err(error) = restart_engine_after_app_update(&app) {
+                tray_log(
+                    &app,
+                    &format!("engine restart after app update FAILED: {error}"),
+                );
+            }
             app.restart()
         }
         // The engine moved but the app did not: restart so both halves come

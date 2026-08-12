@@ -5072,7 +5072,15 @@ class ProjectChatManager:
         # may re-dispatch on a switched model; picker/cancel/timeout end the
         # turn here with no result event.
         if images:
-            if not self._model_capable(request.model, chat):
+            # _model_capable and _capability_candidates take the slow path for
+            # ambiguous ids: a synchronous urllib probe against the Ollama or
+            # OpenRouter endpoint. Calling them straight from this async
+            # generator parked the whole event loop on that socket - every other
+            # stream, websocket, and API request on the server stalled with it -
+            # for up to the probe timeout, per candidate. Push them to a worker.
+            if not await asyncio.to_thread(
+                self._model_capable, request.model, chat
+            ):
                 if unattended:
                     # No one is watching to answer; never block the turn.
                     # Close with the system bubble so the user knows the
@@ -5088,14 +5096,15 @@ class ProjectChatManager:
                     request_id
                 )
                 if registered:
+                    candidates = await asyncio.to_thread(
+                        self._capability_candidates, chat, request.model
+                    )
                     yield ModelCapabilityQuestionEvent(
                         type="model_capability_question",
                         request_id=request_id,
                         missing="image_input",
                         current_model=chat.model,
-                        candidates=self._capability_candidates(
-                            chat, request.model
-                        ),
+                        candidates=candidates,
                         timeout_s=CAPABILITY_QUESTION_TIMEOUT_S,
                     )
                     answer = await self._await_capability_answer(
@@ -5112,6 +5121,31 @@ class ProjectChatManager:
                     action = str(answer.get("action") or "")
                     if action == "switch":
                         picked = str(answer.get("model_id") or "")
+                        # The answer arrives over the chat websocket, so its
+                        # model_id is client input like any other. Persisting it
+                        # unchecked left the chat pinned to an id no provider is
+                        # configured for, and every later turn failed on it -
+                        # the exact hole create/update/handover were reworked to
+                        # close. Only the ids this question actually offered are
+                        # acceptable; anything else falls through to the same
+                        # system bubble as a declined question.
+                        offered = {
+                            str(entry.get("id") or "")
+                            for entry in candidates
+                            if not entry.get("disabled")
+                        }
+                        if picked and picked not in offered:
+                            logger.warning(
+                                "Ignoring capability switch to unoffered model %r "
+                                "for chat %s",
+                                picked,
+                                chat_id,
+                            )
+                            yield SystemStatusEvent(
+                                type="system",
+                                status=_CAPABILITY_IMAGE_MSG,
+                            )
+                            return
                         if picked and picked != request.model:
                             chat.model = picked
                             self._save()

@@ -232,6 +232,13 @@ self.addEventListener('notificationclick', (event) => {
 
 self.addEventListener('notificationclose', (event) => {
   const chatId = event.notification.data?.chat_id || ''
+  // Not every notification belongs to a chat: the Google Workspace token-health
+  // push carries no chat_id. Passing '' on to these helpers is the *wildcard*
+  // form - it deletes every unread entry, zeroes the app badge, and closes every
+  // other Ciaobot banner - so swiping away one unrelated banner discarded the
+  // unread state of chats the user had never opened. A dismissal can only ever
+  // speak for its own chat.
+  if (!chatId) return
   event.waitUntil(Promise.all([
     clearUnread(chatId),
     closeNotifications(chatId),

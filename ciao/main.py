@@ -206,7 +206,28 @@ async def _wait_for_chat_drain(
             await asyncio.sleep(max(0.0, poll_interval))
 
 
+def _ensure_homebrew_on_path() -> None:
+    """Prepend Homebrew bin dirs to PATH when missing.
+
+    launchd and LaunchServices both start the engine with a minimal PATH
+    (roughly ``/usr/bin:/bin:/usr/sbin:/sbin``) that omits Homebrew, so
+    subprocess calls to ``npm``, ``node``, Homebrew's ``git``/``pip``, and the
+    provider CLIs fail with FileNotFoundError. Two things depend on this being
+    fixed up before anything else runs: the subprocess steps themselves, and
+    ``ciao/cli.py``, which bakes this process's PATH into ``{{CIAO_PATH}}`` of
+    ``com.ciao.server.plist`` - so when desktop onboarding spawns bootstrap as
+    a child of the Tauri app, dropping this wrote the minimal PATH into the
+    LaunchAgent permanently. Adding a non-existent directory is harmless.
+    """
+    extra = ["/opt/homebrew/bin", "/usr/local/bin"]
+    parts = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    prepend = [d for d in extra if d not in parts]
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join([*prepend, *parts])
+
+
 async def _async_main() -> int:
+    _ensure_homebrew_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
     config = CiaoConfig.from_env()
 

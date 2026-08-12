@@ -14,6 +14,7 @@ import {
 } from '../lib/serverRestart'
 import { archiveFailedToast, archiveStoppedToast } from '../lib/archiveCopy'
 import { errorMessage } from '../lib/errorMessage'
+import { readChatDraft } from '../lib/chatDrafts'
 import type {
   ArchiveChatResponse,
   ProjectInfo,
@@ -1698,6 +1699,12 @@ export const useProjectStore = defineStore('projects', () => {
     if (!chat || chat.archived || chat.session_id) return false
     // A renamed chat is a deliberate act, not an abandoned draft.
     if (chat.title !== DEFAULT_CHAT_TITLE) return false
+    // So is a typed-but-unsent prompt. The composer persists one per chat
+    // (lib/chatDrafts), and Esc closes the chat *while the composer is
+    // focused* — so without this, typing a long prompt into a New Chat and
+    // hitting Esc deleted it with no way back: the chat id leaves `chats`, and
+    // nothing ever reads that draft key again.
+    if (readChatDraft(chatId).trim()) return false
     const loaded = messages.value[chatId]
     if (!loaded) return false
     return !loaded.some(message => message.role === 'user')

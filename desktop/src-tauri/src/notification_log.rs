@@ -1,5 +1,9 @@
 use serde_json::Value;
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 /// Tracks which notification entries this process has already posted.
 ///
@@ -34,6 +38,10 @@ fn entry_id(entry: &Value) -> String {
 
 fn is_clear_entry(entry: &Value) -> bool {
     entry.get("kind").and_then(Value::as_str) == Some("clear")
+}
+
+fn entry_chat_id(entry: &Value) -> &str {
+    entry.get("chat_id").and_then(Value::as_str).unwrap_or("")
 }
 
 impl NotificationLogTail {
@@ -91,8 +99,26 @@ impl NotificationLogTail {
         // a read may have happened while this companion was not running and
         // the delivered macOS banner can still be present in Notification
         // Center from the previous process.
+        //
+        // Only the *last* entry for a chat describes that chat's current state.
+        // Replaying every clear in the log meant an old read dismissed a newer,
+        // still-unread banner for the same chat at launch: read chat X (clear
+        // logged), a new message for X arrives and posts a banner, then the app
+        // restarts and re-applies the stale clear. A clear speaks for a chat
+        // only when nothing followed it.
         if priming {
-            entries.into_iter().filter(is_clear_entry).collect()
+            let mut last_index: HashMap<&str, usize> = HashMap::new();
+            for (index, entry) in entries.iter().enumerate() {
+                last_index.insert(entry_chat_id(entry), index);
+            }
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(index, entry)| {
+                    is_clear_entry(entry) && last_index.get(entry_chat_id(entry)) == Some(index)
+                })
+                .map(|(_, entry)| entry.clone())
+                .collect()
         } else {
             fresh
         }
@@ -211,5 +237,25 @@ mod tests {
         let pending = tail.poll(Some(entries));
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0]["kind"], "clear");
+    }
+
+    // A clear only describes a chat that has not spoken since. Replaying every
+    // clear in the log dismissed a banner the user had never seen: read chat-1,
+    // a new message for chat-1 arrives, then the app restarts.
+    #[test]
+    fn a_clear_superseded_by_a_newer_message_is_not_replayed() {
+        let mut tail = NotificationLogTail::at_end("/nonexistent");
+        let entries = vec![
+            json!({"ts": 1.0, "kind": "clear", "chat_id": "chat-1"}),
+            json!({"ts": 2.0, "title": "unread again", "chat_id": "chat-1"}),
+            json!({"ts": 3.0, "kind": "clear", "chat_id": "chat-2"}),
+        ];
+        let pending = tail.poll(Some(entries));
+        assert_eq!(
+            pending.len(),
+            1,
+            "only the clear that nothing followed may replay"
+        );
+        assert_eq!(pending[0]["chat_id"], "chat-2");
     }
 }

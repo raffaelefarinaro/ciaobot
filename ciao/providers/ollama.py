@@ -354,10 +354,16 @@ def vision_support_ollama(
     """
     if not model_id:
         return None
+    headers = {"Content-Type": "application/json"}
     if is_local_ollama_model(model_id, settings):
         probe_url = settings.local_url
     elif _looks_like_ollama_id(model_id) and _cloud_available(settings):
         probe_url = settings.base_url
+        # The cloud endpoint rejects an unauthenticated /api/show, so the probe
+        # failed for every cloud model, logged "unreachable", and returned None
+        # without caching - re-running the same doomed round trip on each image
+        # send. The model catalog fetch above already authenticates this way.
+        headers["Authorization"] = f"Bearer {settings.api_key}"
     else:
         return None
     key = (probe_url, model_id)
@@ -367,9 +373,7 @@ def vision_support_ollama(
         return cached[1]
     url = probe_url.rstrip("/") + "/api/show"
     body = json.dumps({"name": model_id}).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}
-    )
+    req = urllib.request.Request(url, data=body, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as response:
             payload = json.loads(response.read().decode("utf-8"))
