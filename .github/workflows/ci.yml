@@ -93,12 +93,14 @@ jobs:
     - name: Resolve pinned Python runtimes
       id: python-runtime
       shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         # Bump deliberately when refreshing the embedded runtime; the URLs and
         # hashes below are resolved from this immutable upstream release tag.
         release_tag="20260807"
-        metadata="$(curl -fsSL "https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/${release_tag}")"
+        metadata="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/${release_tag}")"
         resolve_asset() {
           local platform="$1"
           local asset url digest

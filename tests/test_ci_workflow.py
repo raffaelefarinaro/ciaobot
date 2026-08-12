@@ -29,3 +29,11 @@ def test_release_on_main_workflow_publishes_from_main_merge() -> None:
     assert "sync-develop" in workflow
     assert "gh pr merge" in workflow
     assert "CHANGELOG.md" in workflow
+
+
+def test_runtime_resolution_authenticates_github_api_requests() -> None:
+    root = Path(__file__).parents[1] / ".github" / "workflows"
+    for name in ("ci.yml", "publish.yml"):
+        workflow = (root / name).read_text(encoding="utf-8")
+        assert "GITHUB_TOKEN: ${{ github.token }}" in workflow
+        assert "Authorization: Bearer ${GITHUB_TOKEN}" in workflow
