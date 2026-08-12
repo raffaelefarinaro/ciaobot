@@ -358,3 +358,117 @@ def test_external_vault_mode_redacts_result_paths(tmp_path: Path) -> None:
     )
     assert "memory-vault/personal/Workspace/People/Ada.md" not in public_paths
     assert "source-" in public_paths
+
+
+def test_current_inventory_uses_to_ref_not_worktree(tmp_path: Path) -> None:
+    """`run_release_evidence` must inventory the requested ref, not dirty files.
+
+    Reproduces the P1 Codex finding: when the workspace contains
+    untracked or ignored files (e.g. ``__pycache__`` or ``.pyc``) the
+    inventory was capturing them, polluting ``changes.json`` and
+    reporting machine-local noise as part of the release.
+    """
+    import subprocess
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=workspace, check=True)
+    # Tracked skills directory at v1.
+    tracked = workspace / "ciao" / "stock" / "skills" / "demo" / "SKILL.md"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("---\nname: demo\n---\nv1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "v1"], cwd=workspace, check=True)
+    initial_ref = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, text=True, stdout=subprocess.PIPE, check=True
+    ).stdout.strip()
+    # Commit v2.
+    tracked.write_text("---\nname: demo\n---\nv2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "v2"], cwd=workspace, check=True)
+    head_ref = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, text=True, stdout=subprocess.PIPE, check=True
+    ).stdout.strip()
+    # Pollute the worktree with untracked and ignored files.
+    (workspace / "ciao" / "stock" / "skills" / "demo" / "stale.pyc").write_bytes(b"\x00\x01")
+    (workspace / "untracked_dir").mkdir()
+    (workspace / "untracked_dir" / "noise.md").write_text("dirty", encoding="utf-8")
+
+    def fake_runner(scenario, provider, mode, **_kwargs):
+        return [_observation(scenario.name, provider=provider)] * len(scenario.turns)
+
+    result = run_release_evidence(
+        suite_path=Path("evals/release.json"),
+        workspace=workspace,
+        output=tmp_path / "out",
+        version="1.0.0",
+        modes=("cold",),
+        repeats=1,
+        from_ref=initial_ref,
+        to_ref=head_ref,
+        mode_runner=fake_runner,
+        require_complete=False,
+    )
+
+    skills = result.changes["categories"]["skills"]
+    assert skills["changed"]
+    changed_paths = {entry["after"]["path"] for entry in skills["changed"]}
+    assert "ciao/stock/skills/demo/SKILL.md" in changed_paths
+    assert "stale.pyc" not in " ".join(changed_paths)
+    assert "untracked_dir/noise.md" not in str(result.changes)
+
+
+def test_memory_leakage_undefined_without_negative_assertions(tmp_path: Path) -> None:
+    """A turn without ``output_not_contains``/``output_not_regex`` must report None.
+
+    Reproduces the P2 Codex finding: ``all(passed for passed in [])`` is
+    ``True``, so the empty negative-assertion case used to be reported
+    as ``0.0`` (clean leakage), falsely claiming the scenario was
+    measured. Comparisons then could suppress or create
+    ``memory_leakage_regression`` flags on the basis of a measurement
+    that never happened.
+    """
+    from ciao.evals import EvalAssertionResult, EvalResult
+    from ciao.release_evidence import _public_assertions
+
+    # No negative assertions at all: leakage must be None, not 0.0.
+    result_no_neg = EvalResult(
+        scenario_name="capabilities",
+        passed=True,
+        duration_s=0.1,
+        assertion_results=(),
+        normalized_tools=(),
+        output="",
+    )
+    _, memory_none = _public_assertions(result_no_neg, (), ())
+    assert memory_none["memory_leakage"] is None
+
+    # Negative assertion that passed: leakage must be 0.0.
+    result_clean = EvalResult(
+        scenario_name="vault",
+        passed=True,
+        duration_s=0.1,
+        assertion_results=(
+            EvalAssertionResult(kind="output_not_contains", expected="VAULT_PRIVATE", passed=True),
+        ),
+        normalized_tools=(),
+        output="",
+    )
+    _, memory_clean = _public_assertions(result_clean, (), ())
+    assert memory_clean["memory_leakage"] == 0.0
+
+    # Negative assertion that failed: leakage must be 1.0.
+    result_leaked = EvalResult(
+        scenario_name="vault",
+        passed=True,
+        duration_s=0.1,
+        assertion_results=(
+            EvalAssertionResult(kind="output_not_contains", expected="VAULT_PRIVATE", passed=False),
+        ),
+        normalized_tools=(),
+        output="",
+    )
+    _, memory_leaked = _public_assertions(result_leaked, (), ())
+    assert memory_leaked["memory_leakage"] == 1.0

@@ -615,7 +615,7 @@ def _public_assertions(
         "memory_retrieval": source_recall,
         "memory_source_accuracy": 1.0 if expected and source_ok else (None if not expected else 0.0),
         "memory_leakage": (
-            0.0 if all(item.passed for item in negative_assertions) else 1.0
+            (0.0 if all(item.passed for item in negative_assertions) else 1.0)
             if negative_assertions
             else None
         ),
@@ -980,7 +980,7 @@ def run_release_evidence(
     if not selected_modes or any(mode not in _MODES for mode in selected_modes):
         raise ReleaseEvidenceError("modes must be cold, warm, or restart")
     suite = load_release_suite(suite_path.resolve())
-    current_inventory = collect_inventory(workspace.resolve())
+    current_inventory = collect_inventory(workspace.resolve(), to_ref)
     baseline_inventory = collect_inventory(workspace.resolve(), from_ref) if from_ref else {"categories": {}}
     changes = diff_inventories(baseline_inventory, current_inventory)
     changes["from_ref"] = from_ref
