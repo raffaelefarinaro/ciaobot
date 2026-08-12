@@ -741,11 +741,11 @@ def test_context_overflow_is_distinguished_from_a_transient_timeout() -> None:
     overflow = Exception(
         "API Error 400 Message too long: 262183 > 125952 maximum context length"
     )
-    assert insights._is_context_overflow(overflow)
-    assert insights._is_context_overflow(Exception("context_length_exceeded"))
+    assert insights.is_context_overflow(overflow)
+    assert insights.is_context_overflow(Exception("context_length_exceeded"))
     # Transient failures must stay retryable.
-    assert not insights._is_context_overflow(asyncio.TimeoutError())
-    assert not insights._is_context_overflow(Exception("429 rate limit"))
+    assert not insights.is_context_overflow(asyncio.TimeoutError())
+    assert not insights.is_context_overflow(Exception("429 rate limit"))
 
 
 def test_oversized_input_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:

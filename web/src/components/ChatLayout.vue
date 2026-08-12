@@ -903,6 +903,10 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  /* PaneHeader must respond to the space left after the resizable sidebar,
+     not only to the browser viewport width. */
+  container-type: inline-size;
+  container-name: chat-pane;
 }
 
 .empty-shell {

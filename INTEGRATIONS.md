@@ -19,6 +19,17 @@ codex login status           # credential-free readiness check
 
 The bundled CLI inside the ChatGPT desktop app is detected on macOS as well. Its updates follow the desktop app; standalone installs use `codex update`. `CIAO_CODEX_BIN` can point at an absolute Codex binary when launchd cannot discover it. Readiness also generates the installed app-server schema in a temporary directory and verifies the protocol methods Ciaobot needs, so a logged-in but incompatible CLI is reported as needing an update. Ciaobot gets the account-specific model catalog and reasoning efforts from `model/list`; no OpenAI API key is required for Codex subscription chats. The Ciaobot `fable` preset selects the discovered Sol-family Codex model with Ultra reasoning effort. Ciaobot itself no longer uses an OpenAI API key at all — voice moved on-device and nothing else read it.
 
+### Live eval provider access
+
+`ciao eval` uses the selected provider's existing CLI authentication and the
+same managed chat path as a normal turn. Claude runs require a working Claude
+Code login. Codex runs require `codex login`; no `OPENAI_API_KEY` is needed for
+subscription-backed Codex chats. Live evals may call external tools and spend
+provider tokens, so run the opt-in fixtures in `tests/fixtures/evals/`
+individually and write reports to a disposable directory. Normal pytest and CI
+coverage for the eval framework mocks provider execution and requires no
+provider credentials.
+
 ### `gws`: Google Workspace CLI
 
 Required by `gws-*` and `recipe-*` skills (Gmail, Drive, Docs, Sheets, Slides, Calendar, Tasks, Forms).
