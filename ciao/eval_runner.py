@@ -451,6 +451,50 @@ def _read_jsonl(path: Path, chat_id: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _read_jsonl_after(path: Path, chat_id: str, *, offset: int) -> list[dict[str, Any]]:
+    """Return chat_id-matching rows appended to ``path`` after ``offset``.
+
+    Used to isolate telemetry to a single measured turn: warm and multi-turn
+    scenarios reuse the same chat, so reading from byte zero would mix in
+    rows from warm-up and earlier turns and let required-tool or
+    memory-source assertions pass even when the measured turn never acted.
+    The telemetry writers append one JSON object per line, so byte offset
+    matches line offset for these files.
+    """
+    if not path.exists():
+        return []
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    if offset < 0 or offset >= size:
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("chat_id") == chat_id:
+                    rows.append(row)
+    except OSError:
+        return []
+    return rows
+
+
+def _jsonl_offset(path: Path) -> int:
+    """Return the byte offset where new ``path`` writes would start, or 0."""
+    if not path.exists():
+        return 0
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 def _has_terminal_assistant(messages: Iterable[dict[str, Any]]) -> bool:
     return any(
         row.get("role") == "assistant"
@@ -554,6 +598,8 @@ def run_chat_turn(
     chat_id = ""
     provider_error = False
     completed = False
+    agent_offset = 0
+    mcp_offset = 0
     try:
         try:
             if owns_server:
@@ -565,6 +611,9 @@ def run_chat_turn(
                 if prepared_chat is not None
                 else time.perf_counter()
             )
+            runtime = server.runtime
+            agent_offset = _jsonl_offset(runtime / "agent_tool_calls.jsonl")
+            mcp_offset = _jsonl_offset(runtime / "mcp_tool_calls.jsonl")
             server.send(chat_id, spec.prompt)
             messages = server.wait_for_turn(chat_id, spec.turn_timeout_s)
         except Exception as exc:  # noqa: BLE001 - evaluations preserve failed runs
@@ -576,8 +625,13 @@ def run_chat_turn(
         )
         if provider_error:
             error = error or final_text or "provider error"
-        provider_rows = _read_jsonl(server.runtime / "agent_tool_calls.jsonl", chat_id)
-        mcp_rows = _read_jsonl(server.runtime / "mcp_tool_calls.jsonl", chat_id)
+        runtime = server.runtime
+        provider_rows = _read_jsonl_after(
+            runtime / "agent_tool_calls.jsonl", chat_id, offset=agent_offset
+        )
+        mcp_rows = _read_jsonl_after(
+            runtime / "mcp_tool_calls.jsonl", chat_id, offset=mcp_offset
+        )
         elapsed_ms = (
             int((observed_at - started) * 1000)
             if started is not None

@@ -129,10 +129,26 @@ def test_observation_collects_effective_model_usage_tokens_and_tools(
         )(),
     )
     monkeypatch.setattr(server, "send", lambda _chat_id, _prompt: None)
-    monkeypatch.setattr(
-        server,
-        "wait_for_turn",
-        lambda _chat_id, _timeout: [
+
+    def append_turn_telemetry(_chat_id, _timeout):
+        # Append during wait_for_turn to mimic the real telemetry writers;
+        # the offset captured before send() must include these new rows,
+        # while pre-existing rows from earlier turns must not.
+        with (runtime / "agent_tool_calls.jsonl").open("a", encoding="utf-8") as h:
+            h.write(
+                json.dumps({"chat_id": "chat-1", "tool": "Read"}) + "\n"
+                + json.dumps({"chat_id": "other", "tool": "Ignored"}) + "\n"
+            )
+        with (runtime / "mcp_tool_calls.jsonl").open("a", encoding="utf-8") as h:
+            h.write(
+                json.dumps({"chat_id": "chat-1", "tool": "memory_add", "status": "ok"})
+                + "\n"
+                + json.dumps(
+                    {"chat_id": "chat-1", "tool": "vault_read", "status": "error"}
+                )
+                + "\n"
+            )
+        return [
             {
                 "role": "assistant",
                 "content": "done",
@@ -145,8 +161,9 @@ def test_observation_collects_effective_model_usage_tokens_and_tools(
                     "output_tokens": "5",
                 },
             }
-        ],
-    )
+        ]
+
+    monkeypatch.setattr(server, "wait_for_turn", append_turn_telemetry)
 
     observation = run_chat_turn(server, _spec())
 
@@ -158,6 +175,64 @@ def test_observation_collects_effective_model_usage_tokens_and_tools(
     assert observation.provider_tools == ("Read",)
     assert observation.mcp_tools == ("memory_add", "vault_read")
     assert observation.mcp_errors == 1
+
+
+def test_observation_excludes_telemetry_from_prior_turns_on_same_chat(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-turn telemetry must skip rows written before send() in the same chat."""
+
+    server = _server(tmp_path)
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    # Pre-existing rows from an earlier turn on the same chat must NOT leak in.
+    (runtime / "agent_tool_calls.jsonl").write_text(
+        json.dumps({"chat_id": "chat-1", "tool": "PriorRead"}) + "\n",
+        encoding="utf-8",
+    )
+    (runtime / "mcp_tool_calls.jsonl").write_text(
+        json.dumps({"chat_id": "chat-1", "tool": "prior_tool", "status": "ok"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        server, "start", lambda: setattr(server, "process", _FakeProcess())
+    )
+    monkeypatch.setattr(server, "stop", lambda: setattr(server, "process", None))
+    monkeypatch.setattr(
+        server,
+        "prepare_chat",
+        lambda _spec: type(
+            "Prepared",
+            (),
+            {
+                "project_id": "project-1",
+                "project_name": "Eval",
+                "chat_id": "chat-1",
+                "chat_title": "Eval",
+            },
+        )(),
+    )
+    monkeypatch.setattr(server, "send", lambda _chat_id, _prompt: None)
+
+    def append_turn_telemetry(_chat_id, _timeout):
+        with (runtime / "agent_tool_calls.jsonl").open("a", encoding="utf-8") as h:
+            h.write(json.dumps({"chat_id": "chat-1", "tool": "CurrentRead"}) + "\n")
+        with (runtime / "mcp_tool_calls.jsonl").open("a", encoding="utf-8") as h:
+            h.write(
+                json.dumps({"chat_id": "chat-1", "tool": "current_tool", "status": "ok"})
+                + "\n"
+            )
+        return [{"role": "assistant", "content": "done", "duration_ms": 1}]
+
+    monkeypatch.setattr(server, "wait_for_turn", append_turn_telemetry)
+
+    observation = run_chat_turn(server, _spec())
+
+    assert observation.provider_tools == ("CurrentRead",)
+    assert observation.mcp_tools == ("current_tool",)
+    assert observation.mcp_errors == 0
 
 
 def test_claude_and_codex_token_totals_keep_existing_cache_semantics() -> None:

@@ -178,6 +178,7 @@ def test_compare_summaries_flags_quality_and_advisory_regressions() -> None:
                 "scenario": "one",
                 "provider": "claude",
                 "mode": "cold",
+                "repetitions": 3,
                 "passed": 3,
                 "elapsed_ms": {"median": 100},
                 "cache_read_share": {"median": 0.8},
@@ -190,6 +191,7 @@ def test_compare_summaries_flags_quality_and_advisory_regressions() -> None:
                 "scenario": "one",
                 "provider": "claude",
                 "mode": "cold",
+                "repetitions": 3,
                 "passed": 2,
                 "elapsed_ms": {"median": 120},
                 "cache_read_share": {"median": 0.6},
@@ -202,6 +204,112 @@ def test_compare_summaries_flags_quality_and_advisory_regressions() -> None:
     assert "quality_regression" in kinds
     assert "advisory_regression" in kinds
     assert "cache_regression" in kinds
+
+
+def test_compare_summaries_compares_pass_rate_across_repeat_counts() -> None:
+    """Different --repeats values must not produce pass-count false regressions."""
+
+    def run(baseline_passed: int, baseline_repeats: int, current_passed: int, current_repeats: int):
+        baseline = {
+            "groups": [
+                {
+                    "scenario": "one",
+                    "provider": "claude",
+                    "mode": "cold",
+                    "repetitions": baseline_repeats,
+                    "passed": baseline_passed,
+                    "elapsed_ms": {"median": 100},
+                    "cache_read_share": {"median": 0.5},
+                }
+            ]
+        }
+        current = {
+            "groups": [
+                {
+                    "scenario": "one",
+                    "provider": "claude",
+                    "mode": "cold",
+                    "repetitions": current_repeats,
+                    "passed": current_passed,
+                    "elapsed_ms": {"median": 100},
+                    "cache_read_share": {"median": 0.5},
+                }
+            ]
+        }
+        return compare_summaries(baseline, current)
+
+    # 3/3 vs 2/2 same rate -> no quality regression.
+    assert all(
+        flag["kind"] != "quality_regression"
+        for flag in run(3, 3, 2, 2)["flags"]
+    )
+    # 2/2 vs 1/3 strictly worse -> quality regression.
+    assert any(
+        flag["kind"] == "quality_regression"
+        for flag in run(2, 2, 1, 3)["flags"]
+    )
+    # 3/3 vs 2/2 same rate -> no quality regression.
+    assert all(
+        flag["kind"] != "quality_regression"
+        for flag in run(3, 3, 2, 2)["flags"]
+    )
+    # 2/3 baseline vs 2/2 current is an improvement (1.0 > 0.667) -> no regression.
+    assert all(
+        flag["kind"] != "quality_regression"
+        for flag in run(2, 3, 2, 2)["flags"]
+    )
+    # 3/3 baseline vs 1/2 current is a regression (0.5 < 1.0) -> quality_regression.
+    assert any(
+        flag["kind"] == "quality_regression"
+        for flag in run(3, 3, 1, 2)["flags"]
+    )
+
+
+def test_compare_summaries_uses_provider_appropriate_cache_metric() -> None:
+    """A real Codex cache-hit drop must surface even when cache_read_share is null."""
+
+    baseline = {
+        "groups": [
+            {
+                "scenario": "one",
+                "provider": "codex",
+                "mode": "cold",
+                "repetitions": 3,
+                "passed": 3,
+                "elapsed_ms": {"median": 100},
+                "cache_read_share": {"median": None},
+                "cached_input_share": {"median": 0.5},
+            }
+        ]
+    }
+    current = {
+        "groups": [
+            {
+                "scenario": "one",
+                "provider": "codex",
+                "mode": "cold",
+                "repetitions": 3,
+                "passed": 3,
+                "elapsed_ms": {"median": 100},
+                "cache_read_share": {"median": None},
+                "cached_input_share": {"median": 0.2},
+            }
+        ]
+    }
+
+    kinds = {flag["kind"] for flag in compare_summaries(baseline, current)["flags"]}
+    assert "cache_regression" in kinds
+
+    # Claude rows that lack cache_read_share by accident still find the metric.
+    claude_baseline = dict(baseline["groups"][0], provider="claude", cache_read_share={"median": 0.8}, cached_input_share={"median": None})
+    claude_current = dict(current["groups"][0], provider="claude", cache_read_share={"median": 0.6}, cached_input_share={"median": None})
+    claude_kinds = {
+        flag["kind"]
+        for flag in compare_summaries(
+            {"groups": [claude_baseline]}, {"groups": [claude_current]}
+        )["flags"]
+    }
+    assert "cache_regression" in claude_kinds
 
 
 def test_eval_compare_cli_is_advisory(tmp_path: Path) -> None:

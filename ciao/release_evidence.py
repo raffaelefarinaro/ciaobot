@@ -380,6 +380,53 @@ def summarize_values(values: Iterable[float]) -> dict[str, float | int | None]:
     }
 
 
+def _pass_rate(group: Mapping[str, Any]) -> float | None:
+    """Return ``passed / repetitions`` for a comparison group, or None.
+
+    Comparing raw ``passed`` across scorecards produced with different
+    ``--repeats`` is misleading (3/3 vs 2/2 reads as a regression; 2/2 vs
+    2/3 reads as a pass). A missing or zero denominator is treated as
+    undefined so it is never compared.
+    """
+    repetitions = group.get("repetitions")
+    if not isinstance(repetitions, int) or repetitions <= 0:
+        return None
+    passed = group.get("passed", 0)
+    try:
+        return float(passed) / repetitions
+    except (TypeError, ValueError):
+        return None
+
+
+def _cache_metric(group: Mapping[str, Any]) -> float | None:
+    """Return the provider-appropriate cache-hit median for a group, or None.
+
+    Claude populates ``cache_read_share`` and Codex populates
+    ``cached_input_share``; the opposite field is null and a naive
+    ``cache_read_share`` lookup silently lets Codex cache regressions
+    pass. The provider tag is on each group, but if it is missing or
+    unknown, fall back to whichever field carries a real number.
+    """
+    provider = str(group.get("provider") or "").lower()
+    if provider == "claude":
+        value = group.get("cache_read_share", {}).get("median")
+        if isinstance(value, (int, float)):
+            return float(value)
+        value = group.get("cached_input_share", {}).get("median")
+        return float(value) if isinstance(value, (int, float)) else None
+    if provider == "codex":
+        value = group.get("cached_input_share", {}).get("median")
+        if isinstance(value, (int, float)):
+            return float(value)
+        value = group.get("cache_read_share", {}).get("median")
+        return float(value) if isinstance(value, (int, float)) else None
+    for field_name in ("cached_input_share", "cache_read_share"):
+        value = group.get(field_name, {}).get("median")
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -684,7 +731,9 @@ def compare_summaries(
             continue
         old = before[key]
         new = after[key]
-        if new.get("passed", 0) < old.get("passed", 0):
+        old_pass_rate = _pass_rate(old)
+        new_pass_rate = _pass_rate(new)
+        if new_pass_rate < old_pass_rate:
             flags.append({"kind": "quality_regression", "key": list(key)})
         for field_name in ("elapsed_ms", "provider_duration_ms", "input_tokens", "output_tokens", "context_pct"):
             old_value = old.get(field_name, {}).get("median")
@@ -714,8 +763,8 @@ def compare_summaries(
             and new_leakage > old_leakage
         ):
             flags.append({"kind": "memory_leakage_regression", "key": list(key)})
-        old_cache = old.get("cache_read_share", {}).get("median")
-        new_cache = new.get("cache_read_share", {}).get("median")
+        old_cache = _cache_metric(old)
+        new_cache = _cache_metric(new)
         if isinstance(old_cache, (int, float)) and isinstance(new_cache, (int, float)):
             if old_cache - new_cache > 0.10:
                 flags.append({"kind": "cache_regression", "key": list(key)})
