@@ -309,8 +309,9 @@ context/cache/token/latency metrics, tool and memory-source summaries, and
 structural skill/MCP changes, but never prompts, model answers, vault content,
 tool arguments, or credentials. Performance and cache regressions are
 advisory; missing provider coverage and correctness failures stop release
-preparation. Merging the release PR publishes the report in the GitHub release
-notes and uploads the evidence as release assets.
+preparation. The evidence remains reviewable in the release PR and worktree;
+the release owner may attach or link it manually. No CI job runs or publishes
+the scorecard.
 
 Synthetic vault fixtures are the default. A local, sanitized vault can be used
 for a private operator run with `--vault-root /path/to/vault`; external source
