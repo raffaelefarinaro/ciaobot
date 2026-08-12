@@ -8,9 +8,18 @@ import pytest
 from ciao.eval_runner import (
     ChatRunSpec,
     IsolatedChatServer,
+    PreparedChat,
     run_chat_turn,
     token_count,
 )
+
+
+class _FakeProcess:
+    def __init__(self, returncode: int | None = None) -> None:
+        self.returncode = returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
 
 
 def _spec(*, provider: str = "claude") -> ChatRunSpec:
@@ -58,7 +67,9 @@ def test_chat_run_sends_explicit_provider_model_and_surface(
         raise AssertionError(path)
 
     monkeypatch.setattr("ciao.eval_runner._json_request", request)
-    monkeypatch.setattr(server, "start", lambda: setattr(server, "process", object()))
+    monkeypatch.setattr(
+        server, "start", lambda: setattr(server, "process", _FakeProcess())
+    )
     monkeypatch.setattr(server, "stop", lambda: setattr(server, "process", None))
     monkeypatch.setattr(
         server,
@@ -99,7 +110,9 @@ def test_observation_collects_effective_model_usage_tokens_and_tools(
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(server, "start", lambda: setattr(server, "process", object()))
+    monkeypatch.setattr(
+        server, "start", lambda: setattr(server, "process", _FakeProcess())
+    )
     monkeypatch.setattr(server, "stop", lambda: setattr(server, "process", None))
     monkeypatch.setattr(
         server,
@@ -167,7 +180,7 @@ def test_isolated_server_is_closed_after_timeout(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server = _server(tmp_path)
-    server.process = object()  # type: ignore[assignment]
+    server.process = _FakeProcess()  # type: ignore[assignment]
     stopped = False
 
     def stop() -> None:
@@ -198,7 +211,7 @@ def test_isolated_server_is_closed_after_provider_error(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server = _server(tmp_path)
-    server.process = object()  # type: ignore[assignment]
+    server.process = _FakeProcess()  # type: ignore[assignment]
     stopped = False
 
     def stop() -> None:
@@ -222,3 +235,237 @@ def test_isolated_server_is_closed_after_provider_error(
 
     assert observation.error == "provider failed"
     assert stopped is True
+
+
+def test_startup_failure_closes_process_and_log(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class ExitedProcess:
+        returncode = 17
+
+        def poll(self) -> int:
+            return self.returncode
+
+    server = _server(tmp_path)
+    monkeypatch.setattr("ciao.eval_runner._free_port", lambda: 9876)
+    monkeypatch.setattr("ciao.eval_runner._copy_packaged_assets", lambda _root: None)
+    monkeypatch.setattr(
+        "ciao.eval_runner.subprocess.Popen",
+        lambda *_args, **_kwargs: ExitedProcess(),
+    )
+
+    with pytest.raises(RuntimeError, match="server exited with 17"):
+        server.start()
+
+    assert server.process is None
+    assert server._log_handle is None
+
+
+def test_startup_timeout_terminates_child_and_closes_log(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class LiveProcess:
+        pid = 42
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float) -> int:
+            self.returncode = 0
+            return 0
+
+    server = _server(tmp_path)
+    server.startup_timeout = 0.5
+    monotonic = iter([0.0, 1.0])
+    monkeypatch.setattr("ciao.eval_runner._free_port", lambda: 9876)
+    monkeypatch.setattr("ciao.eval_runner._copy_packaged_assets", lambda _root: None)
+    monkeypatch.setattr(
+        "ciao.eval_runner.subprocess.Popen",
+        lambda *_args, **_kwargs: LiveProcess(),
+    )
+    monkeypatch.setattr("ciao.eval_runner.time.monotonic", lambda: next(monotonic))
+    monkeypatch.setattr("ciao.eval_runner.os.killpg", lambda _pid, _signal: None)
+
+    with pytest.raises(RuntimeError, match="Timed out starting"):
+        server.start()
+
+    assert server.process is None
+    assert server._log_handle is None
+
+
+def test_terminated_process_is_not_running_and_direct_run_restarts_it(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Process:
+        def __init__(self, returncode: int | None) -> None:
+            self.returncode = returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    server = _server(tmp_path)
+    server.process = Process(9)  # type: ignore[assignment]
+    starts = 0
+
+    def start() -> None:
+        nonlocal starts
+        starts += 1
+        server.process = Process(None)  # type: ignore[assignment]
+
+    monkeypatch.setattr(server, "start", start)
+    monkeypatch.setattr(server, "stop", lambda: setattr(server, "process", None))
+    monkeypatch.setattr(
+        server,
+        "prepare_chat",
+        lambda _spec: PreparedChat("project", "Eval", "chat", "Eval", 0),
+    )
+    monkeypatch.setattr(server, "send", lambda _chat_id, _prompt: None)
+    monkeypatch.setattr(
+        server,
+        "wait_for_turn",
+        lambda _chat_id, _timeout: [
+            {"role": "assistant", "content": "done", "duration_ms": 1}
+        ],
+    )
+
+    assert server.is_running is False
+
+    observation = run_chat_turn(server, _spec())
+
+    assert starts == 1
+    assert observation.final_text == "done"
+
+
+def test_start_closes_stale_log_before_restarting_dead_process(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale_log = (tmp_path / "stale.log").open("ab")
+    replacement = _FakeProcess()
+    server = _server(tmp_path)
+    server.process = _FakeProcess(9)  # type: ignore[assignment]
+    server._log_handle = stale_log
+    monkeypatch.setattr("ciao.eval_runner._free_port", lambda: 9876)
+    monkeypatch.setattr("ciao.eval_runner._copy_packaged_assets", lambda _root: None)
+    monkeypatch.setattr(
+        "ciao.eval_runner.subprocess.Popen",
+        lambda *_args, **_kwargs: replacement,
+    )
+    monkeypatch.setattr(
+        "ciao.eval_runner._json_request",
+        lambda *_args, **_kwargs: {"enabled": True, "bound": True},
+    )
+
+    server.start()
+
+    assert stale_log.closed is True
+    assert server.process is replacement
+    replacement.returncode = 0
+    server.stop()
+
+
+def test_wait_for_turn_observes_fast_terminal_response_without_active_poll(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = _server(tmp_path)
+    server.process = _FakeProcess()  # type: ignore[assignment]
+    calls: list[str] = []
+
+    def request(
+        _base_url: str,
+        path: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        timeout: float = 30,
+    ) -> Any:
+        calls.append(path)
+        if path == "/api/active-chats":
+            return {"active_chat_ids": []}
+        if path == "/api/chats/chat/messages":
+            return [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "done", "duration_ms": 4},
+            ]
+        raise AssertionError(path)
+
+    monotonic = iter([0.0, 0.1])
+    monkeypatch.setattr("ciao.eval_runner._json_request", request)
+    monkeypatch.setattr("ciao.eval_runner.time.monotonic", lambda: next(monotonic))
+
+    messages = server.wait_for_turn("chat", 3)
+
+    assert messages[-1]["content"] == "done"
+    assert calls == ["/api/active-chats", "/api/chats/chat/messages"]
+
+
+def test_direct_run_elapsed_time_starts_at_prompt_dispatch(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class LiveProcess:
+        def poll(self) -> None:
+            return None
+
+    server = _server(tmp_path)
+    clock = 0.0
+    prepared_chat = PreparedChat("project", "Eval", "chat", "Eval", 99.0)
+
+    def start() -> None:
+        nonlocal clock
+        clock = 50.0
+        server.process = LiveProcess()  # type: ignore[assignment]
+
+    def prepare_chat(_spec: ChatRunSpec) -> PreparedChat:
+        nonlocal clock
+        clock = 100.0
+        return prepared_chat
+
+    def send(_chat_id: str, _prompt: str) -> None:
+        nonlocal clock
+        clock = 100.1
+
+    def wait(_chat_id: str, _timeout: float) -> list[dict[str, Any]]:
+        nonlocal clock
+        clock = 100.4
+        return [{"role": "assistant", "content": "done", "duration_ms": 2}]
+
+    monkeypatch.setattr(server, "start", start)
+    monkeypatch.setattr(server, "stop", lambda: setattr(server, "process", None))
+    monkeypatch.setattr(server, "prepare_chat", prepare_chat)
+    monkeypatch.setattr(server, "send", send)
+    monkeypatch.setattr(server, "wait_for_turn", wait)
+    monkeypatch.setattr("ciao.eval_runner.time.perf_counter", lambda: clock)
+
+    observation = run_chat_turn(
+        server,
+        _spec(),
+    )
+
+    assert observation.elapsed_ms == 400
+
+
+def test_prepared_run_elapsed_time_includes_time_since_chat_preparation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = _server(tmp_path)
+    server.process = _FakeProcess()  # type: ignore[assignment]
+    clock = 100.0
+    prepared_chat = PreparedChat("project", "Eval", "chat", "Eval", 99.0)
+
+    def send(_chat_id: str, _prompt: str) -> None:
+        nonlocal clock
+        clock = 100.1
+
+    def wait(_chat_id: str, _timeout: float) -> list[dict[str, Any]]:
+        nonlocal clock
+        clock = 100.4
+        return [{"role": "assistant", "content": "done", "duration_ms": 2}]
+
+    monkeypatch.setattr(server, "send", send)
+    monkeypatch.setattr(server, "wait_for_turn", wait)
+    monkeypatch.setattr("ciao.eval_runner.time.perf_counter", lambda: clock)
+
+    observation = run_chat_turn(server, _spec(), prepared_chat=prepared_chat)
+
+    # Prepared benchmark timing intentionally includes fixture time after prepare_chat().
+    assert observation.elapsed_ms == 1400

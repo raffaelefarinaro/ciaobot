@@ -40,6 +40,8 @@ ciao package-smoke --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
 ciao auth codex --print-only               # show Codex / ChatGPT login command
 ciao auth ollama                           # run provider login helper
+ciao scaffold eval example --workspace .  # create evals/example.json
+ciao eval --suite evals/example.json --workspace .
 ```
 
 ### macOS venv workarounds
@@ -232,6 +234,52 @@ cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
 
+### Declarative live evaluations
+
+Create a starter suite, then run it against the current workspace:
+
+```bash
+ciao scaffold eval example --workspace .
+ciao eval --suite evals/example.json --workspace .
+```
+
+The suite is schema-version 1 JSON. It declares routing defaults and ordered
+scenarios; each scenario selects exactly one `skill` or `subagent` target and
+contains deterministic assertions such as output text, regular expressions,
+and required or forbidden tools. Use `--filter` to select scenarios and
+`--provider`, `--model`, `--output`, `--turn-timeout`, or `--startup-timeout`
+to override execution settings. Routing precedence is CLI override, scenario,
+then suite default.
+
+Each scenario runs in a fresh temporary workspace and isolated Ciaobot server.
+Only the selected target is staged, workspace-owned targets take precedence
+over packaged targets, and the source workspace is not modified. Path and
+symlink boundary checks reject targets that escape their canonical source.
+
+The normal tests mock provider execution and require no credentials:
+
+```bash
+pytest -q tests/test_evals.py tests/test_eval_targets.py \
+  tests/test_eval_runner.py tests/test_eval_cli.py
+```
+
+Two opt-in fixtures exercise real provider credentials and may spend tokens:
+
+```bash
+ciao eval --suite tests/fixtures/evals/skill-smoke.json \
+  --workspace . --provider claude --output /tmp/ciao-eval-claude-skill
+
+ciao eval --suite tests/fixtures/evals/subagent-smoke.json \
+  --workspace . --provider codex --model sonnet \
+  --output /tmp/ciao-eval-codex-subagent
+```
+
+After every scenario, the output directory contains atomic `results.json` and
+`REPORT.md` snapshots. Results include status, assertion outcomes, output or
+error, routing, selected/effective model, normalized tools, usage, token
+totals, and timings. Live runs use the existing provider login and are not part
+of the normal credential-free test suite.
+
 The Settings → Automations list is registry-driven: `GET /api/automation` carries
 each job's static `trigger` sentence, `schedule_id`, `one_time`, `uses_model`,
 and `produces_outcome`. Do not infer those from a job's latest run — never-run
@@ -366,9 +414,7 @@ workspace/project/chat access, and have focused protocol plus domain tests.
 Self-affecting operations must defer until the caller chat drains. Provider
 tokens must never enter the model's shell environment or telemetry arguments.
 
-See `docs/MCP.md` for the catalog, Claude/Codex configuration, and the release
-benchmark/promotion rule. Smoke/partial results are diagnostic only; promotion
-requires all 8 scenarios and at least five repeats.
+See `docs/MCP.md` for the catalog and Claude/Codex configuration.
 
 ## Change guidelines
 

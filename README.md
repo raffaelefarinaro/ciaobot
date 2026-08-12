@@ -209,6 +209,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 - Stock skills, subagents, and slash commands ship with the app; same-named workspace versions override them.
 - Install skills from GitHub repositories; they refresh automatically on restart.
+- Run declarative live evaluations for one skill or subagent through an isolated full chat, with deterministic output and tool assertions.
 - A weekly skill-evolution routine proposes improvements from real usage — reviewable proposals, never silent edits.
 
 **Providers and models**

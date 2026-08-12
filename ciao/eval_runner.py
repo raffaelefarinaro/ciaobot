@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -49,6 +50,8 @@ class ChatObservation:
 
 @dataclass(frozen=True, slots=True)
 class PreparedChat:
+    """A chat prepared before benchmark fixtures, with their timing origin."""
+
     project_id: str
     project_name: str
     chat_id: str
@@ -114,12 +117,18 @@ class IsolatedChatServer:
         provider: Provider,
         workspace_name: str,
         startup_timeout: float,
+        install_packaged_assets: bool = True,
+        require_subagent_synthesis: bool = False,
+        subagent_discovery_polls: int = 3,
     ) -> None:
         self.root = root
         self.surface = surface
         self.provider = provider
         self.workspace_name = workspace_name
         self.startup_timeout = startup_timeout
+        self.install_packaged_assets = install_packaged_assets
+        self.require_subagent_synthesis = require_subagent_synthesis
+        self.subagent_discovery_polls = max(1, subagent_discovery_polls)
         self.port = 0
         self.base_url = ""
         self.process: subprocess.Popen[bytes] | None = None
@@ -138,13 +147,19 @@ class IsolatedChatServer:
 
     @property
     def is_running(self) -> bool:
-        return self.process is not None
+        process = self.process
+        return process is not None and process.poll() is None
 
     def start(self) -> None:
+        if self.is_running:
+            return
+        if self.process is not None or self._log_handle is not None:
+            self.stop()
         self.port = _free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.root.mkdir(parents=True, exist_ok=True)
-        _copy_packaged_assets(self.root)
+        if self.install_packaged_assets:
+            _copy_packaged_assets(self.root)
         (self.root / "memory-vault" / self.workspace_name).mkdir(
             parents=True, exist_ok=True
         )
@@ -177,33 +192,38 @@ class IsolatedChatServer:
         )
         log_path = self.root / "server.log"
         self._log_handle = log_path.open("ab")
-        self.process = subprocess.Popen(
-            [sys.executable, "-m", "ciao.cli", "run"],
-            cwd=self.root,
-            env=env,
-            stdout=self._log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        deadline = time.monotonic() + self.startup_timeout
-        last_error = ""
-        while time.monotonic() < deadline:
-            process = self.process
-            if process is not None and process.poll() is not None:
-                raise RuntimeError(
-                    f"{self.surface} server exited with {process.returncode}; "
-                    f"see {log_path}"
-                )
-            try:
-                status = _json_request(self.base_url, "/api/mcp/status", timeout=2)
-                if status.get("enabled") and status.get("bound"):
-                    return
-            except RuntimeError as exc:
-                last_error = str(exc)
-            time.sleep(0.25)
-        raise RuntimeError(
-            f"Timed out starting {self.surface} server: {last_error}; see {log_path}"
-        )
+        try:
+            self.process = subprocess.Popen(
+                [sys.executable, "-m", "ciao.cli", "run"],
+                cwd=self.root,
+                env=env,
+                stdout=self._log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + self.startup_timeout
+            last_error = ""
+            while time.monotonic() < deadline:
+                process = self.process
+                if process is not None and process.poll() is not None:
+                    raise RuntimeError(
+                        f"{self.surface} server exited with {process.returncode}; "
+                        f"see {log_path}"
+                    )
+                try:
+                    status = _json_request(self.base_url, "/api/mcp/status", timeout=2)
+                    if status.get("enabled") and status.get("bound"):
+                        return
+                except RuntimeError as exc:
+                    last_error = str(exc)
+                time.sleep(0.25)
+            raise RuntimeError(
+                f"Timed out starting {self.surface} server: {last_error}; "
+                f"see {log_path}"
+            )
+        except BaseException:
+            self.stop()
+            raise
 
     def stop(self) -> None:
         process = self.process
@@ -287,6 +307,9 @@ class IsolatedChatServer:
         )
 
     def wait_for_turn(self, chat_id: str, timeout: float) -> list[dict[str, Any]]:
+        if self.require_subagent_synthesis:
+            return self._wait_for_subagent_synthesis(chat_id, timeout)
+
         deadline = time.monotonic() + timeout
         seen_active = False
         while time.monotonic() < deadline:
@@ -294,16 +317,122 @@ class IsolatedChatServer:
             ids = active.get("active_chat_ids") or []
             if chat_id in ids:
                 seen_active = True
-            elif seen_active:
-                time.sleep(0.2)
+            else:
+                if seen_active:
+                    time.sleep(0.2)
                 messages: list[dict[str, Any]] = _json_request(
                     self.base_url, f"/api/chats/{chat_id}/messages", timeout=15
                 )
-                return messages
-            elif self.process is not None and self.process.poll() is not None:
+                if _has_terminal_assistant(messages):
+                    return messages
+            if self.process is not None and self.process.poll() is not None:
                 raise RuntimeError(f"server exited with {self.process.returncode}")
             time.sleep(0.25)
         raise TimeoutError(f"chat {chat_id} did not finish within {timeout:.0f}s")
+
+    def _wait_for_subagent_synthesis(
+        self,
+        chat_id: str,
+        timeout: float,
+    ) -> list[dict[str, Any]]:
+        """Wait for persisted subagent completion and the parent follow-up.
+
+        ``active-chats`` alone has an intentional watcher-to-drain gap. The
+        subagent endpoint persists dispatch status, while chat history places
+        the completion notification before the synthesis assistant message.
+        Those two observable facts form the completion contract.
+        """
+        deadline = time.monotonic() + timeout
+        assistant_baseline: tuple[str, ...] = ()
+        saw_subagent = False
+        stable_parent_signatures: tuple[str, ...] | None = None
+        stable_parent_polls = 0
+        while time.monotonic() < deadline:
+            active = _json_request(self.base_url, "/api/active-chats", timeout=5)
+            is_active = chat_id in (active.get("active_chat_ids") or [])
+            messages: list[dict[str, Any]] = _json_request(
+                self.base_url, f"/api/chats/{chat_id}/messages", timeout=15
+            )
+            subagents_raw = _json_request(
+                self.base_url, f"/api/chats/{chat_id}/subagents", timeout=15
+            )
+            subagents = (
+                [row for row in subagents_raw if isinstance(row, dict)]
+                if isinstance(subagents_raw, list)
+                else []
+            )
+            if subagents:
+                saw_subagent = True
+            async_subagents = [
+                row for row in subagents if bool(row.get("is_async"))
+            ]
+            signatures = _assistant_signatures(messages)
+
+            # A model may ignore the delegation instruction. Once the parent
+            # is terminal and unchanged across a bounded set of polls, with no
+            # persisted subagent record ever observed, return that response so
+            # deterministic assertions can report the routing failure.
+            if (
+                not saw_subagent
+                and not is_active
+                and _has_terminal_assistant(messages)
+            ):
+                if signatures == stable_parent_signatures:
+                    stable_parent_polls += 1
+                else:
+                    stable_parent_signatures = signatures
+                    stable_parent_polls = 1
+                if stable_parent_polls >= self.subagent_discovery_polls:
+                    return messages
+            else:
+                stable_parent_signatures = None
+                stable_parent_polls = 0
+
+            # Foreground delegation completes inside the parent turn. There
+            # is no between-turn synthesis to wait for. Require explicit
+            # metadata on every entry so a briefly unclassified background
+            # dispatch cannot be mistaken for foreground work.
+            explicitly_foreground = bool(subagents) and all(
+                row.get("is_async") is False
+                and str(row.get("status") or "").casefold()
+                in {"completed", "failed", "errored", "interrupted"}
+                for row in subagents
+            )
+            if explicitly_foreground:
+                if not is_active and _has_terminal_assistant(messages):
+                    return messages
+
+            if async_subagents:
+                running = any(
+                    str(row.get("status") or "").casefold()
+                    not in {"completed", "failed", "errored", "interrupted"}
+                    for row in async_subagents
+                )
+                if running:
+                    # This is the interim parent sequence. A valid synthesis
+                    # must add a later assistant response.
+                    assistant_baseline = signatures
+                elif not is_active:
+                    if _has_assistant_after_subagent_completion(messages):
+                        return messages
+                    if (
+                        assistant_baseline
+                        and signatures != assistant_baseline
+                        and len(signatures) > len(assistant_baseline)
+                    ):
+                        return messages
+                    # Codex keeps the parent collaboration turn open until its
+                    # children settle; it does not use Claude's nudge/drain.
+                    if self.provider == "codex" and _has_terminal_assistant(messages):
+                        return messages
+
+            if self.process is not None and self.process.poll() is not None:
+                raise RuntimeError(f"server exited with {self.process.returncode}")
+            time.sleep(0.25)
+        raise TimeoutError(
+            f"chat {chat_id} did not produce a post-subagent synthesis "
+            f"within {timeout:.0f}s"
+        )
 
 
 def _read_jsonl(path: Path, chat_id: str) -> list[dict[str, Any]]:
@@ -320,16 +449,58 @@ def _read_jsonl(path: Path, chat_id: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _has_terminal_assistant(messages: Iterable[dict[str, Any]]) -> bool:
+    return any(
+        row.get("role") == "assistant"
+        and (
+            row.get("duration_ms") is not None
+            or bool(row.get("is_error"))
+            or bool(row.get("effective_model"))
+            or isinstance(row.get("usage"), dict)
+        )
+        for row in messages
+    )
+
+
+def _assistant_signatures(
+    messages: Iterable[dict[str, Any]],
+) -> tuple[str, ...]:
+    return tuple(
+        str(row.get("content") or "")
+        for row in messages
+        if row.get("role") == "assistant"
+    )
+
+
+def _has_assistant_after_subagent_completion(
+    messages: Iterable[dict[str, Any]],
+) -> bool:
+    completion_seen = False
+    for row in messages:
+        content = str(row.get("content") or "")
+        if (
+            row.get("role") == "system"
+            and content.startswith("🤖 ")
+            and re.search(
+                r"\b(?:completed|finished|done|succeeded|failed)\b",
+                content,
+                re.IGNORECASE,
+            )
+        ):
+            completion_seen = True
+            continue
+        if completion_seen and row.get("role") == "assistant" and content.strip():
+            return True
+    return False
+
+
 def _assistant_result(
     messages: Iterable[dict[str, Any]],
 ) -> tuple[str, str, int | None, dict[str, str], bool]:
     assistant = [row for row in messages if row.get("role") == "assistant"]
     if not assistant:
         return "", "", None, {}, False
-    terminal = next(
-        (row for row in reversed(assistant) if row.get("duration_ms") is not None),
-        assistant[-1],
-    )
+    terminal = assistant[-1]
     duration = terminal.get("duration_ms")
     usage_raw = terminal.get("usage")
     usage = usage_raw if isinstance(usage_raw, dict) else {}
@@ -368,50 +539,66 @@ def run_chat_turn(
     *,
     prepared_chat: PreparedChat | None = None,
 ) -> ChatObservation:
-    """Run and observe one chat turn, closing servers started by this call."""
+    """Run and observe one turn, preserving direct and benchmark timing contracts.
+
+    Declarative two-argument runs measure prompt dispatch through terminal
+    observation. Prepared benchmark runs begin at ``PreparedChat.prepared_at``
+    so their existing wall-time metric continues to include fixture work.
+    """
     owns_server = not server.is_running
-    started = (
-        prepared_chat.prepared_at
-        if prepared_chat is not None
-        else time.perf_counter()
-    )
+    started: float | None = None
     messages: list[dict[str, Any]] = []
     error = ""
     chat_id = ""
+    provider_error = False
+    completed = False
     try:
-        if owns_server:
-            server.start()
-        prepared = prepared_chat or server.prepare_chat(spec)
-        chat_id = prepared.chat_id
-        server.send(chat_id, spec.prompt)
-        messages = server.wait_for_turn(chat_id, spec.turn_timeout_s)
-    except Exception as exc:  # noqa: BLE001 - evaluations preserve failed runs
-        error = str(exc)
-    finally:
-        if owns_server or error:
-            server.stop()
+        try:
+            if owns_server:
+                server.start()
+            prepared = prepared_chat or server.prepare_chat(spec)
+            chat_id = prepared.chat_id
+            started = (
+                prepared.prepared_at
+                if prepared_chat is not None
+                else time.perf_counter()
+            )
+            server.send(chat_id, spec.prompt)
+            messages = server.wait_for_turn(chat_id, spec.turn_timeout_s)
+        except Exception as exc:  # noqa: BLE001 - evaluations preserve failed runs
+            error = str(exc)
 
-    elapsed_ms = int((time.perf_counter() - started) * 1000)
-    final_text, effective_model, duration_ms, usage, provider_error = _assistant_result(
-        messages
-    )
-    if provider_error:
-        error = error or final_text or "provider error"
-        if server.is_running:
+        observed_at = time.perf_counter()
+        final_text, effective_model, duration_ms, usage, provider_error = (
+            _assistant_result(messages)
+        )
+        if provider_error:
+            error = error or final_text or "provider error"
+        provider_rows = _read_jsonl(server.runtime / "agent_tool_calls.jsonl", chat_id)
+        mcp_rows = _read_jsonl(server.runtime / "mcp_tool_calls.jsonl", chat_id)
+        elapsed_ms = (
+            int((observed_at - started) * 1000)
+            if started is not None
+            else 0
+        )
+        observation = ChatObservation(
+            scenario=spec.scenario,
+            selected_model=spec.model,
+            effective_model=effective_model or spec.model,
+            final_text=final_text,
+            error=error,
+            elapsed_ms=elapsed_ms,
+            provider_duration_ms=duration_ms,
+            usage=usage,
+            tokens=token_count(spec.provider, usage),
+            provider_tools=tuple(
+                str(row.get("tool") or "") for row in provider_rows
+            ),
+            mcp_tools=tuple(str(row.get("tool") or "") for row in mcp_rows),
+            mcp_errors=sum(row.get("status") != "ok" for row in mcp_rows),
+        )
+        completed = True
+        return observation
+    finally:
+        if owns_server or error or provider_error or not completed:
             server.stop()
-    provider_rows = _read_jsonl(server.runtime / "agent_tool_calls.jsonl", chat_id)
-    mcp_rows = _read_jsonl(server.runtime / "mcp_tool_calls.jsonl", chat_id)
-    return ChatObservation(
-        scenario=spec.scenario,
-        selected_model=spec.model,
-        effective_model=effective_model or spec.model,
-        final_text=final_text,
-        error=error,
-        elapsed_ms=elapsed_ms,
-        provider_duration_ms=duration_ms,
-        usage=usage,
-        tokens=token_count(spec.provider, usage),
-        provider_tools=tuple(str(row.get("tool") or "") for row in provider_rows),
-        mcp_tools=tuple(str(row.get("tool") or "") for row in mcp_rows),
-        mcp_errors=sum(row.get("status") != "ok" for row in mcp_rows),
-    )
