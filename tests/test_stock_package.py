@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from fnmatch import fnmatchcase
 from importlib import resources
 from pathlib import Path
 
@@ -97,8 +98,17 @@ def test_pyproject_packages_stock_data() -> None:
     pyproject = Path(__file__).parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
 
-    assert "ciao.stock" in data["tool"]["setuptools"]["packages"]
-    package_data = data["tool"]["setuptools"]["package-data"]
+    setuptools = data["tool"]["setuptools"]
+    # Either an explicit `packages` list (legacy) or a packages.find pattern
+    # that actually matches the stock subpackage.
+    if "packages" in setuptools and isinstance(setuptools["packages"], list):
+        assert "ciao.stock" in setuptools["packages"]
+    else:
+        find_cfg = setuptools.get("packages", {}).get("find", {})
+        includes = find_cfg.get("include", [])
+        assert any(fnmatchcase("ciao.stock", include) for include in includes), find_cfg
+
+    package_data = setuptools["package-data"]
     assert "agents/*.md" in package_data["ciao.stock"]
     assert "commands/*.md" in package_data["ciao.stock"]
     assert "skills/.gitkeep" in package_data["ciao.stock"]
