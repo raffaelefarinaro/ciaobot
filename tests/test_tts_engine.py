@@ -44,7 +44,7 @@ def _pcm(tmp_path, **config_overrides):
 
 def test_system_speaker_refuses_without_the_sidecar(monkeypatch):
     monkeypatch.setattr(voice, "apple_speech_available", lambda: False)
-    with pytest.raises(ValueError, match="ciao desktop install"):
+    with pytest.raises(ValueError, match="one-line installer"):
         voice.SystemSpeaker("", "en-US")
 
 
@@ -109,7 +109,7 @@ async def test_synthesize_speech_reports_the_reason_when_unavailable(tmp_path, m
 
     with pytest.raises(ValueError) as exc_info:
         await pcm.synthesize_speech("Hello there")
-    assert "ciao desktop install" in str(exc_info.value)
+    assert "one-line installer" in str(exc_info.value)
 
 
 async def test_synthesize_speech_is_free_and_uses_the_configured_voice(tmp_path, monkeypatch):

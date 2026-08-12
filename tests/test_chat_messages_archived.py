@@ -169,6 +169,36 @@ async def test_archived_chat_returns_handover_when_transcript_missing(tmp_path: 
     assert '"content":"seed"' in payload
 
 
+@pytest.mark.asyncio
+async def test_archived_chat_falls_back_when_sdk_session_is_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty SDK session must not hide the durable archived transcript."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Archive empty SDK", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="empty-sdk-session")
+    chat.session_id = "sess-empty"
+
+    chats_dir = tmp_path / "memory-vault" / "Logs" / "Chats" / chat.chat_id
+    claude_dir = chats_dir / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = claude_dir / "2026-06-19T10-00-00Z-sess-empty.md"
+    transcript_path.write_text(_TRANSCRIPT, encoding="utf-8")
+    chat.archived = True
+    chat.archive_path = str(transcript_path.relative_to(tmp_path))
+    pcm._save()
+
+    fake_sdk = SimpleNamespace(get_session_messages=lambda session_id, directory: [])
+    monkeypatch.setitem(__import__("sys").modules, "claude_agent_sdk", fake_sdk)
+
+    response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
+    payload = response.body.decode()
+
+    assert '"content":"hello archived chat"' in payload
+    assert '"content":"reply from archived chat"' in payload
+
+
 _CODEX_TRANSCRIPT = """---
 provider: codex
 context: archived fallback test

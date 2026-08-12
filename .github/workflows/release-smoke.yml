@@ -1,28 +1,18 @@
 name: release smoke
 
-# Split out of publish.yml so the smoke test can be run on demand against an
-# already-published version. It used to be a job gated on
-# `github.event_name == 'release'`, which meant every attempt to fix it cost a
-# version bump — v0.6.3 and v0.6.4 both shipped with this job red.
 on:
   workflow_call:
     inputs:
       version:
-        description: "Released version to install and smoke test. Defaults to the latest release."
-        required: false
+        description: "Released version to install and smoke test."
+        required: true
         type: string
   workflow_dispatch:
     inputs:
       version:
-        description: "Released version to install and smoke test (e.g. 0.6.4). Defaults to the latest release."
-        required: false
+        description: "Released version to install and smoke test (e.g. 0.8.1)."
+        required: true
         type: string
-  # So a change to this workflow is exercised before it ships. Without it the
-  # only way to test the smoke test is to cut a release, which is how it stayed
-  # broken across two of them.
-  pull_request:
-    paths:
-      - .github/workflows/release-smoke.yml
 
 permissions:
   contents: read
@@ -31,131 +21,77 @@ jobs:
   smoke:
     runs-on: macos-latest
     steps:
-      - name: Resolve the version to test
+      - name: Normalize version
         id: resolve
         env:
-          GH_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.version }}
         run: |
           version="${REQUESTED#v}"
-          if [ -z "$version" ]; then
-            version="$(gh release view --repo raffaelefarinaro/ciaobot --json tagName -q .tagName)"
-            version="${version#v}"
-          fi
           test -n "$version"
-          echo "Smoke testing version ${version}"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-
-      - name: Install the released formula and cask from the tap
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install with the one-line installer
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
         run: |
-          brew update
-          brew install raffaelefarinaro/ciaobot/ciaobot
-          brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
-          test -x "$(brew --prefix)/bin/ciao"
-          test -x "/Applications/Ciaobot.app/Contents/MacOS/ciaobot-desktop"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/Ciaobot.app/Contents/Info.plist)" = "local.ciaobot.app"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Ciaobot.app/Contents/Info.plist)" = "$VERSION"
-
-      # Required for an unattended launch, not a convenience. The app is ad-hoc
-      # signed and not notarized, so with the quarantine flag brew applies, the
-      # first launch blocks on a Gatekeeper assessment nothing here can approve:
-      # a stack sample of the v0.6.4 run showed the process pinned in
-      # `_dyld_start` with a 96K footprint 35s after launch, never reaching
-      # main(). A real user clicks through that prompt once; CI cannot.
-      - name: Clear quarantine so the app can launch unattended
+          set -euo pipefail
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          curl -fsSL "https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/install.sh" \
+            | sh -s -- --version "$VERSION"
+          app="$HOME/Applications/Ciaobot.app"
+          test -x "$app/Contents/MacOS/ciaobot-desktop"
+          test -x "$app/Contents/Resources/ciao-runtime/bin/ciao"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$HOME/Library/LaunchAgents/Ciaobot.plist")" = "$app/Contents/MacOS/ciaobot-desktop"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:1' "$HOME/Library/LaunchAgents/Ciaobot.plist")" = "--background"
+          launchctl print "gui/$(id -u)/Ciaobot" >/dev/null
+          ! xattr -p com.apple.quarantine "$app" 2>/dev/null
+      - name: Launch and wait for the engine
         run: |
-          echo "before: $(xattr -l /Applications/Ciaobot.app 2>&1 | tr '\n' ' ')"
-          xattr -dr com.apple.quarantine /Applications/Ciaobot.app 2>/dev/null || true
-          ! xattr -p com.apple.quarantine /Applications/Ciaobot.app 2>/dev/null
-          echo "after: quarantine attribute is gone"
-
-      - name: Configure the workspace
-        run: |
-          ciao setup --workspace "${RUNNER_TEMP}/ciaobot-workspace" --app-dir "${RUNNER_TEMP}/ciaobot-apps"
-
-      - name: Launch the app and wait for the engine
-        run: |
-          open -g /Applications/Ciaobot.app --args --background >"${RUNNER_TEMP}/ciaobot-open.log" 2>&1 &
+          set -euo pipefail
+          app="$HOME/Applications/Ciaobot.app"
+          open -g "$app" --args --background >"$RUNNER_TEMP/ciaobot-open.log" 2>&1 &
           for _ in {1..30}; do
             pgrep -x ciaobot-desktop >/dev/null && break
             sleep 1
           done
           pgrep -x ciaobot-desktop >/dev/null
-          # The app owns starting the engine (lib.rs start_engine_if_needed for a
-          # written LaunchAgent, spawn_bootstrap otherwise). Do NOT paper over a
-          # failure here by loading launchd from CI — a cold start that never
-          # brings up the backend is the defect this job exists to catch.
-          for _ in {1..30}; do
+          for _ in {1..45}; do
             curl -fsS http://localhost:8443/api/startup-status >/dev/null 2>&1 && break
             sleep 1
           done
           curl -fsS http://localhost:8443/api/startup-status | jq -e '.desktop_api_version == 1'
-
-      # Without this, a cold-start failure looks like nothing but a wall of
-      # `curl: (7) Failed to connect` with no way to tell whether the engine was
-      # never asked to start or failed while starting.
-      - name: Diagnostics
-        if: failure()
+      - name: Re-run installer as an update/recovery path
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
         run: |
-          workspace="${RUNNER_TEMP}/ciaobot-workspace"
-          echo "--- ciao/ciaobot processes ---"
-          pgrep -lf 'ciaobot|ciao' || echo "(none)"
-          echo "--- listening TCP sockets ---"
-          lsof -nP -iTCP -sTCP:LISTEN || true
-          echo "--- launchd state ---"
-          launchctl list | grep -i ciao || echo "(no ciao services listed)"
-          launchctl print "gui/$(id -u)/com.ciao.server" 2>&1 | head -40 || true
-          echo "--- gatekeeper / quarantine state ---"
-          xattr -l /Applications/Ciaobot.app 2>&1 | head -10 || echo "(no xattrs)"
-          spctl -a -vv /Applications/Ciaobot.app 2>&1 | head -10 || true
-          codesign -dv /Applications/Ciaobot.app 2>&1 | head -10 || true
-          echo "--- server LaunchAgent plist ---"
-          cat ~/Library/LaunchAgents/com.ciao.server.plist 2>/dev/null || echo "(absent)"
-          # Sample the app BEFORE starting anything: this is the only thing that
-          # tells apart "setup() is blocked before it starts the engine" from
-          # "it asked launchd and launchd refused".
-          echo "--- app stack sample (still in the failed state) ---"
-          app_pid="$(pgrep -x ciaobot-desktop || true)"
-          if [ -n "$app_pid" ]; then
-            sample "$app_pid" 2 -file "${RUNNER_TEMP}/ciaobot-sample.txt" >/dev/null 2>&1 || true
-            sed -n '1,120p' "${RUNNER_TEMP}/ciaobot-sample.txt" 2>/dev/null || echo "(sample unavailable)"
-          else
-            echo "(app not running)"
-          fi
-          echo "--- any desktop-tray.log on the box ---"
-          find "$HOME" -name desktop-tray.log -maxdepth 6 2>/dev/null || true
-          ls -la "$HOME/.ciaobot/runtime" 2>/dev/null || echo "(no ~/.ciaobot/runtime)"
-          echo "--- app log stream ---"
-          log show --last 3m --predicate 'process == "ciaobot-desktop"' 2>/dev/null | tail -40 || echo "(log show unavailable)"
-          echo "--- desktop-service status ---"
-          ciao desktop-service status --json 2>&1 | head -20 || true
-          echo "--- explicit desktop-service start ---"
-          ciao desktop-service start --json 2>&1 | head -40 || true
-          sleep 5
-          echo "--- startup-status after explicit start ---"
-          curl -fsS http://localhost:8443/api/startup-status 2>&1 | head -20 || true
-          echo "--- app launch log ---"
-          cat "${RUNNER_TEMP}/ciaobot-open.log" 2>/dev/null || echo "(absent)"
-          echo "--- workspace runtime dir ---"
-          ls -la "${workspace}/.runtime" 2>/dev/null || echo "(absent)"
-          for log in ciao.stderr.log ciao.stdout.log desktop-tray.log; do
-            echo "--- ${log} ---"
-            tail -80 "${workspace}/.runtime/${log}" 2>/dev/null || echo "(absent)"
-          done
-
-      - name: Verify updater metadata
+          set -euo pipefail
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          curl -fsSL "https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/install.sh" \
+            | sh -s -- --version "$VERSION" --no-start
+          test -x "$HOME/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao"
+      - name: Verify updater metadata and installer assets
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.resolve.outputs.version }}
         run: |
-          gh release download "v${VERSION}" --repo raffaelefarinaro/ciaobot --pattern latest.json
+          gh release download "v${VERSION}" --repo raffaelefarinaro/ciaobot --pattern latest.json --pattern install.sh --pattern ciaobot-installer-verify_universal
           jq -e '.platforms["darwin-aarch64"].url and .platforms["darwin-aarch64"].signature' latest.json
           jq -e '.platforms["darwin-x86_64"].url and .platforms["darwin-x86_64"].signature' latest.json
-
-      - name: Verify cask uninstall
+          if grep -q '__VERIFIER_SHA256__' install.sh; then
+            echo "release installer still contains its checksum placeholder" >&2
+            exit 1
+          fi
+          test -x ciaobot-installer-verify_universal
+      - name: Diagnostics
+        if: failure()
         run: |
-          pkill -x ciaobot-desktop || true
-          brew uninstall --cask ciaobot-desktop
-          test ! -e "/Applications/Ciaobot.app"
+          echo "--- processes ---"
+          pgrep -lf 'ciaobot|ciao' || true
+          echo "--- launchd state ---"
+          launchctl print "gui/$(id -u)/com.ciao.server" 2>&1 | head -60 || true
+          echo "--- LaunchAgent ---"
+          cat "$HOME/Library/LaunchAgents/com.ciao.server.plist" 2>/dev/null || true
+          echo "--- runtime logs ---"
+          find "$HOME/Ciaobot/.runtime" -maxdepth 1 -type f -print -exec tail -80 {} \; 2>/dev/null || true
+          echo "--- app launch log ---"
+          cat "$RUNNER_TEMP/ciaobot-open.log" 2>/dev/null || true

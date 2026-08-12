@@ -2982,7 +2982,11 @@ async def chat_messages(request: Request) -> JSONResponse:
             msgs = []
         msgs.extend(segment)
 
-    if msgs is None:
+    # An SDK session can still exist while containing no renderable messages
+    # (for example after an archived session was compacted or partially
+    # cleaned up). Archived chats have a durable Markdown copy; use it in that
+    # case as well as when the provider-side session is missing entirely.
+    if msgs is None or (not msgs and chat.archived):
         archived = _messages_from_archived_transcript(pcm, config, chat)
         if archived is not None:
             return JSONResponse(handover_messages + archived)
@@ -5362,11 +5366,16 @@ def _setup_finish_origin_allowed(request: Request) -> bool:
 
 
 def _interactive_foreground_run() -> bool:
-    """True when this server was started from an interactive terminal."""
+    """True when setup can hand the bootstrap server to launchd.
+
+    The bundled desktop app deliberately starts bootstrap with no terminal
+    attached, but it still owns the one-time onboarding process and must hand
+    the configured server to the LaunchAgent when setup completes.
+    """
     try:
-        return sys.stderr.isatty()
+        return sys.stderr.isatty() or os.environ.get("CIAO_BOOTSTRAP_LAUNCHD_HANDOFF") == "1"
     except (AttributeError, ValueError):
-        return False
+        return os.environ.get("CIAO_BOOTSTRAP_LAUNCHD_HANDOFF") == "1"
 
 
 def _schedule_launchd_server_handoff() -> bool:
@@ -5500,9 +5509,9 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    # setup_workspace installs Ciaobot.app, which downloads ~13 MB with a
-    # 300s timeout. On the loop that freezes the wizard's own polling and
-    # every open chat socket for the duration.
+    # setup_workspace only writes workspace files and the bundled-engine
+    # LaunchAgent. The release installer owns app downloads, so setup remains
+    # responsive and never reaches out to GitHub.
     written = await asyncio.to_thread(
         functools.partial(
             setup_workspace,
@@ -5814,24 +5823,17 @@ def _record_step(step: str, result: subprocess.CompletedProcess) -> dict:
 
 
 def _pip_install_hint(output: str) -> str:
-    """Turn pip's "cannot uninstall" wall of text into an actionable sentence.
+    """Turn a development deploy's "cannot uninstall" wall into guidance.
 
-    Restart reinstalls the checkout with the *running server's* interpreter. When
-    that server is the Homebrew build, its `ciaobot` dist-info ships without a
-    RECORD file, so pip cannot work out which files belong to it and refuses to
-    uninstall — which it must do before installing the editable copy. Nothing
-    about the checkout is wrong, so the raw pip output sends people to debug the
-    wrong thing.
+    A packaged app cannot be replaced by the developer-only deploy action. The
+    raw installer output otherwise sends users to debug the wrong thing.
     """
     lowered = output.lower()
     if "cannot uninstall" in lowered or "no record file" in lowered:
         return (
-            "The engine is running from the Homebrew install, which pip cannot "
-            "replace in place: that install has no RECORD file, so pip refuses "
-            "to uninstall it before installing this checkout. Restart-from-source "
-            "needs an engine started from a source install — run `ciao run` from "
-            "a venv with `pip install -e .` — or use `brew upgrade ciaobot` to "
-            "move the Homebrew copy forward instead."
+            "The running engine belongs to a packaged Ciaobot.app and cannot be "
+            "replaced by the development deploy action. Use the signed in-app "
+            "updater or re-run the one-line installer for production updates."
         )
     return ""
 
@@ -5839,10 +5841,8 @@ def _pip_install_hint(output: str) -> str:
 def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
-    ``CIAO_APP_REPO`` wins over the module path because the engine can be an
-    installed package (Homebrew cask, wheel): there ``__file__`` sits in
-    site-packages, which has no ``.git`` and no ``web/``, so every build step
-    below would operate on the wrong directory.
+    ``CIAO_APP_REPO`` wins over the module path for developer-mode deploys. A
+    packaged app does not resolve a checkout for production updates.
     """
     configured = getattr(config, "app_repo", None)
     if configured:

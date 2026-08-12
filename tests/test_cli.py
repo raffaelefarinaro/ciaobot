@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 
 import pytest
@@ -349,8 +350,6 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert plist.is_file()
     plist_text = plist.read_text(encoding="utf-8")
     assert "<string>/opt/ciao/bin/python</string>" in plist_text
-    assert "<string>-m</string>" in plist_text
-    assert "<string>ciao.cli</string>" in plist_text
     assert "<string>run</string>" in plist_text
     assert f"<string>{workspace.resolve()}</string>" in plist_text
     assert "<string>9443</string>" in plist_text
@@ -396,10 +395,41 @@ def test_setup_no_auth_opts_out_of_password_protection(tmp_path: Path) -> None:
     assert "PWA_AUTH_REQUIRED=true" not in env_lines
 
 
-def _isolate_app_roots(monkeypatch, *roots: Path) -> None:
-    """Keep the desktop-app check off the developer's real /Applications."""
+def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao"
+    monkeypatch.setenv("CIAO_ENGINE_PATH", engine)
+    launch_agents = tmp_path / "LaunchAgents"
 
-    monkeypatch.setattr(cli, "_app_search_roots", lambda: tuple(roots))
+    cli.setup_workspace(
+        tmp_path / "workspace",
+        launch_agents_dir=launch_agents,
+        python_path=None,
+    )
+
+    with (launch_agents / "com.ciao.server.plist").open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["ProgramArguments"][0] == engine
+    assert plist["ProgramArguments"][1:] == ["run"]
+    assert plist["EnvironmentVariables"]["CIAO_NATIVE_SIDECAR"] == (
+        "/Applications/Ciaobot.app/Contents/MacOS/ciaobot-native"
+    )
+
+
+def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> None:
+    launch_agents = tmp_path / "LaunchAgents"
+
+    cli.setup_workspace(
+        tmp_path / "workspace",
+        launch_agents_dir=launch_agents,
+        python_path="/opt/ciao/bin/python3.12",
+    )
+
+    with (launch_agents / "com.ciao.server.plist").open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["ProgramArguments"][1:] == ["-m", "ciao.cli", "run"]
+    assert plist["EnvironmentVariables"]["CIAO_NATIVE_SIDECAR"] == ""
 
 
 def _write_desktop_app(app_dir: Path) -> Path:
@@ -587,37 +617,7 @@ def test_setup_skips_legacy_companion_when_tauri_app_is_installed(
     assert not (apps / "Ciaobot Server.app").exists()
 
 
-def test_setup_skips_legacy_companion_when_tauri_app_is_in_another_root(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # Non-admin default: setup writes to ~/Applications, the cask sits in
-    # /Applications. Without --app-dir the check spans every standard root.
-    home_apps = tmp_path / "home-apps"
-    system_apps = tmp_path / "system-apps"
-    home_apps.mkdir()
-    _write_desktop_app(system_apps)
-    _isolate_app_roots(monkeypatch, home_apps, system_apps)
-    monkeypatch.setattr(cli, "_default_app_dir", lambda: home_apps)
-    launch_agents = tmp_path / "LaunchAgents"
-
-    assert cli.main([
-        "setup",
-        "--workspace",
-        str(tmp_path / "workspace"),
-        "--launch-agents-dir",
-        str(launch_agents),
-    ]) == 0
-
-    assert (launch_agents / "com.ciao.server.plist").is_file()
-    assert not (launch_agents / "com.ciao.menubar.plist").exists()
-    assert not (home_apps / "Ciaobot Server.app").exists()
-
-
-def test_default_app_dir_prefers_system_applications(monkeypatch) -> None:
-    monkeypatch.setattr(cli.os, "access", lambda path, mode: True)
-    assert cli._default_app_dir() == Path("/Applications")
-
-    monkeypatch.setattr(cli.os, "access", lambda path, mode: False)
+def test_default_app_dir_matches_the_release_installer() -> None:
     assert cli._default_app_dir() == Path.home() / "Applications"
 
 
@@ -903,51 +903,6 @@ def test_create_chat_command_uses_active_workspace_without_name_clamp(
 
 
 
-def test_desktop_install_refuses_when_the_app_sits_in_another_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    """Non-admin layout: the app is in ~/Applications while /Applications is
-    writable. desktop_install only guards its own target directory, so without
-    this check the command would install a second copy and then quarrel with the
-    updater over which one is current."""
-    home_apps = tmp_path / "home-apps"
-    system_apps = tmp_path / "system-apps"
-    system_apps.mkdir()
-    home_apps.mkdir()
-    _write_desktop_app(home_apps)
-    _isolate_app_roots(monkeypatch, home_apps, system_apps)
-    monkeypatch.setattr(cli, "_default_app_dir", lambda: system_apps)
-
-    assert cli.main(["desktop", "install"]) == 1
-    assert "already installed" in capsys.readouterr().err
-    assert not (system_apps / "Ciaobot.app").exists()
-
-
-def test_desktop_install_honours_an_explicit_app_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--app-dir means "operate on this directory only", so the cross-root check
-    is skipped and the module's own guard is what applies."""
-    home_apps = tmp_path / "home-apps"
-    home_apps.mkdir()
-    _write_desktop_app(home_apps)
-    _isolate_app_roots(monkeypatch, home_apps)
-    target = tmp_path / "elsewhere"
-    target.mkdir()
-    seen: list[Path] = []
-
-    from ciao import desktop_install
-
-    def fake_install(*, app_dir, version):
-        seen.append(app_dir)
-        return {"version": "9.9.9", "path": str(app_dir / "Ciaobot.app"), "trusted_comment": "t"}
-
-    monkeypatch.setattr(desktop_install, "install_desktop_app", fake_install)
-
-    assert cli.main(["desktop", "install", "--app-dir", str(target)]) == 0
-    assert seen == [target]
-
-
 def test_desktop_uninstall_reports_when_nothing_is_installed(
     tmp_path: Path, capsys
 ) -> None:
@@ -966,154 +921,21 @@ def test_desktop_uninstall_json_reports_a_refusal(tmp_path: Path, capsys) -> Non
     assert "not the Ciaobot desktop app" in payload["error"]
 
 
-def test_setup_installs_the_desktop_app_when_none_is_present(
+def test_setup_does_not_download_or_install_the_desktop_app(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One-command install: `brew install` plus setup should leave a working
-    Ciaobot.app, without a separate `ciao desktop install` step."""
-    monkeypatch.delenv("CIAO_SKIP_DESKTOP_APP", raising=False)
+    """Workspace setup is local; the release installer owns app installation."""
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     apps = tmp_path / "Applications"
     apps.mkdir()
-    _isolate_app_roots(monkeypatch, apps)
     monkeypatch.setattr(cli, "_default_app_dir", lambda: apps)
-    calls: list[dict] = []
-
-    from ciao import desktop_install
-
-    def fake_install(*, app_dir, open_after_install):
-        calls.append({"app_dir": app_dir, "open_after_install": open_after_install})
-        _write_desktop_app(Path(app_dir))
-        return {"version": "9.9.9", "path": str(Path(app_dir) / "Ciaobot.app")}
-
-    monkeypatch.setattr(desktop_install, "install_desktop_app", fake_install)
-
-    cli.setup_workspace(
-        tmp_path / "workspace",
-        launch_agents_dir=tmp_path / "LaunchAgents",
-    )
-
-    assert len(calls) == 1
-    # Left closed: the LaunchAgent is not written yet and the app starts the
-    # engine on launch, so opening here would race the rest of setup.
-    assert calls[0]["open_after_install"] is False
-    # Having installed the real app, setup must not also write the legacy
-    # launcher bundle that stands in for it.
-    assert not (apps / "Ciaobot Server.app").exists()
-    plists = {path.name for path in (tmp_path / "LaunchAgents").iterdir()}
-    assert "com.ciao.menubar.plist" not in plists
-
-
-def test_setup_survives_a_failed_desktop_app_download(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    """Offline, proxied or firewalled: setup must still produce a usable install
-    rather than losing the user their workspace."""
-    monkeypatch.delenv("CIAO_SKIP_DESKTOP_APP", raising=False)
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
-    apps = tmp_path / "Applications"
-    apps.mkdir()
-    _isolate_app_roots(monkeypatch, apps)
-    monkeypatch.setattr(cli, "_default_app_dir", lambda: apps)
-
-    from ciao import desktop_install
-
-    def explode(*, app_dir, open_after_install):
-        raise desktop_install.InstallError("no route to host")
-
-    monkeypatch.setattr(desktop_install, "install_desktop_app", explode)
 
     written = cli.setup_workspace(
         tmp_path / "workspace",
         launch_agents_dir=tmp_path / "LaunchAgents",
-    )
-
-    assert written  # the workspace was still scaffolded
-    # Fell back to the launcher bundle, so the user still has a menu bar.
-    # The launcher is retired: cleanup runs, nothing is written back.
-    assert not (apps / "Ciaobot Server.app").exists()
-    err = capsys.readouterr().err
-    assert "no route to host" in err
-    assert "ciao desktop install" in err
-
-
-def test_setup_skips_the_desktop_app_for_a_pinned_app_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--app-dir means tests, CI or a headless install; none should reach GitHub.
-    release-smoke relies on this to install the cask instead."""
-    monkeypatch.delenv("CIAO_SKIP_DESKTOP_APP", raising=False)
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
-    apps = tmp_path / "Applications"
-    apps.mkdir()
-
-    from ciao import desktop_install
-
-    def explode(**kwargs):
-        raise AssertionError("must not download with an explicit --app-dir")
-
-    monkeypatch.setattr(desktop_install, "install_desktop_app", explode)
-
-    cli.setup_workspace(
-        tmp_path / "workspace",
-        launch_agents_dir=tmp_path / "LaunchAgents",
         app_dir=apps,
     )
-    # The launcher is retired: cleanup runs, nothing is written back.
-    assert not (apps / "Ciaobot Server.app").exists()
 
-
-def test_setup_honours_the_no_desktop_app_flag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("CIAO_SKIP_DESKTOP_APP", raising=False)
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
-    apps = tmp_path / "Applications"
-    apps.mkdir()
-    _isolate_app_roots(monkeypatch, apps)
-    monkeypatch.setattr(cli, "_default_app_dir", lambda: apps)
-
-    from ciao import desktop_install
-
-    def explode(**kwargs):
-        raise AssertionError("--no-desktop-app must skip the download")
-
-    monkeypatch.setattr(desktop_install, "install_desktop_app", explode)
-
-    assert cli.main([
-        "setup",
-        "--workspace",
-        str(tmp_path / "workspace"),
-        "--launch-agents-dir",
-        str(tmp_path / "LaunchAgents"),
-        "--no-desktop-app",
-    ]) == 0
-    # The launcher is retired: cleanup runs, nothing is written back.
-    assert not (apps / "Ciaobot Server.app").exists()
-
-
-def test_setup_skips_the_desktop_app_in_dev_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Dev builds come from desktop_build against the checkout, not a release."""
-    monkeypatch.delenv("CIAO_SKIP_DESKTOP_APP", raising=False)
-    monkeypatch.setenv("CIAO_DEV_MODE", "1")
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
-    apps = tmp_path / "Applications"
-    apps.mkdir()
-    _isolate_app_roots(monkeypatch, apps)
-    monkeypatch.setattr(cli, "_default_app_dir", lambda: apps)
-
-    from ciao import desktop_install
-
-    def explode(**kwargs):
-        raise AssertionError("dev mode must not download a release bundle")
-
-    monkeypatch.setattr(desktop_install, "install_desktop_app", explode)
-
-    cli.setup_workspace(
-        tmp_path / "workspace",
-        launch_agents_dir=tmp_path / "LaunchAgents",
-    )
-    # The launcher is retired: cleanup runs, nothing is written back.
+    assert written
+    assert not (apps / "Ciaobot.app").exists()
     assert not (apps / "Ciaobot Server.app").exists()

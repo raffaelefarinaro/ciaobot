@@ -31,7 +31,7 @@ jobs:
 
       # Create the release with a PAT, not GITHUB_TOKEN: releases created by
       # GITHUB_TOKEN do not fire the `release: published` event, so publish.yml
-      # (PyPI + Homebrew) never runs. RELEASE_PAT must be a token with
+      # never runs. RELEASE_PAT must be a token with
       # contents:write. Falls back to github.token when the secret is absent
       # (release still cut, but publish must then be run manually).
       - name: Create GitHub release

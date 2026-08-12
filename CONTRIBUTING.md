@@ -38,7 +38,7 @@ Day-to-day work lands on `develop` through pull requests. Do not push directly t
 
 1. Branch from `develop`, open a PR back into `develop`, and wait for CI.
 2. When it is time to ship, a maintainer runs `scripts/prepare-release --apply --create-pr` from a clean checkout. That cuts `release/vX.Y.Z` from `develop`, bumps versions, updates `CHANGELOG.md`, and opens a release PR into `main`.
-3. Merging the release PR into `main` creates the GitHub tag and release automatically. The existing `publish.yml` workflow then publishes the wheel to PyPI and updates the Homebrew tap.
+3. Merging the release PR into `main` creates the GitHub tag and release automatically. The `publish.yml` workflow then builds the PWA, bundled Python runtimes, signed app archive, native verifier, installer, and updater metadata as one release.
 4. A follow-up job merges `main` back into `develop` so version files stay aligned.
 
 `main` is release-only. `develop` is the integration branch and the GitHub default branch.

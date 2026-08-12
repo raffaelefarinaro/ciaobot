@@ -21,9 +21,11 @@
   "bundle": {
     "active": true,
     "targets": [
-      "app",
-      "dmg"
+      "app"
     ],
+    "resources": {
+      "../runtime": "ciao-runtime"
+    },
     "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/ciaobot-native"

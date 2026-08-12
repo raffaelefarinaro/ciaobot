@@ -8133,7 +8133,7 @@ class ProjectChatManager:
                 raise ValueError("Read-aloud is macOS-only.")
             raise ValueError(
                 "Read-aloud is unavailable. Install the desktop app with "
-                "`ciao desktop install`."
+                "the Ciaobot one-line installer."
             )
         try:
             speaker = SystemSpeaker(

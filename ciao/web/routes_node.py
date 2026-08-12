@@ -69,7 +69,7 @@ async def package_changelog_endpoint(request: Request) -> JSONResponse:
 
 
 async def package_update_endpoint(request: Request) -> JSONResponse:
-    """Perform package update and restart the server on success."""
+    """Return update guidance; packaged app updates are owned by Ciaobot.app."""
     res = await asyncio.to_thread(update_package)
     if res.get("ok"):
         config = request.app.state.config
@@ -85,7 +85,7 @@ async def package_update_endpoint(request: Request) -> JSONResponse:
         asyncio.create_task(_do_restart())
         return JSONResponse(res)
     else:
-        status_code = 400 if res.get("mode") in {"editable", "unknown"} else 500
+        status_code = 400 if res.get("mode") in {"bundled_app", "editable", "unknown"} else 500
         return JSONResponse(res, status_code=status_code)
 
 

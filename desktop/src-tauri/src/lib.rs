@@ -281,6 +281,55 @@ fn requires_confirmation(result: &service::ServiceResult) -> bool {
         .unwrap_or(false)
 }
 
+fn engine_launch_action(result: &service::ServiceResult) -> &'static str {
+    if result
+        .details
+        .get("loaded")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        "restart"
+    } else {
+        "start"
+    }
+}
+
+// Restart the separate Python LaunchAgent after the app bundle has been
+// replaced. The app updater only restarts this Tauri process; without this
+// kickstart the server keeps executing the old bundle from the same plist path.
+// A fresh bootstrap install has no server plist yet, so there is nothing to
+// restart until onboarding finishes setup.
+fn restart_engine_after_app_update(app: &AppHandle) -> Result<(), String> {
+    let server_plist = app
+        .state::<DesktopModel>()
+        .runtime
+        .read()
+        .map_err(|_| "Could not read the current Ciaobot runtime.".to_string())?
+        .server_plist
+        .clone();
+    if !server_plist.is_file() {
+        return Ok(());
+    }
+    let binary = service::resolve_ciao(env::var("PATH").ok().as_deref())
+        .ok_or_else(|| "The bundled Ciaobot engine was not found.".to_string())?;
+    let status = service::invoke(&binary, "status", &[])?;
+    let action = engine_launch_action(&status);
+    let result = service::invoke(
+        &binary,
+        action,
+        if action == "restart" {
+            &["--force"][..]
+        } else {
+            &[][..]
+        },
+    )?;
+    if result.ok {
+        Ok(())
+    } else {
+        Err(result.message)
+    }
+}
+
 // Second half of the unified update. There is no bundled window left to emit
 // progress to, so failures surface as a dialog. Only restart when something
 // actually changed — otherwise "Update…" would bounce a healthy app for nothing.
@@ -294,6 +343,7 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
                 .download_and_install(|_, _| {}, || {})
                 .await
                 .map_err(|error| format!("Update {version} could not be installed: {error}"))?;
+            restart_engine_after_app_update(&app)?;
             app.restart()
         }
         // The engine moved but the app did not: restart so both halves come
@@ -1307,10 +1357,17 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_autostart::init(
-            MacosLauncher::LaunchAgent,
-            Some(vec!["--background"]),
-        ))
+        // The release installer and the tray must own the same LaunchAgent.
+        // Explicitly name it so the plugin does not derive
+        // `ciaobot-desktop.plist` from the Rust package name while the
+        // installer manages `Ciaobot.plist`.
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("Ciaobot")
+                .args(["--background"])
+                .macos_launcher(MacosLauncher::LaunchAgent)
+                .build(),
+        )
         .setup(|app| {
             let runtime = runtime::discover_current();
             let app_data = app.path().app_data_dir()?;
@@ -1376,8 +1433,8 @@ pub fn run() {
 mod tests {
     use super::{
         append_log, browser_event_script, create_desktop_drop_grant, engine_already_current,
-        is_external_link, is_trusted_main_navigation, needs_drop_staging, requires_confirmation,
-        should_show_main_window,
+        engine_launch_action, is_external_link, is_trusted_main_navigation, needs_drop_staging,
+        requires_confirmation, should_show_main_window,
     };
     use crate::service::ServiceResult;
 
@@ -1566,5 +1623,17 @@ mod tests {
             serde_json::json!({"requires_confirmation": true})
         )));
         assert!(!requires_confirmation(&result_with(serde_json::json!({}))));
+    }
+
+    #[test]
+    fn app_update_starts_a_stopped_engine_instead_of_kickstarting_an_unloaded_job() {
+        assert_eq!(
+            engine_launch_action(&result_with(serde_json::json!({"loaded": true}))),
+            "restart"
+        );
+        assert_eq!(
+            engine_launch_action(&result_with(serde_json::json!({"loaded": false}))),
+            "start"
+        );
     }
 }

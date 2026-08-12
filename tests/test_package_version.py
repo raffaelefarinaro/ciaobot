@@ -62,6 +62,7 @@ def test_package_status_reports_available_update() -> None:
         "current_version": "0.2.0",
         "latest_version": "0.3.0",
         "update_available": True,
+        "mode": "editable",
         "source": latest_release_redirect_url(),
         "error": "",
     }
@@ -296,8 +297,7 @@ def test_running_install_present_true_for_live_package() -> None:
 
 
 def test_running_install_present_false_when_files_gone(monkeypatch, tmp_path) -> None:
-    # Simulate the Homebrew-swap symptom: ciao.__file__ points at a keg dir
-    # that no longer exists on disk.
+    # Simulate a runtime removed from disk while the process is still alive.
     import ciao
 
     monkeypatch.setattr(ciao, "__file__", str(tmp_path / "gone" / "ciao" / "__init__.py"))
@@ -357,15 +357,3 @@ def test_installed_version_missing_interpreter_fails_open(monkeypatch) -> None:
 
     monkeypatch.setattr(subprocess, "run", boom)
     assert package_version.installed_version() is None
-
-
-def test_stable_executable_maps_cellar_to_opt(monkeypatch, tmp_path) -> None:
-    import sys
-    from ciao import package_version
-
-    opt = tmp_path / "opt" / "ciaobot" / "libexec" / "bin"
-    opt.mkdir(parents=True)
-    (opt / "python").write_text("", encoding="utf-8")
-    cellar = tmp_path / "Cellar" / "ciaobot" / "0.4.20" / "libexec" / "bin" / "python"
-    monkeypatch.setattr(sys, "executable", str(cellar))
-    assert package_version._stable_executable() == str(opt / "python")

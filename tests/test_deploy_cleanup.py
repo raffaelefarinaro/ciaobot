@@ -29,12 +29,14 @@ def test_deploy_plist_points_at_packaged_cli_template() -> None:
         Path(__file__).parents[1] / "ciao" / "stock" / "deploy" / "com.ciao.server.plist.tmpl"
     ).read_text(encoding="utf-8")
 
-    assert "{{CIAO_PYTHON}}" in text
+    assert "{{CIAO_EXECUTABLE}}" in text
     assert "{{CIAO_WORKSPACE}}" in text
+    assert "{{CIAO_RUNTIME_ROOT}}" in text
     assert "{{CIAO_PORT}}" in text
     assert "{{CIAO_PATH}}" in text
-    assert "<string>ciao.cli</string>" in text
-    assert "<string>run</string>" in text
+    assert "{{LAUNCHD_PROGRAM_ARGUMENTS}}" in text
+    assert "<string>{{CIAO_EXECUTABLE}}</string>" in text
+    assert "<string>ciao.cli</string>" not in text
 
 
 def test_render_launchd_plist_substitutes_path() -> None:
@@ -54,53 +56,40 @@ def test_render_launchd_plist_substitutes_path() -> None:
         os.environ["PATH"] = saved
 
     assert "{{CIAO_PATH}}" not in out
+    assert "{{CIAO_RUNTIME_ROOT}}" not in out
+    assert "/tmp/ciao-ws/.runtime" in out
     assert "<key>PATH</key>" in out
     assert "/opt/homebrew/bin:/usr/bin:/bin" in out
+    assert "<string>-m</string>" in out
+    assert "<string>ciao.cli</string>" in out
 
 
-def test_render_launchd_plist_maps_cellar_python_to_opt(tmp_path: Path) -> None:
-    """A Homebrew Cellar interpreter is recorded via the upgrade-stable
-    opt symlink: `brew upgrade` deletes the versioned keg, which killed the
-    LaunchAgents (and the running server) pinned to it."""
-    from ciao.cli import _render_launchd_plist
-
-    cellar_python = tmp_path / "Cellar" / "ciaobot" / "0.4.8" / "libexec" / "bin" / "python"
-    opt_python = tmp_path / "opt" / "ciaobot" / "libexec" / "bin" / "python"
-    for p in (cellar_python, opt_python):
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("", encoding="utf-8")
-
-    out = _render_launchd_plist(
-        workspace=Path("/tmp/ciao-ws"),
-        python_path=str(cellar_python),
-        port=8443,
-    )
-    assert str(opt_python) in out
-    assert "/Cellar/" not in out
-
-
-def test_render_launchd_plist_keeps_non_cellar_python(tmp_path: Path) -> None:
-    """Non-Homebrew interpreters (and Cellar paths without an opt mirror)
-    are recorded as given."""
+def test_render_launchd_plist_preserves_custom_runtime_root() -> None:
     from ciao.cli import _render_launchd_plist
 
     out = _render_launchd_plist(
         workspace=Path("/tmp/ciao-ws"),
-        python_path="/Users/me/.ciaobot-venv/bin/python",
+        runtime_root=Path("/tmp/ciao-runtime"),
         port=8443,
     )
-    assert "/Users/me/.ciaobot-venv/bin/python" in out
 
-    orphan = tmp_path / "Cellar" / "ciaobot" / "9.9.9" / "bin" / "python"
-    orphan.parent.mkdir(parents=True, exist_ok=True)
-    orphan.write_text("", encoding="utf-8")
+    assert f"<string>{Path('/tmp/ciao-runtime').resolve()}</string>" in out
+
+
+def test_render_launchd_plist_uses_bundled_engine_path() -> None:
+    from ciao.cli import _render_launchd_plist
+
     out = _render_launchd_plist(
         workspace=Path("/tmp/ciao-ws"),
-        python_path=str(orphan),
+        engine_path=(
+            "/Users/me/Applications/Ciaobot.app/Contents/Resources/"
+            "ciao-runtime/bin/ciao"
+        ),
         port=8443,
     )
-    # No opt mirror exists for this keg: the path is left untouched.
-    assert str(orphan) in out
+
+    assert "Contents/Resources/ciao-runtime/bin/ciao" in out
+    assert "ciao.cli" not in out
 
 
 def test_run_step_reports_missing_binary_as_failed_step() -> None:

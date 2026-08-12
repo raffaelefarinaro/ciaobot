@@ -47,8 +47,9 @@ def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
     assert stock.joinpath("deploy", "com.ciao.server.plist.tmpl").is_file()
     assert stock.joinpath("schedules", "weekly-review-template.md").is_file()
     plist = stock.joinpath("deploy", "com.ciao.server.plist.tmpl").read_text(encoding="utf-8")
-    assert "<string>ciao.cli</string>" in plist
-    assert "<string>run</string>" in plist
+    assert "<string>{{CIAO_EXECUTABLE}}</string>" in plist
+    assert "{{LAUNCHD_PROGRAM_ARGUMENTS}}" in plist
+    assert "<string>ciao.cli</string>" not in plist
 
     schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))
     assert {entry["schedule_id"] for entry in schedules["schedules"]} == EXPECTED_SYSTEM_SCHEDULES

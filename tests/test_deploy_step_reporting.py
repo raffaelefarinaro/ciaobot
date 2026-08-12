@@ -78,12 +78,8 @@ def test_record_step_stays_quiet_on_success(caplog) -> None:
     assert caplog.text == ""
 
 
-def test_pip_hint_explains_the_homebrew_record_case() -> None:
-    """Homebrew's dist-info has no RECORD, so pip refuses to uninstall it.
-
-    Nothing is wrong with the checkout, so the raw pip text sends the reader
-    to debug the wrong thing.
-    """
+def test_pip_hint_explains_a_packaged_engine_cannot_be_replaced() -> None:
+    """A packaged engine must be updated as an app, not by developer deploy."""
     output = (
         "ERROR: Cannot uninstall ciaobot 0.7.0, RECORD file not found. "
         "Hint: The package was installed by a different tool."
@@ -91,8 +87,8 @@ def test_pip_hint_explains_the_homebrew_record_case() -> None:
 
     hint = _pip_install_hint(output)
 
-    assert "Homebrew" in hint
-    assert "RECORD" in hint
+    assert "Ciaobot.app" in hint
+    assert "one-line installer" in hint
 
 
 def test_pip_hint_is_empty_for_an_unrelated_failure() -> None:

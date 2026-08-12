@@ -234,16 +234,20 @@
             <div>
               <p class="section-title">package update</p>
               <p class="hint">
-                <template v-if="isNodeClient">
+                <template v-if="isNodeClient && packageStatus?.mode !== 'bundled_app'">
                   The version installed on {{ hostScopeLabel }}. Updating restarts the host.
                   To upgrade this computer, open <router-link to="/device">this device</router-link>.
+                </template>
+                <template v-else-if="packageStatus?.mode === 'bundled_app'">
+                  This bundled app updates through the Ciaobot menu-bar icon. Choose
+                  <strong>Update</strong> there, or run the one-line installer again.
                 </template>
                 <template v-else>
                   Check the installed package version and upgrade this local app.
                 </template>
               </p>
             </div>
-            <div v-if="packageStatus" class="settings-card-header-actions">
+            <div v-if="packageStatus && packageStatus.mode !== 'bundled_app'" class="settings-card-header-actions">
               <button
                 :class="packageStatus.update_available ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
                 @click="openUpdatePanel"
@@ -263,7 +267,7 @@
               Update check failed: {{ packageStatus.error }}
             </div>
 
-            <div v-if="showUpdatePanel" class="settings-form-panel">
+            <div v-if="showUpdatePanel && packageStatus.mode !== 'bundled_app'" class="settings-form-panel">
               <p class="section-title">What&rsquo;s new in {{ packageStatus.latest_version }}</p>
               <div v-if="changelogLoading" class="loading">Loading changelog&hellip;</div>
               <template v-else>
@@ -703,8 +707,8 @@
                   </template>
                   <template v-else>
                     <span class="hint--warn">
-                      Read-aloud is unavailable. Install the desktop app with
-                      <code>ciao desktop install</code>.
+                      Read-aloud is unavailable. Install Ciaobot with the
+                      one-line installer from the release page.
                     </span>
                   </template>
                 </span>

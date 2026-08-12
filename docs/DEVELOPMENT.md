@@ -53,21 +53,25 @@ On recent macOS, `scripts/run-ciao.sh` and the `scripts/dev.sh` wrapper source `
 
 No manual step is needed; `ensure-deps.sh` handles both. If you set up the venv by hand and hit either error, run `scripts/ensure-deps.sh` once to repair `activate`.
 
-### Homebrew distribution
+### End-user distribution
 
-macOS users can install from the [homebrew-ciaobot](https://github.com/raffaelefarinaro/homebrew-ciaobot) tap:
-
-```bash
-brew install raffaelefarinaro/ciaobot/ciaobot
-```
-
-The formula template lives in `deploy/homebrew/ciaobot.rb`. Regenerate it with:
+The supported macOS release path is the one-line installer:
 
 ```bash
-./scripts/update-homebrew-tap.sh <version> <wheel-sha256> <desktop-dmg-sha256>
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-On each GitHub release, `publish.yml` updates the tap automatically. Add a repo-scoped `HOMEBREW_TAP_GITHUB_TOKEN` secret to this repository so the workflow can push to `homebrew-ciaobot` (the default `GITHUB_TOKEN` cannot write across repos).
+The installer downloads the signed universal app archive, verifies it with the
+published native verifier, and installs the bundled runtime into `Ciaobot.app`.
+When a configured workspace is already referenced by the LaunchAgent, it
+preserves that workspace and password; on a clean machine it leaves setup to
+the app's bootstrap onboarding rather than generating a hidden password. It
+does not require Python, Homebrew, or sudo. A DMG is intentionally not built or
+attached to releases.
+
+The source template is `scripts/install.sh`. The release workflow substitutes
+the verifier checksum and attaches `install.sh`, the verifier, the signed app
+archive, its signature, and `latest.json`.
 
 ## Branching and releases
 
@@ -87,7 +91,7 @@ scripts/prepare-release --apply --run-release-evals --create-pr --ready
   `--bump minor` or `--version X.Y.Z` when needed. Live release evals require
   both provider logins and may spend provider tokens.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the wheel, publishes to PyPI, and updates the Homebrew tap. A follow-up job merges `main` back into `develop`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA, embedded runtimes, universal app, native verifier, installer, and updater metadata. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 
@@ -198,9 +202,9 @@ Two things are load-bearing:
 The quit goes through AppleScript, not the tray's Quit item: the tray item also
 stops the engine, which is not what a rebuild wants.
 
-Engines that were installed rather than checked out (Homebrew cask, wheel) need
-`CIAO_APP_REPO` pointing at the checkout. Without it every deploy step resolves
-relative to the running module, which is `site-packages`.
+The bundled engine is resolved from `Ciaobot.app/Contents/Resources/ciao-runtime`.
+Development builds may still use the checkout's interpreter, but a packaged app
+must never fall back to Homebrew or another `PATH` installation.
 
 After PWA changes, rebuild and either restart the service or use the **Deploy** button in PWA Settings. **Never restart the ciao service from inside a PWA chat** (you'd sever your own session); ask the operator to deploy.
 

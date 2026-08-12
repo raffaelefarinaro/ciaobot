@@ -357,12 +357,9 @@ class CiaoConfig:
     # on a handshake, so it's safe against cross-site WS hijacking).
     pwa_allowed_origins: tuple[str, ...] = ()
     dev_mode: bool = False
-    # Path to the ciaobot source checkout, for engines that do not run from one
-    # (Homebrew, wheel). Settings -> Restart pulls, reinstalls, and rebuilds
-    # from here. Without it those steps resolve relative to the running module,
-    # which for an installed engine is site-packages: no .git, no web/, so the
-    # git pull and npm build both fail on a directory that only looks wrong in
-    # hindsight. From CIAO_APP_REPO.
+    # Path to the Ciaobot source checkout for developer-only deploy/restart
+    # workflows. Packaged apps update the app bundle atomically instead. From
+    # CIAO_APP_REPO.
     app_repo: Path | None = None
     vault_mode: str = "scratch"
     bootstrap_mode: bool = False
