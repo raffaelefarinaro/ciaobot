@@ -632,6 +632,7 @@ watch(() => store.activeWorkspace, async () => {
 .home-chat-item--quiet .home-chat-heading,
 .home-chat-item--older .home-chat-heading {
   flex: 1;
+  align-items: center;
 }
 
 .home-chat-title {
