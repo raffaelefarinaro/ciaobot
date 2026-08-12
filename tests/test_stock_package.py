@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from fnmatch import fnmatchcase
 from importlib import resources
 from pathlib import Path
 
@@ -98,16 +99,14 @@ def test_pyproject_packages_stock_data() -> None:
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
 
     setuptools = data["tool"]["setuptools"]
-    # Either an explicit `packages` list (legacy) or `packages.find` with an
-    # include that covers ciao.* (current, see issue #256). The test guards
-    # that the ciao.stock subpackage is reachable, not which mechanism
-    # declares it.
+    # Either an explicit `packages` list (legacy) or a packages.find pattern
+    # that actually matches the stock subpackage.
     if "packages" in setuptools and isinstance(setuptools["packages"], list):
         assert "ciao.stock" in setuptools["packages"]
     else:
         find_cfg = setuptools.get("packages", {}).get("find", {})
         includes = find_cfg.get("include", [])
-        assert any(inc.rstrip("*") + ".stock" == "ciao.stock" or inc == "ciao.stock" for inc in includes), find_cfg
+        assert any(fnmatchcase("ciao.stock", include) for include in includes), find_cfg
 
     package_data = setuptools["package-data"]
     assert "agents/*.md" in package_data["ciao.stock"]

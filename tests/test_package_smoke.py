@@ -88,7 +88,6 @@ def test_release_wheel_bundles_every_ciao_module(tmp_path: Path) -> None:
             "-m",
             "build",
             "--wheel",
-            "--no-isolation",
             "--outdir",
             str(outdir),
         ],
