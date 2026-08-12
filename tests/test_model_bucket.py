@@ -215,6 +215,39 @@ def test_configured_workspace_provider_preselects_openrouter_bucket(tmp_path):
     assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-or"
 
 
+def test_configured_openrouter_bucket_requires_api_key(tmp_path):
+    """A persisted OpenRouter bucket must not survive credential removal."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        openrouter=OpenRouterSettings(api_key=""),
+        workspaces={
+            "client": WorkspaceConfig(
+                name="client",
+                vault_root="vaults/client",
+                model_bucket="openrouter",
+                gws_profile="work",
+            )
+        },
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("client", workspace="client")
+
+    with pytest.raises(
+        ValueError, match="Unknown model 'anthropic/claude-opus-latest'"
+    ):
+        pcm.create_chat(project.project_id)
+
+
 def test_openrouter_fable_alias_uses_fable_latest(tmp_path):
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)

@@ -2839,6 +2839,13 @@ class ProjectChatManager:
                 chat_model = self._resolve_claude_model(
                     chat_model, chat_bucket, project_id
                 )
+            # The workspace bucket can be persisted independently of backend
+            # credentials. Revalidate after resolving a tier alias so a
+            # stale OpenRouter bucket cannot turn ``opus`` into an
+            # unavailable ``owner/model`` id after the pre-resolution tier
+            # check above (#259).
+            self._validate_custom_model_runner(chat_model, chat_provider)
+            self._validate_configured_model(chat_model, chat_provider)
         chat = ChatInfo(
             chat_id=cid,
             project_id=project_id,
