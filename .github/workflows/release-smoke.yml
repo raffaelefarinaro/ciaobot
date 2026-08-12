@@ -13,9 +13,6 @@ on:
         description: "Released version to install and smoke test (e.g. 0.8.1)."
         required: true
         type: string
-  pull_request:
-    paths:
-      - .github/workflows/release-smoke.yml
 
 permissions:
   contents: read

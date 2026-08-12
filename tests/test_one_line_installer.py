@@ -93,6 +93,19 @@ def test_release_workflows_do_not_publish_removed_install_channels() -> None:
     assert "brew install" not in workflows
 
 
+def test_release_smoke_only_runs_with_a_published_version() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "release-smoke.yml").read_text(
+        encoding="utf-8"
+    )
+
+    # Pull requests do not populate workflow_call/workflow_dispatch inputs, so
+    # triggering this release-only smoke test there would normalize an empty
+    # version and fail before the installer is exercised.
+    assert "workflow_call:" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "pull_request:" not in workflow
+
+
 def test_ci_prepares_cross_arch_toolchains_before_runtime_build() -> None:
     ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
