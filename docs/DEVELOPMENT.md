@@ -246,6 +246,7 @@ that schedule is not installed.
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
 For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests.
 For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths.
+For sidebar chat-group changes, verify that a supervisor's delegate disclosure has a visible `aria-expanded` state, keeps a 44px touch target, hides and restores only its delegate rows, and automatically reopens when the selected chat is a delegate.
 For composer drag-and-drop changes, test both local host and remote client roles:
 host paths must be absolute, while client files must upload into the active
 project on the host before the returned host path is inserted.

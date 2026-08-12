@@ -99,6 +99,10 @@ ninth workspace in the sidebar's displayed order; the sidebar shows the assigned
 number on each workspace button. Number keys remain available for normal typing
 inside text fields.
 
+The sidebar's project and delegate-subchat disclosure state is local UI state;
+it has no integration, environment variable, or cross-device synchronization
+setting.
+
 
 ### Python 3 + `google-cloud-bigquery`
 

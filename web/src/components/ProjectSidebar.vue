@@ -494,58 +494,71 @@
 
             <!-- Chats in project -->
             <div v-if="expandedProjects.has(project.project_id)" class="chat-list">
-              <div
+              <template
                 v-for="{ chat, isDelegate } in store.projectChatRows(project.project_id)"
                 :key="chat.chat_id"
-                class="chat-item"
-                :class="{
-                  active: chat.chat_id === store.activeChatId,
-                  remote: chat.local === false,
-                  delegate: isDelegate,
-                  dragging: dragChatId === chat.chat_id,
-                }"
-                :draggable="chat.local !== false"
-                @click="chat.local !== false && selectChat(chat.chat_id)"
-                @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
-                @keydown.space.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
-                @dragstart="onChatDragStart(chat, $event)"
-                @dragend="onChatDragEnd"
-                @contextmenu.prevent="toggleChatMenu($event, chat.chat_id)"
-                role="link"
-                :tabindex="chat.local === false ? -1 : 0"
-                :aria-disabled="chat.local === false"
-                :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
               >
-                <span
-                  v-if="isDelegate"
-                  class="delegate-mark"
-                  title="Delegate: spawned by this chat's supervisor"
-                  aria-label="Delegate chat"
-                >&#8627;</span>
-                <span
-                  v-if="chat.title_status === 'pending'"
-                  class="title-shimmer"
-                  aria-label="Generating title"
-                  title="Generating title..."
-                />
-                <span
-                  v-else
-                  class="chat-title"
-                  :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
-                >{{ chat.title }}</span>
-                <ChatSignals
-                  :chat-id="chat.chat_id"
-                  density="row"
-                  :hue="colorForChat(chat)"
-                />
-                <span v-if="chat.local === false" class="remote-chip">remote</span>
-                <button
-                  class="chat-actions-btn"
-                  aria-label="Chat actions"
-                  title="Copy ID, rename, move, archive, delete"
-                  @click.stop="toggleChatMenu($event, chat.chat_id)"
-                >&middot;&middot;&middot;</button>
-              </div>
+                <div
+                  v-if="!isDelegate || subchatsExpanded(chat.spawned_from_chat_id || '')"
+                  class="chat-item"
+                  :class="{
+                    active: chat.chat_id === store.activeChatId,
+                    remote: chat.local === false,
+                    delegate: isDelegate,
+                    dragging: dragChatId === chat.chat_id,
+                  }"
+                  :draggable="chat.local !== false"
+                  @click="chat.local !== false && selectChat(chat.chat_id)"
+                  @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
+                  @keydown.space.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
+                  @dragstart="onChatDragStart(chat, $event)"
+                  @dragend="onChatDragEnd"
+                  @contextmenu.prevent="toggleChatMenu($event, chat.chat_id)"
+                  role="link"
+                  :tabindex="chat.local === false ? -1 : 0"
+                  :aria-disabled="chat.local === false"
+                  :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
+                >
+                  <span
+                    v-if="isDelegate"
+                    class="delegate-mark"
+                    title="Delegate: spawned by this chat's supervisor"
+                    aria-label="Delegate chat"
+                  >&#8627;</span>
+                  <button
+                    v-else-if="visibleSubchatCount(project.project_id, chat.chat_id) > 0"
+                    type="button"
+                    class="subchat-toggle"
+                    :aria-expanded="subchatsExpanded(chat.chat_id)"
+                    :aria-label="(subchatsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subchats for ' + chat.title"
+                    :title="(subchatsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subchats'"
+                    @click.stop="toggleSubchats(chat.chat_id)"
+                  >{{ subchatsExpanded(chat.chat_id) ? '▾' : '▸' }}</button>
+                  <span
+                    v-if="chat.title_status === 'pending'"
+                    class="title-shimmer"
+                    aria-label="Generating title"
+                    title="Generating title..."
+                  />
+                  <span
+                    v-else
+                    class="chat-title"
+                    :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
+                  >{{ chat.title }}</span>
+                  <ChatSignals
+                    :chat-id="chat.chat_id"
+                    density="row"
+                    :hue="colorForChat(chat)"
+                  />
+                  <span v-if="chat.local === false" class="remote-chip">remote</span>
+                  <button
+                    class="chat-actions-btn"
+                    aria-label="Chat actions"
+                    title="Copy ID, rename, move, archive, delete"
+                    @click.stop="toggleChatMenu($event, chat.chat_id)"
+                  >&middot;&middot;&middot;</button>
+                </div>
+              </template>
 
               <!-- Chat context menu - teleported to body -->
               <Teleport to="body">
@@ -738,6 +751,11 @@ function openProject(projectId: string) {
 }
 
 const expandedProjects = reactive(new Set<string>())
+// Keep supervisor groups open by default so the existing sidebar remains
+// unchanged until the user explicitly collapses one. This is deliberately
+// component-local, matching the project disclosure state above and the chat
+// context disclosure in ChatPanel.
+const collapsedSubchatParents = reactive(new Set<string>())
 const projectMenu = ref<string | null>(null)
 const chatMenu = ref<string | null>(null)
 const chatMenuPos = ref<{ top: number; left: number }>({ top: 0, left: 0 })
@@ -876,6 +894,10 @@ watch(() => store.activeChatId, (chatId) => {
   if (project) {
     expandedProjects.add(project.project_id)
   }
+  const chat = store.chats.find(c => c.chat_id === chatId)
+  if (chat?.spawned_from_chat_id) {
+    collapsedSubchatParents.delete(chat.spawned_from_chat_id)
+  }
 }, { immediate: true })
 
 function selectChat(chatId: string) {
@@ -975,6 +997,23 @@ function toggleProject(id: string) {
     expandedProjects.delete(id)
   } else {
     expandedProjects.add(id)
+  }
+}
+
+function visibleSubchatCount(projectId: string, chatId: string): number {
+  return store.projectChatGroups(projectId)
+    .find(group => group.chat.chat_id === chatId)?.delegates.length || 0
+}
+
+function subchatsExpanded(chatId: string): boolean {
+  return !collapsedSubchatParents.has(chatId)
+}
+
+function toggleSubchats(chatId: string) {
+  if (subchatsExpanded(chatId)) {
+    collapsedSubchatParents.add(chatId)
+  } else {
+    collapsedSubchatParents.delete(chatId)
   }
 }
 
@@ -1801,6 +1840,31 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg3, var(--fg2));
   font-size: var(--text-sm, 0.85em);
   line-height: 1;
+}
+
+/* A supervisor's disclosure sits inside the parent chat row. It uses the same
+   44px hit area as the project disclosure while keeping the glyph compact, so
+   collapsing a busy supervisor does not make the child rows unreachable on a
+   touch device. */
+.subchat-toggle {
+  flex: 0 0 var(--touch);
+  width: var(--touch);
+  height: var(--touch);
+  margin: 0 0 0 -14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg3, var(--fg2));
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  text-align: center;
+}
+.subchat-toggle:hover { color: var(--fg); }
+.subchat-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
 }
 
 /* Loop marker on a chat row. Accent while the cadence is live, muted when the
