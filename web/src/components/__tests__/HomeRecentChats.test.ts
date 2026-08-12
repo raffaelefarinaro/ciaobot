@@ -211,3 +211,84 @@ describe('HomeRecentChats regressions', () => {
     wrapper.unmount()
   })
 })
+
+describe('HomeRecentChats new-chat project picker', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+    if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
+  })
+
+  it('keeps "+ new" one click to General and offers the rest behind the caret', async () => {
+    const wrapper = await mountHome()
+    const lane = wrapper.find('[data-lane-key="personal"]')
+
+    await lane.find('.home-lane-new').trigger('click')
+    expect(wrapper.emitted('new-workspace-chat')?.[0]).toEqual([
+      { workspace: 'personal', projectId: 'personal-general', isCreating: false },
+    ])
+
+    await lane.find('.home-lane-new-caret').trigger('click')
+    // General leads: it is what the plain button creates in.
+    expect(lane.findAll('.home-lane-project-option').map(n => n.text())).toEqual([
+      'General',
+      'Personal project',
+    ])
+    wrapper.unmount()
+  })
+
+  it('creates in the picked project and closes the menu', async () => {
+    const wrapper = await mountHome()
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    await lane.find('.home-lane-new-caret').trigger('click')
+
+    const options = lane.findAll('.home-lane-project-option')
+    await options[1].trigger('click')
+
+    expect(wrapper.emitted('new-workspace-chat')?.[0]).toEqual([
+      { workspace: 'personal', projectId: 'personal-project', isCreating: false },
+    ])
+    expect(lane.find('.home-lane-project-menu').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  // Hover does not exist on a phone, so the caret is dimmed rather than hidden
+  // and has to stay reachable by keyboard: Esc must hand focus back rather than
+  // dropping it on the body.
+  it('closes on Escape and returns focus to the caret', async () => {
+    const wrapper = await mountHome()
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    const caret = lane.find('.home-lane-new-caret')
+    await caret.trigger('click')
+    await nextTick()
+
+    await lane.find('.home-lane-project-menu').trigger('keydown.esc')
+    await nextTick()
+
+    expect(lane.find('.home-lane-project-menu').exists()).toBe(false)
+    expect(document.activeElement).toBe(caret.element)
+    wrapper.unmount()
+  })
+
+  it('hides the caret when the workspace has only one project', async () => {
+    const store = seedChats()
+    store.projects = store.projects.filter(
+      project => project.project_id !== 'personal-project',
+    )
+    store.chats = store.chats.map(chat =>
+      chat.project_id === 'personal-project'
+        ? { ...chat, project_id: 'personal-general' }
+        : chat,
+    ) as unknown as typeof store.chats
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    expect(lane.find('.home-lane-new').exists()).toBe(true)
+    expect(lane.find('.home-lane-new-caret').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})

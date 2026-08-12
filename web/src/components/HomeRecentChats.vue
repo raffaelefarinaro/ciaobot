@@ -22,15 +22,56 @@
               <template v-if="laneSummaryRest(lane)"><span v-if="laneNeedsCount(lane)"> · </span>{{ laneSummaryRest(lane) }}</template>
             </span>
           </div>
-          <button
-            v-if="laneNewAction(lane)"
-            type="button"
-            class="home-lane-new"
-            :data-workspace-color="lane.color"
-            :disabled="laneNewAction(lane)!.isCreating"
-            :aria-label="`New chat in ${lane.label || 'workspace'}`"
-            @click="emit('new-workspace-chat', laneNewAction(lane)!)"
-          >{{ laneNewAction(lane)!.isCreating ? '...' : '+ new' }}</button>
+          <div v-if="laneNewAction(lane)" class="home-lane-new-split">
+            <button
+              type="button"
+              class="home-lane-new"
+              :class="{ 'home-lane-new--split': laneProjects(lane).length > 1 }"
+              :data-workspace-color="lane.color"
+              :disabled="laneNewAction(lane)!.isCreating"
+              :aria-label="`New chat in ${lane.label || 'workspace'}`"
+              @click="emit('new-workspace-chat', laneNewAction(lane)!)"
+            >{{ laneNewAction(lane)!.isCreating ? '...' : '+ new' }}</button>
+            <!-- Dimmed at rest rather than hover-revealed: the PWA is used on
+                 phones, where there is no hover, so a hover-only affordance is
+                 simply missing. Hover and focus bring it up to full strength. -->
+            <button
+              v-if="laneProjects(lane).length > 1"
+              type="button"
+              class="home-lane-new-caret"
+              :data-workspace-color="lane.color"
+              :disabled="laneNewAction(lane)!.isCreating"
+              :aria-label="`Choose a project for a new chat in ${lane.label || 'workspace'}`"
+              aria-haspopup="menu"
+              :aria-expanded="openProjectLane === lane.key"
+              @click="toggleProjectMenu(lane)"
+              @keydown.down.prevent="openProjectMenu(lane)"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="3" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+            <div
+              v-if="openProjectLane === lane.key"
+              :ref="(element) => setProjectMenuRef(lane.key, element as HTMLElement | null)"
+              class="home-lane-project-menu"
+              role="menu"
+              @keydown.esc.prevent="closeProjectMenu({ restoreFocus: true })"
+              @keydown.down.prevent="moveProjectMenuFocus(1)"
+              @keydown.up.prevent="moveProjectMenuFocus(-1)"
+            >
+              <button
+                v-for="project in laneProjects(lane)"
+                :key="project.project_id"
+                type="button"
+                role="menuitem"
+                class="home-lane-project-option"
+                :disabled="Boolean(store.creatingChatProjectIds[project.project_id])"
+                @click="createChatInProject(lane, project.project_id)"
+              >{{ project.name }}</button>
+            </div>
+          </div>
         </header>
 
         <div class="home-lane-body">
@@ -92,9 +133,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
-import type { ChatInfo } from '../lib/types'
+import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
@@ -109,6 +150,19 @@ const emit = defineEmits<{
 const store = useProjectStore()
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
+const openProjectLane = ref<string | null>(null)
+const projectMenus = ref<Record<string, HTMLElement>>({})
+
+function closeProjectMenuOnOutsideClick(event: MouseEvent): void {
+  if (!openProjectLane.value) return
+  const target = event.target as Node | null
+  const lane = laneElements.value[openProjectLane.value]
+  if (target && lane?.contains(target)) return
+  closeProjectMenu()
+}
+
+onMounted(() => document.addEventListener('click', closeProjectMenuOnOutsideClick))
+onBeforeUnmount(() => document.removeEventListener('click', closeProjectMenuOnOutsideClick))
 
 interface HomeLane {
   key: string
@@ -244,6 +298,80 @@ function laneNewAction(lane: HomeLane): NewWorkspaceChatAction | null {
     projectId,
     isCreating: Boolean(store.creatingChatProjectIds[projectId]),
   }
+}
+
+// Projects a new chat can be started in, in the sidebar's own order but with
+// General hoisted: it is what plain "+ new" creates in, so it belongs first.
+function laneProjects(lane: HomeLane): ProjectInfo[] {
+  if (!lane.workspace || lane.workspace === 'unknown') return []
+  return store.projects
+    .filter(project => project.workspace === lane.workspace)
+    .slice()
+    .sort((a, b) => {
+      if (a.name === 'General' && b.name !== 'General') return -1
+      if (b.name === 'General' && a.name !== 'General') return 1
+      return a.order - b.order || a.name.localeCompare(b.name)
+    })
+}
+
+function openProjectMenu(lane: HomeLane): void {
+  openProjectLane.value = lane.key
+  void nextTick(() => {
+    projectMenuItems(lane.key)[0]?.focus()
+  })
+}
+
+function toggleProjectMenu(lane: HomeLane): void {
+  if (openProjectLane.value === lane.key) {
+    closeProjectMenu({ restoreFocus: true })
+    return
+  }
+  openProjectMenu(lane)
+}
+
+function closeProjectMenu(options: { restoreFocus?: boolean } = {}): void {
+  const laneKey = openProjectLane.value
+  openProjectLane.value = null
+  if (!laneKey || !options.restoreFocus) return
+  // Esc and re-clicking the caret must not drop focus to the document body,
+  // which would strand a keyboard user at the top of the page.
+  void nextTick(() => {
+    const lane = laneElements.value[laneKey]
+    lane?.querySelector<HTMLElement>('.home-lane-new-caret')?.focus()
+  })
+}
+
+function projectMenuItems(laneKey: string): HTMLElement[] {
+  const menu = projectMenus.value[laneKey]
+  if (!menu) return []
+  return Array.from(
+    menu.querySelectorAll<HTMLElement>('.home-lane-project-option:not([disabled])'),
+  )
+}
+
+function moveProjectMenuFocus(step: number): void {
+  const laneKey = openProjectLane.value
+  if (!laneKey) return
+  const items = projectMenuItems(laneKey)
+  if (!items.length) return
+  const current = items.indexOf(document.activeElement as HTMLElement)
+  const next = (current + step + items.length) % items.length
+  items[next]?.focus()
+}
+
+function setProjectMenuRef(laneKey: string, element: HTMLElement | null): void {
+  if (element) projectMenus.value[laneKey] = element
+  else delete projectMenus.value[laneKey]
+}
+
+function createChatInProject(lane: HomeLane, projectId: string): void {
+  if (!lane.workspace) return
+  closeProjectMenu()
+  emit('new-workspace-chat', {
+    workspace: lane.workspace,
+    projectId,
+    isCreating: Boolean(store.creatingChatProjectIds[projectId]),
+  })
 }
 
 function isLaneActive(lane: HomeLane): boolean {
@@ -512,6 +640,104 @@ watch(() => store.activeWorkspace, async () => {
 .home-lane-new:disabled {
   cursor: wait;
   opacity: 0.65;
+}
+
+/* Split control: "+ new" keeps its one-click meaning (a chat in General) and
+   the caret opens the project picker beside it. They read as one control, so
+   the shared edge is flattened and only the outer corners stay rounded. */
+.home-lane-new-split {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+}
+
+.home-lane-new--split {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right-width: 0;
+}
+
+.home-lane-new-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--touch, 44px);
+  padding-inline: 7px;
+  border: 1px dashed var(--accent);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-top-right-radius: var(--radius-sm, 6px);
+  border-bottom-right-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  /* Quiet at rest so the lane header stays calm, but never hidden: hover does
+     not exist on a phone, and an affordance that only appears on hover is one
+     that half the users never get. */
+  opacity: 0.55;
+  transition: opacity 120ms var(--ease), background 120ms var(--ease);
+}
+
+.home-lane-new-caret:hover,
+.home-lane-new-caret:focus-visible {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.home-lane-new-caret[aria-expanded='true'] {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.home-lane-new-caret:disabled {
+  cursor: wait;
+  opacity: 0.4;
+}
+
+.home-lane-project-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  min-width: 160px;
+  max-width: min(260px, 70vw);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+}
+
+.home-lane-project-option {
+  min-height: var(--touch, 44px);
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.home-lane-project-option:hover,
+.home-lane-project-option:focus-visible {
+  background: var(--bg3);
+}
+
+.home-lane-project-option:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-lane-new-caret { transition: none; }
 }
 
 .home-lane-body {
