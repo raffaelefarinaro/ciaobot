@@ -1620,6 +1620,34 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx >= 0) chats.value[idx] = c
   }
 
+  // Tell the server whether this browser is holding unsent composer text, so
+  // its emptiness rule stops deleting a chat whose only content is a typed but
+  // unsent prompt. Reported on transitions only - the composer writes its local
+  // draft on every keystroke, but the server only needs the boolean, so this is
+  // two requests per draft rather than one per key. Failures are swallowed: the
+  // draft is still safe locally, and a lost flag only restores today's
+  // behaviour.
+  const reportedDraftState = new Map<string, boolean>()
+
+  async function setChatDraftState(
+    chatId: string | null | undefined,
+    hasDraft: boolean,
+  ): Promise<void> {
+    // Same nullable id as writeChatDraft takes: the composer reads it from
+    // activeChatId, which is null between chats.
+    if (!chatId) return
+    if (reportedDraftState.get(chatId) === hasDraft) return
+    reportedDraftState.set(chatId, hasDraft)
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat) chat.has_unsent_draft = hasDraft
+    try {
+      await api.patch<ChatInfo>(`/api/chats/${chatId}`, { has_unsent_draft: hasDraft })
+    } catch {
+      // Let the next transition retry; nothing the user typed is at risk here.
+      reportedDraftState.delete(chatId)
+    }
+  }
+
   async function handoverChat(
     chatId: string,
     updates: { model: string; provider: 'claude' | 'codex'; model_bucket?: string },
@@ -1700,10 +1728,13 @@ export const useProjectStore = defineStore('projects', () => {
     // A renamed chat is a deliberate act, not an abandoned draft.
     if (chat.title !== DEFAULT_CHAT_TITLE) return false
     // So is a typed-but-unsent prompt. The composer persists one per chat
-    // (lib/chatDrafts), and Esc closes the chat *while the composer is
-    // focused* — so without this, typing a long prompt into a New Chat and
-    // hitting Esc deleted it with no way back: the chat id leaves `chats`, and
-    // nothing ever reads that draft key again.
+    // (lib/chatDrafts) and Esc closes the chat *while the composer is
+    // focused*, so without this, typing a long prompt into a New Chat and
+    // hitting Esc deleted it with no way back. Checked locally as well as
+    // through chat.has_unsent_draft because this browser's own draft is the
+    // one at risk, and it is authoritative here even if the flag has not
+    // round-tripped yet.
+    if (chat.has_unsent_draft) return false
     if (readChatDraft(chatId).trim()) return false
     const loaded = messages.value[chatId]
     if (!loaded) return false
@@ -4189,7 +4220,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
-    createChat, newChatInGeneral, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, renameChat, updateChat, setChatDraftState, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest,

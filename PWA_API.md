@@ -311,6 +311,18 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats/$CID" \
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
 
+# has_unsent_draft (boolean) — whether a client is holding composer text that
+# has not been sent. Only the flag is shared; the draft itself stays in the
+# browser that typed it. It exists because the emptiness rule lives on the
+# server (`user_turn_count` never reaches the client) and three paths act on
+# it: DELETE ?only_if_empty=1, the sweep in chat creation, and the sweep at
+# startup. A chat with the flag set is never swept, so a typed-but-unsent
+# prompt is not deleted out from under the user. The engine clears it when the
+# text becomes a turn; clients report transitions, not keystrokes. A
+# non-boolean value is a 400.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats/$CID" \
+  -H 'content-type: application/json' -d '{"has_unsent_draft":true}'
+
 # Handover — switch model/backend inside the same visible chat.
 # Body keys: provider = claude|codex, model, model_bucket (Claude only), messages
 # (visible rows). Starts the next provider turn as a fresh session seeded

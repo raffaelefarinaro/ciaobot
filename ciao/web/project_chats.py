@@ -956,6 +956,14 @@ class ChatInfo:
     # key when recording image attachments so we can re-emit them alongside
     # the replayed SDK session history (which strips attachments).
     user_turn_count: int = 0
+    # Whether a client is holding unsent composer text for this chat. The draft
+    # itself stays in that browser's localStorage — only the fact that one
+    # exists is shared, because the emptiness rule lives here (see
+    # _is_empty_chat) and three separate sweeps act on it. Without this the
+    # server deleted a chat whose only content was a prompt the user had typed
+    # and not yet sent, and the draft key became unreachable. Defaults False,
+    # so chats written before this field behave exactly as they did.
+    has_unsent_draft: bool = False
     # Map of user-turn index → list of image ref filenames (relative to
     # media_root). JSON round-trip turns int keys into strings, so lookups
     # must tolerate both.
@@ -1067,6 +1075,7 @@ class ChatInfo:
             "schedule_title": self.schedule_title,
             "spawned_from_chat_id": self.spawned_from_chat_id,
             "delegation_id": self.delegation_id,
+            "has_unsent_draft": self.has_unsent_draft,
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -1405,6 +1414,7 @@ class ProjectChatManager:
                     cd.get("last_activity_at", cd.get("created_at", "")),
                 ),
                 user_turn_count=cd.get("user_turn_count", 0),
+                has_unsent_draft=bool(cd.get("has_unsent_draft", False)),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
@@ -1497,6 +1507,7 @@ class ProjectChatManager:
                     "last_activity_at": c.last_activity_at,
                     "last_read_at": c.last_read_at,
                     "user_turn_count": c.user_turn_count,
+                    "has_unsent_draft": c.has_unsent_draft,
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
                     "user_turn_unattended": c.user_turn_unattended,
@@ -3047,6 +3058,25 @@ class ProjectChatManager:
         self._events.publish({"type": "chat_created", "chat": chat.to_dict(local=True)})
         return chat
 
+    def set_unsent_draft(self, chat_id: str, has_draft: bool) -> ChatInfo | None:
+        """Record whether a client holds unsent composer text for this chat.
+
+        Only the flag crosses the wire: the draft text itself stays in the
+        browser that typed it. That is enough, because what the server needs to
+        know is not what was typed but whether the chat is still empty — a
+        question three separate sweeps ask (`only_if_empty` delete, the
+        `create_chat` cleanup, and the startup cleanup) and only the server can
+        answer, since `user_turn_count` never reaches the client.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        if chat.has_unsent_draft == has_draft:
+            return chat
+        chat.has_unsent_draft = has_draft
+        self._save(reason="chat_draft_state")
+        return chat
+
     def is_empty_chat(self, chat_id: str) -> bool:
         """Public form of `_is_empty_chat`, for the conditional-delete route.
 
@@ -3062,7 +3092,9 @@ class ProjectChatManager:
         Criteria: default title, no user turns recorded, no SDK session
         attached, not archived, and not a retired imported CLI record. Active
         broker stream is also a bail-out signal: it means a turn is in flight,
-        so user_turn_count may just not have been bumped yet.
+        so user_turn_count may just not have been bumped yet. Unsent composer
+        text counts as content too — the user typed it, and deleting the chat
+        strands it in a localStorage key nothing can reach again.
         """
         if chat.archived:
             return False
@@ -3075,6 +3107,8 @@ class ProjectChatManager:
         if chat.session_id:
             return False
         if chat.user_turn_count > 0:
+            return False
+        if chat.has_unsent_draft:
             return False
         if self._broker.get(chat.chat_id) is not None:
             return False
@@ -5036,6 +5070,13 @@ class ProjectChatManager:
             raise ValueError(f"Chat '{chat_id}' not found")
         if chat.archived:
             raise ValueError("Cannot send messages to an archived chat")
+        # The composer text just became a turn, so whatever draft the client was
+        # holding is spent. The client reports this too, but a send is the one
+        # moment the server knows first-hand - and a client that dies mid-send
+        # would otherwise leave the chat permanently exempt from the sweeps.
+        if chat.has_unsent_draft:
+            chat.has_unsent_draft = False
+            self._save(reason="chat_draft_sent")
 
         provider = self._get_provider(chat_id)
         handover_context_sent = bool(

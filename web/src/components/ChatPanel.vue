@@ -1259,6 +1259,10 @@ watch(inputText, (text) => {
     promptHistoryIndex.value = -1
     promptHistoryDraft.value = ''
     writeChatDraft(draftChatId, text)
+    // The draft lives in this browser, but the server owns the rule that
+    // decides whether an untouched New Chat gets swept away - so it has to know
+    // one exists. The store only sends this when the boolean actually flips.
+    void store.setChatDraftState(draftChatId, Boolean(text.trim()))
   }
 }, { flush: 'sync' })
 

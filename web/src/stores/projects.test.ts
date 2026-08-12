@@ -635,6 +635,83 @@ describe('chat closing and re-entry orientation', () => {
     expect(routerPush).toHaveBeenCalledWith('/')
   })
 
+  test('keeps a chat holding an unsent composer draft', async () => {
+    // Esc closes the chat even while the composer is focused, so a chat whose
+    // only content is a typed-but-unsent prompt must not be treated as a
+    // discardable draft — the text lives in a localStorage key that becomes
+    // unreachable the moment the chat id leaves the store.
+    const store = useProjectStore()
+    const chatId = 'chat-with-draft'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'New Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+      has_unsent_draft: true,
+    }]
+    store.messages[chatId] = []
+    store.activeChatId = chatId
+
+    await store.closeChat()
+
+    expect(apiDel).not.toHaveBeenCalled()
+    expect(store.chats).toHaveLength(1)
+  })
+
+  test('reports a draft to the server only when the flag flips', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-draft-report'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'New Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    apiPatch.mockResolvedValue({})
+
+    // The composer writes its local draft on every keystroke; only the
+    // transitions are worth a request.
+    await store.setChatDraftState(chatId, true)
+    await store.setChatDraftState(chatId, true)
+    await store.setChatDraftState(chatId, true)
+
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+    expect(apiPatch).toHaveBeenCalledWith(`/api/chats/${chatId}`, { has_unsent_draft: true })
+    expect(store.chats[0].has_unsent_draft).toBe(true)
+
+    await store.setChatDraftState(chatId, false)
+
+    expect(apiPatch).toHaveBeenCalledTimes(2)
+    expect(apiPatch).toHaveBeenLastCalledWith(`/api/chats/${chatId}`, { has_unsent_draft: false })
+    expect(store.chats[0].has_unsent_draft).toBe(false)
+  })
+
+  test('retries the draft report after a failed request', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-draft-retry'
+    store.chats = []
+    apiPatch.mockRejectedValueOnce(new Error('offline'))
+
+    await store.setChatDraftState(chatId, true)
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+
+    // The failed state must not be remembered as reported, or the chat would
+    // stay sweepable for the rest of the session.
+    apiPatch.mockResolvedValue({})
+    await store.setChatDraftState(chatId, true)
+    expect(apiPatch).toHaveBeenCalledTimes(2)
+  })
+
   test('keeps a chat the server declines to delete', async () => {
     // The client cannot see user_turn_count, so its "is this a draft" guess
     // can be wrong — a chat whose messages are not loaded, or one that just

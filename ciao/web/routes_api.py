@@ -2369,6 +2369,10 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
+    if "has_unsent_draft" in body and not isinstance(body["has_unsent_draft"], bool):
+        return JSONResponse(
+            {"error": "has_unsent_draft must be a boolean"}, status_code=400
+        )
     if "control_surface" in body:
         surface = str(body.get("control_surface") or "").strip()
         if surface not in {"", "legacy", "mcp", "auto"}:
@@ -2392,6 +2396,11 @@ async def chat_detail(request: Request) -> JSONResponse:
             thinking_level=body.get("thinking_level"),
             model_bucket=body.get("model_bucket"),
         )
+        if chat is not None and "has_unsent_draft" in body:
+            # Deliberately not routed through update_chat: a draft toggle must
+            # not drag the composer's keystrokes through model resolution and
+            # bucket validation.
+            chat = pcm.set_unsent_draft(chat_id, body["has_unsent_draft"]) or chat
         if chat is not None and "control_surface" in body:
             changed = chat.control_surface != surface
             chat.control_surface = surface
