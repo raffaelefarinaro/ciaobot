@@ -134,6 +134,10 @@ REGISTRY: tuple[JobSpec, ...] = (
     JobSpec("schedule_attention_classifier", "Schedule attention classifier", "content",
             "Decides whether an auto-archive schedule result needs user attention.", True, False,
             trigger="After a scheduled run that auto-archives its chat."),
+    JobSpec("background_run", "Background command runs", "system",
+            "Runs one command in a tracked subprocess and wakes the chat that "
+            "started it.", False, True,
+            trigger="When a chat starts one with the background_run_start tool."),
     JobSpec("startup_sync", "Startup git sync", "system",
             "Commits and pulls the workspace on server startup.", False, False,
             trigger="On server startup."),

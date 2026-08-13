@@ -104,8 +104,10 @@ def harness_skill_overrides() -> dict[str, str]:
 #
 # The cut is the ``_DESTRUCTIVE`` annotation in ``ciao/mcp_server.py``: deletes
 # and lifecycle actions (``chat_delete``, ``project_delete``, ``chat_stop``,
-# ``schedule_action``, ``loop_action``, ``project_complete``)
-# are deliberately absent and still raise a card. ``tests/test_mcp_server.py``
+# ``schedule_action``, ``loop_action``, ``project_complete``), plus
+# ``background_run_start`` / ``background_run_cancel``, which execute and kill
+# real commands, are deliberately absent and still raise a card.
+# ``tests/test_mcp_server.py``
 # cross-checks this tuple against the annotations declared on the tools, so a
 # new tool fails the suite until its policy is decided here.
 MCP_SERVER_NAME = "ciaobot"
@@ -133,6 +135,11 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "chat_archive",
     "delegate_spawn",
     "delegates_list",
+    # Only the read half of the background_run trio. Starting and cancelling a
+    # command are ``_DESTRUCTIVE`` and still raise an approval card: an
+    # auto-approved arbitrary-command tool would bypass the very classifier a
+    # plain Bash call has to pass.
+    "background_run_status",
     "schedules_list",
     "schedule_preview",
     "schedule_create",

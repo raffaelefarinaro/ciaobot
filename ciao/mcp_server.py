@@ -1218,6 +1218,88 @@ class CiaoMcpService:
                 "delegates_list", lambda cp, p: cp.delegates_list(p, chat_id)
             )
 
+        # ── background command runs ──────────────────────────────────────
+        # Deliberately _DESTRUCTIVE rather than _WRITE (issue #282 proposed
+        # _WRITE, describing it as "Auto-mode approval required"). In this
+        # codebase _WRITE means the opposite: it puts the tool on
+        # AUTO_APPROVED_MCP_TOOLS, which bypasses the PermissionGate entirely.
+        # Since a Bash call in Auto mode still goes through the classifier, an
+        # auto-approved arbitrary-command tool would be a strictly wider hole
+        # than the shell it wraps. _DESTRUCTIVE is what actually delivers the
+        # approval the issue asked for.
+        @tool(name="background_run_start", annotations=_DESTRUCTIVE, structured_output=True)
+        async def background_run_start(
+            cmd: list[str],
+            cwd: str = "",
+            env: dict[str, str] | None = None,
+            timeout_s: int = 1800,
+            label: str = "",
+        ) -> dict[str, Any]:
+            """Run one command in a tracked background subprocess and get woken
+            when it exits.
+
+            Sits between a plain `nohup` (survives the turn, but you lose track
+            of it) and delegate_spawn (a whole chat with a model loop). Use it
+            when the work is a single script that takes minutes: a fetch, a
+            build, a data enrichment pass. There is no model in the loop and no
+            tool access — it runs the command, nothing else.
+
+            This call does NOT block: it returns as soon as the process starts.
+            End your turn after starting one. Do not poll; Ciaobot sends you a
+            fresh turn with the status, exit code, log tail, and log path when
+            it finishes. background_run_status is for the rare case where you
+            need the state mid-turn.
+
+            Args:
+                cmd: Argv list, e.g. ["./scripts/report.sh", "--full"]. A
+                    single string is rejected: there is no shell, so nothing
+                    would split it. For shell features, run
+                    ["bash", "-lc", "..."] explicitly and own that choice.
+                cwd: Directory for the run, relative to the workspace root.
+                    Defaults to the workspace root. Paths outside it are
+                    rejected.
+                env: Extra environment variables. Loader hooks (LD_PRELOAD and
+                    friends) and Ciaobot's own session token are rejected.
+                timeout_s: Wall-clock ceiling; the process tree is terminated
+                    past it and the run reports as failed. Default 1800.
+                label: Short name for the wake report, e.g. "adoption report".
+            """
+            return await self._invoke(
+                "background_run_start",
+                lambda cp, p: cp.background_run_start(
+                    p, cmd=cmd, cwd=cwd, env=env, timeout_s=timeout_s, label=label
+                ),
+                mutating=True,
+            )
+
+        @tool(name="background_run_status", annotations=_READ, structured_output=True)
+        async def background_run_status(run_id: str, lines: int = 50) -> dict[str, Any]:
+            """Status, exit code, and log tail for a background run this chat
+            started.
+
+            Prefer waiting for the wake turn. Only reach for this when you need
+            the state inside the current turn — a run started by another chat
+            reports as not found.
+            """
+            return await self._invoke(
+                "background_run_status",
+                lambda cp, p: cp.background_run_status(p, run_id, lines),
+            )
+
+        @tool(name="background_run_cancel", annotations=_DESTRUCTIVE, structured_output=True)
+        async def background_run_cancel(run_id: str) -> dict[str, Any]:
+            """Stop a background run: SIGTERM to its process group, then
+            SIGKILL after a short grace period.
+
+            Idempotent — cancelling an already-finished run returns its final
+            state unchanged.
+            """
+            return await self._invoke(
+                "background_run_cancel",
+                lambda cp, p: cp.background_run_cancel(p, run_id),
+                mutating=True,
+            )
+
         @tool(name="schedules_list", annotations=_READ, structured_output=True)
         async def schedules_list() -> dict[str, Any]:
             """List schedules in the active workspace with their next run."""
