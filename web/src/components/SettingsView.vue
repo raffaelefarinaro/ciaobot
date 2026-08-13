@@ -398,6 +398,20 @@
               </div>
             </div>
           </div>
+          <div class="setting-row setting-row--inline setting-row--toggle">
+            <div class="routine-info">
+              <span class="routine-name">Re-entry summary</span>
+              <span class="routine-detail">Show a one-line Apple Intelligence orientation note when you reopen a quiet chat. The summary stays visible while you scroll and clears the moment you send a new message.</span>
+            </div>
+            <label class="settings-checkbox-hit">
+              <input
+                type="checkbox"
+                class="settings-checkbox"
+                v-model="reentrySummaryEnabled"
+                @change="onReentrySummaryToggle"
+              />
+            </label>
+          </div>
         </div>
 
         
@@ -2267,6 +2281,7 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
 import { providerModelBadges, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 
 // The tray owns package updates and native notifications in the desktop app.
 const inDesktopApp = isDesktopApp()
@@ -2305,6 +2320,7 @@ const newMcpTransport = ref<'http' | 'stdio'>('http')
 const newMcpUrl = ref('')
 const newMcpCommand = ref('')
 const fastMcpEnabled = ref(true)
+const { reentrySummaryEnabled, setReentrySummaryEnabled } = useReentrySummaryPreference()
 const expandedMcp = ref<Record<string, boolean>>({})
 const mcpEnvInputs = ref<Record<string, string>>({})
 const mcpEnvSaving = ref(false)
@@ -2534,6 +2550,17 @@ async function refreshMcpServerTools(srv: McpProjectServer) {
 
 function saveFastMcpToggle() {
   notifySaved(fastMcpEnabled.value ? 'Ciaobot FastMCP enabled.' : 'Ciaobot FastMCP disabled.')
+}
+
+function onReentrySummaryToggle() {
+  setReentrySummaryEnabled(reentrySummaryEnabled.value)
+  // The store action already evicts cached summaries when the toggle goes
+  // off. Persist to localStorage too so the choice survives reload.
+  if (reentrySummaryEnabled.value) {
+    notifySaved('Re-entry summary enabled.')
+  } else {
+    notifySaved('Re-entry summary disabled.')
+  }
 }
 
 async function createMcpViaChat() {

@@ -7,6 +7,7 @@ import { formatChatComments, formatFileComments, type ChatCommentAnchor } from '
 import { isPlausibleFilePath } from '../lib/filePaths'
 import { useFileViewerStore } from './fileViewer'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
+import { readReentrySummaryEnabled } from '../composables/useReentrySummaryPreference'
 import {
   isRestartDrainMessage,
   reloadWhenServerReady,
@@ -1785,6 +1786,7 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function requestReentrySummaryIfUseful(chatId: string): void {
+    if (!readReentrySummaryEnabled()) return
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat || chat.archived) return
     // session_id covers chats whose history is still being hydrated; the
@@ -1794,6 +1796,18 @@ export const useProjectStore = defineStore('projects', () => {
     )
     if (hasHistory && !reentrySummaries.value[chatId]) {
       void requestReentrySummary(chatId)
+    }
+  }
+
+  // Toggling the preference off also evicts any cached summaries so the
+  // bubble disappears immediately rather than lingering for the rest of
+  // the session. Toggling on does nothing — the next chat open will fetch
+  // its own summary, no warm-up needed.
+  function setReentrySummaryEnabled(enabled: boolean): void {
+    if (!enabled) {
+      for (const chatId of Object.keys(reentrySummaries.value)) {
+        clearReentrySummary(chatId)
+      }
     }
   }
 
@@ -3568,9 +3582,16 @@ export const useProjectStore = defineStore('projects', () => {
     const msgs = messages.value[chatId] || []
 
     // A summary belongs only to the moment the user re-enters a quiet chat.
-    // Any message arriving over the socket makes that orientation stale,
-    // including messages from another device and assistant results.
-    if (event.type === 'user_echo' || event.type === 'queued' || event.type === 'steered' || event.type === 'result') {
+    // `queued` and `steered` always represent new user activity (a new prompt
+    // is now waiting or has been redirected at the current turn), so they
+    // always invalidate the summary.
+    //
+    // `user_echo` and `result` are handled inside their switch cases below:
+    // the broker replays them on every WS reconnect, and a no-op replay
+    // (turn already rendered, or no final text on a result) must NOT clear
+    // the summary. The user opens a chat, scrolls to re-orient, and the
+    // summary disappearing on a broker replay is the wrong behavior.
+    if (event.type === 'queued' || event.type === 'steered') {
       clearReentrySummary(chatId)
     }
 
@@ -3621,6 +3642,10 @@ export const useProjectStore = defineStore('projects', () => {
             // do reflect the implied streaming state.
             if (event.unattended) existingWithTurn.unattended = true
             if (!streaming.value[chatId]) streaming.value[chatId] = true
+            // This is a broker replay, not a new send: leave the re-entry
+            // summary alone. The whole reason a user re-enters a chat is
+            // orientation, and the summary must survive the WS-resume echo
+            // storm until the user actually types or sends.
             break
           }
           // Look for an optimistic user message with matching content but no
@@ -3680,6 +3705,10 @@ export const useProjectStore = defineStore('projects', () => {
         messages.value[chatId] = normalizeMessages([...msgs])
         // Flushed turn = we're streaming again. Make sure the flag reflects it.
         if (!streaming.value[chatId]) streaming.value[chatId] = true
+        // Brand-new echo (not a replay) is the user actually starting a turn.
+        // Clear the summary here so it disappears when the user sends, not on
+        // an unrelated broker replay.
+        clearReentrySummary(chatId)
         break
       }
 
@@ -4010,6 +4039,12 @@ export const useProjectStore = defineStore('projects', () => {
           const chat = chats.value.find(c => c.chat_id === chatId)
           if (chat) chat.session_id = event.session_id
         }
+        // Clear the re-entry summary only when the result represents a turn
+        // that just finished while the user was watching. If `streaming` was
+        // already false, this is a broker replay for a turn the user has
+        // already been reading and the summary still applies. The summary
+        // also clears at user send (sendMessage / fresh user_echo).
+        const wasStreaming = streaming.value[chatId] === true
         if (text.trim() || event.is_error) {
           msgs.push({
             role: 'assistant',
@@ -4042,6 +4077,14 @@ export const useProjectStore = defineStore('projects', () => {
         // so a late click can't race a brand-new turn.
         delete pendingPermissions.value[chatId]
         persistMessages()
+        if (wasStreaming) {
+          // The result closed a turn that was actually in flight on this
+          // client. The re-entry summary no longer reflects the chat
+          // state, so drop it. Skipped on a broker replay (wasStreaming
+          // false) so a scroll-induced resume doesn't dismiss the summary
+          // for a turn the user is still re-reading.
+          clearReentrySummary(chatId)
+        }
         // Reconcile with the authoritative SDK session. Handles the reconnect
         // case where /messages already had this turn (dedups) and the race
         // where the SDK session file lags the result event (retries until the
@@ -4210,7 +4253,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
-    loadMessages, loadSubagents,
+    loadMessages, loadSubagents, setReentrySummaryEnabled,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart,
     pushToast, pushErrorToast, dismissToast, fixError,

@@ -1168,6 +1168,7 @@ import {
   type MentionProject,
 } from '../composables/useMentionPicker'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
+import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 import {
   clearPlanReturnMode,
   includeBuiltinPlanCommand,
@@ -1239,6 +1240,7 @@ const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 const { thinkingExpanded, toggleThinking } = useThinkingPreference()
+const { reentrySummaryEnabled } = useReentrySummaryPreference()
 const draftChatId = store.activeChatId
 const inputText = ref(readChatDraft(draftChatId))
 const inputRevision = ref(0)
@@ -1475,7 +1477,10 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
-const reentrySummary = computed(() => store.reentrySummaries[chat.value.chat_id] || '')
+const reentrySummary = computed(() => {
+  if (!reentrySummaryEnabled.value) return ''
+  return store.reentrySummaries[chat.value.chat_id] || ''
+})
 watch(() => chat.value.provider, () => {
   void loadSlashCommands()
 })
