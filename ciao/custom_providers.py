@@ -18,7 +18,13 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
-_RUNNERS = frozenset({"claude", "codex"})
+
+
+def _runners() -> frozenset[str]:
+    """Runtime providers a custom endpoint may be driven by."""
+    from ciao import provider_registry
+
+    return frozenset(provider_registry.custom_runner_ids())
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,8 +89,10 @@ def _provider_from_mapping(raw: object, *, existing: CustomProvider | None = Non
     if not name or len(name) > 80:
         raise ValueError("custom provider name must be 1-80 characters")
     runner = str(raw.get("runner") or "").strip().lower()
-    if runner not in _RUNNERS:
-        raise ValueError("custom provider runner must be 'claude' or 'codex'")
+    runners = _runners()
+    if runner not in runners:
+        allowed = " or ".join(repr(item) for item in sorted(runners))
+        raise ValueError(f"custom provider runner must be {allowed}")
     token = str(raw["token"]) if "token" in raw else (existing.token if existing else "")
     return CustomProvider(
         id=provider_id,

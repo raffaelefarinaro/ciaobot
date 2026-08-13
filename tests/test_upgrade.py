@@ -7,12 +7,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ciao import provider_registry
 from ciao.upgrade import (
     UpgradeResult,
     update_skills,
     upgrade_all,
     upgrade_claude_code,
     upgrade_codex,
+    upgrade_opencode,
     upgrade_gws,
     upgrade_root_npm,
     upgrade_scrapling,
@@ -123,11 +125,55 @@ def test_upgrade_codex_uses_native_updater(monkeypatch) -> None:
 
 
 
+def test_upgrade_opencode_skips_when_not_installed(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda: None)
+
+    result = asyncio.run(upgrade_opencode())
+
+    assert result.success is False
+    assert result.changed is False
+    assert "opencode not found" in result.stderr
+
+
+def test_upgrade_opencode_uses_native_updater(monkeypatch) -> None:
+    binary = "/usr/local/bin/opencode"
+    expected = UpgradeResult(
+        command=[binary, "upgrade"], changed=True, success=True,
+        stdout="", stderr="", before_version="1", after_version="2",
+    )
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda: binary)
+    runner = AsyncMock(return_value=expected)
+    monkeypatch.setattr("ciao.upgrade.run_upgrade", runner)
+
+    result = asyncio.run(upgrade_opencode())
+
+    assert result is expected
+    runner.assert_awaited_once_with(
+        install_command=[binary, "upgrade"],
+        version_command=[binary, "--version"],
+    )
+
+
 _UNCHANGED = UpgradeResult(
     command=[], changed=False, success=True,
     stdout="", stderr="",
     before_version="1.0.0", after_version="1.0.0",
 )
+
+
+def _stub_provider_upgrades(monkeypatch, **overrides: UpgradeResult) -> None:
+    """Stub every registered provider's CLI upgrade.
+
+    Driven by the registry rather than a hand-written list: patching by name
+    meant that adding a provider silently let its real updater run — and hit
+    the network — inside the test suite.
+    """
+    for descriptor in provider_registry.descriptors():
+        if not descriptor.upgrade_path:
+            continue
+        _module, _, attr = descriptor.upgrade_path.partition(":")
+        result = overrides.get(descriptor.id, _UNCHANGED)
+        monkeypatch.setattr(f"ciao.upgrade.{attr}", AsyncMock(return_value=result))
 
 
 @pytest.mark.asyncio
@@ -138,8 +184,7 @@ async def test_upgrade_all_returns_none_when_nothing_changed(monkeypatch, tmp_pa
     monkeypatch.setattr("ciao.upgrade.upgrade_project_deps", _no_pip_changes)
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
+    _stub_provider_upgrades(monkeypatch)
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
@@ -165,8 +210,7 @@ async def test_upgrade_all_reports_changes(monkeypatch, tmp_path, caplog) -> Non
     monkeypatch.setattr("ciao.upgrade.upgrade_project_deps", _pip_bumped)
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=gws_bumped))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
+    _stub_provider_upgrades(monkeypatch)
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
@@ -196,8 +240,7 @@ async def test_upgrade_all_surfaces_silent_failures(monkeypatch, tmp_path, caplo
     monkeypatch.setattr("ciao.upgrade.upgrade_project_deps", _no_pip_changes)
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=claude_failed))
-    monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
+    _stub_provider_upgrades(monkeypatch, claude=claude_failed)
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))

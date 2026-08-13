@@ -90,7 +90,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useTaskStore } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
-import type { ScheduleArchivePolicy } from '../lib/types'
+import type { RuntimeProvider, ScheduleArchivePolicy } from '../lib/types'
 import ModelSelector from '../components/ModelSelector.vue'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 const emit = defineEmits<{ created: [] }>()
@@ -136,7 +136,7 @@ const inheritedModelLabel = computed(() => {
   return model ? `Inherit ${provider} / ${model}` : `Inherit ${provider} default`
 })
 
-const selectedProvider = ref<'claude' | 'codex' | undefined>(undefined)
+const selectedProvider = ref<RuntimeProvider | undefined>(undefined)
 
 function selectScheduleModel(value: string | string[], sectionKey: string) {
   model.value = Array.isArray(value) ? value[0] || '' : value

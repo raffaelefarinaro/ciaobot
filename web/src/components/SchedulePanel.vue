@@ -546,7 +546,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
 import type { ScheduleUpdate } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
-import type { Loop, Schedule, ScheduleArchivePolicy } from '../lib/types'
+import type { Loop, RuntimeProvider, Schedule, ScheduleArchivePolicy } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
 import NewLoopForm from './NewLoopForm.vue'
 import PaneHeader from './PaneHeader.vue'
@@ -881,7 +881,7 @@ function formatWhen(iso: string | null): string {
 }
 
 const scheduleModelSections = computed(() => sectionsFromModelsResponse(store.models))
-const editModelProvider = ref<'claude' | 'codex' | ''>('')
+const editModelProvider = ref<RuntimeProvider | ''>('')
 
 const editWorkspaceConfig = computed(() =>
   projectStore.workspaceOptions.find(workspace => workspace.name === editData.value.workspace),

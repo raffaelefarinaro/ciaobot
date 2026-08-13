@@ -20,6 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Mapping, Any
 
+from ciao import provider_registry
 from ciao.providers.codex import codex_login_status
 
 # Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
@@ -358,6 +359,38 @@ def _discover_claude_mcps_uncached(
     return connected
 
 
+# Provider status probes share one keyword-only contract so ``setup_status``
+# can enumerate them from ``ciao.provider_registry`` instead of naming each
+# provider. Each probe takes whatever context it needs and ignores the rest.
+def claude_status_probe(
+    env: Mapping[str, str],
+    *,
+    credentials_path: Path,
+    config_path: Path,
+    workspace_root: Path | None = None,
+    **_unused: Any,
+) -> dict[str, Any]:
+    return _claude_status(
+        env, credentials_path, config_path, workspace_root=workspace_root
+    )
+
+
+def codex_status_probe(
+    env: Mapping[str, str],
+    **_unused: Any,
+) -> dict[str, Any]:
+    return codex_login_status(env)
+
+
+def opencode_status_probe(
+    env: Mapping[str, str],
+    **_unused: Any,
+) -> dict[str, Any]:
+    from ciao.providers.opencode import opencode_login_status
+
+    return opencode_login_status(env)
+
+
 def _claude_status(
     env: Mapping[str, str],
     credentials_path: Path,
@@ -589,13 +622,20 @@ def setup_status(
         ),
     ]
     providers = {
-        "claude": _claude_status(
-            source, credentials_path, config_path, workspace_root=workspace_root
-        ),
-        "codex": codex_login_status(source),
-        "ollama": _ollama_status(config, source),
-        "openrouter": _openrouter_status(source),
+        descriptor.id: descriptor.status_probe(
+            source,
+            config=config,
+            credentials_path=credentials_path,
+            config_path=config_path,
+            workspace_root=workspace_root,
+        )
+        for descriptor in provider_registry.descriptors()
+        if descriptor.status_probe_path
     }
+    # Routing backends, not runtime providers: they have no provider module and
+    # run through Claude Code, but Settings still shows their credential state.
+    providers["ollama"] = _ollama_status(config, source)
+    providers["openrouter"] = _openrouter_status(source)
     configured = all(row["ok"] for row in checks if row["required"])
     provider_ready = any(row["ok"] for row in providers.values())
     bootstrap = bool(getattr(config, "bootstrap_mode", False))

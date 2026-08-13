@@ -901,11 +901,18 @@
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="store.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
+      <!-- Capability disclosure: providers that can steer inject a mid-turn
+           message into the running turn; ones that cannot only queue it. -->
+      <p v-if="!providerCanSteer" class="queued-note">
+        {{ providerLabelForChat }} can't take a message mid-turn — this is sent when the current response finishes.
+      </p>
       <div
         v-for="(q, i) in store.currentQueued"
         :key="q.id || i"
         class="queued-chip"
-        title="Will be sent when current response finishes"
+        :title="providerCanSteer
+          ? 'Will be sent when current response finishes'
+          : `${providerLabelForChat} cannot be steered mid-turn; sent when the current response finishes`"
       >
         <span class="queued-label">Queued</span>
         <div class="queued-body">
@@ -1141,7 +1148,7 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
-import type { AgentAssetsResponse, CommandsResponse, Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, Loop, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1816,6 +1823,25 @@ const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
 const modelsResponse = ref<ModelsResponse | null>(null)
+
+/** The backend descriptor for this chat's runtime provider, if known. */
+const providerDescriptor = computed(() => {
+  const id = chat.value?.provider || ''
+  return modelsResponse.value?.providers?.find((item) => item.id === id) || null
+})
+
+/**
+ * Whether this provider can take a message mid-turn.
+ *
+ * Defaults to true so the extra note only ever appears once the backend has
+ * actually said the provider cannot steer — an unknown provider should not be
+ * described as limited.
+ */
+const providerCanSteer = computed(() => providerDescriptor.value?.capabilities?.steer ?? true)
+
+const providerLabelForChat = computed(
+  () => providerDescriptor.value?.short_label || chat.value?.provider || 'This provider',
+)
 const thinkingLevels = ref<Record<string, string[]>>({})
 
 const openTraces = ref<Record<number, boolean>>({})
@@ -2030,17 +2056,20 @@ const touchedFiles = computed<TouchedFile[]>(() => {
   return Array.from(byPath.values()).sort((a, b) => b.index - a.index)
 })
 
-type ProviderKey = 'claude' | 'codex'
-type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex' | `custom:${string}`
+type ProviderKey = RuntimeProvider
+type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex' | 'opencode' | `custom:${string}`
 type ModelBucketValue = 'work' | 'personal' | 'openrouter' | ''
-type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex' | 'custom'
+type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex' | 'opencode' | 'custom'
 type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
+// The first three buckets are all served by the Claude runner, differing only
+// in env-injected routing; the rest are one bucket per runtime provider.
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
   { key: 'claude_work', label: 'Claude', provider: 'claude' },
   { key: 'claude_personal', label: 'Ollama', provider: 'claude' },
   { key: 'openrouter', label: 'OpenRouter', provider: 'claude' },
   { key: 'codex', label: 'Codex', provider: 'codex' },
+  { key: 'opencode', label: 'opencode', provider: 'opencode' },
 ]
 
 
@@ -3938,6 +3967,8 @@ function routingProviderLabel(bucket: string | undefined, provider: string): str
   if (lower === 'anthropic') return 'Anthropic'
   if (lower === 'openrouter') return 'OpenRouter'
   if (lower === 'codex') return 'Codex'
+  // Lower-case on purpose: that is how opencode brands itself.
+  if (lower === 'opencode') return 'opencode'
   if (lower === 'claude') return 'Claude'
   if (lower === 'custom') {
     if (bucket?.startsWith('custom:')) {
@@ -3952,7 +3983,8 @@ function routingProviderLabel(bucket: string | undefined, provider: string): str
 
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
   if (bucket.startsWith('custom:')) return ''
-  if (bucket === 'codex') return ''
+  // Providers that serve their own models have no Anthropic-style bucket.
+  if (bucket === 'codex' || bucket === 'opencode') return ''
   if (bucket === 'openrouter') return 'openrouter'
   return bucket === 'claude_personal' ? 'personal' : 'work'
 }
@@ -3975,6 +4007,9 @@ function bucketForSelectedModel(model: string): BucketKey {
   if (response?.alias_tiers?.codex?.[model]) return 'codex'
   if ((response?.codex_models || []).includes(model)) return 'codex'
   if (model === CODEX_FABLE_PSEUDO_MODEL) return 'codex'
+  // Must precede the OpenRouter check: opencode ids are also `provider/model`,
+  // so the shape heuristic below would otherwise claim them.
+  if ((response?.opencode_models || []).includes(model)) return 'opencode'
   const openrouterModels = response?.openrouter_models || []
   if (openrouterModels.includes(model) || (model.includes('/') && !model.includes(':'))) {
     return 'openrouter'
@@ -3987,7 +4022,7 @@ function bucketForSelectedModel(model: string): BucketKey {
 }
 
 function effectiveModelForBucket(model: string, bucket: BucketKey): string {
-  if (bucket === 'codex') return model
+  if (bucket === 'codex' || bucket === 'opencode') return model
   const tier = tierAlias(model)
   if (!tier) return model
   if (bucket === 'openrouter') {
@@ -4002,6 +4037,7 @@ function effectiveModelForBucket(model: string, bucket: BucketKey): string {
 function routeKindFor(model: string, bucket: BucketKey): RouteKind {
   if (bucket.startsWith('custom:')) return 'custom'
   if (bucket === 'codex') return 'codex'
+  if (bucket === 'opencode') return 'opencode'
   const effective = effectiveModelForBucket(model, bucket)
   if (bucket === 'openrouter' || (effective.includes('/') && !effective.includes(':'))) {
     return 'openrouter'
@@ -4023,6 +4059,7 @@ async function selectModel(value: string | string[], sectionKey = '') {
   const sectionBucket: Partial<Record<string, BucketKey>> = {
     anthropic: 'claude_work',
     codex: 'codex',
+    opencode: 'opencode',
     ollama: 'claude_personal',
     openrouter: 'openrouter',
   }
@@ -6362,6 +6399,12 @@ details[open] > .activity-summary::before {
   border-radius: var(--radius);
   font-size: 13px;
   color: var(--fg2);
+}
+.queued-note {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--fg3, var(--fg2));
+  line-height: 1.4;
 }
 .queued-label {
   font-size: 10px;

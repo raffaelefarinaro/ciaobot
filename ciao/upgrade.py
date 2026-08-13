@@ -12,6 +12,8 @@ import sys
 from dataclasses import dataclass
 from typing import cast
 
+from ciao import provider_registry
+
 logger = logging.getLogger(__name__)
 
 
@@ -221,6 +223,25 @@ async def upgrade_codex() -> UpgradeResult:
     )
 
 
+async def upgrade_opencode() -> UpgradeResult:
+    """Upgrade the installed opencode CLI through its native updater."""
+    from ciao.providers.opencode import resolve_opencode_binary
+
+    binary = resolve_opencode_binary()
+    if not binary:
+        return UpgradeResult(
+            command=["opencode", "upgrade"],
+            changed=False,
+            success=False,
+            stdout="",
+            stderr="opencode not found",
+            before_version="",
+            after_version="",
+        )
+    return await run_upgrade(
+        install_command=[binary, "upgrade"],
+        version_command=[binary, "--version"],
+    )
 
 
 async def upgrade_root_npm(project_root: str) -> UpgradeResult:
@@ -319,33 +340,41 @@ async def upgrade_scrapling() -> UpgradeResult:
 
 async def upgrade_all(project_root: str) -> str | None:
     """Run all upgrades (pip deps + root npm + web npm + gws + defuddle
-    + claude + codex). Returns a summary or *None*."""
+    + every registered provider CLI). Returns a summary or *None*."""
     parts: list[str] = []
 
-    # All upgrades in parallel.
+    # All upgrades in parallel. Provider CLIs fan out from the registry, so a
+    # new provider is upgraded without touching this function.
     pip_task = asyncio.create_task(upgrade_project_deps(project_root))
     gws_task = asyncio.create_task(upgrade_gws())
     defuddle_task = asyncio.create_task(upgrade_defuddle())
-    claude_task = asyncio.create_task(upgrade_claude_code())
-    codex_task = asyncio.create_task(upgrade_codex())
+    provider_tasks = {
+        descriptor.id: asyncio.create_task(descriptor.upgrade_callable()())
+        for descriptor in provider_registry.descriptors()
+        if descriptor.upgrade_path
+    }
     root_npm_task = asyncio.create_task(upgrade_root_npm(project_root))
     web_npm_task = asyncio.create_task(upgrade_web_npm(project_root))
     libreoffice_task = asyncio.create_task(upgrade_libreoffice())
     scrapling_task = asyncio.create_task(upgrade_scrapling())
+    # One gather, with the provider results tailing the fixed positions: a
+    # failure anywhere must not leave a provider task awaited by nobody.
+    results = await asyncio.gather(
+        pip_task, gws_task, defuddle_task,
+        root_npm_task, web_npm_task, libreoffice_task,
+        scrapling_task,
+        *provider_tasks.values(),
+    )
     (
         pip_changed, gws_result, defuddle_result,
-        claude_result, codex_result, root_npm_result, web_npm_result,
+        root_npm_result, web_npm_result,
         libreoffice_result, scrapling_result,
     ) = cast(
         "tuple[dict[str, tuple[str, str]], UpgradeResult, UpgradeResult, "
-        "UpgradeResult, UpgradeResult, UpgradeResult, UpgradeResult, "
-        "UpgradeResult, UpgradeResult]",
-        await asyncio.gather(
-            pip_task, gws_task, defuddle_task, claude_task, codex_task,
-            root_npm_task, web_npm_task, libreoffice_task,
-            scrapling_task,
-        ),
+        "UpgradeResult, UpgradeResult, UpgradeResult, UpgradeResult]",
+        tuple(results[:7]),
     )
+    provider_results = cast("list[UpgradeResult]", list(results[7:]))
 
     # Failures get logged + surfaced in the summary even when nothing changed,
     # so silent EACCES (e.g. npm-global writes without a prior sudo seed) don't
@@ -353,8 +382,7 @@ async def upgrade_all(project_root: str) -> str | None:
     named_results = [
         ("gws", gws_result),
         ("defuddle", defuddle_result),
-        ("claude", claude_result),
-        ("codex", codex_result),
+        *zip(provider_tasks, provider_results),
         ("root-npm", root_npm_result),
         ("web-npm", web_npm_result),
         ("libreoffice", libreoffice_result),

@@ -1,0 +1,761 @@
+"""opencode provider unit tests.
+
+Event fixtures under ``tests/fixtures/opencode/`` were captured from a real
+``opencode serve`` process (1.18.18) and sanitized: absolute paths replaced,
+bundler stack traces trimmed to their first line. No credentials, prompts, or
+account identifiers are recorded.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from ciao.models import (
+    AssistantTextDelta,
+    PermissionRequestEvent,
+    ThinkingEvent,
+    TokenUsageEvent,
+    ToolUseEvent,
+)
+from ciao.providers.opencode import (
+    OpencodeProvider,
+    OpencodeSettings,
+    _catalog_from_providers,
+    error_text,
+    missing_required_paths,
+    mode_settings,
+    opencode_tier_overrides,
+    split_model,
+    usage_payload,
+)
+
+FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
+
+
+def _provider(tmp_path: Path) -> OpencodeProvider:
+    return OpencodeProvider(tmp_path)
+
+
+# ── capabilities ────────────────────────────────────────────────────────
+
+
+def test_steer_is_unsupported():
+    """opencode has no API to inject into a running turn (see the plan doc)."""
+    assert OpencodeProvider.capabilities.steer is False
+
+
+def test_quota_is_unsupported():
+    """Bring-your-own-provider: there is no unified quota snapshot to report."""
+    assert OpencodeProvider.capabilities.quota is False
+
+
+def test_background_subagents_are_supported():
+    """Child sessions carry parentID, so background agents are inspectable."""
+    assert OpencodeProvider.capabilities.background_subagents is True
+    assert OpencodeProvider.capabilities.subagent_messages is True
+
+
+@pytest.mark.asyncio
+async def test_steer_never_sends_a_second_prompt(tmp_path):
+    """Returning False keeps the message in ProviderService's next-turn queue.
+
+    Sending a second prompt instead would either queue it out of order or
+    abort the active turn; neither is steering.
+    """
+    provider = _provider(tmp_path)
+    assert await provider.steer(object()) is False  # type: ignore[arg-type]
+
+
+# ── contract verification ───────────────────────────────────────────────
+
+
+def test_missing_required_paths_flags_an_incompatible_build():
+    spec = {"paths": {"/global/health": {}, "/session": {}}}
+    missing = missing_required_paths(spec)
+    assert "/session/{sessionID}/abort" in missing
+    assert "/question/{requestID}/reply" in missing
+
+
+def test_missing_required_paths_accepts_the_real_document():
+    """The captured OpenAPI paths from opencode 1.18 satisfy every requirement."""
+    spec = json.loads((FIXTURES / "openapi_paths.json").read_text(encoding="utf-8"))
+    assert missing_required_paths(spec) == ()
+
+
+# ── model ids ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("anthropic/claude-sonnet-4-6", ("anthropic", "claude-sonnet-4-6")),
+        ("openai/gpt-5.6-terra", ("openai", "gpt-5.6-terra")),
+        # A bare id names no provider; opencode falls back to its default.
+        ("sonnet", ("", "sonnet")),
+        ("", ("", "")),
+        # A trailing slash is not a provider split.
+        ("anthropic/", ("", "anthropic/")),
+    ],
+)
+def test_split_model(value, expected):
+    assert split_model(value) == expected
+
+
+# ── modes ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("mode", "agent"),
+    [("plan", "plan"), ("normal", "build"), ("auto", "build"), ("bypass", "build")],
+)
+def test_mode_agents(mode, agent):
+    assert mode_settings(mode)[0] == agent
+
+
+def _actions(mode: str) -> dict[str, str]:
+    """Flatten a ruleset to {permission: action} for readable assertions."""
+    return {rule["permission"]: rule["action"] for rule in mode_settings(mode)[1]}
+
+
+def test_permission_rules_use_the_api_shape_not_the_config_map():
+    """`POST /session` wants a list of rules; the `{"*": "ask"}` map 400s.
+
+    The config-file form and the API form differ, and the server rejects the
+    wrong one with a bare `{"_tag":"BadRequest"}`, so pin the shape here.
+    """
+    ruleset = mode_settings("normal")[1]
+    assert isinstance(ruleset, list)
+    assert ruleset[0] == {"permission": "*", "pattern": "*", "action": "ask"}
+
+
+def test_every_rule_uses_a_valid_action():
+    for mode in ("plan", "normal", "auto", "bypass"):
+        for rule in mode_settings(mode)[1]:
+            assert rule["action"] in {"allow", "deny", "ask"}
+            assert set(rule) == {"permission", "pattern", "action"}
+
+
+def test_the_wildcard_rule_comes_first():
+    """Resolution is last-match-wins, so specific grants must follow it."""
+    for mode in ("plan", "auto"):
+        assert mode_settings(mode)[1][0]["permission"] == "*"
+
+
+def test_bypass_allows_everything_and_normal_asks():
+    assert _actions("bypass") == {"*": "allow"}
+    assert _actions("normal") == {"*": "ask"}
+
+
+def test_auto_allows_edits_but_still_gates_shell():
+    """Auto mode applies edits automatically; bash stays behind the wildcard."""
+    actions = _actions("auto")
+    assert actions["edit"] == "allow"
+    assert actions["*"] == "ask"
+    assert "bash" not in actions
+
+
+def test_plan_mode_is_read_only():
+    actions = _actions("plan")
+    assert actions["read"] == "allow"
+    assert actions["*"] == "ask"
+    assert "edit" not in actions
+
+
+def test_unknown_mode_falls_back_to_normal():
+    assert mode_settings("nonsense") == mode_settings("normal")  # type: ignore[arg-type]
+
+
+# ── error sanitization ──────────────────────────────────────────────────
+
+
+def test_error_text_drops_the_stack_trace():
+    """opencode error payloads embed a bundler stack; only line one is shown."""
+    error = {
+        "name": "UnknownError",
+        "data": {"message": "Model not found: x\n    at <anonymous> (/$bunfs/root/a.js:1:2)"},
+    }
+    assert error_text(error) == "Model not found: x"
+
+
+def test_error_text_falls_back_to_the_error_name():
+    assert error_text({"name": "ProviderAuthError", "data": {}}) == "ProviderAuthError"
+
+
+def test_error_text_handles_a_missing_payload():
+    assert error_text(None) == "opencode reported an error"
+
+
+# ── usage ───────────────────────────────────────────────────────────────
+
+
+def test_usage_payload_flattens_cache_counts():
+    usage = usage_payload(
+        {"input": 120, "output": 40, "reasoning": 8, "cache": {"read": 900, "write": 30}}
+    )
+    assert usage == {
+        "inputTokens": "120",
+        "outputTokens": "40",
+        "reasoningTokens": "8",
+        "cacheReadTokens": "900",
+        "cacheWriteTokens": "30",
+    }
+
+
+def test_usage_payload_omits_zero_counts():
+    assert usage_payload({"input": 0, "output": 5, "cache": {}}) == {"outputTokens": "5"}
+
+
+def test_usage_payload_tolerates_junk():
+    assert usage_payload(None) == {}
+    assert usage_payload({"input": "not-a-number"}) == {}
+
+
+# ── model catalog ───────────────────────────────────────────────────────
+
+
+def test_catalog_lists_only_connected_providers():
+    """`all` enumerates every backend opencode knows of — hundreds. Only the
+    authenticated ones are models the user can actually run."""
+    payload = {
+        "connected": ["anthropic"],
+        "all": [
+            {"id": "anthropic", "models": {"claude-sonnet-4-6": {"id": "claude-sonnet-4-6", "name": "Sonnet"}}},
+            {"id": "openai", "models": {"gpt-5.6-terra": {"id": "gpt-5.6-terra", "name": "Terra"}}},
+        ],
+    }
+    assert _catalog_from_providers(payload) == [
+        {
+            "model": "anthropic/claude-sonnet-4-6",
+            "label": "Sonnet (anthropic)",
+            "variants": [],
+        }
+    ]
+
+
+def test_catalog_handles_list_shaped_models():
+    payload = {"connected": ["x"], "all": [{"id": "x", "models": [{"id": "m", "name": "M"}]}]}
+    assert _catalog_from_providers(payload) == [
+        {"model": "x/m", "label": "M (x)", "variants": []}
+    ]
+
+
+def test_catalog_reports_per_model_reasoning_variants():
+    """opencode calls reasoning effort a model `variant`, and it is per model.
+
+    Captured live: `deepseek-v4-flash-free` offers low/high/max while
+    `big-pickle` offers none, so the level list has to be narrowed per model
+    rather than assumed from a fixed ladder.
+    """
+    payload = {
+        "connected": ["opencode"],
+        "all": [{
+            "id": "opencode",
+            "models": {
+                "deepseek-v4-flash-free": {
+                    "id": "deepseek-v4-flash-free",
+                    "variants": {"low": {}, "high": {}, "max": {}},
+                },
+                "big-pickle": {"id": "big-pickle"},
+            },
+        }],
+    }
+    by_model = {row["model"]: row["variants"] for row in _catalog_from_providers(payload)}
+    assert by_model["opencode/deepseek-v4-flash-free"] == ["high", "low", "max"]
+    assert by_model["opencode/big-pickle"] == []
+
+
+def test_catalog_is_empty_when_nothing_is_connected():
+    payload = {"connected": [], "all": [{"id": "anthropic", "models": {"a": {"id": "a"}}}]}
+    assert _catalog_from_providers(payload) == []
+
+
+def test_catalog_tolerates_junk():
+    assert _catalog_from_providers(None) == []
+    assert _catalog_from_providers({"all": "nope"}) == []
+
+
+# ── tier pins ───────────────────────────────────────────────────────────
+
+
+def test_tier_overrides_skips_unpinned_tiers():
+    class Config:
+        opencode = OpencodeSettings(sonnet_model="anthropic/claude-sonnet-4-6")
+
+    assert opencode_tier_overrides(Config()) == {"sonnet": "anthropic/claude-sonnet-4-6"}
+
+
+def test_tier_overrides_on_a_config_without_opencode():
+    assert opencode_tier_overrides(object()) == {}
+
+
+# ── event normalization ─────────────────────────────────────────────────
+
+
+def _convert(provider: OpencodeProvider, kind: str, properties: dict):
+    return provider._event_to_stream({"type": kind, "properties": properties})
+
+
+def test_text_delta_becomes_assistant_text(tmp_path):
+    events = _convert(
+        _provider(tmp_path), "session.next.text.delta", {"delta": "hello"}
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], AssistantTextDelta)
+    assert events[0].text == "hello"
+
+
+def test_empty_text_delta_is_dropped(tmp_path):
+    assert _convert(_provider(tmp_path), "session.next.text.delta", {"delta": ""}) == []
+
+
+def test_reasoning_delta_becomes_thinking(tmp_path):
+    events = _convert(
+        _provider(tmp_path), "session.next.reasoning.delta", {"delta": "hmm"}
+    )
+    assert isinstance(events[0], ThinkingEvent)
+    assert events[0].text == "hmm"
+
+
+def test_tool_called_becomes_tool_use_with_a_stable_id(tmp_path):
+    events = _convert(
+        _provider(tmp_path),
+        "session.next.tool.called",
+        {"callID": "call_1", "tool": "read", "input": {"filePath": "/workspace/a.py"}},
+    )
+    assert isinstance(events[0], ToolUseEvent)
+    assert events[0].tool_name == "read"
+    assert events[0].tool_use_id == "call_1"
+    assert events[0].tool_input == "/workspace/a.py"
+
+
+def test_write_tool_reports_a_file_touch(tmp_path):
+    events = _convert(
+        _provider(tmp_path),
+        "session.next.tool.called",
+        {"callID": "c", "tool": "write", "input": {"filePath": "/workspace/new.py"}},
+    )
+    assert events[0].file_touches == [{"file_path": "/workspace/new.py", "action": "write"}]
+
+
+def test_read_tool_reports_no_file_touch(tmp_path):
+    events = _convert(
+        _provider(tmp_path),
+        "session.next.tool.called",
+        {"callID": "c", "tool": "read", "input": {"filePath": "/workspace/a.py"}},
+    )
+    assert events[0].file_touches is None
+
+
+def test_tool_result_recovers_the_tool_name_from_the_call(tmp_path):
+    provider = _provider(tmp_path)
+    _convert(provider, "session.next.tool.called", {"callID": "c1", "tool": "bash", "input": {}})
+    events = _convert(provider, "session.next.tool.success", {"callID": "c1"})
+    assert events[0].type == "tool_result"
+    assert events[0].tool_name == "bash"
+    # The call is forgotten once resolved, so a duplicate cannot re-fire it.
+    assert provider._tool_calls == {}
+
+
+def test_failed_tool_carries_a_sanitized_reason(tmp_path):
+    provider = _provider(tmp_path)
+    _convert(provider, "session.next.tool.called", {"callID": "c1", "tool": "bash", "input": {}})
+    events = _convert(
+        provider,
+        "session.next.tool.failed",
+        {"callID": "c1", "error": {"name": "E", "data": {"message": "boom\n  at x"}}},
+    )
+    assert events[0].tool_input == "boom"
+
+
+def test_step_ended_reports_token_usage(tmp_path):
+    events = _convert(
+        _provider(tmp_path),
+        "session.next.step.ended",
+        {"tokens": {"input": 10, "output": 3}},
+    )
+    assert isinstance(events[0], TokenUsageEvent)
+    assert (events[0].input_tokens, events[0].output_tokens) == (10, 3)
+
+
+# Captured verbatim from a live `permission.asked` event (opencode 1.18.18)
+# when a bash command was gated in `normal` mode.
+LIVE_PERMISSION = {
+    "id": "per_live1",
+    "sessionID": "ses_1",
+    "permission": "bash",
+    "patterns": ["echo approved-ok"],
+    "metadata": {"command": "echo approved-ok"},
+    "always": ["echo *"],
+    "tool": {"messageID": "msg_1", "callID": "call_abc"},
+}
+
+
+def test_permission_card_names_the_tool_and_the_command(tmp_path):
+    """Regression: an approval card must say *what* is being approved.
+
+    The live event is `permission.asked` with `permission`/`patterns`/
+    `metadata`; reading the schema's v2 `action`/`resources` instead produced
+    a card that said only "run a tool" with no detail — the user could not
+    tell what they were approving.
+    """
+    events = _convert(_provider(tmp_path), "permission.asked", LIVE_PERMISSION)
+    assert isinstance(events[0], PermissionRequestEvent)
+    assert events[0].tool_name == "bash"
+    assert events[0].tool_input == "echo approved-ok"
+    assert "bash" in events[0].message
+
+
+def test_permission_card_links_back_to_the_tool_call(tmp_path):
+    """So the UI can retract the tool card when the request is refused."""
+    provider = _provider(tmp_path)
+    _convert(provider, "permission.asked", LIVE_PERMISSION)
+    assert provider.tool_use_id_for_request("per_live1") == "call_abc"
+
+
+def test_permission_card_falls_back_to_patterns_without_metadata(tmp_path):
+    payload = {**LIVE_PERMISSION, "metadata": {}}
+    events = _convert(_provider(tmp_path), "permission.asked", payload)
+    assert events[0].tool_input == "echo approved-ok"
+
+
+def test_permission_ask_registers_a_pending_request(tmp_path):
+    provider = _provider(tmp_path)
+    events = _convert(
+        provider,
+        "permission.v2.asked",
+        {"id": "perm_1", "sessionID": "ses_1", "action": "edit", "resources": ["/workspace/a.py"]},
+    )
+    assert isinstance(events[0], PermissionRequestEvent)
+    assert events[0].request_id == "perm_1"
+    # The newer v2 shape still resolves to a usable card.
+    assert events[0].tool_name == "edit"
+    assert events[0].tool_input == "/workspace/a.py"
+    assert "perm_1" in provider._permission_requests
+
+
+def test_permission_without_an_id_is_ignored(tmp_path):
+    provider = _provider(tmp_path)
+    assert _convert(provider, "permission.v2.asked", {"action": "edit"}) == []
+    assert provider._permission_requests == {}
+
+
+def test_question_becomes_an_ask_user_question_card(tmp_path):
+    provider = _provider(tmp_path)
+    events = _convert(
+        provider,
+        "question.v2.asked",
+        {
+            "id": "q_1",
+            "sessionID": "ses_1",
+            "questions": [{
+                "question": "Which database?",
+                "header": "Database",
+                "multiple": False,
+                "custom": True,
+                "options": [{"label": "Postgres", "description": "Relational"}],
+            }],
+        },
+    )
+    assert events[0].tool_name == "AskUserQuestion"
+    payload = json.loads(events[0].tool_input)
+    assert payload["questions"][0]["question"] == "Which database?"
+    assert payload["questions"][0]["options"] == [
+        {"label": "Postgres", "description": "Relational"}
+    ]
+    assert payload["questions"][0]["allowCustom"] is True
+    assert "q_1" in provider._question_requests
+
+
+def test_question_without_questions_is_ignored(tmp_path):
+    provider = _provider(tmp_path)
+    assert _convert(provider, "question.v2.asked", {"id": "q", "questions": []}) == []
+    assert provider._question_requests == {}
+
+
+def test_idle_status_is_not_surfaced_as_activity(tmp_path):
+    assert _convert(_provider(tmp_path), "session.status", {"status": {"type": "idle"}}) == []
+
+
+def test_busy_status_is_surfaced(tmp_path):
+    events = _convert(_provider(tmp_path), "session.status", {"status": {"type": "busy"}})
+    assert events[0].status == "busy"
+
+
+def test_unknown_events_are_ignored(tmp_path):
+    assert _convert(_provider(tmp_path), "pty.created", {"ptyID": "x"}) == []
+
+
+# ── replies ─────────────────────────────────────────────────────────────
+
+
+def test_permission_reply_for_an_unknown_request_is_refused(tmp_path):
+    assert _provider(tmp_path).send_permission_response("nope", True) is False
+
+
+def test_question_reply_for_an_unknown_request_is_refused(tmp_path):
+    assert _provider(tmp_path).send_question_response("nope", {}) is False
+
+
+def test_tool_use_id_for_unknown_request_is_empty(tmp_path):
+    assert _provider(tmp_path).tool_use_id_for_request("nope") == ""
+
+
+# ── real captured stream ────────────────────────────────────────────────
+
+
+def _live_events() -> list[dict]:
+    lines = (FIXTURES / "live_events.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def test_live_fixture_parses_without_raising(tmp_path):
+    """Replay a real captured SSE stream through the translator."""
+    provider = _provider(tmp_path)
+    events = _live_events()
+    assert events[0]["type"] == "server.connected"
+    # Nothing in a real stream should raise, whatever the variant.
+    for event in events:
+        provider._event_to_stream(event)
+
+
+def test_a_failure_is_reported_before_idle_ends_the_turn():
+    """The turn loop stops at `session.idle`, so the error must precede it.
+
+    opencode emits the failure once before idle and repeats it afterwards with
+    a bundler stack appended. `run_streaming` breaks at idle and never sees the
+    repeat, so this ordering is what makes a failed turn report as failed.
+    """
+    kinds = [event["type"] for event in _live_events()]
+    assert "session.error" in kinds and "session.idle" in kinds
+    assert kinds.index("session.error") < kinds.index("session.idle")
+
+
+def test_live_fixture_error_is_reported_without_a_stack(tmp_path):
+    lines = (FIXTURES / "live_events.jsonl").read_text(encoding="utf-8").splitlines()
+    errors = [
+        json.loads(line)["properties"]["error"]
+        for line in lines
+        if line.strip() and json.loads(line)["type"] == "session.error"
+    ]
+    assert errors, "fixture should contain a session.error"
+    for error in errors:
+        text = error_text(error)
+        assert "\n" not in text
+        assert "$bunfs" not in text
+
+
+# ── the real streaming path (`message.part.*`) ──────────────────────────
+#
+# `turn_with_tool.jsonl` is a full turn captured from a live opencode server
+# against a free model: reasoning, a bash tool call, assistant text, and the
+# usage totals. This is the event family opencode actually emits; the
+# `session.next.*` cases above are a forward-compatible path that this build
+# does not use for ordinary turns.
+
+
+def _replay(provider: OpencodeProvider, name: str = "turn_with_tool.jsonl"):
+    events = []
+    for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            events.extend(provider._event_to_stream(json.loads(line)))
+    return events
+
+
+def _joined(events, kind: str) -> str:
+    return "".join(e.text for e in events if e.type == kind)
+
+
+def test_real_turn_yields_the_assistant_answer(tmp_path):
+    events = _replay(_provider(tmp_path))
+    assert "DONE" in _joined(events, "text")
+
+
+def test_real_turn_keeps_reasoning_out_of_the_answer(tmp_path):
+    """Regression: a ReasoningPart also stores its content in a `text` field.
+
+    Keying off the delta's `field` alone merged the model's private reasoning
+    into the visible reply. The part's tracked type is what separates them.
+    """
+    events = _replay(_provider(tmp_path))
+    thinking = _joined(events, "thinking")
+    text = _joined(events, "text")
+    assert thinking, "the captured turn contains reasoning"
+    assert thinking not in text
+    assert not text.startswith(thinking[:20])
+
+
+def test_real_turn_does_not_duplicate_text(tmp_path):
+    """opencode sends each token twice: as a delta and in the settled part.
+
+    Emitting both would double every character.
+    """
+    events = _replay(_provider(tmp_path))
+    text = _joined(events, "text")
+    assert text.count("DONE") == 1
+
+
+def test_real_turn_does_not_replay_the_user_prompt(tmp_path):
+    """The submitted user part is echoed back; the bubble already exists."""
+    events = _replay(_provider(tmp_path))
+    assert "Then reply DONE" not in _joined(events, "text")
+
+
+def test_real_turn_reports_the_tool_call_and_its_result(tmp_path):
+    events = _replay(_provider(tmp_path))
+    tools = [(e.type, e.tool_name) for e in events if e.type in {"tool_use", "tool_result"}]
+    assert ("tool_use", "bash") in tools
+    assert ("tool_result", "bash") in tools
+
+
+def test_a_tool_call_is_announced_exactly_once(tmp_path):
+    """Running updates repeat; only the first should surface as a new call."""
+    events = _replay(_provider(tmp_path))
+    starts = [e for e in events if e.type == "tool_use" and e.tool_name == "bash"]
+    assert len(starts) == 1
+
+
+def test_real_turn_records_usage_and_cost(tmp_path):
+    provider = _provider(tmp_path)
+    _replay(provider)
+    assert provider._usage.get("inputTokens")
+    assert provider._cost is not None
+
+
+def test_replaying_a_turn_twice_is_clean_after_reset(tmp_path):
+    """Per-turn state must not leak between turns on a reused provider."""
+    provider = _provider(tmp_path)
+    first = _joined(_replay(provider), "text")
+    provider._reset_turn_state()
+    second = _joined(_replay(provider), "text")
+    assert first == second
+
+
+def test_turn_fixture_carries_no_private_paths(tmp_path):
+    raw = (FIXTURES / "turn_with_tool.jsonl").read_text(encoding="utf-8")
+    for needle in ("raffaelefarinaro", "claude-501", "OPENCODE_SERVER_PASSWORD", "Bearer "):
+        assert needle not in raw
+
+
+# ── server lifecycle ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
+    """A server we could not validate must not outlive the attempt."""
+    provider = _provider(tmp_path)
+    terminated: list[str] = []
+
+    class FakeProcess:
+        returncode = None
+
+        def terminate(self):
+            terminated.append("terminate")
+            FakeProcess.returncode = 0
+
+        def kill(self):  # pragma: no cover - only on a hung process
+            terminated.append("kill")
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*_args, **_kwargs):
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
+    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    async def boom(self):
+        raise RuntimeError("incompatible build")
+
+    monkeypatch.setattr(OpencodeProvider, "_await_health", boom)
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+
+    with pytest.raises(RuntimeError, match="incompatible build"):
+        await provider._ensure_server(Request())  # type: ignore[arg-type]
+
+    assert terminated == ["terminate"]
+    assert provider._process is None
+    assert provider._client is None
+    FakeProcess.returncode = None
+
+
+@pytest.mark.asyncio
+async def test_missing_binary_names_the_override_env_var(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None
+    )
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+
+    with pytest.raises(FileNotFoundError, match="CIAO_OPENCODE_BIN"):
+        await provider._ensure_server(Request())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_disconnect_is_safe_before_any_server_started(tmp_path):
+    await _provider(tmp_path).disconnect()
+
+
+def test_live_fixture_carries_no_credentials(tmp_path):
+    """Guard the fixture itself: it must never gain secrets on a re-capture."""
+    raw = (FIXTURES / "live_events.jsonl").read_text(encoding="utf-8")
+    for needle in ("OPENCODE_SERVER_PASSWORD", "Authorization", "sk-", "Bearer "):
+        assert needle not in raw
+
+
+# ── /api/models contract the PWA reads ──────────────────────────────────
+
+
+def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
+    """The PWA gates its UI on `providers[].capabilities`, not on provider ids.
+
+    In particular the composer's "this queues rather than steers" note keys off
+    `steer`, so the flag has to survive the round trip to the API.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from starlette.requests import Request
+
+    from ciao.config import CiaoConfig
+    from ciao.providers.codex import CodexProvider
+    from ciao.web.routes_api import list_models
+
+    config = CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+    )
+    monkeypatch.setattr(CodexProvider, "model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[
+        {"model": "opencode/big-pickle", "label": "Big Pickle (opencode)"},
+    ]))
+    request = Request({
+        "type": "http", "method": "GET", "path": "/api/models",
+        "headers": [], "app": SimpleNamespace(state=SimpleNamespace(config=config)),
+        "path_params": {},
+    })
+
+    payload = json.loads(asyncio.run(list_models(request)).body)
+
+    by_id = {item["id"]: item for item in payload["providers"]}
+    assert by_id["opencode"]["capabilities"]["steer"] is False
+    assert by_id["claude"]["capabilities"]["steer"] is True
+    assert by_id["codex"]["capabilities"]["steer"] is True
+    assert by_id["opencode"]["capabilities"]["background_subagents"] is True
+    assert by_id["opencode"]["short_label"] == "opencode"
+    assert payload["opencode_models"] == ["opencode/big-pickle"]
+    assert payload["backends"]["opencode"] is True

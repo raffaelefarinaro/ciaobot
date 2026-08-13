@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -180,6 +182,7 @@ def test_patch_applies_tier_model_overrides(tmp_path):
 
 
 def test_patch_applies_codex_tier_pins(tmp_path):
+    """The legacy flat ``<provider>_<tier>_model`` PATCH shape still works."""
     client, config = _make_client(tmp_path)
     resp = client.patch(
         "/api/settings/routines",
@@ -191,12 +194,44 @@ def test_patch_applies_codex_tier_pins(tmp_path):
     assert data["codex_sonnet_model"] == "gpt-5.6-sol"
     assert data["codex_haiku_model"] == "gpt-5.6-terra"
     assert data["codex_opus_model"] == ""
+    assert data["provider_routing"]["codex"] == {
+        "sonnet": "gpt-5.6-sol",
+        "haiku": "gpt-5.6-terra",
+    }
     # Codex effective tiers need the account catalog, so they live in
     # /api/models, not here.
     assert "codex" not in data["alias_tiers"]
     assert config.codex.sonnet_model == "gpt-5.6-sol"
     fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.settings.codex_sonnet_model == "gpt-5.6-sol"
+    assert fresh.tier_pin("codex", "sonnet") == "gpt-5.6-sol"
+
+
+def test_patch_applies_provider_routing_map(tmp_path):
+    """The canonical nested shape sets the same pins."""
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"provider_routing": {"codex": {"sonnet": "gpt-5.6-sol"}}},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["provider_routing"] == {"codex": {"sonnet": "gpt-5.6-sol"}}
+    assert data["codex_sonnet_model"] == "gpt-5.6-sol"
+    assert config.codex.sonnet_model == "gpt-5.6-sol"
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.tier_pin("codex", "sonnet") == "gpt-5.6-sol"
+
+
+def test_legacy_flat_tier_pins_on_disk_are_migrated(tmp_path):
+    """A settings file written before the map still resolves its pins."""
+    path = tmp_path / ".runtime" / "app_settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"codex_opus_model": "gpt-5.6-sol"}), encoding="utf-8")
+
+    store = AppSettingsStore(path)
+
+    assert store.tier_pin("codex", "opus") == "gpt-5.6-sol"
 
 
 def test_patch_clearing_restores_defaults(tmp_path):

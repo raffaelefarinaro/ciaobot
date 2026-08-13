@@ -14,6 +14,7 @@ from ciao.execution_modes import HARNESS_DISABLED_SKILLS, normalize_claude_mode
 from ciao.models import BridgeMode
 from ciao.providers.codex import CodexSettings
 from ciao.providers.ollama import OllamaSettings
+from ciao.providers.opencode import OpencodeSettings
 from ciao.providers.openrouter import OpenRouterSettings
 
 
@@ -420,6 +421,9 @@ class CiaoConfig:
     # Empty means automatic: tiers derive from the signed-in account's
     # model catalog (luna→haiku, terra→sonnet, sol→opus/fable).
     codex: CodexSettings = field(default_factory=CodexSettings)
+    # Per-tier opencode model pins, same shape and meaning as the Codex ones.
+    # Empty means the tier falls through to the session provider's own model.
+    opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
     # Runtime-selected custom-provider tier routes, keyed by provider id.
     custom_routing: dict[str, dict[str, str]] = field(default_factory=dict)
     # Auto-discover models installed on the local Ollama daemon at startup
@@ -790,30 +794,40 @@ class CiaoConfig:
         Falls back to ``claude_default_model`` when the per-workspace
         knob is empty or the workspace is unknown.
         """
+        from ciao import provider_registry
+
         workspace_config = self.workspace(workspace)
         if workspace_config and workspace_config.default_model:
             return workspace_config.default_model
-        if workspace_config and workspace_config.default_provider == "codex":
-            # Empty means "use the Codex account's current catalog default";
-            # app-server resolves it and the chat records the effective model.
-            return ""
+        if workspace_config:
+            descriptor = provider_registry.get(workspace_config.default_provider)
+            if descriptor is not None:
+                if descriptor.default_model_config_key:
+                    return str(getattr(self, descriptor.default_model_config_key, "") or "")
+                # No operator setting and no descriptor default means "use that
+                # provider account's current catalog default": the provider
+                # resolves it and the chat records the effective model.
+                return descriptor.default_model
         return self.claude_default_model
 
     def model_bucket_for_workspace(self, workspace: str | None) -> str:
         """Resolve the model-routing bucket for a workspace."""
+        from ciao import provider_registry
+
         workspace_config = self.workspace(workspace)
         if workspace_config and workspace_config.model_bucket:
             return workspace_config.model_bucket
         if workspace_config:
             provider = workspace_config.default_provider
+            # openrouter/ollama are routing backends, not runtime providers, so
+            # they name their bucket directly; runtime providers carry theirs.
             if provider == "openrouter":
                 return "openrouter"
             if provider == "ollama":
                 return "ollama"
-            if provider == "claude":
-                return "work"
-            if provider == "codex":
-                return ""
+            descriptor = provider_registry.get(provider)
+            if descriptor is not None:
+                return descriptor.model_bucket
         # An unregistered name (typo, stale reference, renamed workspace) has
         # no bucket of its own; fall back to the primary workspace's rather
         # than guessing from the name, which only ever worked for the two
@@ -842,10 +856,14 @@ class CiaoConfig:
         return "haiku"
 
     def default_provider_for_workspace(self, workspace: str | None) -> str:
+        from ciao import provider_registry
+
         workspace_config = self.workspace(workspace)
-        if (
-            workspace_config
-            and workspace_config.default_provider in {"claude", "codex"}
+        # A workspace may pin a routing backend (ollama/openrouter) or a custom
+        # endpoint; those run through Claude, so only a runtime provider id
+        # changes the answer.
+        if workspace_config and provider_registry.is_provider(
+            workspace_config.default_provider
         ):
             return workspace_config.default_provider
         return "claude"

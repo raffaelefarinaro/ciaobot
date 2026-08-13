@@ -289,6 +289,14 @@ def resolve_codex_binary(env: Mapping[str, str] | None = None) -> str | None:
     return None
 
 
+def auth_command(*, device_auth: bool = False) -> list[str]:
+    """Interactive login command, for ``ciao auth codex`` and the PWA."""
+    binary = resolve_codex_binary()
+    if not binary:
+        raise FileNotFoundError("Codex CLI not found")
+    return [binary, "login", "--device-auth"] if device_auth else [binary, "login"]
+
+
 def _codex_path_env(binary: str) -> dict[str, str]:
     """Return an env fragment that puts *binary*'s directory on ``PATH``.
 

@@ -29,6 +29,7 @@ import type {
   VoiceResult,
   InAppToast,
   PendingPermission,
+  RuntimeProvider,
   WorkspaceInfo,
   WorkspaceName,
   WorkspaceProviderOption,
@@ -1611,7 +1612,7 @@ export const useProjectStore = defineStore('projects', () => {
     updates: {
       model?: string
       mode?: string
-      provider?: 'claude' | 'codex'
+      provider?: RuntimeProvider
       thinking_level?: string
       model_bucket?: string
     },
@@ -1623,7 +1624,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function handoverChat(
     chatId: string,
-    updates: { model: string; provider: 'claude' | 'codex'; model_bucket?: string },
+    updates: { model: string; provider: RuntimeProvider; model_bucket?: string },
   ) {
     const visibleMessages = normalizeMessages(messages.value[chatId] || [])
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/handover`, {

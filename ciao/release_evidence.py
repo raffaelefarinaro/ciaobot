@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence, cast
 
+from ciao import provider_registry
 from ciao.eval_runner import (
     ChatObservation,
     ChatRunSpec,
@@ -37,7 +38,7 @@ from ciao.evals import (
 
 ReleaseMode = Literal["cold", "warm", "restart"]
 _MODES: tuple[ReleaseMode, ...] = ("cold", "warm", "restart")
-_PROVIDERS = ("claude", "codex")
+_PROVIDERS = provider_registry.provider_ids()
 _INVENTORY_CATEGORIES = ("skills", "agents", "commands", "mcp_tools", "memory")
 
 
@@ -150,8 +151,9 @@ def _parse_providers(value: object, path: str) -> tuple[str, ...]:
         raise EvalSchemaError(f"{path}: must contain at least one provider")
     invalid = [item for item in providers if item not in _PROVIDERS]
     if invalid:
+        expected = " or ".join(_PROVIDERS)
         raise EvalSchemaError(
-            f"{path}: unsupported provider {invalid[0]!r}; expected claude or codex"
+            f"{path}: unsupported provider {invalid[0]!r}; expected {expected}"
         )
     if len(set(providers)) != len(providers):
         raise EvalSchemaError(f"{path}: duplicate provider")

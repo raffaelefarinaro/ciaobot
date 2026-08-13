@@ -151,3 +151,49 @@ describe('modelSections', () => {
     })
   })
 })
+
+describe('opencode section', () => {
+  const base: ModelsResponse = {
+    models: [],
+    default: 'opus',
+    provider_models: {},
+    provider_defaults: {},
+  } as unknown as ModelsResponse
+
+  it('renders opencode models as their own section', () => {
+    const sections = sectionsFromModelsResponse({
+      ...base,
+      opencode_models: ['anthropic/claude-sonnet-4-6', 'opencode/big-pickle'],
+    })
+    const opencode = sections.find((s) => s.key === 'opencode')
+    expect(opencode?.label).toBe('opencode')
+    expect(opencode?.models).toContain('opencode/big-pickle')
+  })
+
+  it('omits the section when nothing is authenticated', () => {
+    const sections = sectionsFromModelsResponse({ ...base, opencode_models: [] })
+    expect(sections.find((s) => s.key === 'opencode')).toBeUndefined()
+  })
+
+  it('keeps opencode models out of the OpenRouter section', () => {
+    // Both use `provider/model` ids, so a shape heuristic alone would
+    // misfile them.
+    const sections = sectionsFromModelsResponse({
+      ...base,
+      opencode_models: ['anthropic/claude-sonnet-4-6'],
+      openrouter_models: ['google/gemini-3-pro'],
+    })
+    const openrouter = sections.find((s) => s.key === 'openrouter')
+    expect(openrouter?.models).not.toContain('anthropic/claude-sonnet-4-6')
+  })
+
+  it('is absent from the routine pickers, which run through Claude or Codex', () => {
+    const options: RoutineSettings['model_options'] = {
+      anthropic: [],
+      ollama_cloud: [],
+      ollama_local: [],
+    }
+    const sections = sectionsFromModelOptions(options, { opencode: true })
+    expect(sections.find((s) => s.key === 'opencode')).toBeUndefined()
+  })
+})

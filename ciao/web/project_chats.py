@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover
 
 import yaml
 
-from ciao import job_runs, native_sidecar, subagent_tracking
+from ciao import job_runs, native_sidecar, provider_registry, subagent_tracking
 from ciao.config import BridgeConfig
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import (
@@ -99,7 +99,7 @@ from ciao.custom_providers import (
     provider_for_model,
     runtime_model,
 )
-from ciao.provider_service import ProviderService, supported_providers
+from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
 from ciao.web.chat_broker import (
@@ -282,11 +282,9 @@ def _parse_iso(value: str) -> datetime | None:
 
 
 def _provider_label(provider: str) -> str:
-    labels = {
-        "claude": "Claude",
-        "codex": "Codex",
-    }
-    return labels.get(provider, provider or "Provider")
+    if not provider:
+        return "Provider"
+    return provider_registry.label(provider, short=True)
 
 
 def _clean_handover_messages(messages: list[dict] | None) -> list[dict]:
@@ -6431,7 +6429,7 @@ class ProjectChatManager:
                 if (
                     chat_for_watcher is not None
                     and chat_for_watcher.session_id
-                    and chat_for_watcher.provider in {"claude", "codex"}
+                    and capabilities_for(chat_for_watcher.provider).background_subagents
                 ):
                     self._start_subagent_watcher(chat_id, project_id)
                     # Keep the SDK pipe drained while the client idles: a

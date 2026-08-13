@@ -148,6 +148,21 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
     })
   }
 
+  // opencode is bring-your-own-provider: its catalog is whatever backends the
+  // user connected, already namespaced as `providerID/modelID`.
+  const opencodeModels = orderedUnique(
+    response.opencode_models || response.provider_models?.opencode || [],
+  )
+  if (opencodeModels.length) {
+    const modelBadges = providerModelBadges('opencode', opencodeModels, response.alias_tiers)
+    sections.push({
+      key: 'opencode',
+      label: 'opencode',
+      models: sortModelsByTier(opencodeModels, modelBadges),
+      modelBadges,
+    })
+  }
+
   // Ollama: cloud allowlist plus locally discovered daemon models.
   const local = orderedUnique(response.ollama_local_models || [])
   const allOllama = orderedUnique([...local, ...ollamaModels])
@@ -215,6 +230,9 @@ export function sectionsFromModelOptions(
     })
   }
 
+  // opencode is deliberately absent here: this builder feeds the routine
+  // (title/insights/critique) pickers, which run one-shot calls through the
+  // Claude or Codex runners. opencode is a chat runtime, not a routine backend.
   const openrouterAvailable = !!backends.openrouter
   const openrouter = orderedUnique(options.openrouter || [])
   if (openrouter.length) {
