@@ -203,6 +203,18 @@ shorter list is not an answer.
 Unmodified `1`–`9` mean `switchWorkspace`, in every view. Do not fork a shortcut
 per screen; give the screen a visible reaction instead.
 
+The one exception, and the shape any future one must take: a **blocking prompt
+that prints the digits on itself** owns them while it is up. The open
+`AskUserQuestion` card renders a `1`…`9` badge per option and answers the model
+with them; the turn is stopped until it is answered, so "switch workspace" is
+not a reading anyone intends there. The key still has exactly one meaning at any
+moment — *pick the numbered thing in front of you* — and the badges are the
+visible reaction the rule asks for. A screen may not claim the digits because
+they would be convenient: it must be blocking, transient, and it must show the
+numbers. The claim lives in `ChatLayout.onUnreservedKeydown`, which offers the
+key to `ChatPanel.handleQuestionShortcut` before spending it, so there is still
+one listener and one place to read the precedence.
+
 ---
 
 ## 4. The settings page
