@@ -8,7 +8,7 @@ import re
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from claude_agent_sdk import (
     SDKSessionInfo,
@@ -876,18 +876,23 @@ def get_session_messages_full(
     """
     import sys
 
-    def _fallback(gsm=get_session_messages):
+    def _fallback(gsm: Any = get_session_messages) -> list[SessionMessage]:
         # Prefer a caller-supplied getter so tests that replace
         # sys.modules["claude_agent_sdk"] still reach their mock instead of the
         # statically imported SDK binding from module import time.
+        #
+        # The getter is Any (it may be an SDK binding or a test double), so its
+        # result is cast rather than inferred - without that the Any leaks out
+        # through this function's callers and mypy rejects the return.
         if limit is None and offset == 0:
-            return gsm(session_id, directory=directory)
+            return cast("list[SessionMessage]", gsm(session_id, directory=directory))
         try:
-            return gsm(
-                session_id, directory=directory, limit=limit, offset=offset
+            return cast(
+                "list[SessionMessage]",
+                gsm(session_id, directory=directory, limit=limit, offset=offset),
             )
         except TypeError:
-            return gsm(session_id, directory=directory)
+            return cast("list[SessionMessage]", gsm(session_id, directory=directory))
 
     if get_session_messages is not _sdk_get_session_messages:
         return _fallback()

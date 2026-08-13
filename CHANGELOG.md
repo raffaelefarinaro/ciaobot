@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.8.0 - 2026-08-11
+## v0.8.0 - 2026-08-13
 
 ### Removed
 - **`ciao menubar` is gone.** `Ciaobot.app` is the menu bar now, so the old rumps status-bar helper and its `com.ciao.menubar` LaunchAgent are retired: `ciao setup` unloads and deletes that plist on upgrade, because leaving it registered means launchd retrying an executable that no longer ships. Nothing to do by hand (`90afd6f`)
@@ -17,18 +17,20 @@
 - **Dictation in the comment composer** — annotate a file or a message by voice, including while the agent is still working, in which case the comment rides along on your next message (`9773344`)
 - **Keyboard shortcuts now work in the browser**, not just the desktop app, on whichever modifier is actually free: new chat, dictation, and archive are `Cmd+T`/`Cmd+D`/`Cmd+A` in the app and `Option+N`/`Option+D`/`Option+A` in the PWA, where the browser has already spent the Cmd versions on new-tab, bookmark, and select-all. Settings → Shortcuts is shown to everyone with the labels for how you are running it (`a3c2a44`)
 - `scripts/check-desktop.sh` runs the same desktop checks CI does — Swift sidecar build, `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, a universal `tauri build` — and asserts the sidecar ends up bundled, universal, signed, and runnable inside the built app. Previously nothing compiled the Rust shell locally, so those failures only appeared in CI (`90afd6f`)
+- **Start a chat in the right project from the home screen.** Each workspace lane's `+ new` keeps its one-click meaning (a chat in *General*), and a caret beside it opens the workspace's projects, General first. It is dimmed at rest rather than hover-only, because hover does not exist on a phone, and it is reachable by keyboard: arrows move through the menu, Esc closes it and hands focus back (`8bbb960`)
 
 ### Changed
 - The model picker moves to `Cmd+Shift+M` in the desktop app; macOS reserves plain `Cmd+M` for Minimize Window. Font zoom is `Cmd+Shift+=`/`Cmd+Shift+-` in the app and `Option+=`/`Option+-` in the PWA, because on a US layout `Cmd+Shift+=` *is* the browser's own zoom-in and cannot be intercepted from a page
 - Launching lands on the home screen instead of reopening whatever chat was last active. A deep link, notification, or `/chat/:id` URL still wins
 - An un-limited Session insights backfill is bounded by `CIAO_INSIGHTS_BACKFILL_MAX` (default 200). One archive is one model call, so an uncapped run from a single click is hours of work on an aged vault; a trimmed run reports `capped_at` and `remaining_after_cap` instead of implying it finished everything
 - **Voice is one on-device engine each, and free**: Apple's dictation models for hearing and `AVSpeechSynthesizer` for speaking, both through the `ciaobot-native` sidecar bundled in `Ciaobot.app`. The cloud pair went with them — keeping it meant an API key, two engine pickers, per-minute billing, and a second code path to duplicate what the OS already does. The cost is reach and it is real: voice now needs a **macOS 26+ host with the desktop app installed**, and Settings says so plainly instead of failing when you press record. The constraint is on the *host* only, so a phone or iPad talking to a Mac host still gets voice (`90afd6f`)
-- **The documented install is now `brew install …/ciaobot` then `ciao run`**, with the wizard installing the app. The `ciaobot-desktop` cask remains as a fallback and still hits the Gatekeeper block, so its caveats still describe the Open Anyway steps (`90afd6f`)
+- **The documented install is now a one-line installer**: `curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh`. It puts a self-contained `Ciaobot.app` in `~/Applications` with Ciaobot's Python runtime and dependencies bundled, so Python, pip, Homebrew, `sudo` and a separate DMG are all out of the picture, and it verifies the release's signature with a native verifier before extracting anything. An existing configured workspace is preserved and reused. Homebrew is no longer the documented path (`975a41f`)
 - **Password protection is on by default and can no longer be switched off from Settings.** The first-run wizard asks for the dashboard password (confirmed, minimum 4 characters); `POST /api/auth/settings` sets or changes it but rejects `auth_required: false` rather than ignoring it. The only way out is `PWA_AUTH_REQUIRED=false` in the workspace `.env` — an explicit operator decision made on the machine itself (`2cb10f4`)
 - Settings → Automations is now readable: a headline says whether anything is broken and names it, failing automations sort first, and every row states what it does and when it runs instead of carrying capability chips and a success rate. Rows are actionable — a failing Session insights can be re-run over every archive that is missing them, with a one-off model override for when the configured model is the problem (`POST /api/automation/backfill-insights` accepts `{"model": …}`), and the separate "Insights backfill" row is gone: it is that action. Settled one-time migrations fold away behind a disclosure (`cd9d266`)
 - Settings → Context no longer describes the workspace guide as one instruction file per CLI. There is a single `CLAUDE.md`; `AGENTS.md` is a symlink to it (`cd9d266`)
 - Settings → Skills links to Providers for the skills, plugins, and MCP servers each CLI brings on its own (`cd9d266`)
 - The restart notice is a movable card instead of a full-screen takeover, so it no longer blocks the app while a restart finishes (`78b83bd`)
+- **The automations sidebar matches the chat sidebar**: no repeated page title, and its create button moved to the footer where the other one lives (`26c9b4c`)
 
 ### Fixed
 - **Session insights could stop the project doc updating.** With Apple selected, the sentinel model id was passed to the cloud one-shot runner, which rejected it, and the failure was swallowed — so project docs silently stopped folding. Apple is now a backend the routing layer knows about, so it can never be sent upstream
@@ -40,11 +42,17 @@
 - First-run setup no longer re-registered the retired `com.ciao.menubar` LaunchAgent immediately after deleting it. Normally the plist was already gone and the block did nothing, but when the unlink failed it left launchd retrying a missing executable forever — the exact state the cleanup exists to prevent (`75b6555`)
 - The restart notice bounds the message it renders, so a long server error can no longer stretch the card off-screen (`e85ceee`)
 - Toggling launch-at-login no longer mislabels which machine it applies to when viewing a host's Settings from a client (`3d30473`)
+- **Closing a chat no longer discards what you had typed.** Esc closes a chat even while the composer is focused, and a New Chat holding an unsent prompt read as an abandoned draft, so it was deleted and the text went with it. Staged images and comments count as unsent content too. Chats the *server* sweeps (on restart, or when you create another chat) can still take a draft with them - see issue #277 (`66ab16e`, `21446e4`)
+- **The installer could leave you with no menu-bar app.** `launchctl bootout` is asynchronous, so the bootstrap that followed it either failed outright or found the stale job still registered - pointing at the bundle the install had just moved aside. Both failures were swallowed. The reload now retries until the loaded job names the new app, and says so if it never does (`877d42e`)
+- **Running the engine invalidated the app's own code signature.** The bundled Python wrote `__pycache__` next to sources inside the signed bundle, so `codesign -v` failed on an app that had merely been used. Bytecode goes to a cache outside the bundle now (`877d42e`)
+- **The nav label was clipped mid-word.** The row needs more width than the sidebar's old default, so "automations" rendered as "automation" jammed against the pill edge. The sidebar starts wider, the highlight has its padding back, and below the width where the label fits it is dropped rather than cut in half (`df37736`, `26c9b4c`)
+- **The home status line sat neither centred nor aligned**, 140px inside the lanes it describes, because it capped its width differently from them (`df37736`)
+- **Eight defects found by reviewing this release**, including a service worker that wiped every chat's unread badge when you dismissed one unrelated notification, an image-capability probe that blocked the event loop for every other request on the server, and a failed engine restart that skipped the app restart after an update (`66ab16e`, `4b2143c`)
 
 ### Maintenance
 - On-device generation no longer puts the prompt on a shell command line, where `ps` exposed chat transcripts to any other local user on the machine
 - The on-device availability probe no longer re-runs a blocking subprocess on a timer on the chat-title and insights paths, and the re-entry summary builds its transcript off the event loop
-- `claude-agent-sdk` 0.2.134, `notebooklm-py` 0.8.0; stale `openai` tracking dropped
+- `claude-agent-sdk` 0.2.137, `notebooklm-py` 0.8.0; stale `openai` tracking dropped
 - `claude-agent-sdk` 0.2.128 → 0.2.131
 - LICENSE carries an explicit copyright line and the full Apache appendix (`aa4c919`)
 - `uv.lock` synced (`e823ec9`)
