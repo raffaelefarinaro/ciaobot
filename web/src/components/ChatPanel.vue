@@ -1128,7 +1128,7 @@ import SubagentPanel from './SubagentPanel.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
-import { readChatDraft, readSentPromptHistory, recordSentPrompt, takeSalvagedDraft, writeChatDraft } from '../lib/chatDrafts'
+import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
 import type { AgentAssetsResponse, CommandsResponse, Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
@@ -1240,25 +1240,7 @@ const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 const { thinkingExpanded, toggleThinking } = useThinkingPreference()
 const draftChatId = store.activeChatId
-// A draft whose chat the server swept is stashed aside rather than lost. Offer
-// it back in the first empty New Chat the user opens - the closest thing to
-// where they left it - and only there: dropping recovered text into an existing
-// conversation, or on top of a draft they are already writing, would be worse
-// than the loss it is undoing.
-function initialComposerText(): string {
-  const own = readChatDraft(draftChatId)
-  if (own) return own
-  const chat = store.chats.find(c => c.chat_id === draftChatId)
-  const isFreshChat = !!chat && !chat.session_id && chat.title === 'New Chat'
-  if (!isFreshChat) return ''
-  const salvaged = takeSalvagedDraft()
-  // Persist it against this chat straight away, so it survives a reload even
-  // if the user never types another character.
-  if (salvaged) writeChatDraft(draftChatId, salvaged)
-  return salvaged
-}
-
-const inputText = ref(initialComposerText())
+const inputText = ref(readChatDraft(draftChatId))
 const inputRevision = ref(0)
 const inputEl = ref<HTMLTextAreaElement>()
 const promptHistoryIndex = ref(-1)

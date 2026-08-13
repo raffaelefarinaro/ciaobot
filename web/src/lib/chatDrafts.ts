@@ -89,47 +89,6 @@ export function writeChatDraft(
   }
 }
 
-// A draft whose chat is gone.
-//
-// The server reclaims never-used "New Chat" rows — on close, when another chat
-// is created, and at startup — and it cannot see a draft, because the draft
-// lives in this browser. Rather than trying to hold the chat open (which needs
-// every client to agree about content only one of them can see), the text is
-// moved here when its chat disappears, and the next empty New Chat picks it up.
-// Losing the row is fine; losing what the user typed is not.
-const SALVAGED_DRAFT_STORAGE_KEY = 'ciao-salvaged-draft'
-
-export function stashSalvagedDraft(
-  text: string,
-  storage: DraftStorage | null = defaultStorage(),
-): void {
-  if (!storage) return
-  const trimmed = text.trim()
-  if (!trimmed) return
-  try {
-    // Last one wins. Two drafts orphaned before either is recovered is rare
-    // enough that keeping a queue would be more machinery than it earns, and
-    // the newest is the one the user was most recently working on.
-    storage.setItem(SALVAGED_DRAFT_STORAGE_KEY, text)
-  } catch {
-    // Storage refusing the write costs the salvage, not the session.
-  }
-}
-
-/** Read and clear the salvaged draft, if any. */
-export function takeSalvagedDraft(
-  storage: DraftStorage | null = defaultStorage(),
-): string {
-  if (!storage) return ''
-  try {
-    const text = storage.getItem(SALVAGED_DRAFT_STORAGE_KEY) || ''
-    if (text) storage.removeItem(SALVAGED_DRAFT_STORAGE_KEY)
-    return text
-  } catch {
-    return ''
-  }
-}
-
 /** Return sent prompts from oldest to newest for one chat session. */
 export function readSentPromptHistory(
   chatId: string | null | undefined,

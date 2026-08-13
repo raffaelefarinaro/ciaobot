@@ -14,7 +14,7 @@ import {
 } from '../lib/serverRestart'
 import { archiveFailedToast, archiveStoppedToast } from '../lib/archiveCopy'
 import { errorMessage } from '../lib/errorMessage'
-import { readChatDraft, stashSalvagedDraft, writeChatDraft } from '../lib/chatDrafts'
+import { readChatDraft } from '../lib/chatDrafts'
 import type {
   ArchiveChatResponse,
   ProjectInfo,
@@ -1704,6 +1704,12 @@ export const useProjectStore = defineStore('projects', () => {
     // focused*, so without this, typing a long prompt into a New Chat and
     // hitting Esc deleted it with no way back. Checked locally as well as
     if (readChatDraft(chatId).trim()) return false
+    // Staged attachments are unsent content just as much as typed text, and
+    // the server cannot see them either: it would agree the chat is empty and
+    // delete the pasted screenshot with it.
+    if (getPendingBucket(pendingImagesByChat.value, chatId).length) return false
+    if (getPendingBucket(pendingCommentsByChat.value, chatId).length) return false
+    if (getPendingBucket(pendingChatCommentsByChat.value, chatId).length) return false
     const loaded = messages.value[chatId]
     if (!loaded) return false
     return !loaded.some(message => message.role === 'user')
@@ -2742,13 +2748,6 @@ export const useProjectStore = defineStore('projects', () => {
         // Chat" and never sent a message, then moved on) or when another
         // tab issued an explicit DELETE. Drop the row and detach the active
         // selection if it was the one removed.
-        // The server cannot see a draft - it lives in this browser - so a
-        // sweep can take a chat the user has typed into. Rescue the text
-        // before the id disappears: once the row is gone nothing can read
-        // that draft key again, and the next empty New Chat offers it back.
-        const orphanedDraft = readChatDraft(msg.chat_id)
-        if (orphanedDraft.trim()) stashSalvagedDraft(orphanedDraft)
-        writeChatDraft(msg.chat_id, '')
         chats.value = chats.value.filter(c => c.chat_id !== msg.chat_id)
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null

@@ -663,11 +663,11 @@ describe('chat closing and re-entry orientation', () => {
     localStorage.removeItem('ciao-chat-drafts')
   })
 
-  test('salvages the draft when the server sweeps its chat', async () => {
-    // The server cannot see a draft, so its empty-chat sweep can take a chat
-    // the user typed into. Losing the row is fine; losing the text is not.
+  test('keeps a chat holding only a staged image', async () => {
+    // The server cannot see a staged attachment either, so if the client calls
+    // the chat empty the delete goes through and the screenshot goes with it.
     const store = useProjectStore()
-    const chatId = 'chat-swept'
+    const chatId = 'chat-with-image'
     store.chats = [{
       chat_id: chatId,
       project_id: 'p1',
@@ -679,46 +679,15 @@ describe('chat closing and re-entry orientation', () => {
       created_at: '',
       archived: false,
     }]
+    store.messages[chatId] = []
     store.activeChatId = chatId
-    store.connectEventsWs()
-    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ [chatId]: 'the prompt I typed' }))
+    store.pendingImages = ['img-1']
 
-    fakeSockets[fakeSockets.length - 1].onmessage?.({
-      data: JSON.stringify({ type: 'chat_deleted', chat_id: chatId }),
-    })
+    await store.closeChat()
 
-    expect(store.chats).toHaveLength(0)
-    expect(localStorage.getItem('ciao-salvaged-draft')).toBe('the prompt I typed')
-    // The dead chat's own key is cleared, so nothing is left pointing at an id
-    // that no longer exists.
-    expect(JSON.parse(localStorage.getItem('ciao-chat-drafts') || '{}')[chatId]).toBeUndefined()
-    localStorage.removeItem('ciao-salvaged-draft')
-    localStorage.removeItem('ciao-chat-drafts')
-  })
-
-  test('does not stash anything when the swept chat had no draft', async () => {
-    const store = useProjectStore()
-    const chatId = 'chat-swept-empty'
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'New Chat',
-      model: 'sonnet',
-      provider: 'claude',
-      mode: 'auto',
-      session_id: '',
-      created_at: '',
-      archived: false,
-    }]
-    store.activeChatId = chatId
-    store.connectEventsWs()
-
-    fakeSockets[fakeSockets.length - 1].onmessage?.({
-      data: JSON.stringify({ type: 'chat_deleted', chat_id: chatId }),
-    })
-
-    expect(store.chats).toHaveLength(0)
-    expect(localStorage.getItem('ciao-salvaged-draft')).toBeNull()
+    expect(apiDel).not.toHaveBeenCalled()
+    expect(store.chats).toHaveLength(1)
+    store.pendingImages = []
   })
 
   test('keeps a chat the server declines to delete', async () => {
