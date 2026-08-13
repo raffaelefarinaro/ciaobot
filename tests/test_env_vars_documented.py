@@ -25,6 +25,7 @@ INTERNAL_VARS: dict[str, str] = {
     "CIAO_RESTART_EXIT_CODE": "internal exit-code convention for restart-requesting handlers",
     "CIAO_RUNTIME_ROOT": "test-only override for the runtime/ directory",
     "CIAO_DELEGATE_OF": "subprocess IPC marker naming the supervisor chat of a delegate",
+    "CIAO_BACKGROUND_RUN_ID": "subprocess IPC marker naming the background run a command belongs to",
     "CIAO_DEFAULT_NODE_ROLE": "internal multi-device node failover role default",
     "CIAO_NODE_ID": "internal multi-device node identification marker",
     "CIAO_BOOTSTRAP_LAUNCHD_HANDOFF": "internal marker for desktop-owned bootstrap handoff to launchd",

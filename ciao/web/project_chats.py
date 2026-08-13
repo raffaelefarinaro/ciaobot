@@ -196,6 +196,12 @@ _DELEGATE_WAKE_EXCERPT_CHARS = 600
 # Ceiling on live delegates per supervisor. A runaway fan-out spends real money
 # on provider turns, so the control plane refuses past this.
 _MAX_ACTIVE_DELEGATES = 6
+# Same coalescing idea for background command runs (ciao/background.py): a
+# batch of scripts that finishes together should produce one wake turn, not N.
+_BACKGROUND_WAKE_WINDOW_SECONDS = 5.0
+# Log-tail budget per finished run in the wake prompt. The full log path is
+# always included, so this only has to be enough to decide whether to read it.
+_BACKGROUND_WAKE_TAIL_LINES = 50
 _ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
 _OLLAMA_MODEL_BUCKETS = {"personal", "ollama"}
 
@@ -1314,6 +1320,11 @@ class ProjectChatManager:
         # At most one in-flight flush task per parent; later completions inside
         # the window join the pending list the running task will drain.
         self._delegate_wake_tasks: dict[str, asyncio.Task] = {}
+        # Same pair for finished background command runs. Kept as siblings
+        # rather than one shared map so a slow script cannot delay a delegate
+        # report (and vice versa) by riding the other's coalescing window.
+        self._background_wake_pending: dict[str, list[dict[str, Any]]] = {}
+        self._background_wake_tasks: dict[str, asyncio.Task] = {}
         # A requested server restart drains existing chat work before uvicorn
         # shuts down. Once draining begins, ongoing streams (including their
         # already-queued follow-ups) may finish, but idle chats must not start
@@ -6936,28 +6947,9 @@ class ProjectChatManager:
             if parent is None or parent.archived:
                 return
             prompt = self._build_delegate_wake_prompt(parent_chat_id, finished)
-            # queue_message covers the two live cases in one call: it appends
-            # to the in-flight stream when the supervisor is mid-turn (so we
-            # never interrupt the user), and returns False when the chat is
-            # idle. start_stream then handles the idle case, including a cold
-            # parent whose provider session died in a restart — the reason the
-            # subagent synthesis nudge's steer-only approach is not enough
-            # here, since a delegate can finish hours later.
-            if self.queue_message(parent_chat_id, prompt):
-                delivery = "queued"
-            else:
-                # Deliberately NOT unattended: that flag forces bypass mode,
-                # and a supervisor waking up to merge branches should still
-                # raise approval cards. The user may well be watching.
-                self.start_stream(parent_chat_id, prompt)
-                delivery = "started"
-            self._events.publish({
-                "type": "chat_delegates_reported",
-                "chat_id": parent_chat_id,
-                "project_id": parent.project_id,
-                "count": len(finished),
-                "delivery": delivery,
-            })
+            self._deliver_wake(
+                parent, prompt, kind="delegate", count=len(finished)
+            )
         except RestartDrainingError:
             # Server is shutting down; the delegate results live on in their
             # own chats and the supervisor can be re-prompted by hand.
@@ -6973,6 +6965,178 @@ class ProjectChatManager:
             current = self._delegate_wake_tasks.get(parent_chat_id)
             if current is asyncio.current_task():
                 self._delegate_wake_tasks.pop(parent_chat_id, None)
+
+    def _deliver_wake(
+        self, parent: ChatInfo, prompt: str, *, kind: str, count: int
+    ) -> str:
+        """Deliver one wake turn into *parent* and announce it. Shared by the
+        delegate and background-run flushes so both behave identically.
+
+        queue_message covers the two live cases in one call: it appends to the
+        in-flight stream when the chat is mid-turn (so we never interrupt the
+        user), and returns False when the chat is idle. start_stream then
+        handles the idle case, including a cold chat whose provider session
+        died in a restart — the reason the subagent synthesis nudge's
+        steer-only approach is not enough here, since a delegate or a script
+        can finish hours later.
+        """
+        if self.queue_message(parent.chat_id, prompt):
+            delivery = "queued"
+        else:
+            # Deliberately NOT unattended: that flag forces bypass mode, and a
+            # chat waking up to merge branches or act on a finished script
+            # should still raise approval cards. The user may well be watching.
+            self.start_stream(parent.chat_id, prompt)
+            delivery = "started"
+        self._events.publish({
+            "type": "chat_delegates_reported",
+            "chat_id": parent.chat_id,
+            "project_id": parent.project_id,
+            "count": count,
+            "delivery": delivery,
+            # "delegate" | "background". The event name predates background
+            # runs; both are "the work you dispatched has reported back", so
+            # they share one event and discriminate on this field.
+            "kind": kind,
+        })
+        return delivery
+
+    # ── background command runs ──────────────────────────────────────────
+
+    def queue_background_wake(
+        self,
+        parent_chat_id: str,
+        *,
+        run_id: str,
+        label: str,
+        status: str,
+        exit_code: int | None,
+        last_lines: list[str],
+        log_path: str,
+        error: str = "",
+    ) -> None:
+        """Record a finished background run and arm the coalescing window.
+
+        Called from ``BackgroundRunner``'s supervisor task (and from its
+        restart-orphan sweep), so like ``_queue_delegate_wake`` it must stay
+        cheap and never raise: the run is already over and a failure here would
+        surface as an unrelated error in the wrong place.
+        """
+        parent = self._chats.get(parent_chat_id)
+        if parent is None or parent.archived:
+            # Owning chat is gone or read-only. The log file still holds the
+            # full output, so nothing is lost by not waking.
+            logger.info(
+                "Background run %s finished but chat %s is missing or archived; no wake",
+                run_id,
+                parent_chat_id,
+            )
+            return
+        self._background_wake_pending.setdefault(parent_chat_id, []).append({
+            "run_id": run_id,
+            "label": label or "",
+            "status": status,
+            "exit_code": exit_code,
+            "last_lines": list(last_lines or []),
+            "log_path": log_path,
+            "error": error or "",
+        })
+        existing = self._background_wake_tasks.get(parent_chat_id)
+        if existing is not None and not existing.done():
+            return
+        try:
+            self._background_wake_tasks[parent_chat_id] = asyncio.create_task(
+                self._flush_background_wake(parent_chat_id)
+            )
+        except RuntimeError:
+            # No running loop (a sync context, e.g. a CLI-side prune). The
+            # entry stays pending and the next completion inside a loop drains
+            # it; dropping the wake beats raising into the runner.
+            logger.debug("No event loop for background wake of %s", parent_chat_id)
+
+    async def _flush_background_wake(self, parent_chat_id: str) -> None:
+        """Wait out the coalescing window, then deliver one wake turn."""
+        try:
+            await asyncio.sleep(_BACKGROUND_WAKE_WINDOW_SECONDS)
+            finished = self._background_wake_pending.pop(parent_chat_id, [])
+            if not finished:
+                return
+            parent = self._chats.get(parent_chat_id)
+            if parent is None or parent.archived:
+                return
+            prompt = self._build_background_wake_prompt(finished)
+            self._deliver_wake(
+                parent, prompt, kind="background", count=len(finished)
+            )
+        except RestartDrainingError:
+            logger.info(
+                "Background wake for %s dropped: server is draining for restart",
+                parent_chat_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a failed wake must not kill the app
+            logger.exception("Background wake failed for chat %s", parent_chat_id)
+        finally:
+            current = self._background_wake_tasks.get(parent_chat_id)
+            if current is asyncio.current_task():
+                self._background_wake_tasks.pop(parent_chat_id, None)
+
+    @staticmethod
+    def _build_background_wake_prompt(finished: list[dict[str, Any]]) -> str:
+        """Compose the wake turn from finished background runs.
+
+        Every entry names its log path: the tail is truncated by construction
+        and the interesting line is often above it, so the prompt has to point
+        at the file rather than imply the excerpt is the whole story.
+        """
+        lines = [
+            f"[Ciaobot] {len(finished)} background run"
+            f"{'s' if len(finished) != 1 else ''} finished."
+        ]
+        any_failed = False
+        for entry in finished:
+            status = str(entry.get("status") or "")
+            if status == "ok":
+                verdict = "ok"
+            elif status == "cancelled":
+                verdict = "CANCELLED"
+            else:
+                verdict = "FAILED"
+                any_failed = True
+            exit_code = entry.get("exit_code")
+            name = entry.get("label") or entry.get("run_id") or "run"
+            head = f"— {name} ({entry.get('run_id')}, {verdict}"
+            if exit_code is not None:
+                head += f", exit {exit_code}"
+            head += ")"
+            lines.append("")
+            lines.append(head)
+            if entry.get("error"):
+                lines.append(f"error: {entry['error']}")
+            lines.append(f"log: {entry.get('log_path')}")
+            tail = [row for row in entry.get("last_lines") or [] if row.strip()]
+            tail = tail[-_BACKGROUND_WAKE_TAIL_LINES:]
+            if tail:
+                lines.append(f"last {len(tail)} line(s):")
+                lines.extend(tail)
+            else:
+                lines.append("(no output)")
+        lines.append("")
+        if any_failed:
+            lines.append(
+                "A FAILED run means the command exited non-zero, timed out, or "
+                "could not be tracked across an engine restart. Read the log "
+                "before deciding what happened; the tail above may not contain "
+                "the real error."
+            )
+            lines.append("")
+        lines.append(
+            "Continue the work this run was part of, and report to the user "
+            "only once you have checked the log rather than assuming the tail "
+            "tells the whole story."
+        )
+        return "\n".join(lines)
 
     def _build_delegate_wake_prompt(
         self, parent_chat_id: str, finished: list[dict[str, Any]]
