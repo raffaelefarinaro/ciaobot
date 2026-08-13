@@ -242,6 +242,21 @@ _CC_CHAT_PREFIX = "chat-cc-"
 # mount, so an actively used draft never ages out.
 _DRAFT_CLAIM_TTL_S = 14 * 24 * 60 * 60
 
+# Stands in for the retired has_unsent_draft boolean on upgrade. No browser
+# owns it, so any client release clears it too.
+_LEGACY_DRAFT_CLAIM_ID = "legacy-unsent-draft"
+
+
+def _parse_claim_stamp(stamp: str) -> datetime | None:
+    """A claim timestamp as an aware datetime, or None if it cannot be read."""
+    try:
+        claimed_at = datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return None
+    if claimed_at.tzinfo is None:
+        claimed_at = claimed_at.replace(tzinfo=UTC)
+    return claimed_at
+
 
 def _claim_needs_refresh(stamp: str) -> bool:
     """Whether a re-asserted claim is old enough to be worth persisting again.
@@ -250,12 +265,9 @@ def _claim_needs_refresh(stamp: str) -> bool:
     keeps re-asserting can never lose its claim, and rare enough that opening a
     chat does not rewrite the state file every time.
     """
-    try:
-        claimed_at = datetime.fromisoformat(str(stamp))
-    except ValueError:
+    claimed_at = _parse_claim_stamp(stamp)
+    if claimed_at is None:
         return True
-    if claimed_at.tzinfo is None:
-        claimed_at = claimed_at.replace(tzinfo=UTC)
     return datetime.now(UTC) - claimed_at >= timedelta(days=1)
 
 
@@ -265,9 +277,17 @@ def _load_draft_claims(chat_data: dict) -> dict[str, str]:
     Migration: the first cut of this feature stored a single
     ``has_unsent_draft`` boolean. A user who upgrades while holding an unsent
     prompt would otherwise have the chat fall straight back to "empty" and be
-    swept on the next cleanup — losing exactly the draft the flag was protecting
-    — so a truthy legacy flag becomes a claim under a synthetic client id, aged
-    from now and expiring like any other.
+    swept on the next cleanup — losing exactly the draft the flag was
+    protecting — so a truthy legacy flag becomes a claim under a synthetic
+    client id.
+
+    That claim is aged from the chat's own last activity, not from load time.
+    No client can release it (a browser's release carries its own client id),
+    so dating it "now" would give a months-old abandoned draft a fresh 14 days
+    of protection, and re-date it on every restart — leaving rows that cannot
+    be dismissed. Aged properly, an abandoned one is already stale and a recent
+    one keeps the protection it had. ``set_draft_claim`` also drops it whenever
+    any client releases, since the flag it stands in for was profile-agnostic.
 
     A non-dict value degrades to no claims rather than raising: ``_load`` only
     catches JSON and OS errors, so an AttributeError here would take the engine
@@ -277,7 +297,12 @@ def _load_draft_claims(chat_data: dict) -> dict[str, str]:
     if isinstance(raw, dict):
         return {str(k): str(v) for k, v in raw.items()}
     if raw is None and chat_data.get("has_unsent_draft"):
-        return {"legacy-unsent-draft": _now_iso()}
+        claimed_at = (
+            chat_data.get("last_activity_at")
+            or chat_data.get("created_at")
+            or _now_iso()
+        )
+        return {_LEGACY_DRAFT_CLAIM_ID: str(claimed_at)}
     return {}
 
 
@@ -293,13 +318,8 @@ def _fresh_draft_claims(claims: dict[str, str]) -> dict[str, str]:
     cutoff = datetime.now(UTC) - timedelta(seconds=_DRAFT_CLAIM_TTL_S)
     fresh: dict[str, str] = {}
     for client_id, stamp in claims.items():
-        try:
-            claimed_at = datetime.fromisoformat(str(stamp))
-        except ValueError:
-            continue
-        if claimed_at.tzinfo is None:
-            claimed_at = claimed_at.replace(tzinfo=UTC)
-        if claimed_at >= cutoff:
+        claimed_at = _parse_claim_stamp(stamp)
+        if claimed_at is not None and claimed_at >= cutoff:
             fresh[client_id] = str(stamp)
     return fresh
 
@@ -3167,6 +3187,9 @@ class ProjectChatManager:
             claims[client_id] = _now_iso()
         else:
             claims.pop(client_id, None)
+            # The migrated flag had no owner, so a real client saying "nothing
+            # here" is the only signal that will ever retire it.
+            claims.pop(_LEGACY_DRAFT_CLAIM_ID, None)
         if claims == chat.draft_claims:
             return chat
         chat.draft_claims = claims

@@ -1529,7 +1529,10 @@ async function confirmDeleteChat(chatId: string) {
    A container query resolves against the container's *content* box, so this
    compares against 318 with the header's own 16px padding already excluded -
    not against the sidebar's outer width. At the 340px default the header
-   measures 340 - 1 (sidebar border) - 16 = 323, which clears it.
+   measures 340 - 1 (sidebar border) - 16 (its padding) - any --safe-left inset
+   = 323 on a desktop window, which clears it. On a device with a left inset the
+   headroom shrinks and the label hides earlier, which is the intended
+   degradation rather than a clipped word.
 
    Known limit: the cap above is in ch and this threshold is in px, so at a
    large --font-scale the label can outgrow the budget and clip again. Fixing

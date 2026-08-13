@@ -726,18 +726,37 @@ describe('chat closing and re-entry orientation', () => {
     expect(apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))).toHaveLength(2)
   })
 
-  test('does not release a claim this tab never made', async () => {
-    // The client id is per browser profile but staged content is per tab, so a
-    // second tab opening the chat must not release the claim protecting the
-    // first tab's screenshot.
+  test('a second tab does not release a claim the profile still needs', async () => {
+    // The client id is per browser profile, and so is the staged content: an
+    // image pasted in one tab is in localStorage, which the other tab has not
+    // re-read since page load. Computing the claim from storage rather than
+    // from this tab's hydrated buckets is what stops it releasing a claim the
+    // pasted screenshot still needs.
     const store = useProjectStore()
     const chatId = 'chat-other-tab'
     store.chats = []
+    apiPost.mockResolvedValue({ has_unsent_draft: true })
+    localStorage.setItem('ciao-pending-images', JSON.stringify({ [chatId]: ['img-1'] }))
+
+    await store.syncChatDraftClaim(chatId)
+
+    const claims = apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))
+    expect(claims).toHaveLength(1)
+    expect(claims[0][1]).toMatchObject({ active: true })
+    localStorage.removeItem('ciao-pending-images')
+  })
+
+  test('releases once the profile holds nothing for the chat', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-emptied'
+    store.chats = []
     apiPost.mockResolvedValue({ has_unsent_draft: false })
 
-    await store.setChatDraftState(chatId, false)
+    await store.syncChatDraftClaim(chatId)
 
-    expect(apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))).toHaveLength(0)
+    const claims = apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))
+    expect(claims).toHaveLength(1)
+    expect(claims[0][1]).toMatchObject({ active: false })
   })
 
   test('re-asserts a claim on demand even when the flag has not changed', async () => {

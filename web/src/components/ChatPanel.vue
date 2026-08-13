@@ -1354,37 +1354,24 @@ const canSend = computed(() =>
 // The draft lives in this browser, but the server owns the rule that decides
 // whether an untouched New Chat gets swept away, so it has to know one exists.
 //
-// Deliberately not canSend: that is true for text recalled from prompt history,
-// which is shown in the composer but never written to the local draft store, so
-// claiming on it would protect a chat on the strength of content no browser
-// actually holds. This tracks what is really recoverable — the persisted draft,
-// plus staged images and comments.
-const hasRecoverableContent = computed(() =>
-  !!(persistedDraftText.value
-    || store.pendingImages.length
-    || store.pendingComments.length
-    || store.pendingChatComments.length),
-)
-
-// immediate, so a draft restored into the composer on mount is re-asserted. The
-// text is put back as the ref's initial value, which fires no watcher — without
-// this a claim that never reached the server (offline, host restarting) would
-// stay missing until the sweep deleted the chat.
-watch(hasRecoverableContent, hasContent => {
-  void store.setChatDraftState(draftChatId, hasContent)
-}, { immediate: true })
-
-// A claim expires server-side, and a tab left open for weeks never changes its
-// boolean, so nothing would re-assert it. Refresh whenever the tab comes back to
-// the foreground: that covers a PWA left running far longer than the TTL.
-function refreshDraftClaimOnWake(): void {
-  if (document.visibilityState !== 'visible') return
-  if (!hasRecoverableContent.value) return
-  void store.setChatDraftState(draftChatId, true, { refresh: true })
-}
-onMounted(() => document.addEventListener('visibilitychange', refreshDraftClaimOnWake))
-onBeforeUnmount(() =>
-  document.removeEventListener('visibilitychange', refreshDraftClaimOnWake),
+// The store computes what is actually recoverable - persisted draft text plus
+// staged images and comments - rather than reading the live composer. Prompt
+// history sets the input without persisting it, and claiming on that would
+// protect a chat on the strength of content no browser holds.
+//
+// immediate, so a draft restored on mount is re-asserted: the text is put back
+// as the ref's initial value, which fires no watcher, and a claim that never
+// reached the server would otherwise stay missing until the sweep. Wake-time
+// renewal lives in the store, next to the app's other wake handling.
+watch(
+  () => [
+    persistedDraftText.value,
+    store.pendingImages.length,
+    store.pendingComments.length,
+    store.pendingChatComments.length,
+  ],
+  () => { void store.syncChatDraftClaim(draftChatId) },
+  { immediate: true },
 )
 
 // Empty composer while a turn is in flight → stop; otherwise the same

@@ -380,3 +380,46 @@ def test_the_retired_patch_field_is_rejected(tmp_path: Path) -> None:
 
     assert res.status_code == 400
     assert "draft-claim" in res.json()["error"]
+
+
+def test_a_legacy_claim_is_aged_from_the_chat_not_from_load(tmp_path: Path) -> None:
+    """Dating it 'now' would hand a months-old abandoned draft a fresh 14 days
+    of protection, and re-date it on every restart."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+
+    long_ago = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+    path = manager._path
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["chats"][chat.chat_id]["draft_claims"]
+    data["chats"][chat.chat_id]["has_unsent_draft"] = True
+    data["chats"][chat.chat_id]["last_activity_at"] = long_ago
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    reloaded = _make_manager(tmp_path)
+
+    # Stale on arrival, so the startup sweep reclaims the row instead of the
+    # chat lingering with a fresh 14 days of protection.
+    assert chat.chat_id not in reloaded._chats
+
+
+def test_any_client_release_retires_the_legacy_claim(tmp_path: Path) -> None:
+    """No browser owns the migrated claim, so a real client reporting "nothing
+    here" is the only thing that can ever retire it."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Drafts", workspace="work")
+    chat = manager.create_chat(project.project_id, title="New Chat")
+
+    path = manager._path
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["chats"][chat.chat_id]["draft_claims"]
+    data["chats"][chat.chat_id]["has_unsent_draft"] = True
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    reloaded = _make_manager(tmp_path)
+    assert reloaded.is_empty_chat(chat.chat_id) is False
+
+    reloaded.set_draft_claim(chat.chat_id, "browser-1", False)
+
+    assert reloaded.is_empty_chat(chat.chat_id) is True

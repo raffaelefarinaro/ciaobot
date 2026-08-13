@@ -1631,8 +1631,41 @@ export const useProjectStore = defineStore('projects', () => {
   // its release are one character apart when someone types and immediately
   // deletes, and if those crossed on the wire the chat could be left claimed by
   // a client that is no longer holding anything.
-  const reportedDraftState = new Map<string, boolean>()
+  const reportedDraftState = new Map<string, { active: boolean; at: number }>()
   const draftClaimQueue = new Map<string, Promise<void>>()
+  // Re-assert a standing claim this often. Well inside the server's 14-day TTL,
+  // so a browser left open for weeks keeps its claim, and rare enough that
+  // opening a chat or foregrounding the app is almost never a request.
+  const DRAFT_CLAIM_REASSERT_MS = 6 * 60 * 60 * 1000
+
+  function persistedBucketHasEntries(storageKey: string, chatId: string): boolean {
+    try {
+      if (typeof localStorage === 'undefined') return false
+      const raw = localStorage.getItem(storageKey)
+      if (!raw) return false
+      const buckets = normalizePendingBuckets<unknown>(JSON.parse(raw), chatId)
+      return getPendingBucket(buckets, chatId).length > 0
+    } catch {
+      return false
+    }
+  }
+
+  // Whether *this browser profile* holds anything recoverable for a chat.
+  //
+  // Read from storage rather than from the in-memory buckets, because those are
+  // hydrated once at page load: a second tab would not see an image the first
+  // tab pasted a moment ago, and would then release a claim that content still
+  // needs. Storage is the shared truth across a profile's tabs, which is the
+  // same scope as the client id the claim is filed under.
+  function chatHasRecoverableContent(chatId: string): boolean {
+    if (!chatId) return false
+    if (readChatDraft(chatId).trim()) return true
+    return (
+      persistedBucketHasEntries('ciao-pending-images', chatId)
+      || persistedBucketHasEntries('ciao-pending-comments', chatId)
+      || persistedBucketHasEntries('ciao-pending-chat-comments', chatId)
+    )
+  }
 
   async function setChatDraftState(
     chatId: string | null | undefined,
@@ -1643,13 +1676,15 @@ export const useProjectStore = defineStore('projects', () => {
     // activeChatId, which is null between chats.
     if (!chatId) return
     const reported = reportedDraftState.get(chatId)
-    if (!options.refresh && reported === hasDraft) return
-    // Never release a claim this tab did not make. The client id is per browser
-    // profile, but staged images and comments are per tab, so a second tab
-    // opening the same chat sees an empty composer and would otherwise release
-    // the claim protecting the first tab's screenshot.
-    if (!hasDraft && reported !== true) return
-    reportedDraftState.set(chatId, hasDraft)
+    const stale = !reported || Date.now() - reported.at >= DRAFT_CLAIM_REASSERT_MS
+    if (!options.refresh && reported?.active === hasDraft && !stale) return
+    reportedDraftState.set(chatId, { active: hasDraft, at: Date.now() })
+    // Optimistic in the protective direction only. Marking it claimed at once
+    // closes the window where Esc could delete a chat holding a just-pasted
+    // screenshot before the POST lands; marking it *unclaimed* optimistically
+    // would be a guess about other devices, which only the server can answer.
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat && hasDraft) chat.has_unsent_draft = true
     const previous = draftClaimQueue.get(chatId) ?? Promise.resolve()
     const next = previous
       .catch(() => {})
@@ -1659,26 +1694,33 @@ export const useProjectStore = defineStore('projects', () => {
             client_id: clientId(),
             active: hasDraft,
           })
-          // Take the server's answer rather than assuming our own: it aggregates
-          // every client's claim, so releasing ours does not mean the chat is
-          // unclaimed - another device may still hold a draft, and pretending
-          // otherwise makes this tab treat the chat as discardable.
-          const chat = chats.value.find(c => c.chat_id === chatId)
-          if (chat && typeof updated?.has_unsent_draft === 'boolean') {
-            chat.has_unsent_draft = updated.has_unsent_draft
+          // The server aggregates every client's claim, so releasing ours does
+          // not mean the chat is unclaimed - another device may still hold a
+          // draft. Take its answer.
+          const current = chats.value.find(c => c.chat_id === chatId)
+          if (current && typeof updated?.has_unsent_draft === 'boolean') {
+            current.has_unsent_draft = updated.has_unsent_draft
           }
         } catch {
-          // Forget it so the next assertion retries. The composer re-asserts on
-          // open and on wake, so a claim lost to a restart or a dropped
-          // connection is re-made rather than staying silently missing until
-          // the sweep deletes the chat.
-          if (reportedDraftState.get(chatId) === hasDraft) {
-            reportedDraftState.delete(chatId)
-          }
+          // Forget it so the next assertion retries rather than deduping
+          // against a state the server never received.
+          const memo = reportedDraftState.get(chatId)
+          if (memo?.active === hasDraft) reportedDraftState.delete(chatId)
         }
       })
     draftClaimQueue.set(chatId, next)
     await next
+  }
+
+  // Re-assert (or drop) the claim for a chat from whatever this profile
+  // actually holds. Safe to call from anywhere - it is a no-op unless the value
+  // changed or the standing claim is due a refresh.
+  async function syncChatDraftClaim(
+    chatId: string | null | undefined,
+    options: { refresh?: boolean } = {},
+  ): Promise<void> {
+    if (!chatId) return
+    await setChatDraftState(chatId, chatHasRecoverableContent(chatId), options)
   }
 
   async function handoverChat(
@@ -2439,6 +2481,11 @@ export const useProjectStore = defineStore('projects', () => {
         // report OPEN, but no messages flow.
         void resumeActiveChat()
         void syncLatest()
+        // A claim expires server-side, and a window left open on one chat never
+        // changes its own boolean, so nothing else would renew it. This handler
+        // and the pageshow one below are the app's existing wake points; adding
+        // a third listener elsewhere would just split wake handling further.
+        void syncChatDraftClaim(activeChatId.value, { refresh: true })
         const chatId = (() => {
           if (typeof window === 'undefined') return undefined
           return window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
@@ -2456,6 +2503,7 @@ export const useProjectStore = defineStore('projects', () => {
     window.addEventListener('pageshow', (ev) => {
       if ((ev as PageTransitionEvent).persisted || document.visibilityState === 'visible') {
         void resumeActiveChat()
+        void syncChatDraftClaim(activeChatId.value, { refresh: true })
         checkPendingTarget()
       }
     })
@@ -4253,7 +4301,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
-    createChat, newChatInGeneral, renameChat, updateChat, setChatDraftState, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, renameChat, updateChat, setChatDraftState, syncChatDraftClaim, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest,
