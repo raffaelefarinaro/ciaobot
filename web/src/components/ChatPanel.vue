@@ -751,7 +751,7 @@
          a structured question; we render an interactive option list so the
          answer flows back as the next user message. The SDK's built-in CLI
          picker can't run headless, so this is the only path. -->
-    <div v-if="activeQuestions.length && (dockPrimary === 'question' || dockExpanded)" class="question-card">
+    <div v-if="questionCardVisible" class="question-card">
       <div class="question-card-header">
         <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
@@ -771,15 +771,27 @@
         </div>
         <div class="question-options">
           <button
-            v-for="opt in q.options"
+            v-for="(opt, oi) in q.options"
             :key="opt.label"
             type="button"
             class="question-option"
             :class="{ selected: isQuestionOptionSelected(qi, opt.label) }"
+            :aria-keyshortcuts="questionOptionShortcut(qi, oi) || undefined"
             @click="toggleQuestionOption(qi, opt.label, q.multiSelect)"
           >
-            <span class="question-option-label">{{ opt.label }}</span>
-            <span v-if="opt.description" class="question-option-desc">{{ opt.description }}</span>
+            <span class="question-option-main">
+              <!-- Keyboard hint, not part of the label: only rendered where the
+                   digit actually works (first question, first nine options). -->
+              <span
+                v-if="questionOptionShortcut(qi, oi)"
+                class="question-option-key"
+                aria-hidden="true"
+              >{{ questionOptionShortcut(qi, oi) }}</span>
+              <span class="question-option-text">
+                <span class="question-option-label">{{ opt.label }}</span>
+                <span v-if="opt.description" class="question-option-desc">{{ opt.description }}</span>
+              </span>
+            </span>
           </button>
         </div>
         <input
@@ -2157,6 +2169,13 @@ const activeQuestions = computed(() => {
   return store.activeQuestions[id] || []
 })
 
+// The card is only on screen when it wins the dock, or when the dock strip is
+// expanded behind a permission. Named because the keyboard shortcuts below key
+// off the same condition as the template: a hidden card must not eat digits.
+const questionCardVisible = computed(() =>
+  activeQuestions.value.length > 0 && (dockPrimary.value === 'question' || dockExpanded.value),
+)
+
 type QuestionAnswer = { selected: Set<string>; other: string }
 const questionAnswers = ref<Record<number, QuestionAnswer>>({})
 
@@ -2190,6 +2209,53 @@ function toggleQuestionOption(i: number, label: string, multi: boolean) {
 
 function isQuestionOptionSelected(i: number, label: string): boolean {
   return questionAnswers.value[i]?.selected.has(label) ?? false
+}
+
+// Digit shortcuts cover the first question only -- the picker almost always
+// carries one, and a second block would need a second digit row with no way to
+// tell them apart. The badge is rendered from the same function so the hint can
+// never claim a key that does nothing.
+const MAX_QUESTION_SHORTCUTS = 9
+
+function questionOptionShortcut(qi: number, oi: number): string {
+  if (qi !== 0 || oi >= MAX_QUESTION_SHORTCUTS) return ''
+  return String(oi + 1)
+}
+
+// Keyboard handling for the open question card. ChatLayout owns the single
+// window keydown listener (onUnreservedKeydown) and offers the key here first,
+// the same way it offers arrows to the home grid; returning true means "eaten",
+// and the layout then preventDefaults instead of running its own binding. That
+// is what lets an open card outrank the 1-9 workspace switcher without either
+// side growing a second listener.
+//
+// The caller has already screened out modifiers and text fields (composer and
+// the card's own "Other" input both count as typing targets), so this only
+// decides whether the card has a use for the key.
+function handleQuestionShortcut(e: KeyboardEvent): boolean {
+  if (!questionCardVisible.value) return false
+  const q = activeQuestions.value[0]
+  if (!q) return false
+
+  if (e.key === 'Enter') {
+    // Never steal Enter from a focused control: on Cancel/Send answer, or on
+    // an option button reached by Tab, the native activation is what the user
+    // is asking for. Enter only submits from "nowhere in particular", which is
+    // where focus sits after picking with a digit.
+    if (e.target instanceof HTMLElement && e.target.closest('button, a, [role="button"]')) return false
+    // Multi-select is a collection, not a choice: digits toggle and the
+    // explicit Send answer ends it, so Enter stays a no-op there.
+    if (activeQuestions.value.some(other => other.multiSelect)) return false
+    if (!allQuestionsAnswered.value) return false
+    submitQuestionAnswers()
+    return true
+  }
+
+  if (!/^[1-9]$/.test(e.key)) return false
+  const opt = q.options[Number(e.key) - 1]
+  if (!opt) return false
+  toggleQuestionOption(0, opt.label, q.multiSelect)
+  return true
 }
 
 // Block Send answer until every question has at least one option picked
@@ -4354,7 +4420,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
+defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut })
 </script>
 
 <style scoped>
@@ -6386,6 +6452,38 @@ details[open] > .activity-summary::before {
   background: var(--bg2);
   border-color: var(--accent);
   box-shadow: inset 2px 0 0 var(--accent);
+}
+.question-option-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+/* Keeps a wrapped description aligned under its label rather than under the
+   badge. */
+.question-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* Keyboard chip: low-emphasis on purpose so it reads as a hint next to the
+   label rather than as numbering the model wrote. */
+.question-option-key {
+  flex: none;
+  min-width: 18px;
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  color: var(--fg2);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.question-option.selected .question-option-key {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 .question-option-label { font-weight: 600; }
 .question-option-desc { font-size: 12px; color: var(--fg2); line-height: 1.3; }

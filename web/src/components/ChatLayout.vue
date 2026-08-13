@@ -655,12 +655,29 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
+  const bare = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+
   // Workspace navigation is also useful from the automations view, where the
   // chat-only shortcuts are disabled. Match the visible workspace order and
   // keep the shortcut out of text fields so numbers remain typeable.
-  if (viewShortcutsActive.value && !isTypingTarget(e.target)
-    && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
-    && /^[1-9]$/.test(e.key)) {
+  //
+  // An open AskUserQuestion card gets first refusal on the same digits. Two
+  // features want 1-9, and the card wins *while it is up*: the model is blocked
+  // on that prompt, the numbers are printed on the options right there, and
+  // switching workspace mid-question is not what anyone means by pressing them.
+  // The claim is scoped to the card's lifetime instead of a global mode flag,
+  // so workspace switching is untouched the rest of the time and this function
+  // keeps no "is a card open" state. Same delegation shape as the home grid's
+  // arrows below: the child says whether it used the key, and only then do we
+  // preventDefault. Both branches stay inside the existing viewShortcutsActive
+  // and typing-target gates, so a confirm dialog or the file viewer still
+  // swallows the digit and the composer still types it.
+  if (viewShortcutsActive.value && !isTypingTarget(e.target) && !e.defaultPrevented
+    && bare && /^[1-9]$/.test(e.key)) {
+    if (chatPanelRef.value?.handleQuestionShortcut?.(e)) {
+      e.preventDefault()
+      return
+    }
     const workspace = store.workspaceOptions[Number(e.key) - 1]
     if (workspace) {
       e.preventDefault()
@@ -668,6 +685,18 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       void store.switchWorkspace(workspace.name, {
         transition: viewMode.value !== 'schedules',
       })
+      return
+    }
+  }
+
+  // Enter submits a single-select question card that already has an answer
+  // picked, so digit-then-Enter never has to reach for the mouse. ChatPanel
+  // declines the key whenever a control is focused, which leaves Tab+Enter on
+  // the card's own buttons alone.
+  if (e.key === 'Enter' && viewShortcutsActive.value && !isTypingTarget(e.target)
+    && !e.defaultPrevented && bare) {
+    if (chatPanelRef.value?.handleQuestionShortcut?.(e)) {
+      e.preventDefault()
       return
     }
   }
