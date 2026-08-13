@@ -30,6 +30,22 @@ _claude_mcps_cache: tuple[float, str, tuple[str, ...]] | None = None
 _claude_skills_cache: tuple[float, tuple[str, ...]] | None = None
 
 
+def _resolve_root(raw: Any) -> Path:
+    """Resolve a root without assuming the process cwd still exists.
+
+    The desktop deploy relaunch can leave the engine with a cwd inside the
+    staging bundle the swap then renames, and there both ``Path.cwd()`` and
+    resolving a relative path raise ``FileNotFoundError``. Readiness must still
+    answer, so an unresolvable root is kept as written: its checks then report
+    not-ready instead of pointing at a directory we made up.
+    """
+    path = Path(raw).expanduser()
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
 def clear_claude_discovery_cache() -> None:
     """Drop Claude MCP/skill discovery caches (tests and forced refresh)."""
     global _claude_mcps_cache, _claude_skills_cache
@@ -229,7 +245,7 @@ def discover_claude_mcps(
     """
     global _claude_mcps_cache
     now = time.monotonic()
-    ws_key = str(Path(workspace_root).expanduser().resolve()) if workspace_root else ""
+    ws_key = str(_resolve_root(workspace_root)) if workspace_root else ""
     if (
         _claude_mcps_cache is not None
         and now - _claude_mcps_cache[0] < _CLAUDE_DISCOVERY_TTL_SECONDS
@@ -558,8 +574,14 @@ def setup_status(
     process environment without exposing secret values in the response.
     """
     source = env if env is not None else os.environ
-    workspace_root = Path(getattr(config, "workspace_root", Path.cwd())).resolve()
-    vault_root = Path(getattr(config, "vault_root", workspace_root / "memory-vault")).resolve()
+    # ``Path.cwd()`` cannot be the getattr default: it is evaluated even when the
+    # config carries an explicit workspace_root, and it raises once the cwd is gone.
+    configured_root = getattr(config, "workspace_root", None)
+    workspace_root = _resolve_root(configured_root if configured_root is not None else Path("."))
+    configured_vault = getattr(config, "vault_root", None)
+    vault_root = _resolve_root(
+        configured_vault if configured_vault is not None else workspace_root / "memory-vault"
+    )
     raw_credentials_path = source.get("CLAUDE_CREDENTIALS_PATH", "").strip()
     credentials_path = (
         claude_credentials_path

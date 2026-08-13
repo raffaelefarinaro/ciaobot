@@ -113,6 +113,38 @@ def test_setup_status_reports_missing_required_config(tmp_path) -> None:
     assert data["configured"] is False
 
 
+def test_setup_status_survives_a_deleted_working_directory(tmp_path, monkeypatch) -> None:
+    """A dead cwd must not turn the readiness payload into a 500.
+
+    The desktop deploy relaunch can leave the engine with a cwd inside a staging
+    bundle that the swap then renames, and ``os.getcwd()`` raises there.
+    """
+    config = _config(tmp_path)
+    (tmp_path / "memory-vault").mkdir()
+    expected_root = str(tmp_path.resolve())
+
+    def _dead_cwd() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "getcwd", _dead_cwd)
+
+    data = setup_status(
+        config,
+        env={"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"},
+    )
+
+    checks = {row["id"]: row for row in data["checks"]}
+    assert data["workspace_root"] == expected_root
+    assert checks["workspace"]["ok"] is True
+    assert checks["vault"]["ok"] is True
+
+    # A config without an explicit workspace_root has no root to fall back to,
+    # but the payload must still be produced instead of raising.
+    bare = setup_status(SimpleNamespace(pwa_auth_token="test-token"), env={})
+    assert isinstance(bare["checks"], list)
+    assert "providers" in bare
+
+
 def test_setup_status_marks_bootstrap_mode(tmp_path) -> None:
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
 
