@@ -35,7 +35,7 @@
         @skip="skipped = true"
       />
     </Transition>
-    <RestartOverlay
+    <RestartNotice
       v-if="projectStore.serverRestarting"
       :message="projectStore.serverRestartMessage"
     />
@@ -51,7 +51,7 @@ import { useRoute } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import { errorMessage } from './lib/errorMessage'
 import InAppToast from './components/InAppToast.vue'
-import RestartOverlay from './components/RestartOverlay.vue'
+import RestartNotice from './components/RestartNotice.vue'
 import StartupView from './components/StartupView.vue'
 import { askConfirm } from './lib/confirm'
 import { normalizeWorkspaceColor } from './lib/workspaceColors'
@@ -277,10 +277,17 @@ watch(showStartup, (show) => {
   --warning: #ff9800;
   --error: #f44336;
   /* Geometry */
+  --radius-xs: 4px;     /* small squared tags: state chips, key badges */
   --radius: 10px;
   --radius-sm: 6px;
   --radius-lg: 14px;
+  --radius-pill: 999px; /* fully rounded ends: pills, count badges, chips */
   --touch: 44px;        /* min hit area on touch devices */
+  /* Width of the home screen's content column. Shared because the status row
+     and the lanes under it must start on the same left edge, and when this
+     lived as a number in each component they drifted (1040 vs 1320) and the
+     row sat neither centred nor aligned. */
+  --home-max: 1320px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;

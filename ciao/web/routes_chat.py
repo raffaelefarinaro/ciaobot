@@ -180,6 +180,24 @@ async def ws_chat(websocket: WebSocket) -> None:
                     )
                 continue
 
+            if msg_type == "capability_response":
+                # Answer to a prior ``model_capability_question`` (image
+                # input against a non-vision model). ``action`` is switch,
+                # picker, or cancel; switch carries the chosen ``model_id``.
+                # Stale request ids are dropped silently like the other
+                # response verbs.
+                request_id = str(msg.get("request_id", "")).strip()
+                action = str(msg.get("action", "")).strip()
+                model_id = str(msg.get("model_id", "")).strip()
+                if request_id and action:
+                    pcm.respond_capability(
+                        chat_id,
+                        request_id=request_id,
+                        action=action,
+                        model_id=model_id,
+                    )
+                continue
+
             if msg_type == "queue_reorder":
                 pcm.reorder_queue(
                     chat_id,

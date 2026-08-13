@@ -27,6 +27,7 @@ INTERNAL_VARS: dict[str, str] = {
     "CIAO_DELEGATE_OF": "subprocess IPC marker naming the supervisor chat of a delegate",
     "CIAO_DEFAULT_NODE_ROLE": "internal multi-device node failover role default",
     "CIAO_NODE_ID": "internal multi-device node identification marker",
+    "CIAO_BOOTSTRAP_LAUNCHD_HANDOFF": "internal marker for desktop-owned bootstrap handoff to launchd",
 }
 
 

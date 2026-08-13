@@ -54,6 +54,7 @@ from ciao.web.routes_api import (
     chat_images,
     chat_mark_read,
     chat_messages,
+    chat_reentry_summary,
     chat_retry,
     chat_prompt,
     chat_new_session,
@@ -99,6 +100,7 @@ from ciao.web.routes_api import (
     setup_status_endpoint,
     list_automation,
     trigger_backfill_insights,
+    compare_apple_insights_route,
     list_completed_projects,
     list_projects,
     list_loops,
@@ -108,11 +110,8 @@ from ciao.web.routes_api import (
     project_complete,
     project_detail,
     reorder_projects,
-    tts_install_local_endpoint,
-    voice_install_local_endpoint,
     libreoffice_status_endpoint,
     libreoffice_install_endpoint,
-    apfel_install_endpoint,
     project_restore,
     project_files_list,
     project_files_upload,
@@ -131,6 +130,7 @@ from ciao.web.routes_api import (
     vault_markdown_paths,
     workspace_binary,
     workspace_file,
+    workspace_html,
     workspace_file_write,
     workspace_image,
     workspace_open,
@@ -239,6 +239,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/retry", chat_retry, methods=["POST"]),
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
         Route("/api/chats/{chat_id}/messages", chat_messages, methods=["GET"]),
+        Route("/api/chats/{chat_id}/reentry-summary", chat_reentry_summary, methods=["POST"]),
         Route("/api/chats/{chat_id}/subagents", chat_subagents, methods=["GET"]),
         Route("/api/chats/{chat_id}/voice", chat_voice, methods=["POST"]),
         Route("/api/chats/{chat_id}/speak", chat_speak, methods=["POST"]),
@@ -247,6 +248,9 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Host file viewer/editor. Absolute paths are intentional; endpoints
         # enforce type and size allowlists rather than a workspace sandbox.
         Route("/api/workspace-file", workspace_file, methods=["GET"]),
+        # Preview side of the same file for artifacts: text/html under a
+        # sandboxing CSP, so the panel can embed the rendered page.
+        Route("/api/workspace-html", workspace_html, methods=["GET"]),
         Route("/api/workspace-file", workspace_file_write, methods=["POST"]),
         Route("/api/vault-markdown-paths", vault_markdown_paths, methods=["GET"]),
         Route("/api/vault/backlinks", vault_backlinks, methods=["GET"]),
@@ -255,7 +259,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspace-open", workspace_open, methods=["POST"]),
         Route("/api/libreoffice-status", libreoffice_status_endpoint, methods=["GET"]),
         Route("/api/libreoffice-install", libreoffice_install_endpoint, methods=["POST"]),
-        Route("/api/apfel/install", apfel_install_endpoint, methods=["POST"]),
         # File snapshots — History and Diff tabs in the file viewer.
         Route("/api/file-history", file_history, methods=["GET"]),
         Route("/api/file-content", file_content, methods=["GET"]),
@@ -273,6 +276,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Automation status (read-only) — Settings → Automation page
         Route("/api/automation", list_automation, methods=["GET"]),
         Route("/api/automation/backfill-insights", trigger_backfill_insights, methods=["POST"]),
+        Route("/api/automation/compare-apple-insights", compare_apple_insights_route, methods=["POST"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
         Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)
@@ -325,8 +329,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/device/package-status", package_status_endpoint, methods=["GET"]),
         Route("/api/device/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/device/update", package_update_endpoint, methods=["POST"]),
-        Route("/api/voice/install-local", voice_install_local_endpoint, methods=["POST"]),
-        Route("/api/tts/install-local", tts_install_local_endpoint, methods=["POST"]),
         # Node & Handover (Multi-device Active-Standby)
         Route("/api/node/status", node_status_endpoint, methods=["GET"]),
         Route("/api/node/connect", node_connect_endpoint, methods=["POST"]),

@@ -182,11 +182,38 @@ def test_missing_auth_token_enters_bootstrap_mode_with_persisted_token(tmp_path:
     assert restarted.pwa_auth_token == config.pwa_auth_token
 
 
+def test_password_protection_is_on_by_default(tmp_path: Path) -> None:
+    """A configured workspace with a token is protected without asking: the
+    token is the password, so an .env written before the default flipped (no
+    PWA_AUTH_REQUIRED line) still ends up protected."""
+    config = CiaoConfig.from_env(
+        {"CIAO_WORKSPACE": str(tmp_path), "PWA_AUTH_TOKEN": "hunter2"}
+    )
+
+    assert config.pwa_auth_required is True
+    assert config.bootstrap_mode is False
+
+
+def test_password_protection_can_be_opted_out_in_env(tmp_path: Path) -> None:
+    config = CiaoConfig.from_env(
+        {
+            "CIAO_WORKSPACE": str(tmp_path),
+            "PWA_AUTH_TOKEN": "hunter2",
+            "PWA_AUTH_REQUIRED": "false",
+        }
+    )
+
+    assert config.pwa_auth_required is False
+
+
 def test_missing_token_without_auth_persists_random_secret_not_a_constant(tmp_path: Path) -> None:
-    env = {"CIAO_WORKSPACE": str(tmp_path)}  # no PWA_AUTH_TOKEN, auth not required
+    env = {"CIAO_WORKSPACE": str(tmp_path)}  # no PWA_AUTH_TOKEN
 
     config = CiaoConfig.from_env(env)
 
+    # Nothing a human could type exists yet, so enforcing would lock the owner
+    # out of their own install: protection waits for a password.
+    assert config.pwa_auth_required is False
     assert config.bootstrap_mode is False
     assert config.pwa_auth_token != "ciao-insecure-fallback-secret-key"
     assert len(config.pwa_auth_token) >= 32

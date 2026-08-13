@@ -95,7 +95,10 @@ describe('LoginView setup wizard tests', () => {
     })
 
     const wrapper = await mountLoginView()
-    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
+    // The wizard, not the login prompt: it sets the password instead of asking
+    // for an existing one.
+    expect(wrapper.find('#login-token').exists()).toBe(false)
+    expect(wrapper.find('#setup-password').exists()).toBe(true)
     expect(wrapper.find('#setup-workspace').exists()).toBe(true)
     expect(wrapper.find('#setup-workspace-browse').exists()).toBe(true)
     // scratch mode hides the vault input behind the derived-path hint
@@ -125,15 +128,18 @@ describe('LoginView setup wizard tests', () => {
     const wrapper = await mountLoginView()
     expect(wrapper.find('#setup-port').exists()).toBe(false)
     expect(wrapper.find('#setup-python').exists()).toBe(false)
-    expect(wrapper.find('#setup-auth-required').exists()).toBe(false)
     expect(wrapper.find('#setup-api-fallback').exists()).toBe(false)
+    // The password is enforced, so it belongs in the main flow — never behind
+    // Advanced, and there is no on/off toggle to hide there either.
+    expect(wrapper.find('#setup-password').exists()).toBe(true)
+    expect(wrapper.find('#setup-auth-required').exists()).toBe(false)
 
     await wrapper.find('#setup-advanced-toggle').trigger('click')
     await nextTick()
     expect(wrapper.find('#setup-port').exists()).toBe(true)
     expect(wrapper.find('#setup-python').exists()).toBe(true)
-    expect(wrapper.find('#setup-auth-required').exists()).toBe(true)
     expect(wrapper.find('#setup-api-fallback').exists()).toBe(true)
+    expect(wrapper.find('#setup-auth-required').exists()).toBe(false)
     expect((wrapper.find('#setup-port').element as HTMLInputElement).value).toBe('8443')
   })
 
@@ -279,6 +285,11 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.find('#setup-push').exists()).toBe(false)
 
     const submitBtn = wrapper.find('button[type="submit"]')
+    // A password is mandatory: the wizard cannot be submitted without one.
+    expect(submitBtn.element.hasAttribute('disabled')).toBe(true)
+    await wrapper.find('#setup-password').setValue('hunter2')
+    await wrapper.find('#setup-password-confirm').setValue('hunter2')
+    await nextTick()
     expect(submitBtn.element.hasAttribute('disabled')).toBe(false)
 
     mockApiPost.mockResolvedValue({ ok: true })
@@ -292,7 +303,7 @@ describe('LoginView setup wizard tests', () => {
       workspace_name: 'personal',
       port: 8443,
       python: undefined,
-      auth_required: false,
+      password: 'hunter2',
       provider: 'claude',
       restart: true,
     })

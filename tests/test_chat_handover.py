@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from ciao.config import CiaoConfig
+from ciao.providers.ollama import OllamaSettings
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -17,6 +19,7 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
+        ollama=OllamaSettings(api_key="sk-ollama", models=("kimi-k2.7-code:cloud",)),
     )
     state = StateStore(config.state_path, tmp_path, config.media_root)
     transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
@@ -124,3 +127,26 @@ def test_handover_messages_are_injected_into_next_prompt_once(tmp_path: Path) ->
     assert after.handover_context_pending is False
     assert "[Provider handover messages]" not in pcm._build_prompt_prefix(after)
     assert after.handover_messages
+
+
+def test_handover_chat_validates_and_canonicalizes_model(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("handover", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude", model_bucket="work")
+
+    updated = pcm.handover_chat(
+        chat.chat_id,
+        provider="claude",
+        model=" Sonnet ",
+        model_bucket="work",
+    )
+    assert updated is not None
+    assert updated.model == "sonnet"
+
+    with pytest.raises(ValueError, match="Unknown custom model"):
+        pcm.handover_chat(
+            chat.chat_id,
+            provider="claude",
+            model="custom:missing:foo",
+        )
+    assert pcm.get_chat(chat.chat_id).model == "sonnet"

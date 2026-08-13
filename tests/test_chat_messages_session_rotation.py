@@ -151,3 +151,106 @@ async def test_new_session_clears_previous_session_ids(tmp_path: Path) -> None:
 
     assert pcm._chats[chat.chat_id].previous_session_ids == []
     assert pcm._chats[chat.chat_id].session_id == ""
+
+
+@pytest.mark.asyncio
+async def test_get_session_messages_full_traverses_logical_parent_uuid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a session file contains a compact_boundary with logicalParentUuid,
+    get_session_messages_full must walk across the boundary to return both
+    pre-compaction and post-compaction turns in chronological order.
+    """
+    import json
+    from claude_agent_sdk._internal.sessions import project_key_for_directory
+    from ciao.transcripts import get_session_messages_full
+
+    session_id = "11111111-2222-3333-4444-555555555555"
+    key = project_key_for_directory(str(tmp_path))
+    project_dir = tmp_path / ".claude" / "projects" / key
+    project_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = project_dir / f"{session_id}.jsonl"
+
+    monkeypatch.setattr(
+        "claude_agent_sdk._internal.sessions._get_projects_dir",
+        lambda: tmp_path / ".claude" / "projects",
+    )
+
+    entries = [
+        {
+            "type": "user",
+            "uuid": "u1",
+            "parentUuid": None,
+            "sessionId": session_id,
+            "message": {"role": "user", "content": "pre-compact question"},
+        },
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "parentUuid": "u1",
+            "sessionId": session_id,
+            "message": {"role": "assistant", "content": "pre-compact answer"},
+        },
+        {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "uuid": "cb1",
+            "parentUuid": None,
+            "logicalParentUuid": "a1",
+            "sessionId": session_id,
+        },
+        {
+            "type": "user",
+            "uuid": "u2",
+            "parentUuid": "cb1",
+            "isCompactSummary": True,
+            "sessionId": session_id,
+            "message": {
+                "role": "user",
+                "content": "This session is being continued from a previous conversation that ran out of context. Summary: test",
+            },
+        },
+        {
+            "type": "assistant",
+            "uuid": "a2",
+            "parentUuid": "u2",
+            "sessionId": session_id,
+            "message": {"role": "assistant", "content": "post-compact answer"},
+        },
+    ]
+    jsonl_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+
+    # Fetch messages via get_session_messages_full
+    messages = get_session_messages_full(session_id, directory=str(tmp_path))
+    assert len(messages) == 4
+    contents = [
+        m.message.get("content") if isinstance(m.message, dict) else m.message
+        for m in messages
+    ]
+    assert contents[0] == "pre-compact question"
+    assert contents[1] == "pre-compact answer"
+    assert "This session is being continued" in contents[2]
+    assert contents[3] == "post-compact answer"
+
+    # Test /messages endpoint rendering
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Compact test", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="compact-test")
+    chat.session_id = session_id
+    pcm._save()
+
+    response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
+    payload = response.body.decode()
+
+    # Pre-compact, summary (as system), and post-compact items must all be present
+    assert "pre-compact question" in payload
+    assert "pre-compact answer" in payload
+    assert "This session is being continued" in payload
+    assert "post-compact answer" in payload
+
+    # Verify positions: pre-compact < summary < post-compact
+    pos_pre = payload.index("pre-compact question")
+    pos_sum = payload.index("This session is being continued")
+    pos_post = payload.index("post-compact answer")
+    assert pos_pre < pos_sum < pos_post
+

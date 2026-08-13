@@ -778,6 +778,7 @@ class CiaoMcpService:
         principal: McpPrincipal | None = None
         status = "ok"
         error_code = ""
+        value: Any = None
         try:
             if self.control_plane is None:
                 raise ControlPlaneError("unavailable", "Ciaobot control plane is not ready.", retryable=True)
@@ -823,6 +824,7 @@ class CiaoMcpService:
                 status=status,
                 error_code=error_code,
                 duration_ms=int((time.perf_counter() - started) * 1000),
+                value=value,
             )
 
     def _record_tool_call(
@@ -833,6 +835,7 @@ class CiaoMcpService:
         status: str,
         error_code: str,
         duration_ms: int,
+        value: Any = None,
     ) -> None:
         record = {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -845,6 +848,16 @@ class CiaoMcpService:
             "error_code": error_code,
             "duration_ms": duration_ms,
         }
+        if name == "vault_search" and isinstance(value, dict):
+            data = value.get("data")
+            if isinstance(data, list):
+                paths = [
+                    str(row.get("path"))
+                    for row in data
+                    if isinstance(row, dict) and row.get("path")
+                ]
+                record["result_count"] = len(paths)
+                record["result_paths"] = paths[:50]
         try:
             self._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
             with self._telemetry_path.open("a", encoding="utf-8") as handle:
@@ -1168,7 +1181,11 @@ class CiaoMcpService:
                     "done" means.
                 title: Short sidebar label, e.g. "Fix #238 NSIRD drop".
                 model: Model for the delegate, e.g. a cheaper or specialized
-                    one. Omit to inherit the workspace default.
+                    one. Must be in the configured model set for the resolved
+                    provider (Ollama local/cloud, OpenRouter, or Anthropic
+                    tier alias). Unknown ids are rejected with `invalid_model`
+                    and a list of valid alternatives. Omit to inherit the
+                    workspace default.
                 delegation_id: Shared tag for delegates dispatched as one
                     batch, so their completion reports group together.
             """

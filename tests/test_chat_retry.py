@@ -69,6 +69,38 @@ async def test_quota_error_marks_turn_for_hourly_retry(tmp_path: Path) -> None:
     pcm.stop_chat_retry(chat.chat_id)
 
 
+async def test_codex_capacity_error_marks_turn_for_hourly_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    capacity_error = "Selected model is at capacity. Please try a different model."
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result=capacity_error,
+            session_id="sess-retry",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_interval_seconds == 3600
+    assert updated.retry_last_error == capacity_error
+    assert any(e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events)
+    pcm.stop_chat_retry(chat.chat_id)
+
+
 def test_manual_retry_can_be_set_and_stopped(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
@@ -181,6 +213,11 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
     # resolves to "ollama" and the retry path is enabled.
     chat.model = "kimi5.2:cloud"
     pcm._save()
+    # The image-capability pre-flight would intercept kimi5.2 (known
+    # non-vision) before dispatch. This test exercises the dispatch-time
+    # ladder safety net, so let the turn through as if the pre-flight
+    # approved the model.
+    pcm._model_capable = lambda model, chat: True  # type: ignore[assignment]
 
     seen_models: list[str] = []
     seen_image_counts: list[int] = []
@@ -347,6 +384,9 @@ async def test_capability_fallback_preserves_images(tmp_path: Path) -> None:
     chat = pcm.create_chat(project.project_id, title="preserve-images")
     chat.model = "kimi5.2:cloud"
     pcm._save()
+    # Bypass the image-capability pre-flight: this test targets the
+    # dispatch-time ladder's image preservation, not the pre-flight ask.
+    pcm._model_capable = lambda model, chat: True  # type: ignore[assignment]
 
     retry_images: list | None = None
 
@@ -839,4 +879,3 @@ async def test_rate_limit_error_with_progress_arms_retry(tmp_path: Path) -> None
         e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
     )
     pcm.stop_chat_retry(chat.chat_id)
-

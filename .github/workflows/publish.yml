@@ -6,37 +6,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-publish:
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write   # PyPI trusted publishing
-      contents: write   # upload artifacts to the GitHub release
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build PWA
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
-      - name: Build wheel and sdist
-        run: |
-          python -m pip install --quiet build
-          python -m build
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-      - name: Attach artifacts to the GitHub release
-        if: github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
-
   build-desktop:
     runs-on: macos-latest
     if: github.event_name == 'release'
@@ -52,30 +21,77 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.90.0
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Select newest Xcode
+        run: |
+          newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          test -n "$newest"
+          sudo xcode-select -s "$newest"
+          xcodebuild -version
+          swiftc --version
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci
-      - name: Build signed universal desktop artifacts
+      - name: Build PWA assets
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Resolve pinned Python runtimes
+        id: python-runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          . scripts/pinned-python-runtime.env
+          {
+            echo "arm64_url=$CIAO_PYTHON_ARM64_URL"
+            echo "arm64_sha256=$CIAO_PYTHON_ARM64_SHA256"
+            echo "x86_64_url=$CIAO_PYTHON_X86_64_URL"
+            echo "x86_64_sha256=$CIAO_PYTHON_X86_64_SHA256"
+          } >> "$GITHUB_OUTPUT"
+      - name: Build embedded Ciaobot runtime
+        env:
+          CIAO_PYTHON_ARM64_URL: ${{ steps.python-runtime.outputs.arm64_url }}
+          CIAO_PYTHON_ARM64_SHA256: ${{ steps.python-runtime.outputs.arm64_sha256 }}
+          CIAO_PYTHON_X86_64_URL: ${{ steps.python-runtime.outputs.x86_64_url }}
+          CIAO_PYTHON_X86_64_SHA256: ${{ steps.python-runtime.outputs.x86_64_sha256 }}
+        run: ./scripts/build-bundled-runtime.sh desktop/runtime
+      - name: Build signed universal desktop app
         working-directory: desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --target universal-apple-darwin
-      - name: Prepare updater manifest
+      - name: Build universal installer verifier
+        working-directory: desktop/installer-verify
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create \
+            target/aarch64-apple-darwin/release/ciaobot-installer-verify \
+            target/x86_64-apple-darwin/release/ciaobot-installer-verify \
+            -output target/ciaobot-installer-verify_universal
+      - name: Prepare release assets
         env:
           VERSION: ${{ github.event.release.tag_name }}
         run: |
+          set -euo pipefail
           version="${VERSION#v}"
           bundle="desktop/src-tauri/target/universal-apple-darwin/release/bundle"
           updater="$(find "$bundle" -name '*.app.tar.gz' -type f -print -quit)"
           signature="${updater}.sig"
-          dmg="$(find "$bundle" -name '*.dmg' -type f -print -quit)"
-          test -n "$updater" -a -f "$signature" -a -n "$dmg"
+          verifier="desktop/installer-verify/target/ciaobot-installer-verify_universal"
+          test -n "$updater" -a -f "$signature" -a -x "$verifier"
           updater_name="Ciaobot_${version}_universal.app.tar.gz"
-          dmg_name="Ciaobot_${version}_universal.dmg"
+          verifier_name="ciaobot-installer-verify_universal"
           cp "$updater" "$updater_name"
           cp "$signature" "${updater_name}.sig"
-          cp "$dmg" "$dmg_name"
+          cp "$verifier" "$verifier_name"
+          chmod 755 "$verifier_name"
+          verifier_sha256="$(shasum -a 256 "$verifier_name" | awk '{print $1}')"
+          sed "s/__VERIFIER_SHA256__/${verifier_sha256}/g" scripts/install.sh > install.sh
+          chmod 755 install.sh
           signature_value="$(cat "${updater_name}.sig")"
           download="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${version}/${updater_name}"
           jq -n \
@@ -84,71 +100,23 @@ jobs:
             --arg pub_date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg url "$download" \
             --arg signature "$signature_value" \
-            '{
-              version: $version,
-              notes: $notes,
-              pub_date: $pub_date,
-              platforms: {
-                "darwin-aarch64": {signature: $signature, url: $url},
-                "darwin-x86_64": {signature: $signature, url: $url}
-              }
-            }' > latest.json
-      - name: Attach desktop artifacts to the GitHub release
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"darwin-aarch64": {signature: $signature, url: $url}, "darwin-x86_64": {signature: $signature, url: $url}}}' \
+            > latest.json
+      - name: Attach release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" Ciaobot_*_universal.dmg Ciaobot_*_universal.app.tar.gz Ciaobot_*_universal.app.tar.gz.sig latest.json --clobber
+        run: |
+          gh release upload "$TAG" \
+            install.sh \
+            ciaobot-installer-verify_universal \
+            Ciaobot_*_universal.app.tar.gz \
+            Ciaobot_*_universal.app.tar.gz.sig \
+            latest.json \
+            --clobber
 
-  update-homebrew-tap:
-    runs-on: ubuntu-latest
-    needs: [build-and-publish, build-desktop]
-    if: github.event_name == 'release'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Compute wheel checksum
-        id: wheel
-        env:
-          VERSION: ${{ github.event.release.tag_name }}
-        run: |
-          version="${VERSION#v}"
-          wheel_url="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${version}/ciaobot-${version}-py3-none-any.whl"
-          sha256="$(curl -fsSL "$wheel_url" | sha256sum | awk '{print $1}')"
-          dmg_url="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${version}/Ciaobot_${version}_universal.dmg"
-          dmg_sha256="$(curl -fsSL "$dmg_url" | sha256sum | awk '{print $1}')"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
-          echo "dmg_sha256=${dmg_sha256}" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        with:
-          repository: raffaelefarinaro/homebrew-ciaobot
-          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-          path: homebrew-ciaobot
-      - name: Update formula
-        run: |
-          ./scripts/update-homebrew-tap.sh \
-            "${{ steps.wheel.outputs.version }}" \
-            "${{ steps.wheel.outputs.sha256 }}" \
-            "${{ steps.wheel.outputs.dmg_sha256 }}" \
-            homebrew-ciaobot
-      - name: Commit and push tap update
-        working-directory: homebrew-ciaobot
-        env:
-          RELEASE_VERSION: ${{ steps.wheel.outputs.version }}
-        run: |
-          if git diff --quiet; then
-            echo "Formula already up to date."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/ciaobot.rb Casks/ciaobot-desktop.rb
-          git commit -m "ciaobot ${RELEASE_VERSION}"
-          git push
-
-  # Lives in its own workflow so it can also be dispatched by hand against an
-  # already-published version, instead of only ever running once per release.
   release-smoke:
-    needs: update-homebrew-tap
+    needs: build-desktop
     if: github.event_name == 'release'
     uses: ./.github/workflows/release-smoke.yml
     with:

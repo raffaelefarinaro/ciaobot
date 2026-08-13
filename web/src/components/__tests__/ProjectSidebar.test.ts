@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
 
@@ -13,6 +14,7 @@ describe('ProjectSidebar chat actions', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     const store = useProjectStore()
+    store.unread = {}
     store.workspaces = [{
       name: 'personal',
       vault_root: '/tmp/vault',
@@ -47,6 +49,33 @@ describe('ProjectSidebar chat actions', () => {
   afterEach(() => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()
+  })
+
+  it('shows a notification dot beside an unread chat', async () => {
+    const store = useProjectStore()
+    store.chats[0].last_activity_at = '2026-08-12T10:00:00Z'
+    store.chats[0].last_read_at = '2026-08-12T09:00:00Z'
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: {
+        plugins: [router],
+        stubs: { NotificationBell: true },
+      },
+    })
+
+    const unread = wrapper.get('.chat-item .chat-signal--unread')
+    expect(unread.attributes('aria-label')).toBe('Unread chat')
+    expect(unread.attributes('title')).toBe('Unread chat')
+
+    wrapper.unmount()
   })
 
   it('copies the selected chat ID from the action menu', async () => {
@@ -138,6 +167,57 @@ describe('ProjectSidebar chat actions', () => {
 
     expect(dataTransfer.setData).toHaveBeenCalledWith('application/x-ciaobot-chat', chatId)
     expect(moveChat).toHaveBeenCalledWith(chatId, 'project-2')
+
+    wrapper.unmount()
+  })
+
+  it('collapses and expands a supervisor subchat group', async () => {
+    const store = useProjectStore()
+    store.chats.push({
+      ...store.chats[0],
+      chat_id: 'subchat-5678-efgh',
+      title: 'Child chat',
+      spawned_from_chat_id: chatId,
+      created_at: '2026-07-29T00:01:00Z',
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: {
+        plugins: [router],
+        stubs: { NotificationBell: true },
+      },
+    })
+
+    expect(wrapper.findAll('.chat-item')).toHaveLength(2)
+    const toggle = wrapper.get('[aria-label="Collapse subchats for Copy me"]')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+
+    await toggle.trigger('click')
+
+    expect(wrapper.findAll('.chat-item')).toHaveLength(1)
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+
+    store.activeChatId = 'subchat-5678-efgh'
+    await nextTick()
+
+    expect(wrapper.findAll('.chat-item')).toHaveLength(2)
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+
+    await toggle.trigger('click')
+    expect(wrapper.findAll('.chat-item')).toHaveLength(1)
+
+    await toggle.trigger('click')
+
+    expect(wrapper.findAll('.chat-item')).toHaveLength(2)
+    expect(toggle.attributes('aria-expanded')).toBe('true')
 
     wrapper.unmount()
   })

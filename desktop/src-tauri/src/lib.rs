@@ -281,6 +281,55 @@ fn requires_confirmation(result: &service::ServiceResult) -> bool {
         .unwrap_or(false)
 }
 
+fn engine_launch_action(result: &service::ServiceResult) -> &'static str {
+    if result
+        .details
+        .get("loaded")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        "restart"
+    } else {
+        "start"
+    }
+}
+
+// Restart the separate Python LaunchAgent after the app bundle has been
+// replaced. The app updater only restarts this Tauri process; without this
+// kickstart the server keeps executing the old bundle from the same plist path.
+// A fresh bootstrap install has no server plist yet, so there is nothing to
+// restart until onboarding finishes setup.
+fn restart_engine_after_app_update(app: &AppHandle) -> Result<(), String> {
+    let server_plist = app
+        .state::<DesktopModel>()
+        .runtime
+        .read()
+        .map_err(|_| "Could not read the current Ciaobot runtime.".to_string())?
+        .server_plist
+        .clone();
+    if !server_plist.is_file() {
+        return Ok(());
+    }
+    let binary = service::resolve_ciao(env::var("PATH").ok().as_deref())
+        .ok_or_else(|| "The bundled Ciaobot engine was not found.".to_string())?;
+    let status = service::invoke(&binary, "status", &[])?;
+    let action = engine_launch_action(&status);
+    let result = service::invoke(
+        &binary,
+        action,
+        if action == "restart" {
+            &["--force"][..]
+        } else {
+            &[][..]
+        },
+    )?;
+    if result.ok {
+        Ok(())
+    } else {
+        Err(result.message)
+    }
+}
+
 // Second half of the unified update. There is no bundled window left to emit
 // progress to, so failures surface as a dialog. Only restart when something
 // actually changed — otherwise "Update…" would bounce a healthy app for nothing.
@@ -294,6 +343,33 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
                 .download_and_install(|_, _| {}, || {})
                 .await
                 .map_err(|error| format!("Update {version} could not be installed: {error}"))?;
+            // The bundle has already been swapped on disk at this point, so the
+            // running process is the *old* app. Propagating a restart failure
+            // out of here skipped `app.restart()` and left exactly that: a new
+            // bundle on disk, an old app in memory, and a half-restarted
+            // engine — the desktop-service version mismatch this whole path
+            // exists to avoid. Surface the engine failure, then restart anyway;
+            // the fresh process runs the engine start-up path again.
+            if let Err(error) = restart_engine_after_app_update(&app) {
+                tray_log(
+                    &app,
+                    &format!("engine restart after app update FAILED: {error}"),
+                );
+                // Blocking: the `?` this replaced at least produced an error
+                // dialog, and `app.restart()` below would outrun a
+                // fire-and-forget one. Safe here - this is a spawned async
+                // task, not the main thread.
+                show_error_blocking(
+                    &app,
+                    "Engine restart failed",
+                    format!(
+                        "The app was updated, but the Ciaobot engine did not \
+                         restart:\n\n{error}\n\nCiaobot will restart now. If \
+                         the engine stays down, use Restart engine in the menu \
+                         bar."
+                    ),
+                );
+            }
             app.restart()
         }
         // The engine moved but the app did not: restart so both halves come
@@ -318,7 +394,7 @@ fn run_full_update(app: AppHandle, force: bool) {
         for window in app.webview_windows().values() {
             let _ = window.hide();
         }
-        set_dock_visible(&app, false);
+        hide_dock_unless_pinned(&app);
         let extra = if force { &["--force"][..] } else { &[][..] };
         let engine_updated = match service::invoke(&binary, "update-engine", extra) {
             Ok(result) if result.ok => true,
@@ -397,6 +473,24 @@ fn set_dock_visible(app: &AppHandle, visible: bool) {
         tauri::ActivationPolicy::Accessory
     };
     let _ = app.set_activation_policy(policy);
+}
+
+// Whether the Dock tile should disappear along with the last window. Reading the
+// setting through a poisoned-lock-tolerant helper keeps the window-close path
+// from panicking on a lock another thread died holding; defaulting to true there
+// preserves the behaviour this preference replaced.
+fn hide_dock_icon_enabled(app: &AppHandle) -> bool {
+    app.state::<DesktopModel>()
+        .settings
+        .lock()
+        .map(|settings| settings.hide_dock_icon)
+        .unwrap_or(true)
+}
+
+fn hide_dock_unless_pinned(app: &AppHandle) {
+    if hide_dock_icon_enabled(app) {
+        set_dock_visible(app, false);
+    }
 }
 
 fn show_window(app: &AppHandle, label: &str) {
@@ -648,10 +742,11 @@ fn build_windows(
                 }
                 WindowEvent::CloseRequested { api, .. } => {
                     // Closing the window leaves Ciaobot running in the menu bar;
-                    // quitting is a tray action. Drop the Dock tile with it.
+                    // quitting is a tray action. Drop the Dock tile with it,
+                    // unless the user unchecked Hide Dock Icon.
                     api.prevent_close();
                     let _ = window.hide();
-                    set_dock_visible(&window.app_handle().clone(), false);
+                    hide_dock_unless_pinned(&window.app_handle().clone());
                 }
                 _ => {}
             }
@@ -697,6 +792,18 @@ fn show_error(app: &AppHandle, title: &str, message: impl Into<String>) {
         .title(title)
         .kind(MessageDialogKind::Error)
         .show(|_| {});
+}
+
+// Same dialog, but it does not return until the user dismisses it. For the one
+// caller that is about to end the process: `app.restart()` tears everything
+// down before a `.show()` callback could paint, so the user would never see it.
+// Only safe off the main thread.
+fn show_error_blocking(app: &AppHandle, title: &str, message: impl Into<String>) {
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
 }
 
 fn show_info(app: &AppHandle, title: &str, message: impl Into<String>) {
@@ -768,6 +875,45 @@ fn invoke_service_action(app: AppHandle, action: &'static str, force: bool, exit
     });
 }
 
+fn disconnect_from_host(app: AppHandle) {
+    thread::spawn(move || {
+        let runtime = match app.state::<DesktopModel>().runtime.read() {
+            Ok(runtime) => runtime.clone(),
+            Err(error) => {
+                show_error(&app, "Could not disconnect from host", error.to_string());
+                return;
+            }
+        };
+        let result = tauri::async_runtime::block_on(capture::disconnect_from_host(&runtime));
+        match result {
+            Ok(()) => {
+                tray_log(&app, "client disconnect: promoted local node to host");
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.navigate(runtime.server_url);
+                }
+                let _ = refresh_tray(&app);
+            }
+            Err(error) => show_error(&app, "Could not disconnect from host", error),
+        }
+    });
+}
+
+fn prompt_disconnect_from_host(app: &AppHandle) {
+    let app_for_action = app.clone();
+    app.dialog()
+        .message("The host may be unavailable. Disconnect this device and make it the host here?")
+        .title("Disconnect from host?")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Disconnect".into(),
+            "Cancel".into(),
+        ))
+        .show(move |confirmed| {
+            if confirmed {
+                disconnect_from_host(app_for_action);
+            }
+        });
+}
+
 fn set_login_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let previous = app
         .autolaunch()
@@ -800,11 +946,10 @@ fn refresh_tray(app: &AppHandle) -> Result<(), String> {
         .read()
         .map_err(|error| error.to_string())?
         .clone();
-    let notifications = model
-        .settings
-        .lock()
-        .map_err(|error| error.to_string())?
-        .notifications_enabled;
+    let (notifications, hide_dock_icon) = {
+        let settings = model.settings.lock().map_err(|error| error.to_string())?;
+        (settings.notifications_enabled, settings.hide_dock_icon)
+    };
     let login = app.autolaunch().is_enabled().unwrap_or(false);
     let built = tray::build_menu(
         app,
@@ -812,6 +957,7 @@ fn refresh_tray(app: &AppHandle) -> Result<(), String> {
         notifications,
         notification_permission_state().contains("denied"),
         login,
+        hide_dock_icon,
     )
     .map_err(|e| e.to_string())?;
     let working_rows = built.working_items.len();
@@ -855,6 +1001,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         settings.notifications_enabled,
         notification_permission_state().contains("denied"),
         app.autolaunch().is_enabled().unwrap_or(false),
+        settings.hide_dock_icon,
     )?
     .menu;
     let icon = Image::from_bytes(include_bytes!(
@@ -872,6 +1019,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             match id {
                 "open" => show_window(app, "main"),
+                "disconnect" => prompt_disconnect_from_host(app),
                 "start" => invoke_service_action(app.clone(), "start", false, false),
                 "restart" => invoke_service_action(app.clone(), "restart", false, false),
                 "update" => {
@@ -908,6 +1056,26 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     // The bundled settings window used to own the permission
                     // prompt, so turning the toggle on has to ask for it now.
                     maybe_request_notification_permission(app, enabled);
+                    let _ = refresh_tray(app);
+                }
+                "hide-dock-icon" => {
+                    let model = app.state::<DesktopModel>();
+                    let mut hide = true;
+                    if let Ok(mut settings) = model.settings.lock() {
+                        settings.hide_dock_icon = !settings.hide_dock_icon;
+                        hide = settings.hide_dock_icon;
+                        if let Err(error) = model.store.save(&settings) {
+                            show_error(app, "Could not save Dock setting", error.to_string());
+                        }
+                    }
+                    // Apply immediately rather than at the next window close, so
+                    // the checkbox visibly does something: unchecking it while
+                    // no window is open should bring the tile back right away.
+                    let showing = app
+                        .webview_windows()
+                        .values()
+                        .any(|window| window.is_visible().unwrap_or(false));
+                    set_dock_visible(app, showing || !hide);
                     let _ = refresh_tray(app);
                 }
                 "start-at-login" => {
@@ -1153,10 +1321,21 @@ fn start_notification_tail(app: AppHandle, runtime: RuntimeConfig) {
                 .lock()
                 .map(|settings| settings.notifications_enabled)
                 .unwrap_or(false);
-            if !enabled {
-                continue;
-            }
             for payload in pending {
+                if payload.get("kind").and_then(serde_json::Value::as_str) == Some("clear") {
+                    let chat_id = payload
+                        .get("chat_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    tauri::async_runtime::spawn(async move {
+                        native_notifications::dismiss_chat_notifications(&chat_id).await;
+                    });
+                    continue;
+                }
+                if !enabled {
+                    continue;
+                }
                 let notification = NativeNotification::from_value(&payload);
                 tauri::async_runtime::spawn(async move {
                     let _ = notification.post().await;
@@ -1216,10 +1395,17 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_autostart::init(
-            MacosLauncher::LaunchAgent,
-            Some(vec!["--background"]),
-        ))
+        // The release installer and the tray must own the same LaunchAgent.
+        // Explicitly name it so the plugin does not derive
+        // `ciaobot-desktop.plist` from the Rust package name while the
+        // installer manages `Ciaobot.plist`.
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("Ciaobot")
+                .args(["--background"])
+                .macos_launcher(MacosLauncher::LaunchAgent)
+                .build(),
+        )
         .setup(|app| {
             let runtime = runtime::discover_current();
             let app_data = app.path().app_data_dir()?;
@@ -1264,7 +1450,10 @@ pub fn run() {
                 .get_webview_window("main")
                 .and_then(|window| window.is_visible().ok())
                 .unwrap_or(false);
-            set_dock_visible(app.handle(), main_visible);
+            // With Hide Dock Icon off, the tile stays put even on a windowless
+            // menu-bar-only launch.
+            let keep_dock = !hide_dock_icon_enabled(app.handle());
+            set_dock_visible(app.handle(), main_visible || keep_dock);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -1282,8 +1471,8 @@ pub fn run() {
 mod tests {
     use super::{
         append_log, browser_event_script, create_desktop_drop_grant, engine_already_current,
-        is_external_link, is_trusted_main_navigation, needs_drop_staging, requires_confirmation,
-        should_show_main_window,
+        engine_launch_action, is_external_link, is_trusted_main_navigation, needs_drop_staging,
+        requires_confirmation, should_show_main_window,
     };
     use crate::service::ServiceResult;
 
@@ -1472,5 +1661,17 @@ mod tests {
             serde_json::json!({"requires_confirmation": true})
         )));
         assert!(!requires_confirmation(&result_with(serde_json::json!({}))));
+    }
+
+    #[test]
+    fn app_update_starts_a_stopped_engine_instead_of_kickstarting_an_unloaded_job() {
+        assert_eq!(
+            engine_launch_action(&result_with(serde_json::json!({"loaded": true}))),
+            "restart"
+        );
+        assert_eq!(
+            engine_launch_action(&result_with(serde_json::json!({"loaded": false}))),
+            "start"
+        );
     }
 }

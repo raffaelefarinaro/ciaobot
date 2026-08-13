@@ -67,6 +67,31 @@ def test_notify_permission_invokes_callback(tmp_path: Path) -> None:
     assert calls == [(chat.chat_id, "Bash", "Run risky shell?", "req-42")]
 
 
+def test_notify_permission_skips_delegate_chat(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    parent = pcm.create_chat(project.project_id, title="parent")
+    child = pcm.create_chat(
+        project.project_id,
+        title="internal task",
+        spawned_from_chat_id=parent.chat_id,
+    )
+
+    calls: list[tuple[str, str, str, str]] = []
+    pcm.notify_permission_cb = lambda *args: calls.append(args)
+
+    event = PermissionRequestEvent(
+        type="permission_request",
+        tool_name="Bash",
+        tool_input="{}",
+        message="Run a command?",
+        request_id="req-delegate",
+    )
+    pcm._notify_permission(child.chat_id, event)
+
+    assert calls == []
+
+
 def test_notify_permission_is_no_op_without_callback(tmp_path: Path) -> None:
     """No callback configured (e.g. push manager not wired in tests) must not raise."""
     pcm = _make_manager(tmp_path)

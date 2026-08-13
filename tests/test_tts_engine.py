@@ -42,40 +42,14 @@ def _pcm(tmp_path, **config_overrides):
     )
 
 
-def test_tts_engine_defaults_to_cloud(tmp_path):
-    config = _config(tmp_path=tmp_path)
-    assert config.tts_engine == "cloud"
-    assert config.tts_cloud_voice == "onyx"
-    assert config.tts_local_voice == "am_michael"
+def test_system_speaker_refuses_without_the_sidecar(monkeypatch):
+    monkeypatch.setattr(voice, "apple_speech_available", lambda: False)
+    with pytest.raises(ValueError, match="one-line installer"):
+        voice.SystemSpeaker("", "en-US")
 
 
-def test_tts_engine_env_selection(tmp_path):
-    config = _config({"CIAO_TTS_ENGINE": "local"}, tmp_path)
-    assert config.tts_engine == "local"
-
-
-def test_tts_engine_env_garbage_falls_back_to_cloud(tmp_path):
-    config = _config({"CIAO_TTS_ENGINE": "telepathy"}, tmp_path)
-    assert config.tts_engine == "cloud"
-
-
-def test_tts_voice_env_overrides(tmp_path):
-    config = _config(
-        {"CIAO_TTS_CLOUD_VOICE": "alloy", "CIAO_TTS_LOCAL_VOICE": "im_nicola"},
-        tmp_path,
-    )
-    assert config.tts_cloud_voice == "alloy"
-    assert config.tts_local_voice == "im_nicola"
-
-
-def test_kokoro_speaker_requires_package(monkeypatch):
-    monkeypatch.setattr(voice, "kokoro_available", lambda: False)
-    with pytest.raises(ValueError, match="kokoro-onnx is not installed"):
-        voice.KokoroSpeaker("af_heart")
-
-
-def test_kokoro_available_is_bool():
-    assert isinstance(voice.kokoro_available(), bool)
+def test_system_voices_is_a_list():
+    assert isinstance(voice.system_voices(), list)
 
 
 def test_speech_text_strips_markdown():
@@ -104,75 +78,64 @@ def test_speech_text_truncates_long_input():
     assert text.endswith(".")
 
 
-def test_kokoro_lang_follows_voice_prefix(monkeypatch):
-    monkeypatch.setattr(voice, "kokoro_available", lambda: True)
-    assert voice.KokoroSpeaker("im_nicola")._lang == "it"
-    assert voice.KokoroSpeaker("af_heart")._lang == "en-us"
-    assert voice.KokoroSpeaker("xx_unknown")._lang == "en-us"
 
 
-async def test_synthesize_speech_local_not_installed(tmp_path, monkeypatch):
-    monkeypatch.setattr(voice, "kokoro_available", lambda: False)
-    pcm = _pcm(tmp_path, tts_engine="local")
+def test_voice_settings_default_to_on_device(tmp_path):
+    """One engine now, so there is nothing to select. Empty voice means "the
+    best installed voice for the locale" -- naming one would pick a voice that
+    need not exist on the machine."""
+    config = _config(tmp_path=tmp_path)
+    assert config.tts_local_voice == ""
+    assert config.transcription_locale == "en-US"
+    assert not hasattr(config, "tts_engine")
+    assert not hasattr(config, "tts_cloud_voice")
+    assert not hasattr(config, "openai_api_key")
 
-    with pytest.raises(ValueError) as exc_info:
-        await pcm.synthesize_speech("Hello there")
-    assert "kokoro-onnx is not installed" in str(exc_info.value)
-    assert "Settings → Models" in str(exc_info.value)
+
+def test_voice_env_overrides(tmp_path):
+    config = _config(
+        {"CIAO_TTS_LOCAL_VOICE": "com.apple.voice.x", "CIAO_TRANSCRIPTION_LOCALE": "it-IT"},
+        tmp_path,
+    )
+    assert config.tts_local_voice == "com.apple.voice.x"
+    assert config.transcription_locale == "it-IT"
 
 
-async def test_synthesize_speech_local_fails(tmp_path, monkeypatch):
-    monkeypatch.setattr(voice, "kokoro_available", lambda: True)
-
-    class FailingSpeaker:
-        mime_type = "audio/wav"
-
-        def __init__(self, voice_id):
-            pass
-
-        async def speak(self, text):
-            raise RuntimeError("model download interrupted")
-
-    monkeypatch.setattr(voice, "KokoroSpeaker", FailingSpeaker)
-    pcm = _pcm(tmp_path, tts_engine="local")
+async def test_synthesize_speech_reports_the_reason_when_unavailable(tmp_path, monkeypatch):
+    """No cloud fallback left, so the failure has to name what is wrong."""
+    monkeypatch.setattr(voice, "apple_speech_available", lambda: False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    pcm = _pcm(tmp_path)
 
     with pytest.raises(ValueError) as exc_info:
         await pcm.synthesize_speech("Hello there")
-    assert "Local speech synthesis failed" in str(exc_info.value)
-    assert "model download interrupted" in str(exc_info.value)
-    assert "Settings → Models" in str(exc_info.value)
+    assert "one-line installer" in str(exc_info.value)
 
 
-async def test_synthesize_speech_local_success(tmp_path, monkeypatch):
-    monkeypatch.setattr(voice, "kokoro_available", lambda: True)
+async def test_synthesize_speech_is_free_and_uses_the_configured_voice(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice, "apple_speech_available", lambda: True)
 
     class FakeSpeaker:
         mime_type = "audio/wav"
 
-        def __init__(self, voice_id):
-            assert voice_id == "am_michael"
+        def __init__(self, voice_id, locale):
+            assert voice_id == ""
+            assert locale == "en-US"
 
         async def speak(self, text):
             assert "Hello" in text
             return b"RIFFfake"
 
-    monkeypatch.setattr(voice, "KokoroSpeaker", FakeSpeaker)
-    pcm = _pcm(tmp_path, tts_engine="local")
+    monkeypatch.setattr(voice, "SystemSpeaker", FakeSpeaker)
+    pcm = _pcm(tmp_path)
 
     audio, mime, cost = await pcm.synthesize_speech("Hello **there**")
-    assert audio == b"RIFFfake"
-    assert mime == "audio/wav"
-    assert cost == 0.0
-
-
-async def test_synthesize_speech_cloud_requires_key(tmp_path):
-    pcm = _pcm(tmp_path, tts_engine="cloud")
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
-        await pcm.synthesize_speech("Hello there")
+    assert (audio, mime, cost) == (b"RIFFfake", "audio/wav", 0.0)
 
 
 async def test_synthesize_speech_rejects_empty_text(tmp_path):
-    pcm = _pcm(tmp_path, tts_engine="local")
-    # An image-only message reduces to nothing speakable.
+    """Checked before availability, so a blank message says the useful thing
+    even on a machine where the synthesizer is not usable."""
+    pcm = _pcm(tmp_path)
     with pytest.raises(ValueError, match="Nothing to read aloud"):
-        await pcm.synthesize_speech("![screenshot](http://example.com/shot.png)")
+        await pcm.synthesize_speech("   \n\n   ")

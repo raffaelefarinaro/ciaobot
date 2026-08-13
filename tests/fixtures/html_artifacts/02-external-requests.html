@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Artifact check 2: external requests blocked</title>
+<!-- Must be blocked by style-src: no stylesheet from another host. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.css">
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; padding: 16px; }
+  h1 { font-size: 17px; margin: 0 0 10px; }
+  .verdict { font-weight: 600; padding: 8px 10px; border-radius: 5px; margin: 6px 0; }
+  .pass { background: #d8f3dc; color: #1b4332; }
+  .fail { background: #ffd7d7; color: #7f1d1d; }
+  img { width: 40px; height: 40px; border: 1px solid #999; }
+</style>
+<!-- Must be blocked by script-src: no script from another host. If this ever
+     loads, `window.EXTERNAL_RAN` flips and the verdict below says FAIL. -->
+<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1/dist/confetti.browser.min.js"></script>
+</head>
+<body>
+<h1>Check 2: external requests</h1>
+
+<p id="script" class="verdict">…</p>
+<p id="css" class="verdict">…</p>
+
+<p>Remote image (must stay broken): <img id="img" src="https://placehold.co/40x40" alt=""></p>
+<p id="imgv" class="verdict">…</p>
+
+<p>Expected in devtools: three CSP violations (script-src, style-src, img-src).</p>
+
+<script>
+  function verdict(id, ok, okText, badText) {
+    const el = document.getElementById(id)
+    el.className = 'verdict ' + (ok ? 'pass' : 'fail')
+    el.textContent = (ok ? 'PASS — ' : 'FAIL — ') + (ok ? okText : badText)
+  }
+
+  // canvas-confetti defines window.confetti. Its absence means the CDN script
+  // never executed, which is the whole point.
+  verdict(
+    'script',
+    typeof window.confetti === 'undefined',
+    'the external script was blocked.',
+    'the external script LOADED. script-src is too permissive.',
+  )
+
+  // water.css sets a background on body; if it applied, the computed background
+  // stops being transparent/white-ish default.
+  const bg = getComputedStyle(document.body).backgroundColor
+  verdict(
+    'css',
+    bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent' || bg === 'rgb(255, 255, 255)',
+    'the external stylesheet was blocked (body background is the default ' + bg + ').',
+    'the external stylesheet APPLIED (body background is ' + bg + ').',
+  )
+
+  const img = document.getElementById('img')
+  img.addEventListener('load', () => verdict('imgv', false, '', 'the remote image LOADED. img-src is too permissive.'))
+  img.addEventListener('error', () => verdict('imgv', true, 'the remote image was blocked.', ''))
+</script>
+</body>
+</html>

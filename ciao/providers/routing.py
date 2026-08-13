@@ -47,9 +47,17 @@ def routing_routine_env_for_model(model: str, config: "CiaoConfig") -> dict[str,
 
 
 def intended_backend(model: str) -> str:
-    """Which backend a model id shape implies: openrouter / ollama / anthropic."""
+    """Which backend a model id shape implies: apple / openrouter / ollama / anthropic."""
     if not model:
         return "anthropic"
+    # The Apple sentinels are not upstream ids. Naming them here is what lets
+    # `resolve_with_fallback` treat "Apple Intelligence is off" as an ordinary
+    # unavailable backend and produce the fallback plus its note, rather than
+    # every caller re-testing the sentinel and hand-rolling a substitution.
+    from ciao import native_sidecar
+
+    if native_sidecar.is_apple_model(model):
+        return "apple"
     if model in {"opus", "sonnet", "haiku"} or model.startswith("claude-"):
         return "anthropic"
     if ":" in model:
@@ -60,6 +68,10 @@ def intended_backend(model: str) -> str:
 
 
 def _backend_available(backend: str, config: "CiaoConfig") -> bool:
+    if backend == "apple":
+        from ciao import native_sidecar
+
+        return native_sidecar.apple_model_available()
     if backend == "openrouter":
         return config.openrouter.available
     if backend == "ollama":

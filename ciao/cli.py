@@ -6,6 +6,7 @@ import argparse
 import html
 import http.cookiejar
 import json
+import math
 import os
 import plistlib
 import re
@@ -114,46 +115,60 @@ def _write_if_missing(path: Path, text: str) -> None:
         path.write_text(text, encoding="utf-8")
 
 
-def _stable_python_path(python_path: str) -> str:
-    """Map a Homebrew Cellar interpreter to its upgrade-stable opt path.
+def _launchd_program_arguments(executable: str) -> str:
+    """Render the arguments needed to start either a ciao launcher or Python."""
 
-    `brew upgrade` deletes the old keg, so a LaunchAgent pinned to
-    .../Cellar/<pkg>/<version>/... dies with it (the running server loses
-    its site-packages and every request 500s until the agents are
-    re-rendered). The <prefix>/opt/<pkg> symlink always points at the
-    currently installed keg, so plists must record that instead.
-    """
-    import re
+    name = Path(executable).name.lower()
+    arguments = (
+        ["-m", "ciao.cli", "run"]
+        if name == "python" or name.startswith("python3")
+        else ["run"]
+    )
+    return "\n".join(
+        f"        <string>{html.escape(argument, quote=False)}</string>"
+        for argument in arguments
+    )
 
-    m = re.match(r"(.*)/Cellar/([^/]+)/[^/]+/(.*)$", python_path)
-    if not m:
-        return python_path
-    stable = Path(f"{m.group(1)}/opt/{m.group(2)}/{m.group(3)}")
-    return str(stable) if stable.exists() else python_path
+
+def _bundled_sidecar_path(executable: str) -> str:
+    """Return the sidecar beside a bundled engine, when one is identifiable."""
+
+    executable_path = Path(executable).expanduser()
+    for ancestor in (executable_path, *executable_path.parents):
+        if ancestor.suffix == ".app":
+            return str(ancestor / "Contents" / "MacOS" / "ciaobot-native")
+    return ""
 
 
 def _render_launchd_plist(
     *,
     workspace: Path,
-    python_path: str,
+    python_path: str | None = None,
+    engine_path: str | None = None,
+    runtime_root: Path | None = None,
     port: int,
     path: str = "",
     template_name: str = "com.ciao.server.plist.tmpl",
-    menubar_executable: str = "",
 ) -> str:
-    python_path = _stable_python_path(python_path)
+    executable = engine_path or python_path or sys.executable
     template = resources.files("ciao.stock").joinpath(
         "deploy", template_name
     ).read_text(encoding="utf-8")
-    # Under launchd the default PATH omits Homebrew, so subprocess calls to
-    # npm/node/git fail. Bake the user's PATH from setup time into the plist.
+    # Under launchd the default PATH is minimal. Bake the user's development
+    # PATH from setup time into the plist for optional deploy tooling.
     resolved_path = path or os.environ.get("PATH", "")
     replacements = {
         "{{CIAO_WORKSPACE}}": html.escape(str(workspace), quote=False),
-        "{{CIAO_PYTHON}}": html.escape(python_path, quote=False),
+        "{{CIAO_RUNTIME_ROOT}}": html.escape(
+            str((runtime_root or (workspace / ".runtime")).resolve()), quote=False
+        ),
+        "{{CIAO_EXECUTABLE}}": html.escape(executable, quote=False),
+        "{{LAUNCHD_PROGRAM_ARGUMENTS}}": _launchd_program_arguments(executable),
+        "{{CIAO_NATIVE_SIDECAR}}": html.escape(
+            _bundled_sidecar_path(executable), quote=False
+        ),
         "{{CIAO_PORT}}": html.escape(str(port), quote=False),
         "{{CIAO_PATH}}": html.escape(resolved_path, quote=False),
-        "{{CIAO_MENUBAR_EXECUTABLE}}": html.escape(menubar_executable, quote=False),
     }
     for key, value in replacements.items():
         template = template.replace(key, value)
@@ -164,11 +179,12 @@ def _write_launchd_plist(
     *,
     workspace: Path,
     launch_agents_dir: Path,
-    python_path: str,
+    python_path: str | None = None,
+    engine_path: str | None = None,
+    runtime_root: Path | None = None,
     port: int,
     path: str = "",
     plist_name: str = "com.ciao.server.plist",
-    menubar_executable: str = "",
 ) -> Path:
     plist = launch_agents_dir.expanduser() / plist_name
     plist.parent.mkdir(parents=True, exist_ok=True)
@@ -176,11 +192,12 @@ def _write_launchd_plist(
         _render_launchd_plist(
             workspace=workspace,
             python_path=python_path,
+            engine_path=engine_path,
+            runtime_root=runtime_root,
             port=port,
             path=path,
             template_name=f"{plist_name}.tmpl",
-            menubar_executable=menubar_executable,
-        ),
+            ),
         encoding="utf-8",
     )
     return plist
@@ -246,7 +263,7 @@ def _path_export_hint() -> str | None:
     """
 
     # Not .resolve(): a venv's bin/python is a symlink to the base interpreter,
-    # and resolving it would report the base (e.g. Homebrew) bin dir instead of
+    # and resolving it would report the base interpreter's bin dir instead of
     # the venv's own bin/ where the `ciao` entry point actually lives.
     bin_dir = Path(sys.executable).parent
     entries = {
@@ -280,26 +297,24 @@ def _print_setup_summary(workspace: Path, port: int) -> None:
 
 
 def _default_app_dir() -> Path:
-    """Prefer /Applications (what Finder's sidebar shows) when writable;
-    non-admin accounts fall back to the per-user folder."""
+    """Return the per-user app directory used by the release installer."""
 
-    system_apps = Path("/Applications")
-    if os.access(system_apps, os.W_OK):
-        return system_apps
     return Path.home() / "Applications"
 
 
 _OUR_BUNDLE_IDS = ("local.ciao.app", "local.ciaobot.app")
-_APP_BUNDLE_NAME = "Ciaobot Server.app"
-_APP_DISPLAY_NAME = "Ciaobot Server"
-_APP_EXECUTABLE_NAME = "CiaobotServer"
-_APP_ICON_NAME = "CiaobotServer"
+# Launcher bundles previous versions wrote. Nothing creates these any more —
+# Ciaobot.app is the menu bar — but installs upgrading from an older version
+# still have one on disk, so setup removes them. "Ciaobot.app" is in the list
+# because the pre-rename launcher used that name; _is_our_app_bundle keeps the
+# Tauri app of the same name safe by checking the executable inside.
 _LEGACY_APP_BUNDLE_NAMES = (
     "Ciao.app",
     "Ciaobot.app",
     "Ciaobot Menu Bar.app",
+    "Ciaobot Server.app",
 )
-# Executable inside the Tauri desktop app (the Homebrew cask's Ciaobot.app).
+# Executable inside the Tauri desktop app.
 _DESKTOP_EXECUTABLE_NAME = "ciaobot-desktop"
 
 
@@ -310,7 +325,7 @@ def _is_our_app_bundle(app_root: Path) -> bool:
     ``local.ciaobot.app`` identifier our pre-rename launcher used, so the
     bundle id cannot tell them apart. Misidentifying it is destructive rather
     than merely wasteful: the launcher we write is named ``Ciaobot Server.app``,
-    so ``_remove_legacy_app_shortcuts`` deletes the cask's app and never puts
+    so ``_remove_legacy_app_shortcuts`` must never delete the native app and
     anything back in its place, leaving a running process on a bundle that no
     longer exists on disk. The executable name is the discriminator.
     """
@@ -351,289 +366,10 @@ def _remove_legacy_app_shortcuts(app_dir: Path) -> bool:
     return removed
 
 
-def _write_menubar_helper(*, app_root: Path, python_path: str) -> Path:
-    """Write the menu-bar entrypoint inside ``Ciaobot Server.app``.
-
-    macOS Notification Center attributes alerts to the running process's app
-    bundle. The helper keeps the interpreter inside the native launcher bundle
-    so notifications show as Ciaobot Server instead of Python.
-    """
-
-    macos = app_root / "Contents" / "MacOS"
-    macos.mkdir(parents=True, exist_ok=True)
-    python_path = _stable_python_path(python_path)
-    bundle_python = macos / "python"
-    if bundle_python.exists() or bundle_python.is_symlink():
-        bundle_python.unlink()
-    bundle_python.symlink_to(python_path)
-    # Resolve the symlink to its real target before exec: invoking Python
-    # *through* the Contents/MacOS/python symlink makes CPython resolve
-    # sys.prefix to the base framework instead of the ciaobot venv, so
-    # `import ciao` fails and the menu bar crashes on launch (no tray icon).
-    # Running the resolved target keeps the venv while still living in the
-    # bundle for Notification Center identity.
-    helper = macos / "CiaobotMenuBar"
-    helper.write_text(
-        "#!/bin/sh\n"
-        'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
-        'PY="$DIR/python"\n'
-        'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi\n'
-        'exec "$PY" -m ciao.cli menubar\n',
-        encoding="utf-8",
-    )
-    helper.chmod(0o755)
-    return helper
-
-
-def _write_app_shortcut(
-    *,
-    workspace: Path,
-    app_dir: Path,
-    port: int,
-    python_path: str | None = None,
-    launch_agents_dir: Path | None = None,
-) -> Path:
-    # Create the setup token file if absent so the first launch can log in;
-    # the launcher script below reads its current value live at click time.
-    _ensure_setup_token(workspace)
-    migrated_legacy_bundle = _remove_legacy_app_shortcuts(app_dir.expanduser())
-    # NB: do NOT remove browser-installed PWAs here. Since we open the UI in
-    # the browser and rely on an installed PWA for identity + Web Push, a
-    # browser-installed "Ciaobot" app is now the desired vehicle, not a
-    # duplicate — and this runs on every upgrade via the app-bundle refresh.
-    app_root = app_dir.expanduser() / _APP_BUNDLE_NAME
-    contents = app_root / "Contents"
-    macos = contents / "MacOS"
-    resources_dir = contents / "Resources"
-    macos.mkdir(parents=True, exist_ok=True)
-    resources_dir.mkdir(parents=True, exist_ok=True)
-    icns = resources.files("ciao.stock").joinpath(
-        "deploy", f"{_APP_ICON_NAME}.icns"
-    )
-    (resources_dir / f"{_APP_ICON_NAME}.icns").write_bytes(icns.read_bytes())
-    (contents / "Info.plist").write_text(
-        "\n".join(
-            [
-                '<?xml version="1.0" encoding="UTF-8"?>',
-                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-                '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-                '<plist version="1.0">',
-                '<dict>',
-                '  <key>CFBundleName</key>',
-                f'  <string>{_APP_DISPLAY_NAME}</string>',
-                '  <key>CFBundleDisplayName</key>',
-                f'  <string>{_APP_DISPLAY_NAME}</string>',
-                '  <key>CFBundleExecutable</key>',
-                f'  <string>{_APP_EXECUTABLE_NAME}</string>',
-                '  <key>CFBundleIdentifier</key>',
-                '  <string>local.ciaobot.app</string>',
-                '  <key>CFBundlePackageType</key>',
-                '  <string>APPL</string>',
-                '  <key>CFBundleIconFile</key>',
-                f'  <string>{_APP_ICON_NAME}</string>',
-                '</dict>',
-                '</plist>',
-                '',
-            ]
-        ),
-        encoding="utf-8",
-    )
-    token_file = _setup_token_path(workspace)
-    executable = macos / _APP_EXECUTABLE_NAME
-    # Start the server via launchd when it isn't running, then open the PWA;
-    # otherwise clicking the app lands on "site can't be reached".
-    #
-    # Read the setup token live from disk at click time rather than baking it
-    # into this script: the token is one-time-use (redeemed and deleted on
-    # first login), so a frozen "?setup=<token>" URL shows an "invalid setup
-    # token" error page on every launch after the first. Once the token file
-    # is gone we open the plain URL and rely on the session cookie -- matching
-    # how the menu bar builds its "Open Ciaobot" URL (menubar.open_url).
-    #
-    # Open the URL in the browser (default handler / installed PWA). We used to
-    # embed a pywebview native window here, but running the venv Python as a
-    # bundle-less app broke interactivity, identity, and notifications on macOS;
-    # the browser/PWA path is reliable and lets web push handle notifications.
-    executable.write_text(
-        "#!/bin/sh\n"
-        "start_agent() {\n"
-        '  label="$1"\n'
-        '  plist="$2"\n'
-        "  disabled=0\n"
-        '  launchctl print-disabled "gui/$(id -u)" 2>/dev/null '
-        '| grep -q "\\"$label\\" => true" && disabled=1\n'
-        '  launchctl kickstart "gui/$(id -u)/$label" 2>/dev/null && return\n'
-        '  if [ "$disabled" -eq 1 ]; then\n'
-        '    launchctl enable "gui/$(id -u)/$label" 2>/dev/null\n'
-        "  fi\n"
-        '  launchctl load -w "$plist" 2>/dev/null\n'
-        '  if [ "$disabled" -eq 1 ]; then\n'
-        '    launchctl disable "gui/$(id -u)/$label" 2>/dev/null\n'
-        "  fi\n"
-        "}\n"
-        f'if ! curl -s -o /dev/null --max-time 2 "http://localhost:{port}/"; then\n'
-        '  start_agent "com.ciao.server" "$HOME/Library/LaunchAgents/com.ciao.server.plist"\n'
-        "  i=0\n"
-        "  while [ $i -lt 20 ]; do\n"
-        f'    curl -s -o /dev/null --max-time 1 "http://localhost:{port}/" && break\n'
-        "    sleep 0.5\n"
-        "    i=$((i+1))\n"
-        "  done\n"
-        "fi\n"
-        'start_agent "com.ciao.menubar" "$HOME/Library/LaunchAgents/com.ciao.menubar.plist"\n'
-        f'token=$(tr -d "[:space:]" < "{token_file}" 2>/dev/null)\n'
-        "if [ -n \"$token\" ]; then\n"
-        f'  url="http://localhost:{port}/?setup=$token"\n'
-        "else\n"
-        f'  url="http://localhost:{port}/"\n'
-        "fi\n"
-        'open "$url"\n',
-        encoding="utf-8",
-    )
-    executable.chmod(0o755)
-    _write_menubar_helper(
-        app_root=app_root,
-        python_path=python_path or sys.executable,
-    )
-    _register_app_with_launchservices(app_root)
-    if migrated_legacy_bundle:
-        _migrate_menubar_launch_agent(
-            app_root,
-            launch_agents_dir=launch_agents_dir,
-        )
-    # Record the version that wrote this bundle so the server can refresh it
-    # automatically after an upgrade (see refresh_app_bundle_if_stale).
-    _write_app_bundle_marker(workspace)
-    return app_root
-
-
-def _app_bundle_marker_path(workspace: Path) -> Path:
-    return workspace.expanduser() / ".runtime" / "app-bundle-version"
-
-
-def _write_app_bundle_marker(workspace: Path) -> None:
-    from ciao import __version__
-
-    marker = _app_bundle_marker_path(workspace)
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(__version__ + "\n", encoding="utf-8")
-    except OSError:
-        pass
-
-
-def _app_search_roots() -> tuple[Path, ...]:
-    """Directories macOS installs app bundles into, per-user first.
-
-    A single definition so the launcher search and the desktop-app check can
-    never disagree about where to look; tests point it at a temporary tree.
-    """
-
-    return (Path.home() / "Applications", Path("/Applications"))
-
-
-def _installed_app_dir() -> Path | None:
-    """Directory holding our current or legacy native launcher bundle."""
-
-    for name in (_APP_BUNDLE_NAME, *_LEGACY_APP_BUNDLE_NAMES):
-        for base in _app_search_roots():
-            candidate = base / name
-            if candidate.is_dir() and _is_our_app_bundle(candidate):
-                return base
-    return None
-
-
-def _desktop_app_installed(app_dir: Path | None = None) -> bool:
-    """Whether the authoritative Tauri ``Ciaobot.app`` is installed.
-
-    ``app_dir`` narrows the check to one directory. The default scans every
-    standard root, because the desktop app and a leftover launcher need not
-    share one: a non-admin account keeps the launcher in ``~/Applications``
-    while the cask installs into ``/Applications``.
-    """
-
-    roots = (
-        (Path(app_dir).expanduser(),) if app_dir is not None else _app_search_roots()
-    )
-    return any(
-        (root / "Ciaobot.app" / "Contents" / "MacOS" / _DESKTOP_EXECUTABLE_NAME).is_file()
-        for root in roots
-    )
-
-
-def refresh_app_bundle_if_stale(
-    workspace: Path, port: int, *, python_path: str | None = None
-) -> Path | None:
-    """Rewrite ``Ciaobot Server.app`` when its recorded version is stale.
-
-    Returns the app root when refreshed, else ``None``.
-
-    macOS only. Makes ``brew upgrade`` self-contained: the server, restarted
-    onto the new keg by the stale-install self-heal, regenerates the app
-    bundle (launcher + menu-bar helper + icon) so the double-click launcher
-    and tray helper aren't left on the previous version's scripts. Only the
-    app bundle is touched — the LaunchAgent plists point at the stable opt/
-    symlink and must not be rewritten under a running launchd.
-    """
-
-    if sys.platform != "darwin":
-        return None
-    from ciao import __version__
-
-    app_dir = _installed_app_dir()
-    if app_dir is None:
-        return None  # setup never created a bundle; nothing to refresh
-    if _desktop_app_installed(app_dir) or _desktop_app_installed():
-        # A leftover Ciaobot Server.app while the Tauri app is installed: setup
-        # deliberately skips the Python launcher when the desktop app is
-        # present, so refreshing would rewrite a bundle the desktop app
-        # replaced -- and delete the desktop app on the way through
-        # _remove_legacy_app_shortcuts. The second check covers the split
-        # layout, where the launcher and the desktop app sit in different
-        # roots and the scoped check alone would resurrect the launcher.
-        return None
-    try:
-        last = _app_bundle_marker_path(workspace).read_text(encoding="utf-8").strip()
-    except OSError:
-        last = ""
-    if last == __version__:
-        return None
-    return _write_app_shortcut(
-        workspace=workspace,
-        app_dir=app_dir,
-        port=port,
-        python_path=python_path,
-    )
-
-
 _LSREGISTER = (
     "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
     "LaunchServices.framework/Support/lsregister"
 )
-
-
-def _register_app_with_launchservices(app_root: Path) -> None:
-    """Register the launcher bundle with LaunchServices.
-
-    macOS attributes a LaunchAgent's "App Background Activity" entry to the
-    app named by the plist's ``AssociatedBundleIdentifiers``. That mapping is
-    resolved through LaunchServices, which does not always index a freshly
-    written bundle before the agent loads — so the background item shows the
-    raw executable name ("python") instead of "Ciaobot Server". Registering the
-    bundle up front makes the association resolve immediately. Best-effort:
-    non-macOS or a missing lsregister is a silent skip.
-    """
-
-    if sys.platform != "darwin" or not os.path.exists(_LSREGISTER):
-        return
-    try:
-        subprocess.run(
-            [_LSREGISTER, "-f", str(app_root)],
-            check=False,
-            capture_output=True,
-        )
-    except OSError:
-        pass
 
 
 def _unregister_app_with_launchservices(app_root: Path) -> None:
@@ -651,72 +387,36 @@ def _unregister_app_with_launchservices(app_root: Path) -> None:
         pass
 
 
-def _migrate_menubar_launch_agent(
-    app_root: Path,
-    *,
-    launch_agents_dir: Path | None = None,
-) -> bool:
-    """Point an existing menu-bar LaunchAgent at the renamed app bundle.
+def _disable_legacy_menubar_agent(launch_agents_dir: Path | None = None) -> bool:
+    """Unload and delete the retired rumps menu-bar LaunchAgent.
 
-    The native bundle is refreshed independently after package upgrades. When
-    that refresh migrates ``Ciaobot.app`` to ``Ciaobot Server.app``, the plist
-    and any loaded launchd job must stop referring to the retired helper path.
-    Custom test/install directories are rewritten but never loaded into the
-    user's real launchd domain.
+    Ciaobot.app is the menu bar now; the ``com.ciao.menubar`` agent launched a
+    Python helper that no longer exists, so leaving it registered means launchd
+    retrying a missing executable forever. Called from setup so an upgrade
+    cleans up after itself. Returns whether anything was removed.
+
+    Custom test/install directories are cleaned on disk but never touched in
+    the user's real launchd domain.
     """
 
     default_launch_dir = Path.home() / "Library" / "LaunchAgents"
     launch_dir = (launch_agents_dir or default_launch_dir).expanduser()
     plist_path = launch_dir / "com.ciao.menubar.plist"
-    try:
-        with plist_path.open("rb") as handle:
-            plist = plistlib.load(handle)
-    except (OSError, ValueError):
+    if not plist_path.exists():
         return False
 
-    arguments = plist.get("ProgramArguments")
-    if not isinstance(arguments, list) or not arguments:
-        return False
-    old_executable = str(arguments[0])
-    new_executable = str(app_root / "Contents" / "MacOS" / "CiaobotMenuBar")
-    if old_executable == new_executable:
-        return False
-    if not any(
-        f"/{name}/Contents/MacOS/CiaobotMenuBar" in old_executable
-        for name in _LEGACY_APP_BUNDLE_NAMES
-    ):
-        return False
-
-    arguments[0] = new_executable
+    if sys.platform == "darwin" and launch_dir == default_launch_dir:
+        label = f"gui/{os.getuid()}/com.ciao.menubar"
+        try:
+            subprocess.run(
+                ["launchctl", "bootout", label], check=False, capture_output=True
+            )
+        except OSError:
+            pass
     try:
-        plist_path.write_bytes(plistlib.dumps(plist, sort_keys=False))
+        plist_path.unlink()
     except OSError:
         return False
-
-    if sys.platform != "darwin" or launch_dir != default_launch_dir:
-        return True
-
-    domain = f"gui/{os.getuid()}"
-    label = f"{domain}/com.ciao.menubar"
-    try:
-        loaded = subprocess.run(
-            ["launchctl", "print", label],
-            check=False,
-            capture_output=True,
-        ).returncode == 0
-        if loaded:
-            subprocess.run(
-                ["launchctl", "bootout", label],
-                check=False,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["launchctl", "bootstrap", domain, str(plist_path)],
-                check=False,
-                capture_output=True,
-            )
-    except OSError:
-        pass
     return True
 
 
@@ -939,7 +639,7 @@ def setup_workspace(
     workspace: Path | str,
     *,
     auth_token: str | None = None,
-    auth_required: bool = False,
+    auth_required: bool = True,
     push_contact: str | None = None,
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
@@ -1008,9 +708,13 @@ def setup_workspace(
     # Empty contact = Web Push disabled until configured in Settings;
     # never invent a fake default.
     contact = (push_contact or "").strip()
-    desired_env: list[tuple[str, str]] = [("PWA_AUTH_TOKEN", token)]
-    if auth_required:
-        desired_env.append(("PWA_AUTH_REQUIRED", "true"))
+    # Always pin PWA_AUTH_REQUIRED: an unset value is read as "protect when a
+    # token exists" (see CiaoConfig.from_env), and a setup that deliberately
+    # opted out must survive that default.
+    desired_env: list[tuple[str, str]] = [
+        ("PWA_AUTH_TOKEN", token),
+        ("PWA_AUTH_REQUIRED", "true" if auth_required else "false"),
+    ]
     desired_env.extend([
         ("CIAO_PUSH_CONTACT", contact),
         ("CIAO_WORKSPACE", "."),
@@ -1045,6 +749,11 @@ def setup_workspace(
                 encoding="utf-8",
             )
             written.append(env_path)
+
+    runtime_value = existing_env.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime"
+    runtime_root = Path(runtime_value).expanduser()
+    if not runtime_root.is_absolute():
+        runtime_root = root / runtime_root
 
     stock = resources.files("ciao.stock")
     stock_commands = stock.joinpath("commands")
@@ -1172,42 +881,31 @@ def setup_workspace(
 
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
-    resolved_python = python_path or sys.executable
-    # An explicit --app-dir means "operate on this directory only" (CI, tests,
-    # headless installs). A default install is the real machine, so look in
-    # every standard root: a non-admin account writes the launcher into
-    # ~/Applications, where the /Applications cask would go unnoticed.
-    desktop_installed = _desktop_app_installed(app_root_dir) or (
-        app_dir is None and _desktop_app_installed()
+    # The bundled launcher exports its own entrypoint so onboarding does not
+    # write the embedded interpreter directly into launchd as ``python run``.
+    resolved_engine = (
+        python_path
+        or os.environ.get("CIAO_ENGINE_PATH", "").strip()
+        or sys.executable
     )
-    app_root: Path | None = None
-    menubar_executable = ""
-    plist_names = ["com.ciao.server.plist"]
-    if not desktop_installed:
-        app_root = _write_app_shortcut(
-            workspace=root,
-            app_dir=app_root_dir,
-            port=port,
-            python_path=resolved_python,
-            launch_agents_dir=launch_dir,
-        )
-        menubar_executable = str(app_root / "Contents" / "MacOS" / "CiaobotMenuBar")
-        plist_names.append("com.ciao.menubar.plist")
-    else:
-        # The Tauri app mints/redeems this URL itself on first launch.
-        _ensure_setup_token(root)
-    for plist_name in plist_names:
-        written.append(_write_launchd_plist(
-            workspace=root,
-            launch_agents_dir=launch_dir,
-            python_path=resolved_python,
-            port=port,
-            path=os.environ.get("PATH", ""),
-            plist_name=plist_name,
-            menubar_executable=menubar_executable,
-        ))
-    if app_root is not None:
-        written.append(app_root)
+    # The one-time login token for the PWA. Written unconditionally: the setup
+    # summary prints it as a login URL, and the Tauri app redeems it on first
+    # launch. It used to be created as a side effect of writing the launcher
+    # bundle, which no longer exists.
+    _ensure_setup_token(root)
+    written.append(_write_launchd_plist(
+        workspace=root,
+        launch_agents_dir=launch_dir,
+        engine_path=resolved_engine,
+        runtime_root=runtime_root,
+        port=port,
+        path=os.environ.get("PATH", ""),
+        plist_name="com.ciao.server.plist",
+    ))
+    # Existing installs may still carry the launcher bundle and its agent from
+    # a previous version; remove them rather than leaving orphans behind.
+    _remove_legacy_app_shortcuts(app_root_dir)
+    _disable_legacy_menubar_agent(launch_dir)
 
     ensure_workspace_git(root)
     # A vault outside the workspace (existing notes folder) gets its own
@@ -1290,9 +988,16 @@ def _setup_command(args: argparse.Namespace) -> int:
             )
             return 1
 
+    auth_required = not args.no_auth
+    env_path = root / ".env"
+    try:
+        had_token = "PWA_AUTH_TOKEN=" in env_path.read_text(encoding="utf-8")
+    except OSError:
+        had_token = False
     written = setup_workspace(
         args.workspace,
         auth_token=args.auth_token,
+        auth_required=auth_required,
         push_contact=args.push_contact,
         workspace_name=args.workspace_name,
         python_path=args.python,
@@ -1302,11 +1007,17 @@ def _setup_command(args: argparse.Namespace) -> int:
     )
     for path in written:
         print(path)
-    plists = [
-        Path(args.launch_agents_dir).expanduser() / name
-        for name in ("com.ciao.server.plist", "com.ciao.menubar.plist")
-        if (Path(args.launch_agents_dir).expanduser() / name).is_file()
-    ]
+    if auth_required and not args.auth_token and not had_token:
+        print(
+            "\nPassword protection is on. No --auth-token was given, so a random "
+            f"password was written to {root / '.env'} (PWA_AUTH_TOKEN).\n"
+            "Open Ciaobot with the login URL below and change it in "
+            "Settings -> PWA password."
+        )
+    # One agent now: setup deletes the retired com.ciao.menubar plist rather
+    # than writing it, so there is nothing else here to load.
+    server_plist = Path(args.launch_agents_dir).expanduser() / "com.ciao.server.plist"
+    plists = [server_plist] if server_plist.is_file() else []
     if args.load_launchd:
         rc = 0
         for plist in plists:
@@ -1335,12 +1046,6 @@ def _setup_url_command(args: argparse.Namespace) -> int:
     print(f"Workspace: {root}")
     print(f"http://localhost:{port}/?setup={token}")
     return 0
-
-
-def _menubar_command(args: argparse.Namespace) -> int:
-    from ciao.menubar import run_menubar
-
-    return run_menubar(Path(args.workspace).expanduser().resolve(), args.port)
 
 
 def _auth_command_for_provider(
@@ -1586,6 +1291,58 @@ def _os_audit_command(args: argparse.Namespace) -> int:
         "needs_attention": 1,
         "error": 2,
     }.get(report["status"], 2)
+
+
+def _memory_audit_command(args: argparse.Namespace) -> int:
+    """Audit only the bounded-memory regions.
+
+    ``os-audit`` covers this too, but it also lints the whole vault, which is
+    far too slow to run from a daily routine. This entry point reads one file.
+    """
+    from ciao.os_audit import audit_memory, memory_actionable_count
+
+    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    workspace = Path(workspace_raw).expanduser().resolve()
+    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault = Path(vault_raw).expanduser()
+    if not vault.is_absolute():
+        vault = workspace / vault
+    vault = vault.resolve()
+
+    report = audit_memory(
+        guide_path=workspace / "CLAUDE.md",
+        vault_root=vault if vault.exists() else None,
+        workspace_dir=workspace,
+    )
+    # Same definition os-audit exits on, so the two commands cannot disagree
+    # about whether these regions are clean.
+    findings = memory_actionable_count(report)
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"Bounded memory: {report['memory_entries']} memory / "
+              f"{report['profile_entries']} profile entries")
+        print(f"Event-shaped entries: {len(report['event_shaped_entries'])}")
+        for finding in report["event_shaped_entries"]:
+            print(f"  [{finding['region']}] {finding['entry']}")
+        print(
+            f"Entries citing a missing path: {len(report['stale_path_entries'])} "
+            f"({report['paths_checked']} checked, "
+            f"{report['paths_unverifiable']} not verifiable here)"
+        )
+        for finding in report["stale_path_entries"]:
+            print(f"  [{finding['region']}] {finding['path']} :: {finding['entry']}")
+        print(
+            "Superseded-state candidates (informational): "
+            f"{len(report['superseded_state_candidates'])}"
+        )
+        for finding in report["superseded_state_candidates"]:
+            print(f"  [{finding['region']}] {finding['subject']}")
+
+    if report["marker_errors"] or report["errors"]:
+        return 2
+    return 1 if findings else 0
 
 
 def _vault_index_command(args: argparse.Namespace) -> int:
@@ -1875,30 +1632,55 @@ def _desktop_service_command(args: argparse.Namespace) -> int:
     return macos_service.print_result(result, as_json=bool(args.as_json))
 
 
+def _desktop_command(args: argparse.Namespace) -> int:
+    from ciao import desktop_install
+
+    as_json = bool(getattr(args, "as_json", False))
+    explicit_dir = getattr(args, "app_dir", None)
+    if explicit_dir:
+        app_dir = Path(explicit_dir).expanduser()
+    else:
+        app_dir = _default_app_dir()
+        system_app_dir = Path("/Applications")
+        if not (app_dir / desktop_install.APP_BUNDLE_NAME).exists() and (
+            system_app_dir / desktop_install.APP_BUNDLE_NAME
+        ).exists():
+            # Older installs used /Applications. Keep uninstall able to find
+            # those bundles while new installs consistently use ~/Applications.
+            app_dir = system_app_dir
+
+    def report(payload: dict[str, object], lines: list[str]) -> int:
+        if as_json:
+            print(json.dumps(payload, indent=2))
+        else:
+            for line in lines:
+                print(line)
+        return 0
+
+    try:
+        result = desktop_install.uninstall_desktop_app(app_dir=app_dir)
+        return report(
+            result,
+            [
+                f"Removed {result['path']}"
+                if result["removed"]
+                else f"Nothing to remove at {result['path']}"
+            ],
+        )
+    except desktop_install.InstallError as exc:
+        if as_json:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+        else:
+            print(str(exc), file=sys.stderr)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ciao", description="Ciaobot local assistant CLI.")
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run the Ciaobot server.")
     run_parser.set_defaults(func=lambda _args: _run_server())
-
-    menubar_parser = subparsers.add_parser(
-        "menubar",
-        help="Run the macOS menu bar companion (installed automatically on macOS).",
-    )
-    menubar_parser.add_argument(
-        "--workspace",
-        type=Path,
-        default=Path(os.environ.get("CIAO_WORKSPACE", ".")),
-        help="Workspace directory (defaults to $CIAO_WORKSPACE or cwd).",
-    )
-    menubar_parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.environ.get("CIAO_PORT", "8443")),
-        help="Localhost port the server listens on (defaults to $CIAO_PORT or 8443).",
-    )
-    menubar_parser.set_defaults(func=_menubar_command)
 
     desktop_service_parser = subparsers.add_parser(
         "desktop-service",
@@ -1930,6 +1712,28 @@ def build_parser() -> argparse.ArgumentParser:
     login_parser.add_argument("--json", action="store_true", dest="as_json")
     login_parser.set_defaults(func=_desktop_service_command)
 
+    # Separate from `desktop-service`, which controls the launchd engine. This
+    # group only manages removal of an old app bundle. Installation and updates
+    # are owned by scripts/install.sh and the signed Tauri updater.
+    desktop_parser = subparsers.add_parser(
+        "desktop",
+        help="Remove an installed Ciaobot.app desktop bundle.",
+    )
+    desktop_sub = desktop_parser.add_subparsers(dest="desktop_action", required=True)
+    desktop_uninstall_parser = desktop_sub.add_parser(
+        "uninstall",
+        help="Remove the installed Ciaobot.app bundle.",
+    )
+    desktop_uninstall_parser.add_argument(
+        "--app-dir",
+        type=Path,
+        default=None,
+        help="Directory holding Ciaobot.app (defaults to /Applications, "
+        "or ~/Applications on a non-admin account).",
+    )
+    desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
+    desktop_uninstall_parser.set_defaults(func=_desktop_command)
+
     setup_parser = subparsers.add_parser(
         "setup",
         help="Scaffold a local Ciaobot workspace from packaged stock assets.",
@@ -1949,12 +1753,29 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: personal)."
         ),
     )
-    setup_parser.add_argument("--auth-token", help="PWA auth token to write when .env is new.")
+    setup_parser.add_argument(
+        "--auth-token",
+        help=(
+            "PWA password to write when .env is new (a random one is generated "
+            "when omitted)."
+        ),
+    )
+    setup_parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        help=(
+            "Write PWA_AUTH_REQUIRED=false instead of protecting the dashboard "
+            "with a password. Only for a machine nobody else can reach."
+        ),
+    )
     setup_parser.add_argument("--push-contact", help="Web Push contact to write when .env is new.")
     setup_parser.add_argument(
         "--python",
-        default=sys.executable,
-        help="Python executable used by the generated LaunchAgent.",
+        default=None,
+        help=(
+            "Executable used by the generated LaunchAgent (defaults to the "
+            "bundled ciao launcher, or the current Python outside a bundle)."
+        ),
     )
     setup_parser.add_argument(
         "--port",
@@ -1973,8 +1794,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Directory where Ciaobot Server.app is written. Defaults to "
-            "/Applications when writable, else ~/Applications."
+            "Directory to scan for legacy launcher bundles during migration. "
+            "Defaults to /Applications when writable, else ~/Applications."
         ),
     )
     setup_parser.add_argument(
@@ -2071,7 +1892,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     smoke_parser = subparsers.add_parser(
         "package-smoke",
-        help="Build, install, and smoke-test the Ciaobot wheel.",
+        help="Build, install, and smoke-test the Ciaobot package.",
     )
     smoke_parser.add_argument("args", nargs=argparse.REMAINDER)
     smoke_parser.set_defaults(func=lambda args: package_smoke.main(args.args))
@@ -2176,6 +1997,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output raw JSON audit report.",
     )
     os_audit_parser.set_defaults(func=_os_audit_command)
+
+    memory_audit_parser = subparsers.add_parser(
+        "memory-audit",
+        help="Audit bounded memory for rot (events stored as state, dead paths).",
+        description=(
+            "Reads the ciao:memory and ciao:profile regions of the workspace "
+            "CLAUDE.md and reports entries that record a chat event instead of "
+            "current state, entries citing a path that no longer exists, and "
+            "subjects carrying more than one value. Read-only. Exit 0 when "
+            "clean, 1 when there are findings, 2 when a region could not be "
+            "read."
+        ),
+    )
+    memory_audit_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_audit_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_audit_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output raw JSON audit report.",
+    )
+    memory_audit_parser.set_defaults(func=_memory_audit_command)
 
     chat_parser = subparsers.add_parser(
         "create-chat",
@@ -2315,14 +2167,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run agent evaluation scenarios.",
     )
     eval_parser.add_argument(
+        "--suite",
+        type=Path,
+        required=True,
+        help="Path to one schema-version-1 JSON eval suite.",
+    )
+    eval_parser.add_argument(
         "--workspace",
         type=Path,
-        default=Path("."),
-        help="Workspace root. Defaults to current directory.",
+        required=True,
+        help="Source workspace containing the selected targets.",
     )
     eval_parser.add_argument(
         "--filter",
-        help="Filter scenarios by substring match on name.",
+        help="Case-sensitive scenario-name substring, preserving suite order.",
+    )
+    eval_parser.add_argument(
+        "--provider",
+        choices=["claude", "codex"],
+        help="Provider override applied above scenario and suite defaults.",
+    )
+    eval_parser.add_argument(
+        "--model",
+        help="Model override applied above scenario and suite defaults.",
+    )
+    eval_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("eval-results"),
+        help="Report directory. Defaults to ./eval-results.",
+    )
+    eval_parser.add_argument(
+        "--turn-timeout",
+        type=float,
+        default=300.0,
+        metavar="SECONDS",
+        help="Maximum duration of each live chat turn.",
+    )
+    eval_parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="Maximum duration of each isolated server startup.",
     )
     eval_parser.set_defaults(func=_eval_command)
 
@@ -2351,29 +2238,52 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _eval_command(args: argparse.Namespace) -> int:
-    from ciao.evals import run_eval_suite
+    from ciao.evals import (
+        EvalRunOverrides,
+        EvalReportError,
+        EvalSchemaError,
+        EvalTargetError,
+        run_eval_suite,
+    )
 
-    workspace = Path(args.workspace).resolve()
-    scenario_filter = getattr(args, "filter", None)
-    results = run_eval_suite(workspace, scenario_filter=scenario_filter)
-    if not results:
-        print("No eval scenarios found.")
-        return 0
+    if (
+        not math.isfinite(args.turn_timeout)
+        or args.turn_timeout <= 0
+        or not math.isfinite(args.startup_timeout)
+        or args.startup_timeout <= 0
+    ):
+        print("Eval timeouts must be greater than zero.", file=sys.stderr)
+        return 2
+    if args.model is not None and not args.model.strip():
+        print("Eval model override must not be empty.", file=sys.stderr)
+        return 2
+    try:
+        run = run_eval_suite(
+            Path(args.suite),
+            Path(args.workspace),
+            Path(args.output),
+            name_filter=args.filter,
+            overrides=EvalRunOverrides(
+                provider=args.provider,
+                model=args.model,
+            ),
+            turn_timeout_s=args.turn_timeout,
+            startup_timeout_s=args.startup_timeout,
+        )
+    except EvalReportError as exc:
+        print(f"Eval execution failed: {exc}", file=sys.stderr)
+        return 1
+    except (EvalSchemaError, EvalTargetError, OSError, ValueError) as exc:
+        print(f"Invalid eval request: {exc}", file=sys.stderr)
+        return 2
 
-    passed_count = sum(1 for r in results if r.passed)
-    total_count = len(results)
-
-    print(f"Eval Suite Results ({passed_count}/{total_count} passed):")
-    for r in results:
-        status = "PASS" if r.passed else "FAIL"
-        print(f"  [{status}] {r.scenario_name} ({r.duration_s:.2f}s)")
-        if r.error:
-            print(f"        Error: {r.error}")
-        for pres in r.pattern_results:
-            p_status = "OK" if pres["matched"] else "FAIL"
-            print(f"        Pattern '{pres['pattern']}': {p_status}")
-
-    return 0 if passed_count == total_count else 1
+    passed_count = sum(record.status == "passed" for record in run.records)
+    print(
+        f"Eval suite {run.suite.name}: "
+        f"{passed_count}/{len(run.records)} scenarios passed."
+    )
+    print(f"Reports: {Path(args.output).expanduser().resolve()}")
+    return run.exit_code
 
 
 def _scaffold_command(args: argparse.Namespace) -> int:
@@ -2387,11 +2297,116 @@ def _scaffold_command(args: argparse.Namespace) -> int:
         print(f"Scaffolded subagent package at {folder}")
     elif target_type == "eval":
         from ciao.evals import scaffold_eval
-        target = scaffold_eval(workspace, name)
+        try:
+            target = scaffold_eval(workspace, name)
+        except (FileExistsError, OSError, ValueError) as exc:
+            print(f"Cannot scaffold eval: {exc}", file=sys.stderr)
+            return 2
         print(f"Scaffolded eval scenario at {target}")
     else:
         print(f"Unknown scaffold target type: {target_type}", file=sys.stderr)
         return 1
+    return 0
+
+
+def _eval_release_command(argv: list[str]) -> int:
+    from ciao.release_evidence import (
+        ReleaseEvidenceError,
+        run_release_evidence,
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="ciao eval release",
+        description="Run the public release-evidence scorecard.",
+    )
+    parser.add_argument("--suite", type=Path, default=Path("evals/release.json"))
+    parser.add_argument("--workspace", type=Path, default=Path("."))
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--from-ref")
+    parser.add_argument("--to-ref", default="HEAD")
+    parser.add_argument("--rationale-file", type=Path)
+    parser.add_argument(
+        "--vault-root",
+        type=Path,
+        help="Explicit opt-in vault to copy into isolated runs; source paths are redacted.",
+    )
+    parser.add_argument(
+        "--mode",
+        action="append",
+        choices=["cold", "warm", "restart"],
+        dest="modes",
+        help="Execution mode; repeat to select multiple modes. Defaults to all.",
+    )
+    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--startup-timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="Write evidence and return success even when a provider/scenario fails.",
+    )
+    args = parser.parse_args(argv)
+    rationale = ""
+    if args.rationale_file:
+        try:
+            rationale = args.rationale_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"Could not read rationale file: {exc}", file=sys.stderr)
+            return 2
+    try:
+        result = run_release_evidence(
+            suite_path=args.suite,
+            workspace=args.workspace,
+            output=args.output,
+            version=args.version,
+            baseline_summary=args.baseline,
+            from_ref=args.from_ref,
+            to_ref=args.to_ref,
+            rationale=rationale,
+            modes=tuple(args.modes or ("cold", "warm", "restart")),
+            repeats=args.repeats,
+            startup_timeout_s=args.startup_timeout,
+            require_complete=not args.allow_incomplete,
+            external_vault=args.vault_root,
+        )
+    except (ReleaseEvidenceError, OSError, ValueError) as exc:
+        print(f"Release evidence failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Release evidence: {args.output.expanduser().resolve()}")
+    print(f"Scenarios: {len(result.summary.get('groups', []))} aggregate groups")
+    if result.advisory_flags:
+        print("Advisory flags:")
+        for flag in result.advisory_flags:
+            print(f"- {flag}")
+    return 0
+
+
+def _eval_compare_command(argv: list[str]) -> int:
+    from ciao.release_evidence import ReleaseEvidenceError, compare_summary_files
+
+    parser = argparse.ArgumentParser(
+        prog="ciao eval compare",
+        description="Compare two public release-evidence summaries.",
+    )
+    parser.add_argument("--baseline", type=Path, required=True)
+    parser.add_argument("--current", type=Path, required=True)
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    args = parser.parse_args(argv)
+    try:
+        comparison = compare_summary_files(args.baseline, args.current)
+    except (ReleaseEvidenceError, OSError, ValueError) as exc:
+        print(f"Eval comparison failed: {exc}", file=sys.stderr)
+        return 2
+    if args.as_json:
+        print(json.dumps(comparison, indent=2, sort_keys=True))
+    else:
+        flags = comparison.get("flags", [])
+        print(f"Release comparison: {len(flags)} flag(s)")
+        for flag in flags:
+            print(f"- {flag.get('kind')}: {flag.get('key', '')}")
+    # Performance/cache changes are advisory. Malformed input is the only
+    # comparison failure; correctness flags are surfaced for the release PR.
     return 0
 
 
@@ -2406,6 +2421,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:2] == ["eval", "release"]:
+        return _eval_release_command(argv_list[2:])
+    if argv_list[:2] == ["eval", "compare"]:
+        return _eval_compare_command(argv_list[2:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

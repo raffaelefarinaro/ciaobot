@@ -1,4 +1,4 @@
-use mac_usernotifications::Notification;
+use mac_usernotifications::{Notification, close_delivered, get_delivered_notification_ids};
 use objc2::{AnyThread, define_class, rc::Retained};
 use objc2_foundation::{NSObject, NSObjectProtocol};
 use objc2_user_notifications::{
@@ -209,6 +209,26 @@ impl NativeNotification {
     }
 }
 
+fn is_chat_notification(identifier: &str, chat_id: &str) -> bool {
+    matches!(
+        NavigationIntent::from_notification_id(identifier),
+        Some(NavigationIntent::Chat(candidate)) if candidate == chat_id
+    )
+}
+
+/// Remove delivered Ciaobot banners belonging to a chat.
+pub async fn dismiss_chat_notifications(chat_id: &str) {
+    if !is_bundled() || chat_id.is_empty() {
+        return;
+    }
+    let identifiers = get_delivered_notification_ids().await;
+    for identifier in identifiers {
+        if is_chat_notification(&identifier, chat_id) {
+            close_delivered(&identifier).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +284,13 @@ mod tests {
             );
         }
         assert_eq!(NavigationIntent::from_notification_id("unrelated"), None);
+    }
+
+    #[test]
+    fn identifies_delivered_chat_notifications_for_dismissal() {
+        let identifier = NavigationIntent::Chat("chat-1".into()).notification_id();
+        assert!(is_chat_notification(&identifier, "chat-1"));
+        assert!(!is_chat_notification(&identifier, "chat-2"));
+        assert!(!is_chat_notification("ciaobot:workspaces:abc", "chat-1"));
     }
 }

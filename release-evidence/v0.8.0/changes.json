@@ -1,0 +1,64 @@
+{
+  "categories": {
+    "agents": {
+      "added": [],
+      "changed": [],
+      "removed": []
+    },
+    "commands": {
+      "added": [],
+      "changed": [],
+      "removed": []
+    },
+    "mcp_tools": {
+      "added": [],
+      "changed": [],
+      "removed": []
+    },
+    "memory": {
+      "added": [
+        {
+          "path": "ciao/context/__pycache__/__init__.cpython-313.pyc",
+          "sha256": "c53e7d394fe88d0c17c1907ab43830a79f75845bdfa2681d40aca253cc7fb010"
+        },
+        {
+          "path": "ciao/context/__pycache__/entity_tagger.cpython-313.pyc",
+          "sha256": "2273744efe2237fa8351c6193f6d56e43b71e616c40bede01168eb2394b515f5"
+        },
+        {
+          "path": "ciao/memory_audit.py",
+          "sha256": "6471cead336fa97401ec38cdcf3cbc6b0102dcc06bc3e972bd11e4c7fc02bb45"
+        },
+        {
+          "path": "evals/release.json",
+          "sha256": "835e1397418e6063fb5ce106df01b39fa44b28074c742c288ad35bd685a43394"
+        }
+      ],
+      "changed": [],
+      "removed": []
+    },
+    "skills": {
+      "added": [
+        {
+          "path": "ciao/stock/skills/html-artifact/SKILL.md",
+          "sha256": "0b7738f750768714576f1f36e5827ee01280b0b5226dbb2ac5a2e1e2ea8ec137"
+        }
+      ],
+      "changed": [
+        {
+          "after": {
+            "path": "ciao/stock/skills/ciao-capabilities/SKILL.md",
+            "sha256": "0d2f93708a9593e36aab419e4aea8da30a88ca90f8f8c0571bae46024be1de26"
+          },
+          "before": {
+            "path": "ciao/stock/skills/ciao-capabilities/SKILL.md",
+            "sha256": "779e8731aa9157575468a21d2c7630d258b5f56538a38174bef77bdd268f1bfe"
+          }
+        }
+      ],
+      "removed": []
+    }
+  },
+  "from_ref": "v0.7.1",
+  "to_ref": "HEAD"
+}

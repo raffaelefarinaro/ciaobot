@@ -69,6 +69,51 @@ jobs:
         cd web
         npm run build
 
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@1.90.0
+      with:
+        targets: aarch64-apple-darwin,x86_64-apple-darwin
+        components: rustfmt,clippy
+
+    # The embedded x86_64 runtime may build a native dependency from source
+    # under Rosetta. Select a universal Xcode before that build so its linker
+    # and SDK are usable by both architecture toolchains.
+    - name: Select newest Xcode
+      run: |
+        newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+        if [ -z "$newest" ]; then
+          echo "No Xcode found under /Applications" >&2
+          exit 1
+        fi
+        echo "Selecting $newest"
+        sudo xcode-select -s "$newest"
+        xcodebuild -version
+        swiftc --version
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v6
+
+    - name: Resolve pinned Python runtimes
+      id: python-runtime
+      shell: bash
+      run: |
+        set -euo pipefail
+        . scripts/pinned-python-runtime.env
+        {
+          echo "arm64_url=$CIAO_PYTHON_ARM64_URL"
+          echo "arm64_sha256=$CIAO_PYTHON_ARM64_SHA256"
+          echo "x86_64_url=$CIAO_PYTHON_X86_64_URL"
+          echo "x86_64_sha256=$CIAO_PYTHON_X86_64_SHA256"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Build embedded Ciaobot runtime
+      env:
+        CIAO_PYTHON_ARM64_URL: ${{ steps.python-runtime.outputs.arm64_url }}
+        CIAO_PYTHON_ARM64_SHA256: ${{ steps.python-runtime.outputs.arm64_sha256 }}
+        CIAO_PYTHON_X86_64_URL: ${{ steps.python-runtime.outputs.x86_64_url }}
+        CIAO_PYTHON_X86_64_SHA256: ${{ steps.python-runtime.outputs.x86_64_sha256 }}
+      run: ./scripts/build-bundled-runtime.sh desktop/runtime
+
     - name: Install desktop dependencies
       working-directory: desktop
       run: npm ci
@@ -77,11 +122,15 @@ jobs:
       working-directory: desktop
       run: npm run build
 
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@1.90.0
-      with:
-        targets: aarch64-apple-darwin,x86_64-apple-darwin
-        components: rustfmt,clippy
+    - name: Build native sidecar
+      working-directory: desktop
+      # Must run before any cargo invocation: tauri.conf.json declares the
+      # sidecar as an externalBin, so the build script fails with "resource
+      # path ... doesn't exist" if the binary is absent. `npm run tauri build`
+      # below builds it via the pretauri hook, but clippy/fmt/test call cargo
+      # directly and would never trigger it. The binaries are gitignored
+      # because they are build output.
+      run: npm run build:native
 
     - name: Check desktop Rust formatting
       working-directory: desktop/src-tauri
@@ -102,19 +151,15 @@ jobs:
         --bundles app
         --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
-    # release-smoke installs from the Homebrew tap, so it can only ever test the
-    # previously released app. This exercises the cold-start path of the bundle
-    # built from *this* branch, which is the only way an app-side startup fix can
-    # be verified before it ships.
+    # Exercise the cold-start path of the bundle built from this branch, using
+    # the same embedded runtime layout that the release workflow ships.
     - name: Cold-start the built app and wait for the engine
       run: |
         app="desktop/src-tauri/target/release/bundle/macos/Ciaobot.app"
         test -d "$app"
-        # The app resolves the CLI from /opt/homebrew/bin, then /usr/local/bin,
-        # then PATH -- and `open` does not hand the job's PATH to the launched
-        # app, so the pip-installed ciao has to be visible at a fixed path.
-        sudo ln -sf "$(command -v ciao)" /usr/local/bin/ciao
-        ciao setup --workspace "${RUNNER_TEMP}/ci-workspace" --app-dir "${RUNNER_TEMP}/ci-apps"
+        engine="$app/Contents/Resources/ciao-runtime/bin/ciao"
+        test -x "$engine"
+        "$engine" setup --workspace "${RUNNER_TEMP}/ci-workspace" --app-dir "${RUNNER_TEMP}/ci-apps"
         # Locally built bundles are not quarantined, but be explicit: a
         # Gatekeeper wait on a quarantined bundle is what pinned the app in
         # _dyld_start and kept release-smoke red across v0.6.3 and v0.6.4.
@@ -166,6 +211,6 @@ jobs:
         pkill -x ciaobot-desktop || true
         ciao desktop-service stop --force >/dev/null 2>&1 || true
 
-    - name: Smoke-test wheel
+    - name: Smoke-test package
       run: |
         ciao package-smoke --skip-frontend

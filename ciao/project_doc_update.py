@@ -114,7 +114,7 @@ async def update_project_doc(
     env: dict[str, str] | None = None,
     provider: str = "claude",
     cwd: Path | None = None,
-    timeout_s: float = 120.0,
+    timeout_s: float = 300.0,
 ) -> bool:
     """Fold session insights into the canonical doc. Returns True on write.
 

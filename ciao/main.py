@@ -32,23 +32,6 @@ from ciao.web.push import PushManager
 logger = logging.getLogger(__name__)
 
 
-def _ensure_homebrew_on_path() -> None:
-    """Prepend Homebrew bin dirs to PATH when missing.
-
-    launchd launches the server with a minimal PATH (roughly
-    ``/usr/bin:/bin:/usr/sbin:/sbin``) that omits Homebrew, so subprocess
-    calls to ``npm``, ``node``, Homebrew's ``git``/``pip``, etc. fail with
-    FileNotFoundError. Prepending the standard Homebrew directories lets the
-    deploy/upgrade subprocess steps find those tools regardless of how the
-    service was started. Adding a non-existent directory is harmless.
-    """
-    extra = ["/opt/homebrew/bin", "/usr/local/bin"]
-    parts = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
-    prepend = [d for d in extra if d not in parts]
-    if prepend:
-        os.environ["PATH"] = os.pathsep.join([*prepend, *parts])
-
-
 _PhaseStatus = Literal["pending", "in_progress", "done", "failed"]
 
 
@@ -223,8 +206,42 @@ async def _wait_for_chat_drain(
             await asyncio.sleep(max(0.0, poll_interval))
 
 
+def _ensure_tool_dirs_on_path() -> None:
+    """Add the user's real tool directories to PATH when they are missing.
+
+    launchd and LaunchServices both start the engine with a minimal PATH
+    (roughly ``/usr/bin:/bin:/usr/sbin:/sbin``), so subprocess calls to ``npm``,
+    ``node``, Homebrew's ``git``/``pip``, and the provider CLIs fail with
+    FileNotFoundError. Two things depend on this being fixed up before anything
+    else runs: the subprocess steps themselves, and ``ciao/cli.py``, which bakes
+    this process's PATH into ``{{CIAO_PATH}}`` of ``com.ciao.server.plist`` - so
+    when desktop onboarding spawns bootstrap as a child of the Tauri app,
+    dropping this wrote the minimal PATH into the LaunchAgent permanently.
+
+    The directory list comes from ``tool_path``, which already curates it for
+    this exact problem and includes what a hardcoded Homebrew pair misses -
+    notably nvm's ``node/*/bin``, the most common way node is installed.
+    """
+    from ciao.tool_path import common_tool_dirs
+
+    parts = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    seen = set(parts)
+    missing = [d for d in common_tool_dirs() if d not in seen]
+    if not missing:
+        return
+    if os.environ.get("CIAO_BUNDLED_APP") == "1":
+        # The bundled launcher puts its own bin first on purpose, so child
+        # `ciao` commands resolve to the interpreter that owns the bundled
+        # site-packages. Prepending ahead of it would hand those children a
+        # Homebrew `ciao` running a different CPython against 3.12 extension
+        # modules. Appending still finds npm/node/git.
+        os.environ["PATH"] = os.pathsep.join([*parts, *missing])
+    else:
+        os.environ["PATH"] = os.pathsep.join([*missing, *parts])
+
+
 async def _async_main() -> int:
-    _ensure_homebrew_on_path()
+    _ensure_tool_dirs_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
     config = CiaoConfig.from_env()
 
@@ -525,6 +542,22 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
     app.state.focused_chats = {}
     pcm._push_manager = app.state.push_manager
+
+    # A read mutation is already broadcast to every connected PWA. Fan the
+    # same mutation out to delivered OS notifications in the background: the
+    # macOS companion consumes the runtime log, while Web Push subscriptions
+    # receive a service-worker control message that closes their chat tag.
+    def _clear_notifications(chat_id: str) -> None:
+        pm = app.state.push_manager
+        if pm is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, pm.clear_chat, chat_id)
+        except Exception:
+            logger.exception("Failed scheduling notification clear for %s", chat_id)
+
+    pcm.clear_notifications_cb = _clear_notifications
 
     # Google Workspace token health + server-managed re-login (issue #145).
     from ciao.gws_auth import GwsHealthMonitor, GwsReloginManager
@@ -943,43 +976,15 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     if not getattr(config, "benchmark_mode", False):
         asyncio.create_task(_startup_error_triage())
 
-    # ── Voice extras self-heal ───────────────────────────────
-    # `brew upgrade` replaces the app's private venv, dropping optional
-    # local-voice packages the user installed from Settings. Reinstall
-    # them (once per version) when the saved settings still select the
-    # local engines, then restart to load them.
-    async def _heal_voice_extras() -> None:
-        try:
-            from ciao.voice_extras import heal_voice_extras
-
-            await heal_voice_extras(config, request_restart)
-        except Exception:
-            logger.exception("Voice extras self-heal failed")
-
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_heal_voice_extras())
-
     # ── Stale-install self-heal ──────────────────────────────
-    # Two upgrade shapes leave this process running old code after a bare
-    # `brew upgrade ciaobot` / `pip install -U` outside the app's own Update
-    # button:
-    #  1. Homebrew swaps/deletes the Cellar keg — packaged files this process
-    #     resolves (index.html, stock schedules) vanish and requests 500
-    #     until relaunch. Detected by the vanished package directory (60s).
-    #  2. pip/uv rewrite site-packages in place — the files survive, but only
-    #     a fresh interpreter sees the new code. Detected by a version probe
-    #     (fresh subprocess via the upgrade-stable interpreter path) every
-    #     5 minutes, debounced to two consistent readings.
-    # request_restart drains active chats first; launchd / `ciao run` then
-    # relaunch onto the current install (the LaunchAgent uses the stable
-    # /opt/homebrew/opt/... symlink). Editable checkouts skip the version
-    # probe so a dev server doesn't bounce when release prep bumps
-    # __version__ in the working tree.
+    # Production updates replace the complete app bundle atomically and then
+    # restart the LaunchAgent. Keep the file-presence guard for development
+    # checkouts; the packaged app updater owns production replacement.
     async def _watch_installed_version() -> None:
-        from ciao.package_version import InstallWatcher, detect_install_mode
+        from ciao.package_version import InstallWatcher
 
         watcher = InstallWatcher()
-        probe_upgrades = detect_install_mode() in ("homebrew", "pip_venv")
+        probe_upgrades = False
         tick = 0
         while True:
             await asyncio.sleep(60)
@@ -998,27 +1003,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         asyncio.create_task(_watch_installed_version())
 
     # ── App bundle refresh on upgrade ────────────────────────
-    # `brew upgrade` swaps the Python package but doesn't rewrite Ciaobot Server.app,
-    # so its double-click launcher and menu-bar helper keep running the old
-    # version's scripts until `ciao setup` is re-run by hand. When restarted
-    # onto a new version (by the stale-install self-heal above), regenerate the
-    # bundle once so upgrades are self-contained. App bundle only — never the
-    # LaunchAgent plists (they use the stable opt/ symlink).
-    async def _refresh_app_bundle() -> None:
-        try:
-            from ciao.cli import refresh_app_bundle_if_stale
-
-            refreshed = await asyncio.to_thread(
-                refresh_app_bundle_if_stale, config.workspace_root, config.pwa_port
-            )
-            if refreshed is not None:
-                logger.info("Refreshed %s for the current version.", refreshed)
-        except Exception:
-            logger.exception("App bundle refresh failed")
-
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_refresh_app_bundle())
-
     async def _shutdown_providers() -> None:
         # Disconnect every active provider before uvicorn finishes its
         # lifespan shutdown. Otherwise the Claude SDK subprocess transports

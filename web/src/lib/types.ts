@@ -164,6 +164,13 @@ export interface ChatRow {
   isDelegate: boolean
 }
 
+// One sidebar stack. The supervisor remains the visible anchor and its
+// delegate chats can be expanded beneath it as a single group.
+export interface ChatGroup {
+  chat: ChatInfo
+  delegates: ChatInfo[]
+}
+
 export interface ChatRetryInfo {
   status: '' | 'pending' | 'stopped'
   next_at: string
@@ -261,6 +268,22 @@ export type WsEvent =
   | { type: 'token_usage'; input_tokens: number; output_tokens: number }
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
+  // The selected model cannot see the attached images; the engine asks the
+  // user to pick a vision-capable model before dispatching. Answered via a
+  // `capability_response` client message (action switch | picker | cancel).
+  | {
+      type: 'model_capability_question';
+      request_id: string;
+      missing: string;
+      current_model: string;
+      candidates: Array<{
+        id: string;
+        label: string;
+        supports_vision?: boolean;
+        disabled?: boolean;
+      }>;
+      timeout_s: number;
+    }
   | { type: 'chat_title'; chat_id: string; title: string }
   | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string }
   // A tool call was refused (user Deny, or the auto-deny on an unattended
@@ -275,7 +298,7 @@ export type WsEvent =
   // connection state, not a chat/model failure, so the PWA renders one
   // reconnecting card instead of appending an error to conversation history.
   | { type: 'host_unreachable' }
-  // Server is draining for restart; client should show RestartOverlay, not
+  // Server is draining for restart; client should show RestartNotice, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }
   | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
@@ -481,21 +504,25 @@ export interface RoutineSettings {
   // Env-backed models used when a tier override is cleared.
   tier_defaults?: Record<string, Record<string, string>>
   alias_tiers?: Record<string, Record<string, string>>
-  // Whether the apfel CLI (the "Local (free)" title engine) is installed.
-  apfel_available?: boolean
+  // The "apple" title option: needs macOS 26+, the desktop app, and Apple
+  // Intelligence on. Nothing installable, so Settings shows the reason.
+  apple_model_available?: boolean
+  apple_model_unavailable_reason?: string
+  // Voice is on-device only: Apple dictation (macOS 26+) and
+  // AVSpeechSynthesizer, both via the bundled sidecar. There is no engine to
+  // choose any more, so the payload reports availability and a reason rather
+  // than a selection.
   transcription: {
-    engine: 'cloud' | 'local'
-    cloud_model: string
-    local_model: string
-    local_available: boolean
-    cloud_available: boolean
+    // BCP-47 language for the on-device engines.
+    locale: string
+    available: boolean
+    unavailable_reason: string
   }
   speech: {
-    engine: 'cloud' | 'local'
-    cloud_voice: string
+    // Empty = let macOS pick the best installed voice for the language.
     local_voice: string
-    local_available: boolean
-    cloud_available: boolean
+    available: boolean
+    local_voices?: { id: string; name: string; locale: string; quality: string }[]
   }
   model_options: {
     anthropic: string[]
@@ -669,12 +696,13 @@ export interface SlashCommand {
   name: string
   description: string
   argument_hint: string
-  source: 'project' | 'user' | 'builtin'
+  source: 'project' | 'user' | 'builtin' | 'skill'
   path: string
 }
 
 export interface CommandsResponse {
   commands: SlashCommand[]
+  skills?: SlashCommand[]
 }
 
 // ── Settings agent assets ────────────────────────────────────────────────
@@ -779,6 +807,14 @@ export interface AutomationProcess {
   // metadata was added to GET /api/automation.
   uses_model?: boolean
   produces_outcome?: boolean
+  // Plain-language "when does this run?", the system schedule that fires it,
+  // and whether it is a one-shot migration. Optional: older servers omit them.
+  trigger?: string
+  schedule_id?: string
+  one_time?: boolean
+  // Bulk/manual variants of this job (Session insights carries the backfill),
+  // reported nested so the page keeps one row per automation.
+  sub_jobs?: AutomationProcess[]
   last_run: JobRun | null
   recent: JobRun[]
   stats: AutomationStats
@@ -829,6 +865,33 @@ export interface ActionResult {
   ok?: boolean
   error?: string
   [key: string]: unknown
+}
+
+/** Per-subchat row in the archive cascade response. */
+export interface ArchivedSubchat {
+  chat_id: string
+  archived: boolean
+  stopped_mid_turn: boolean
+  error: string
+}
+
+/**
+ * `POST /api/chats/{id}/archive`.
+ *
+ * Archiving a supervisor cascades to its delegate subchats, and the cascade can
+ * partly fail. The id lists are the contract that matters: mark archived only
+ * what `archived_chat_ids` names, because a subchat missing from it is still
+ * streaming, and hiding it would leave it burning tokens out of sight.
+ * The fields are optional so a client talking to an older host (or through the
+ * node proxy) degrades to "the chat I asked for" instead of breaking.
+ */
+export interface ArchiveChatResponse {
+  ok?: boolean
+  archived_to?: string | null
+  archived_chat_ids?: string[]
+  stopped_chat_ids?: string[]
+  failed_chat_ids?: string[]
+  subchats?: ArchivedSubchat[]
 }
 
 /** One commit row in the update modal, from ciao/package_version.py. */

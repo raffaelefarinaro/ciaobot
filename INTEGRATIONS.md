@@ -17,7 +17,18 @@ ciao auth codex --device-auth # device-code flow for a headless machine
 codex login status           # credential-free readiness check
 ```
 
-The bundled CLI inside the ChatGPT desktop app is detected on macOS as well. Its updates follow the desktop app; standalone installs use `codex update`. `CIAO_CODEX_BIN` can point at an absolute Codex binary when launchd cannot discover it. Readiness also generates the installed app-server schema in a temporary directory and verifies the protocol methods Ciaobot needs, so a logged-in but incompatible CLI is reported as needing an update. Ciaobot gets the account-specific model catalog and reasoning efforts from `model/list`; no OpenAI API key is required for Codex subscription chats. The Ciaobot `fable` preset selects the discovered Sol-family Codex model with Ultra reasoning effort. `OPENAI_API_KEY` remains a separate optional credential for voice and other API-backed features.
+The bundled CLI inside the ChatGPT desktop app is detected on macOS as well. Its updates follow the desktop app; standalone installs use `codex update`. `CIAO_CODEX_BIN` can point at an absolute Codex binary when launchd cannot discover it. Readiness also generates the installed app-server schema in a temporary directory and verifies the protocol methods Ciaobot needs, so a logged-in but incompatible CLI is reported as needing an update. Ciaobot gets the account-specific model catalog and reasoning efforts from `model/list`; no OpenAI API key is required for Codex subscription chats. The Ciaobot `fable` preset selects the discovered Sol-family Codex model with Ultra reasoning effort. Ciaobot itself no longer uses an OpenAI API key at all — voice moved on-device and nothing else read it.
+
+### Live eval provider access
+
+`ciao eval` uses the selected provider's existing CLI authentication and the
+same managed chat path as a normal turn. Claude runs require a working Claude
+Code login. Codex runs require `codex login`; no `OPENAI_API_KEY` is needed for
+subscription-backed Codex chats. Live evals may call external tools and spend
+provider tokens, so run the opt-in fixtures in `tests/fixtures/evals/`
+individually and write reports to a disposable directory. Normal pytest and CI
+coverage for the eval framework mocks provider execution and requires no
+provider credentials.
 
 ### `gws`: Google Workspace CLI
 
@@ -72,15 +83,36 @@ opencli list   # see available adapters
 
 Note: many adapters require the Browser Bridge Chrome extension and an logged-in Chrome session.
 
-### `apfel`: Apple Intelligence CLI
+### Apple Intelligence (on-device titles and session insights)
 
-Provides local-first chat title generation using macOS on-device models.
+Nothing to install. Selecting **Apple** as the Chat titles or Session insights
+model in Settings → Models uses Apple's on-device Foundation Model through the
+`ciaobot-native` sidecar bundled in `Ciaobot.app` — no API key, no network, and
+no per-task cost. Settings also includes a comparison action that re-runs the
+text-only extraction against a small sample of existing processed archives
+without modifying them.
 
-```bash
-# Install: https://github.com/Arthur-Ficial/apfel
-brew install apfel
-```
-No API key or network setup is needed; it queries the macOS on-device Apple Foundation Models via the Neural Engine.
+This replaced the `apfel` Homebrew CLI, which did the same job through the same
+Apple models but had to be installed and kept up to date separately. Ciaobot
+calls `FoundationModels` directly rather than Apple's `fm` CLI, because `fm`
+only ships with macOS 27 while the framework behind it has been present since
+macOS 26.
+
+Requires macOS 26+, the desktop app, and Apple Intelligence switched on in
+System Settings → Apple Intelligence & Siri. When any of those is missing,
+Settings says which one and titles fall back to the configured cloud model.
+
+### PWA workspace keyboard navigation
+
+The PWA has no integration or environment setting for workspace shortcuts. In the
+chat and automations views, unmodified `1`–`9` keys select the first through
+ninth workspace in the sidebar's displayed order; the sidebar shows the assigned
+number on each workspace button. Number keys remain available for normal typing
+inside text fields.
+
+The sidebar's project and delegate-subchat disclosure state is local UI state;
+it has no integration, environment variable, or cross-device synchronization
+setting.
 
 
 ### Python 3 + `google-cloud-bigquery`
@@ -118,13 +150,19 @@ If a connector's tools don't show up, the fix is on the claude.ai side: toggle t
 
 Project MCP servers in `.mcp.json` are automatically projected into the workspace `.codex/config.toml` by `ciao sync-skills`, so Claude and Codex chats share the same project MCP source. The projection excludes the dynamically injected `ciaobot` server, preserves user-owned Codex tables, and keeps credentials as `${ENV_VAR}` references.
 
+The one-line macOS installer preserves a configured workspace discovered from
+the current LaunchAgent. On a clean installation it starts the packaged
+engine without creating a workspace or random dashboard password; the desktop
+app then presents bootstrap onboarding, which asks the user to create or adopt
+the workspace and choose the password.
+
 ## Environment Variables
 
 Copy `.env.example` to `.env` and fill in the app-level settings first:
 
-**Required for a configured workspace:** `PWA_AUTH_TOKEN`. `CIAO_PUSH_CONTACT` is optional: leave it empty to run without Web Push notifications until you set a contact in Settings.
+**Required for a configured workspace:** `PWA_AUTH_TOKEN` — the dashboard password. Password protection is on by default; see `PWA_AUTH_REQUIRED` below for the opt-out. `CIAO_PUSH_CONTACT` is optional: leave it empty to run without Web Push notifications until you set a contact in Settings.
 
-`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`CLAUDE.md`, `AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|codex|ollama>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code, Codex, Ollama, and OpenRouter readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` is required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
+`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`CLAUDE.md`, `AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|codex|ollama>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code, Codex, Ollama, and OpenRouter readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
 
 **Runtime:** `CIAO_WORKSPACE`, `CIAO_PORT`
 
@@ -141,7 +179,7 @@ The embedded server pins the Python MCP SDK at `mcp>=1.29.0,<2.0`, bumped for th
 
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for Codex. They are not environment variables and should not be configured.
 
-**Optional direct-service keys:** `OPENAI_API_KEY` for Ciaobot cloud voice features and `CIAO_OLLAMA_API_KEY` for Ollama Cloud. Claude Code and Codex own their authentication through their respective CLIs.
+**Optional direct-service keys:** `CIAO_OLLAMA_API_KEY` for Ollama Cloud. Claude Code and Codex own their authentication through their respective CLIs, and Ciaobot no longer consumes an OpenAI key of its own.
 
 Workspace-specific integrations can still be set in `.env`, but the public `.env.example` does not ship private/work examples. Use user-owned credentials for each integration:
 
@@ -153,7 +191,7 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **BigQuery:** `GOOGLE_APPLICATION_CREDENTIALS`
 
-**OpenAI:** `OPENAI_API_KEY` (used by cloud voice transcription and read-aloud, and other OpenAI-integrated features). Cloud transcription defaults to `gpt-transcribe`; override the model with `CIAO_TRANSCRIPTION_MODEL` (e.g. `gpt-4o-mini-transcribe`).
+**OpenAI:** Ciaobot does not use an OpenAI API key. Codex chats authenticate through the Codex CLI's own subscription login, and voice is on-device. A custom compatible provider may still carry its own token, which is stored per provider rather than as a global key.
 
 **n8n MCP:** `N8N_MCP_TOKEN` (bearer token for the self-hosted `n8n_mcp` HTTP server in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`.
 
@@ -161,7 +199,7 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **OpenRouter:** `OPENROUTER_API_KEY` (optional). When set, OpenRouter is available as a model backend: the Anthropic-compatible endpoint (`https://openrouter.ai/api`) is reached via `ANTHROPIC_BASE_URL` env injection, so chats and one-shot automations can route `owner/model` ids (e.g. `anthropic/claude-haiku-4.5`) through OpenRouter. The picker exposes the per-tier alias defaults plus dynamically discovered anthropic-family models. The `adversarial_review` MCP tool (`ciao.critique`) defaults to an OpenRouter panel when this key is set.
 
-**Provider connections and direct keys.** Settings → Providers launches, verifies, and logs out Claude Code and Codex through their own CLIs; Ciaobot does not store their credentials. Keys Ciaobot calls directly remain editable: Ollama Cloud and OpenRouter under Providers, and the OpenAI cloud voice key under Settings → Models. Saving a direct key patches `.env` and restarts the server.
+**Provider connections and direct keys.** Settings → Providers launches, verifies, and logs out Claude Code and Codex through their own CLIs; Ciaobot does not store their credentials. Keys Ciaobot calls directly remain editable: Ollama Cloud and OpenRouter under Providers. Voice and Apple Intelligence are on-device and need no provider key. Saving a direct key patches `.env` and restarts the server.
 
 **Custom compatible providers.** Settings → Providers can register any local or hosted endpoint compatible with the selected CLI (for example Ollama, LM Studio, or an Unsloth server). Enter a name, base URL, optional bearer token, and choose `Claude Code` or `Codex` as the runner. Models are discovered when the endpoint supports the OpenAI-style `/v1/models` catalog, or can be entered manually. Claude Code endpoints must implement the Anthropic-compatible chat API; Codex endpoints must implement the OpenAI-compatible API. Provider definitions are tracked in `.ciao/custom_providers.json`, while bearer tokens remain in the gitignored `.runtime/custom_provider_tokens.json`. The resulting custom models are available in chat, workspace defaults, model routing, title generation, insights, schedules, and critique selectors. Claude Code receives `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`; Codex receives `OPENAI_BASE_URL`/`OPENAI_API_KEY`.
 
@@ -184,28 +222,34 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 ### Required env vars
 
-- `PWA_AUTH_TOKEN` (required): pre-shared token for PWA auth. On a node in client
+- `PWA_AUTH_TOKEN` (required): the dashboard password, doubling as the pre-shared
+  token for PWA auth and the session-signing secret. The first-run wizard asks for
+  it and Settings → PWA password changes it. On a node in client
   mode this local token is not what you log in with: the login screen
   authenticates against the *host's* token, and Settings → PWA password edits the
   host's too (that card is proxied). The local token still guards this machine's
   own never-proxied routes, `/api/node/*` and `/api/device/*`.
-- `CIAO_PUSH_CONTACT` (optional): push notification contact string for the Web Push VAPID subject, for example `mailto:you@example.com`. Empty disables Web Push delivery until set (in `.env` or Settings), but the macOS menu-bar companion still posts local alerts from the runtime notification log.
+- `CIAO_PUSH_CONTACT` (optional): push notification contact string for the Web Push VAPID subject, for example `mailto:you@example.com`. Empty disables Web Push delivery until set (in `.env` or Settings), but the macOS menu-bar companion still posts local alerts from the runtime notification log. Read mutations emit a clear control for matching delivered PWA and macOS notifications.
 - `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`).
 - `CIAO_RUNTIME_ROOT` (optional): runtime-state directory. `Ciaobot.app` reads
   this from the configured workspace `.env` and resolves a relative value
   against the workspace.
+- `CIAO_ENGINE_PATH` (internal): bundled engine path inherited by onboarding
+  and desktop helpers; it is normally supplied by `Ciaobot.app`, not set by
+  operators.
 - `CIAO_DESKTOP_SERVER_URL` (development only): overrides desktop runtime
   discovery for a local Tauri development server target.
 - Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same host via `Origin` or `Referer`.
 - Ciaobot sends baseline security headers from the Starlette app, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
+- Workspace HTML artifact previews use a stricter sandbox CSP: inline scripts/styles and `data:` images/fonts/audio/video are allowed, while network connections, `blob:` sources, and same-origin session access are blocked.
 
 ### Optional env vars
 
 - `CLAUDE_EXECUTION_MODE`: `normal`, `plan`, `auto`, `bypass`. Legacy `CLAUDE_PERMISSION_MODE` still accepted.
-- `PWA_AUTH_REQUIRED`: set to `true` to require password protection for the PWA dashboard. Disabled by default.
+- `PWA_AUTH_REQUIRED`: password protection for the PWA dashboard. **Enabled by default** — an unset value protects the dashboard whenever `PWA_AUTH_TOKEN` is present (without a token there is no password a human could type, so protection stays off until one is set in Settings). Set it to `false` to run unprotected on a machine nobody else can reach; that is the only way to turn protection off, since Settings can only change the password. `ciao setup` writes the value explicitly (`--no-auth` writes `false`).
 - `CIAO_ALLOWED_ORIGINS`: comma-separated extra hostnames/origins accepted for state-changing HTTP and WebSocket handshakes when the app is reached under a host it doesn't bind to (reverse proxy, tunnel, or host alias). Without it, such setups get their `/ws/*` upgrades rejected (403) and live updates stall. A proxy-supplied `X-Forwarded-Host` is honored automatically. Example: `app.example.com,ciao.tailnet.ts.net`.
 - `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button), the `/api/debug/issues` report, and the desktop-app rebuild step in Settings → Restart.
-- `CIAO_APP_REPO`: absolute path to the ciaobot source checkout. Required when the engine itself was installed rather than checked out (Homebrew cask, wheel): Settings → Restart otherwise resolves its git pull, `pip install -e .`, and `npm run build` relative to the running module, which lands in `site-packages`. The restart now fails fast with this hint instead of reporting a confusing "not a git repository". Note that `pip install -e .` points the installed engine at the checkout, and a later `brew upgrade` overwrites that, so this is a developer setting.
+- `CIAO_APP_REPO`: absolute path to the Ciaobot source checkout for developer-mode Deploy/Restart actions. Packaged apps update through the signed Tauri updater and do not resolve a checkout, Homebrew, or PyPI installation.
 - `CIAO_VAULT_MODE`: onboarding mode for memory-vault folders. Either `scratch` (create folders and documentation from scratch) or `existing` (connect and adapt existing markdown folders).
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
@@ -230,15 +274,16 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_OLLAMA_LOCAL_URL`: base URL of the *local* Ollama daemon used for locally-installed models, independent of `CIAO_OLLAMA_URL` (which may point at ollama.com when a cloud key is set). Default `http://localhost:11434`. Local models route here with the literal `ollama` token; cloud models keep going to `CIAO_OLLAMA_URL`. For local routes, Ciaobot maps Claude Code's internal haiku/sonnet/opus/subagent/classifier slots to the selected local model so those background calls do not fall back to unsupported `claude-*` IDs.
 - `CIAO_OLLAMA_LOCAL_MODELS`: comma-separated list of local-daemon model IDs to pin into the pickers (e.g. `gemma4:12b-it-qat`). Usually unnecessary: at startup Ciaobot auto-discovers installed models via `GET <local_url>/api/tags` and merges them in (models already in `CIAO_OLLAMA_MODELS` keep their cloud routing). Local models appear in the personal Claude bucket, badged as local.
 - `CIAO_OLLAMA_LOCAL_DISCOVERY`: set to `false`/`0` to disable the startup auto-discovery of local daemon models. Default enabled; discovery is best-effort with a 2s timeout, so a missing daemon just means no local models.
-- `CIAO_OLLAMA_TITLE_MODEL`: cheap model used to auto-title Ollama-routed chats (the chat's own `:cloud` model is usually subscription-gated and overkill for 50-token titles). Default `gemma4:e2b-it-qat`. Other free-tier-friendly options: `gemma3:4b`, `qwen3:8b`, `gpt-oss:20b`, `nemotron-3-nano:30b`. Anthropic chats keep titling via `CIAO_TITLE_MODEL` (default `haiku`) and ignore this knob. When the `apfel` CLI is on PATH, the title call uses it first. If `apfel` is unavailable or fails, Ciaobot falls back to the Claude Agent SDK with the same Ollama env injection used for chats.
+- `CIAO_OLLAMA_TITLE_MODEL`: cheap model used to auto-title Ollama-routed chats (the chat's own `:cloud` model is usually subscription-gated and overkill for 50-token titles). Default `gemma4:e2b-it-qat`. Other free-tier-friendly options: `gemma3:4b`, `qwen3:8b`, `gpt-oss:20b`, `nemotron-3-nano:30b`. Anthropic chats keep titling via `CIAO_TITLE_MODEL` (default `haiku`) and ignore this knob. Selecting **Apple** as the title model uses the on-device Foundation Model instead; if it is unavailable or fails, Ciaobot falls back to the Claude Agent SDK with the same Ollama env injection used for chats.
 - `CIAO_OLLAMA_WEBSEARCH_HOOK`: kill switch for the PostToolUse hook that backfills WebSearch on Ollama-cloud-routed chats. Ollama's Anthropic-compat layer doesn't execute the server-side `web_search` tool, so Claude Code's built-in WebSearch returns an empty boilerplate; the hook reruns the query against Ollama's standalone `POST /api/web_search` and injects the real results as `additionalContext`. Default `1` (enabled). Set `0` to disable. No-op on the Anthropic path (where WebSearch works natively) and on local-daemon routes. See `ciao/observability/hooks.py`.
 - `CIAO_OLLAMA_AUTO_CLASSIFIER`: **removed**. Auto mode is now always live for Ollama-routed chats because the bundled `claude` CLI's permission classifier resolves to an Ollama-served model. Previously this was an opt-in flag because the classifier targeted Anthropic's server-side gate, which ollama.com and local daemons do not expose; the tier-remap env now injected on Ollama routes (`ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL`, `CLAUDE_CODE_BG_CLASSIFIER_MODEL`) fixes that. Delete `CIAO_OLLAMA_AUTO_CLASSIFIER` from your `.env` if it is still there.
 - `CIAO_INSIGHTS_DISABLED`: set to `true`/`yes`/`on` to disable post-archive session insights extraction. Default is enabled (false). When enabled, after a chat is archived, raw JSONL is filtered and run through a model to extract errors, dead ends, new entities, decisions, and reusable code, then appended as a `## Session insights` section to the archive markdown.
 - `CIAO_INSIGHTS_MIN_TURNS`: minimum number of turns in a session before insights extraction runs. Default `2` (single-shot chats are skipped, multi-turn chats are included). Override with any positive integer; set to `1` to include single-shot chats too.
-- `CIAO_INSIGHTS_MODEL`: model ID for insights extraction, routed through the Ollama Anthropic-compatible API. Default `deepseek-v4-flash:0731-cloud`. This model is fixed at the server level and bypasses the Ollama models allowlist. Uses existing `CIAO_OLLAMA_*` config (base URL, API key) through the Claude Agent SDK one-shot path.
+- `CIAO_INSIGHTS_MODEL`: model ID for insights extraction, routed through the Ollama Anthropic-compatible API. Default `deepseek-v4-flash:0731-cloud`. Set it to `apple` (or choose Apple in Settings) to use the on-device Foundation Model; if Apple Intelligence is unavailable, Ciaobot falls back to the configured automatic model. Cloud models use existing `CIAO_OLLAMA_*` config (base URL, API key) through the Claude Agent SDK one-shot path.
 - `CIAO_INSIGHTS_BACKFILL_ON_STARTUP`: set to `true`/`yes`/`on` to asynchronously scan for and backfill missing session insights on server startup. Default is disabled (false). Helps regenerate missing insights if the model call failed during chat archive due to budget or network issues.
 - `CIAO_INSIGHTS_TIMEOUT_S`: per-call timeout (seconds) for the insights and text-fallback model calls. Default `600`. The insights model is operator-selectable, and a slow local or cloud GGUF can take 214–253s end to end; the previous flat 120s budget turned tail latency into a `TimeoutError` and failed the job. Lower it if you route insights at a fast model and want to fail sooner.
 - `CIAO_INSIGHTS_MAX_INPUT_CHARS`: ceiling (characters) on the filtered transcript sent to the insights model. Default `320000`, roughly 90k tokens, which leaves headroom for the system prompt inside a 128k-token context window. Oldest transcript lines are dropped first so the newest turns and their `[idx=N]` citations survive; the trim is logged. Raise it for a large-context model, lower it if you still see `400 Message too long`. An oversized-input rejection is not retried, since the identical payload would fail again.
+- `CIAO_INSIGHTS_BACKFILL_MAX`: most archives a single backfill run will process when the caller supplies no explicit limit — which is what both the startup job and the Settings → Automations button do. Default `200`. One archive is one model call, so on an aged vault an uncapped run from a single click is hours of work and a large bill; when the cap trims a run, the job record carries `capped_at` and `remaining_after_cap` rather than implying it finished everything. `scripts/backfill_insights.py --limit 0` still opts into a genuinely unbounded pass.
 - `CIAO_TRAJECTORIES_DISABLED`: set to `true`/`yes`/`on` to disable structured trajectory capture after a chat is archived (skills loaded, tools used, errors, decisions). Default enabled. Trajectories are written to `~/.ciao/trajectories/YYYY-MM/<session-id>.json` and mined by the weekly skill-evolution pass.
 - `CIAO_SKILL_EVOLUTION_DISABLED`: set to `true`/`yes`/`on` to hard-disable the weekly skill-evolution pass even if the schedule entry remains. Default enabled. The schedule entry itself is the primary on/off switch.
 - `CIAO_REVIEW_MODELS`: comma-separated list of model IDs for the `adversarial_review` MCP tool (`ciao.critique`). Overrides the default panel. IDs use the native shape for their backend: `owner/model` for OpenRouter (e.g. `anthropic/claude-sonnet-4.5`), `:tag`/`:cloud` for Ollama, bare aliases for Anthropic. Runtime-overridable from the PWA (Settings → Models, persisted in `.runtime/app_settings.json` under `critique_models`).
@@ -252,26 +297,25 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_AUTO_VAULT_INDEX`: set to `false` to disable automatic vault index regeneration on server startup. Default `true`.
 - `CIAO_AUTO_UPDATE_GITHUB_SKILLS`: set to `false` to disable checking/updating locked package skills from GitHub on boot. Default `true`.
 - `CIAO_GITHUB_REPO`: `owner/name` of the GitHub repository used to fetch the changelog (commits between the installed and latest release tags) shown in the Settings update prompt. Default `raffaelefarinaro/ciaobot`.
-- `CIAO_GITHUB_TOKEN` (also honors `GITHUB_TOKEN` / `GH_TOKEN`): personal access token used to authenticate the on-demand GitHub REST API calls — resolving the wheel asset when installing an update and fetching the changelog for an available update. Optional; when set it raises GitHub's API rate limit from 60 to 5000 requests/hour. The recurring update check does not use the API at all (it follows the public `releases/latest` redirect), so a token is not needed just to check for updates. No scopes are required (public read only).
+- `CIAO_GITHUB_TOKEN` (also honors `GITHUB_TOKEN` / `GH_TOKEN`): personal access token used to authenticate on-demand GitHub REST API calls when fetching the changelog for an available update. Optional; when set it raises GitHub's API rate limit from 60 to 5000 requests/hour. The recurring update check does not use the API at all (it follows the public `releases/latest` redirect), so a token is not needed just to check for updates. No scopes are required (public read only).
 - `CIAO_OLLAMA_HAIKU_MODEL` / `CIAO_OLLAMA_SONNET_MODEL` / `CIAO_OLLAMA_OPUS_MODEL` / `CIAO_OLLAMA_FABLE_MODEL`: per-tier Ollama model overrides for Claude chats whose effective `model_bucket` is `personal` and that select the aliases `haiku`, `sonnet`, `opus`, or `fable`. The alias resolves at runtime when Ollama is available (cloud key or local daemon); `work` bucket chats keep Anthropic aliases. Defaults: `deepseek-v4-flash:0731-cloud` (haiku), `kimi-k2.7-code:cloud` (sonnet), and `glm-5.2:cloud` (opus and fable).
 - `CIAO_OPENROUTER_BASE_URL`: base URL for OpenRouter's Anthropic-compatible endpoint. Default `https://openrouter.ai/api` (the SDK appends `/v1/messages`). Override only for a self-hosted relay.
 - `CIAO_OPENROUTER_HAIKU_MODEL` / `CIAO_OPENROUTER_SONNET_MODEL` / `CIAO_OPENROUTER_OPUS_MODEL` / `CIAO_OPENROUTER_FABLE_MODEL`: per-tier OpenRouter model overrides (owner/model ids) for chats/automations that select the `haiku`/`sonnet`/`opus`/`fable` aliases and route through OpenRouter. Defaults: `anthropic/claude-haiku-latest`, `anthropic/claude-sonnet-latest`, `anthropic/claude-opus-latest`, and `anthropic/claude-fable-latest`.
 - `CIAO_OPENROUTER_MODELS`: comma-separated allowlist of extra OpenRouter model IDs (owner/model) to surface in the picker on top of the tier defaults and the discovered anthropic-family catalogue. Leave empty to rely on dynamic discovery.
 - `CIAO_OPENROUTER_WEBSEARCH_HOOK`: kill switch for the PostToolUse hook that backfills WebSearch on OpenRouter-routed chats, mirroring `CIAO_OLLAMA_WEBSEARCH_HOOK`. OpenRouter's Anthropic-compat endpoint doesn't execute the server-side `web_search` tool, so Claude Code's built-in WebSearch returns an empty boilerplate; the hook reruns the query as a one-shot chat-completions call with OpenRouter's `web` plugin (on the configured haiku-tier model) and injects the `url_citation` sources as `additionalContext`. Default `1` (enabled). Set `0` to disable. See `ciao/observability/hooks.py`.
 - **Auto tier-fallback on capability errors**: when a turn's primary model returns a 4xx that means the model itself cannot handle the input (`does not support image input`, `does not support tool`, `context length exceeded`, etc.), the chat drive loop silently retries the request on the nearest neighbor tier (cheaper first, then more capable). The ladder is `fable → opus → sonnet → haiku` for Anthropic-direct aliases, and the per-backend `OllamaSettings` / `OpenRouterSettings` tier models for Ollama and OpenRouter. The full original error text is logged at WARNING before the retry, and the PWA shows a `status` event between attempts. Rate limits, auth errors, content-filter rejections, and 5xx errors do NOT trigger the retry — those need operator attention. Codex is excluded. One retry per turn; the new model starts a fresh session id (the failed session is not resumed). Implemented in `ciao/model_tiers.py::next_tier_for_failure` and `ciao/web/project_chats.py::ProjectChatManager.stream_chat`.
+- **Image-capability pre-flight**: before dispatch, a turn that carries images checks whether the selected model can see them. Known-capable ids (Claude tiers, gemini, gpt-4o, minimax-m3) and known non-vision prefixes (`kimi-`, `deepseek-`, `glm-`, `llama-`, `qwen-`, `code`) short-circuit; ambiguous ids probe the backend (Ollama `/api/show`, OpenRouter catalog, both cached 24h) and default to capable when the probe fails so a dead daemon never blocks a turn. A non-vision model pauses the turn on a `model_capability_question` (30s window): the PWA offers same-backend vision candidates, an "Open picker" escape hatch, and Cancel. Switch re-dispatches on the picked model; cancel/timeout close the turn with a `status` bubble; the images are never silently dropped. Text-only and unattended (loop/schedule) turns skip the question. Implemented in `ciao/model_tiers.py::model_supports_vision` / `model_vision_ambiguous`, `ciao/providers/ollama.py::vision_support_ollama`, `ciao/providers/openrouter.py::vision_support_openrouter`, and the pre-flight in `ciao/web/project_chats.py::ProjectChatManager.stream_chat`.
 - `CIAO_PUSH_CONTACT`: push notification contact string. Optional, no default; empty disables Web Push delivery. Used for VAPID subject.
-- `CIAO_PUSH_DELAY_SECONDS`: delay before sending push notifications after a completed turn (default `30`). Rapid replies to the same chat cancel the previous timer and start a new one (coalesce into a single push). Permission requests and model questions push immediately (no delay). Unanswered permission requests re-fire every 30 seconds, up to 3 times, until the user approves/denies or the turn ends.
+- `CIAO_PUSH_DELAY_SECONDS`: delay before sending push notifications after a completed turn (default `30`). Rapid replies to the same chat cancel the previous timer and start a new one (coalesce into a single push). Permission requests and model questions push immediately (no delay). Unanswered permission requests re-fire every 30 seconds, up to 3 times, until the user approves/denies or the turn ends. Marking a chat read sends a separate clear control to all registered Web Push subscriptions and the macOS notification log.
 - `CIAO_PYTHON`: path to a specific Python binary for `scripts/dev.sh` (e.g. when Homebrew breaks `ensurepip`).
-- `CIAO_PATH`: baked into the launchd plist's `EnvironmentVariables` at setup time so the server's subprocesses (npm, node, Homebrew git/pip) are found despite launchd's minimal default PATH. Not an operator env var; it's a `com.ciao.server.plist.tmpl` placeholder rendered from the user's shell PATH.
-- `CIAO_MENUBAR_EXECUTABLE`: absolute path to the menu-bar executable baked into the menu-bar LaunchAgent at setup time. Not an operator env var; it's a `com.ciao.menubar.plist.tmpl` placeholder rendered from the resolved install location.
+- `CIAO_PATH`: baked into the launchd plist's `EnvironmentVariables` at setup time so developer-mode subprocesses (npm, node, git) are found despite launchd's minimal default PATH. Not an operator env var; it's a `com.ciao.server.plist.tmpl` placeholder rendered from the user's shell PATH.
 - `CLAUDE_MODELS`: comma-separated list of Anthropic models in the picker. Default `opus,sonnet,haiku`.
 - `CIAO_TITLE_MODEL`: model used to auto-title Anthropic chats. Default `haiku`.
 - `CIAO_TITLE_MODEL_OVERRIDE`: env-level default for the title-model override normally set from the PWA (Settings → Models tab, persisted in `.runtime/app_settings.json`). When set (either way), it wins over both `CIAO_OLLAMA_TITLE_MODEL` and `CIAO_TITLE_MODEL` and is routed per model: local daemon, Ollama cloud, or Anthropic alias. Empty = automatic routing.
-- `CIAO_TRANSCRIPTION_ENGINE`: voice dictation engine, `cloud` (default; OpenAI API, needs `OPENAI_API_KEY`) or `local` (mlx-whisper on-device, free, Apple Silicon only; bundled in the default bootstrap, this repo now targets macOS only). Runtime-overridable from Settings → Models.
-- `CIAO_TRANSCRIPTION_LOCAL_MODEL`: Hugging Face repo of the mlx-whisper checkpoint for the local engine. Default `mlx-community/whisper-large-v3-turbo` (downloaded on first use).
-- `CIAO_TTS_ENGINE`: read-aloud (speech synthesis) engine, `cloud` (default; OpenAI `gpt-4o-mini-tts`, needs `OPENAI_API_KEY`) or `local` (Kokoro via kokoro-onnx, free, on-device; install with `pip install 'ciao[tts-local]'`, the first playback downloads ~340 MB of model files). Runtime-overridable from Settings → Models.
-- `CIAO_TTS_CLOUD_VOICE`: OpenAI voice preset for the cloud engine. Default `nova`.
-- `CIAO_TTS_LOCAL_VOICE`: Kokoro voice id for the local engine; the first letter picks the language (`af_heart` American English, `im_nicola` Italian, …). Default `af_heart`.
+- `CIAO_NATIVE_SIDECAR`: absolute path to the `ciaobot-native` binary that backs both on-device voice engines. Normally unset — the engine finds it inside the installed `Ciaobot.app`. Point it at `desktop/src-tauri/binaries/ciaobot-native-aarch64-apple-darwin` to test a locally built sidecar (`npm run build:native` in `desktop/`) without installing the app.
+- Installer and release-build variables: `CIAO_APP_DIR` overrides the per-user app directory, `CIAO_ARCHIVE_NAME` and `CIAO_VERIFIER_NAME` override release asset names, and `CIAO_RELEASE_BASE_URL` selects a private release mirror for an explicit `--version` (the embedded archive signature is still mandatory). `CIAO_BUNDLED_APP` marks the embedded runtime for internal mode detection. `CIAO_PYTHON_ARM64_URL`, `CIAO_PYTHON_ARM64_SHA256`, `CIAO_PYTHON_X86_64_URL`, and `CIAO_PYTHON_X86_64_SHA256` are required only by the release workflow when assembling the embedded runtimes. `CIAO_EXECUTABLE` is a LaunchAgent template token, not an operator environment variable.
+- `CIAO_TRANSCRIPTION_LOCALE`: BCP-47 language for both on-device engines — dictation matches it against the installed dictation languages, and the synthesizer picks a voice for it. Default `en-US`.
+- `CIAO_TTS_LOCAL_VOICE`: macOS voice identifier or name for the local engine (e.g. `com.apple.voice.compact.en-US.Samantha`). Empty by default, which means the highest-quality installed voice for `CIAO_TRANSCRIPTION_LOCALE` — preferring premium, then enhanced, then default. The stock voices are all the basic tier; voices marked **Premium** (then Enhanced) sound markedly better and are a free download under System Settings → Accessibility → Read & Speak → System voice → Manage Voices ([Apple's guide](https://support.apple.com/guide/mac-help/mchlp2290/mac)). Ciaobot picks the best installed voice automatically, so downloading one is enough. Siri's voices are not available to third-party apps.
 - `CIAO_MAX_IMAGE_BYTES` / `CIAO_MAX_VOICE_BYTES`: upload size caps. Defaults 10 MB / 25 MB.
 - `CIAO_MEDIA_TTL_HOURS`: auto-cleanup age for uploaded media. Default `72`.
 - `CIAO_PUBLIC_PRIVATE_PATTERNS`: comma-separated private string patterns used by `ciao public-preflight scan` when a `--private-patterns` file is not supplied. Intended for public extraction checks, not normal runtime.
@@ -310,7 +354,7 @@ Ciaobot runs on macOS under launchd.
 
 - `ciao setup --workspace <path> --load-launchd` renders and loads the LaunchAgent.
 - The packaged launchd template is `ciao/stock/deploy/com.ciao.server.plist.tmpl`.
-- The macOS menu bar shows `Start at Login: On/Off` and toggles both `com.ciao.server` and `com.ciao.menubar` with `launchctl enable/disable`. Its status section also offers `Start Server` when the local server is unreachable and `Restart Server` when it is live. The unread badge counts every unread chat even though the quick-open list remains limited to the ten most recent chats.
+- The `Ciaobot.app` menu bar shows `Start at Login: On/Off` and toggles `com.ciao.server` with `launchctl enable/disable`. Its status section also offers `Start Server` when the local server is unreachable and `Restart Server` when it is live. The unread badge counts every unread chat even though the quick-open list remains limited to the ten most recent chats.
 - Stop: `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
 - In client mode, non-image files dropped into chat are uploaded through the

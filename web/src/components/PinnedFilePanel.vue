@@ -1,6 +1,9 @@
 <template>
   <div class="pinned-file-panel" ref="rootEl">
-    <PaneHeader @open-sidebar="$emit('close')">
+    <!-- No brand and no page tag: this header sits beside the main pane's in the
+         split view, and a second wordmark two inches away is the duplication the
+         mark was moved out of the sidebar to end. The filename is the title. -->
+    <PaneHeader :brand="false" @open-sidebar="$emit('close')">
       <template #title>
         <div class="header-left">
           <button class="close-btn desktop-only" @click="$emit('close')" title="Unpin file">&times;</button>
@@ -24,7 +27,7 @@
           </svg>
         </button>
         <button
-          v-if="kind === 'text' && !isEditingText"
+          v-if="(kind === 'text' || (kind === 'html' && htmlView === 'code' && sourceLoaded)) && !isEditingText"
           class="btn-icon"
           @click="startEditingText"
           title="Edit"
@@ -93,6 +96,16 @@
           height="100%"
           style="border: none; flex: 1; min-height: 500px; display: block; border-radius: 4px;"
         ></iframe>
+        <HtmlArtifactViewer
+          v-else-if="kind === 'html' && !isEditingText"
+          :file-path="cleanPath"
+          :reload-token="imageTimestamp"
+          :view="htmlView"
+          :source="content"
+          :source-loading="sourceLoading"
+          :source-error="sourceError"
+          @update:view="setHtmlView"
+        />
         <ExcalidrawViewer
           v-else-if="kind === 'excalidraw'"
           :content="content"
@@ -247,7 +260,7 @@
       >
         <div class="pfp-pop-header">
           <span class="pfp-sidebar-card-line" v-if="commentLineLabel(popoverComment)">{{ commentLineLabel(popoverComment) }}</span>
-          <div v-if="!projectsStore.isStreaming" class="pfp-sidebar-card-actions pfp-pop-actions">
+          <div class="pfp-sidebar-card-actions pfp-pop-actions">
             <button class="pfp-sidebar-card-edit" @click.stop="editFromPopover(popoverComment)" title="Edit">✎</button>
             <button class="pfp-sidebar-card-remove" @click.stop="deleteFromPopover(popoverComment.id)" title="Delete">×</button>
           </div>
@@ -288,9 +301,11 @@ import { useFileComments } from '../composables/useFileComments'
 import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
-import { useFileViewerStore } from '../stores/fileViewer'
+import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
+import type { FileViewerKind, HtmlArtifactView } from '../stores/fileViewer'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
+const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
 const props = defineProps<{ filePath: string }>()
 defineEmits<{ (e: 'close'): void }>()
@@ -302,7 +317,14 @@ const fileViewer = useFileViewerStore()
 const loading = ref(false)
 const error = ref('')
 const content = ref('')
-const kind = ref<'text' | 'image' | 'excalidraw' | 'pdf'>('text')
+const kind = ref<FileViewerKind>('text')
+// Artifact state, mirroring the fileViewer store's. Source is fetched only for
+// Code view: `error` blanks the whole body, so a text-fetch failure must never
+// take down a page that renders fine.
+const htmlView = ref<HtmlArtifactView>('preview')
+const sourceLoading = ref(false)
+const sourceError = ref('')
+const sourceLoaded = ref(false)
 const refreshed = ref(false)
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
 const isEditingExcalidraw = ref(false)
@@ -521,6 +543,13 @@ async function load(): Promise<void> {
   isEditingText.value = false
   editBuffer.value = ''
   editError.value = ''
+  htmlView.value = 'preview'
+  sourceLoading.value = false
+  sourceError.value = ''
+  sourceLoaded.value = false
+  // Images are the panel's own case (the store has openImage for them);
+  // everything else comes from the shared classifier so this stays one
+  // implementation of "what kind of file is this" rather than a second copy.
   const isImg = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(props.filePath)
   if (isImg) {
     kind.value = 'image'
@@ -530,9 +559,8 @@ async function load(): Promise<void> {
     imageTimestamp.value = Date.now()
     return
   }
-  const isPdfOrPptx = /\.(pdf|pptx)$/i.test(cleanPath.value)
-  if (isPdfOrPptx) {
-    kind.value = 'pdf'
+  kind.value = fileViewerKindForPath(cleanPath.value)
+  if (kind.value === 'pdf') {
     loading.value = false
     error.value = ''
     content.value = ''
@@ -542,11 +570,15 @@ async function load(): Promise<void> {
     if (/\.pptx$/i.test(cleanPath.value)) void checkLibreofficeStatus()
     return
   }
-  const isExcalidraw = /\.excalidraw$/i.test(cleanPath.value)
-  if (isExcalidraw) {
-    kind.value = 'excalidraw'
-  } else {
-    kind.value = 'text'
+  if (kind.value === 'html') {
+    // Bumping the token here is what makes the stream-end auto-reload below
+    // refresh the frame after the model revises the artifact. Without it the
+    // panel would keep showing the pre-edit page until a manual refresh.
+    loading.value = false
+    error.value = ''
+    content.value = ''
+    imageTimestamp.value = Date.now()
+    return
   }
   loading.value = true
   error.value = ''
@@ -572,6 +604,35 @@ async function load(): Promise<void> {
   } finally {
     loading.value = false
   }
+}
+
+async function loadSource(force = false): Promise<void> {
+  if (!cleanPath.value || (sourceLoaded.value && !force)) return
+  sourceLoading.value = true
+  sourceError.value = ''
+  try {
+    const resp = await fetch(
+      `/api/workspace-file?path=${encodeURIComponent(cleanPath.value)}`,
+      { credentials: 'same-origin' },
+    )
+    if (!resp.ok) {
+      sourceError.value = resp.status === 413
+        ? 'Source is too large to show (>2 MB).'
+        : `Failed to load source (HTTP ${resp.status}).`
+      return
+    }
+    content.value = await resp.text()
+    sourceLoaded.value = true
+  } catch (e) {
+    sourceError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    sourceLoading.value = false
+  }
+}
+
+async function setHtmlView(view: HtmlArtifactView): Promise<void> {
+  htmlView.value = view
+  if (view === 'code') await loadSource()
 }
 
 function startEditingText(): void {
@@ -612,6 +673,9 @@ async function saveEdits(): Promise<void> {
     content.value = editBuffer.value
     isEditingText.value = false
     editBuffer.value = ''
+    // Artifacts render from a URL, so the frame needs a new token to pick up
+    // the save; adopting the buffer only updates Code view.
+    if (kind.value === 'html') imageTimestamp.value = Date.now()
   } catch (e) {
     editError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -639,6 +703,10 @@ function downloadFile(): void {
     a.href = `/api/workspace-image?path=${encodeURIComponent(cleaned)}`
   } else if (kind.value === 'pdf') {
     a.href = `/api/workspace-binary?path=${encodeURIComponent(cleaned)}&raw=1`
+  } else if (kind.value === 'html') {
+    // Straight from the endpoint, not from `content`: an artifact in Preview
+    // view has never fetched its source, so the in-memory blob would be empty.
+    a.href = `/api/workspace-file?path=${encodeURIComponent(cleaned)}`
   } else {
     const blob = new Blob([content.value], { type: 'text/plain;charset=utf-8' })
     a.href = URL.createObjectURL(blob)
@@ -662,6 +730,10 @@ async function openExternally(): Promise<void> {
   projectsStore.pushErrorToast('Could not open file', result.error)
 }
 
+// Set when an auto-reload was skipped because the user had unsaved work open;
+// applied as soon as the panel goes idle (see the isBusyAuthoring watcher).
+const deferredReload = ref(false)
+
 watch(() => props.filePath, () => load(), { immediate: true })
 
 watch(
@@ -669,12 +741,13 @@ watch(
   ([filePath, chatId, isStreaming], oldValues) => {
     const wasStreaming = oldValues ? oldValues[2] : false
     // Reload the file so the panel shows the model's latest version once its
-    // turn ends. Never while the user is mid-edit: `load()` resets the edit
-    // session, and wiping a half-typed edit the moment the model stops is the
-    // same class of loss the fileViewer store guards with canReplaceOpenFile.
-    // The user can hit Refresh after they Save or Cancel.
-    if (filePath && chatId && wasStreaming && !isStreaming && !isEditingText.value) {
-      load()
+    // turn ends. Never while the user is mid-edit or mid-comment: `load()`
+    // resets the edit session, and wiping half-typed work the moment the model
+    // stops is the same class of loss the fileViewer store guards with
+    // canReplaceOpenFile. The reload is deferred until they save or cancel.
+    if (filePath && chatId && wasStreaming && !isStreaming) {
+      if (isBusyAuthoring.value) deferredReload.value = true
+      else load()
     }
   }
 )
@@ -748,9 +821,9 @@ function editFromPopover(c: { id: string; comment: string; images?: string[] }):
 // reapply on every comment list change so deleting a comment removes the
 // highlight cleanly. clearHighlights / highlightInMarkdown live in
 // useFileComments (shared with FileViewerModal); this surface keeps its own
-// kind guards (image/PDF) and feeds the shared helpers.
+// kind guards (image/PDF/artifact) and feeds the shared helpers.
 function applyHighlights(): void {
-  if (kind.value === 'image' || kind.value === 'pdf') return
+  if (kind.value === 'image' || kind.value === 'pdf' || kind.value === 'html') return
   if (isMarkdown.value) {
     const root = mdEl.value
     if (!root) return
@@ -842,7 +915,17 @@ watch(
 // (shared with FileViewerModal). Only the surface-specific inputs are wired
 // here: the path/content sources, the anchor coordinate root (mainEl), and
 // closing this panel's hover-pin read popover when a compose opens.
-const isCommentable = computed(() => !loading.value && !error.value && kind.value !== 'image' && kind.value !== 'pdf' && !projectsStore.isStreaming)
+// Commenting stays available while the model works, matching FileViewerModal:
+// a comment is staged locally and rides along on the next message the user
+// sends (queued or steered), so there is nothing to wait for.
+// Artifacts are not commentable: a comment anchors to a markdown highlight or
+// a text line, and a rendered page in a sandboxed frame offers neither. This is
+// a real capability loss versus .md, which is why the html-artifact skill tells
+// the model to keep prose in markdown.
+const isCommentable = computed(() =>
+  !loading.value && !error.value
+  && kind.value !== 'image' && kind.value !== 'pdf' && kind.value !== 'html'
+)
 
 const comments = useFileComments({
   path: () => cleanPath.value,
@@ -868,6 +951,19 @@ const {
   cancelEditComment, saveEditComment, handleEditImageUpload, removeEditImage,
 } = comments
 comments.setApplyHighlights(applyHighlights)
+
+// Anything the user has half-written in the panel: a text edit, a new comment,
+// or an edit of an existing one. Auto-reloads hold off while it is true, so a
+// model turn finishing mid-sentence never throws the work away — and then run
+// once the panel is idle again, so the view never stays silently stale.
+const isBusyAuthoring = computed(
+  () => isEditingText.value || commentDraft.value !== null || editingCommentId.value !== null,
+)
+watch(isBusyAuthoring, (busy) => {
+  if (busy || !deferredReload.value) return
+  deferredReload.value = false
+  refresh()
+})
 
 // Re-anchor the floating comment trigger on scroll, and close the hover-pin
 // read popover so it never floats detached from its highlight. Kept here (not
@@ -972,18 +1068,15 @@ const isModifiedInLastTurn = computed(() => {
 watch(
   [() => projectsStore.isStreaming, () => isModifiedInLastTurn.value],
   ([isStreaming, isModified], [wasStreaming, wasModified]) => {
-    if (isStreaming) {
-      comments.cancelComment()
-      comments.editingCommentId.value = null
-      closeCommentPopover()
-    } else {
-      const justStoppedStreaming = wasStreaming && !isStreaming
-      const justFlippedModified = !wasModified && isModified
-      // Same guard as the stream-end reload above: the modified-file refresh
-      // must not clobber an edit the user has open in the panel.
-      if (isModified && (justStoppedStreaming || justFlippedModified) && !isEditingText.value) {
-        refresh()
-      }
+    if (isStreaming) return
+    const justStoppedStreaming = wasStreaming && !isStreaming
+    const justFlippedModified = !wasModified && isModified
+    // Same guard as the stream-end reload above: the modified-file refresh must
+    // not clobber an edit — or a comment the user is mid-way through writing
+    // while the model works — so it waits for them to finish.
+    if (isModified && (justStoppedStreaming || justFlippedModified)) {
+      if (isBusyAuthoring.value) deferredReload.value = true
+      else refresh()
     }
   }
 )
@@ -1001,6 +1094,7 @@ watch(() => props.filePath, () => {
   isEditingText.value = false
   editBuffer.value = ''
   editError.value = ''
+  deferredReload.value = false
 })
 </script>
 

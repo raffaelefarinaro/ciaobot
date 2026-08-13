@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
+from ciao.memory_audit import audit_entries
 from ciao.memory_injector import expiration_tag_error, is_entry_expired
 from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
@@ -464,13 +465,20 @@ def audit_memory(
     today: datetime.date | None = None,
     memory_char_limit: int = DEFAULT_MEMORY_CHAR_LIMIT,
     user_char_limit: int = DEFAULT_USER_CHAR_LIMIT,
+    workspace_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Audit bounded memory regions (caps, expiry, hygiene) and proposal queues.
+    """Audit bounded memory regions and proposal queues.
+
+    Covers both the mechanical health of the regions (caps, expiry, exact
+    duplicates, invisible Unicode) and, via :mod:`ciao.memory_audit`, whether
+    their content has rotted: chat events stored as state, cited paths that no
+    longer exist, and one subject carrying two competing values.
 
     Bounded memory lives in the ``ciao:memory``/``ciao:profile`` fenced
     regions inside ``guide_path`` (the workspace ``CLAUDE.md``).
     """
     guide = guide_path or (Path.cwd() / "CLAUDE.md")
+    workspace = workspace_dir or guide.parent
     current = today or datetime.date.today()
     region_limits = {"memory": memory_char_limit, "profile": user_char_limit}
 
@@ -568,6 +576,8 @@ def audit_memory(
             proposals_count += pending
             proposal_files.append({"path": str(path), "pending": pending})
 
+    rot = audit_entries(region_entries, workspace_dir=workspace)
+
     return {
         "memory_entries": len(mem_entries),
         "profile_entries": len(profile_entries),
@@ -582,6 +592,7 @@ def audit_memory(
         "marker_errors": marker_errors,
         "pending_memory_proposals": proposals_count,
         "proposal_files": proposal_files,
+        **rot,
         "errors": proposal_errors,
     }
 
@@ -885,6 +896,39 @@ def audit_upgrade_notices(config: Any | None) -> dict[str, Any]:
     return {"notices": notices, "notices_found": len(notices), "errors": errors}
 
 
+def memory_actionable_count(memory_result: dict[str, Any]) -> int:
+    """Findings in a memory report that a user can actually act on.
+
+    One definition, shared by `run_os_audit`'s exit status and the standalone
+    `ciao memory-audit` command. They previously each summed their own subset,
+    and `memory-audit` omitted `oversize_entries`, `invisible_unicode` and
+    `pending_memory_proposals` — so it reported "clean" (exit 0) for a region
+    that `ciao os-audit` failed on, and the daily curation routine that reads
+    the weaker verdict saw nothing to fix.
+
+    `superseded_state_candidates` is deliberately excluded: it is a judgement
+    the user may decline, and a finding that can never be cleared would hold
+    the audit at needs_attention until people stop reading it.
+    """
+    # int() because memory_result is dict[str, Any]: the counts are ints at
+    # runtime, but the sum is Any to the type checker.
+    return int(
+        memory_result["expired_memory_entries"]
+        + memory_result["expired_profile_entries"]
+        + memory_result["invalid_expiration_entries"]
+        + len(memory_result["over_cap"])
+        + len(memory_result["oversize_entries"])
+        + len(memory_result["duplicate_entries"])
+        + len(memory_result["invisible_unicode"])
+        + len(memory_result["marker_errors"])
+        + memory_result["pending_memory_proposals"]
+        # Both concretely fixable: move the entry to Learnings.md, or correct
+        # the path.
+        + len(memory_result["event_shaped_entries"])
+        + len(memory_result["stale_path_entries"])
+    )
+
+
 def run_os_audit(
     workspace_dir: Path | None = None,
     vault_root: Path | None = None,
@@ -917,6 +961,7 @@ def run_os_audit(
         today=today,
         memory_char_limit=memory_char_limit,
         user_char_limit=user_char_limit,
+        workspace_dir=workspace,
     )
     job_result = audit_job_runs(workspace, runtime_dir=runtime)
     upgrade_result = audit_upgrade_notices(config)
@@ -960,15 +1005,7 @@ def run_os_audit(
         + len(vault_result.get("broken_markdown_links", []))
         + len(skill_result["issues"])
         + rule_result["rule_clashes_found"]
-        + memory_result["expired_memory_entries"]
-        + memory_result["expired_profile_entries"]
-        + memory_result["invalid_expiration_entries"]
-        + len(memory_result["over_cap"])
-        + len(memory_result["oversize_entries"])
-        + len(memory_result["duplicate_entries"])
-        + len(memory_result["invisible_unicode"])
-        + len(memory_result["marker_errors"])
-        + memory_result["pending_memory_proposals"]
+        + memory_actionable_count(memory_result)
         + job_result["failed_runs"]
         + upgrade_result["notices_found"]
     )
@@ -1070,6 +1107,40 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
             f"- Invisible Unicode entries: {len(memory['invisible_unicode'])}",
             f"- Region marker errors: {len(memory['marker_errors'])}",
             f"- Pending memory proposals: {memory['pending_memory_proposals']}",
+            (
+                "- Event-shaped entries (belong in a log): "
+                f"{len(memory.get('event_shaped_entries', []))}"
+            ),
+            (
+                f"- Entries citing a missing path: "
+                f"{len(memory.get('stale_path_entries', []))} "
+                f"({memory.get('paths_checked', 0)} paths checked, "
+                f"{memory.get('paths_unverifiable', 0)} not verifiable here)"
+            ),
+            (
+                "- Informational superseded-state candidates: "
+                f"{len(memory.get('superseded_state_candidates', []))}"
+            ),
+        ]
+    )
+    for finding in memory.get("event_shaped_entries", [])[:5]:
+        lines.append(
+            f"  - ⚠️ [{finding['region']}] reads as a chat event "
+            f"({', '.join(finding['markers'])}): {finding['entry']}"
+        )
+    for finding in memory.get("stale_path_entries", [])[:5]:
+        lines.append(
+            f"  - ⚠️ [{finding['region']}] missing `{finding['path']}`: "
+            f"{finding['entry']}"
+        )
+    for finding in memory.get("superseded_state_candidates", [])[:5]:
+        lines.append(
+            f"  - ℹ️ [{finding['region']}] {len(finding['entries'])} entries about "
+            f"`{finding['subject']}`; check whether one supersedes the other"
+        )
+
+    lines.extend(
+        [
             "",
             "## 6. Background Automation",
             (

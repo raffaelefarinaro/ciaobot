@@ -144,6 +144,32 @@ pub async fn startup_status(runtime: &RuntimeConfig) -> Result<StartupStatus, St
         .map_err(|error| error.to_string())
 }
 
+fn force_disconnect_payload() -> Value {
+    serde_json::json!({"force": true})
+}
+
+/// Promote this node to host without contacting the configured remote host.
+///
+/// This is the local escape hatch for a client that is stuck waiting for its
+/// host. The endpoint is loopback-only and already supports unauthenticated
+/// force handover for exactly this recovery path.
+pub async fn disconnect_from_host(runtime: &RuntimeConfig) -> Result<(), String> {
+    let url = runtime
+        .server_url
+        .join("api/node/handover")
+        .map_err(|error| error.to_string())?;
+    http()
+        .post(url)
+        .timeout(Duration::from_secs(30))
+        .json(&force_disconnect_payload())
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 async fn menubar_chats(runtime: &RuntimeConfig) -> Result<MenubarChats, String> {
     let url = runtime
         .server_url
@@ -286,5 +312,13 @@ mod tests {
         assert_eq!(status.node_role, "host");
         assert_eq!(status.active_peer_url, "");
         assert_eq!(status.desktop_api_version, Some(1));
+    }
+
+    #[test]
+    fn force_disconnect_only_requests_local_promotion() {
+        assert_eq!(
+            force_disconnect_payload(),
+            serde_json::json!({"force": true})
+        );
     }
 }

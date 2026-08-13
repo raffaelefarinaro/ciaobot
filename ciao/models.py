@@ -263,3 +263,27 @@ class PermissionRequestEvent(StreamEvent):
     tool_name: str = ""
     tool_input: str = ""
     request_id: str = ""
+
+
+@dataclass(slots=True)
+class ModelCapabilityQuestionEvent(StreamEvent):
+    """Emitted before dispatch when the selected model cannot see images.
+
+    The pre-flight check runs when the user attached images to a turn and
+    the model either is known to lack vision or the fast-path table cannot
+    classify it (ambiguous id), so the engine asks the user to pick a
+    vision-capable model instead of silently dropping the images.
+
+    ``candidates`` are ``[{id, label}, ...]`` model choices on the same
+    backend, best-first; the current model is always the first (disabled)
+    entry so the UI can render it as the active-but-unsuitable choice.
+    ``request_id`` correlates the question to the client's eventual
+    ``capability_response`` reply, which carries ``action`` of ``switch``,
+    ``picker``, or ``cancel``.
+    """
+
+    request_id: str = ""
+    missing: str = ""
+    current_model: str = ""
+    candidates: list = field(default_factory=list)
+    timeout_s: int = 30

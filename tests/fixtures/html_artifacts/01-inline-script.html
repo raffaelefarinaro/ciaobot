@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Artifact check 1: inline script and style</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; padding: 16px; }
+  h1 { font-size: 17px; margin: 0 0 10px; }
+  .verdict { font-weight: 600; padding: 8px 10px; border-radius: 5px; }
+  .pass { background: #d8f3dc; color: #1b4332; }
+  .fail { background: #ffd7d7; color: #7f1d1d; }
+  #styled { color: #e0492f; }
+</style>
+</head>
+<body>
+<h1>Check 1: inline script and inline style</h1>
+
+<p>Inline style: <span id="styled">this text must be orange-red, not default black.</span></p>
+
+<p id="js" class="verdict fail">FAIL — inline script did not run. Nothing set this text,
+which means <code>script-src 'unsafe-inline'</code> is missing from the artifact CSP.</p>
+
+<p>Click test: <button id="btn" type="button">count</button> <span id="count">0</span></p>
+
+<script>
+  // If the CSP is right, this replaces the FAIL message above.
+  const el = document.getElementById('js')
+  el.className = 'verdict pass'
+  el.textContent = 'PASS — inline script ran and could touch the DOM.'
+
+  let n = 0
+  document.getElementById('btn').addEventListener('click', () => {
+    n += 1
+    document.getElementById('count').textContent = String(n)
+  })
+</script>
+</body>
+</html>

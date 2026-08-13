@@ -20,11 +20,7 @@ class FakeConfig:
         self.insights_model_override = ""
         self.insights_model = "deepseek-v4-flash:0731-cloud"
 
-        self.transcription_engine = "cloud"
-        self.transcription_local_model = "mlx-community/whisper-large-v3-turbo"
-        self.transcription_model = "gpt-transcribe"
-        self.tts_engine = "cloud"
-        self.tts_cloud_voice = "nova"
+        self.transcription_locale = "en-US"
         self.tts_local_voice = "af_heart"
         self.critique_models = ""
         self.ollama = OllamaSettings(
@@ -92,12 +88,10 @@ def test_update_persists_and_roundtrips(tmp_path):
     assert AppSettingsStore(path).settings.insights_model == "gemma4:12b-it-qat"
 
 
-def test_update_rejects_bad_engine(tmp_path):
+def test_update_rejects_a_non_string_value(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
-    with pytest.raises(ValueError):
-        store.update({"transcription_engine": "telepathy"})
-    with pytest.raises(ValueError):
-        store.update({"tts_engine": "telepathy"})
+    # Engine-value validation went with the cloud engines; type checking is
+    # what is left.
     with pytest.raises(ValueError):
         store.update({"title_model": 3})
 
@@ -106,30 +100,28 @@ def test_apply_overlays_and_clear_restores_defaults(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     config = FakeConfig()
 
-    store.update({"insights_model": "gemma4:12b-it-qat", "transcription_engine": "local"})
+    store.update({"insights_model": "gemma4:12b-it-qat", "transcription_locale": "it-IT"})
     store.apply_to_config(config)
     assert config.insights_model_override == "gemma4:12b-it-qat"
-    assert config.transcription_engine == "local"
+    assert config.transcription_locale == "it-IT"
 
     # Clearing restores the env-backed default captured on first apply.
-    store.update({"insights_model": "", "transcription_engine": ""})
+    store.update({"insights_model": "", "transcription_locale": ""})
     store.apply_to_config(config)
     assert config.insights_model_override == ""
-    assert config.transcription_engine == "cloud"
+    assert config.transcription_locale == "en-US"
 
 
 def test_tts_overrides_apply_and_clear(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     config = FakeConfig()
 
-    store.update({"tts_engine": "local", "tts_local_voice": "im_nicola"})
+    store.update({"tts_local_voice": "im_nicola"})
     store.apply_to_config(config)
-    assert config.tts_engine == "local"
     assert config.tts_local_voice == "im_nicola"
 
-    store.update({"tts_engine": "", "tts_local_voice": ""})
+    store.update({"tts_local_voice": ""})
     store.apply_to_config(config)
-    assert config.tts_engine == "cloud"
     assert config.tts_local_voice == "af_heart"
 
 

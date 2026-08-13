@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { readChatDraft, writeChatDraft } from './chatDrafts'
+import {
+  readChatDraft,
+  readSentPromptHistory,
+  recordSentPrompt,
+  writeChatDraft,
+} from './chatDrafts'
 
 class MemoryStorage {
   private values = new Map<string, string>()
@@ -49,4 +54,25 @@ describe('chat drafts', () => {
     storage.setItem('ciao-chat-drafts', '{not-json')
     expect(readChatDraft('chat-b', storage)).toBe('')
   })
+
+  it('keeps a deduplicated, bounded sent-prompt history per chat', () => {
+    const storage = new MemoryStorage()
+
+    for (let i = 0; i < 51; i++) recordSentPrompt('chat-a', `prompt ${i}`, storage)
+    recordSentPrompt('chat-a', 'prompt 20', storage)
+    recordSentPrompt('chat-b', 'other chat', storage)
+
+    expect(readSentPromptHistory('chat-a', storage)).toHaveLength(50)
+    expect(readSentPromptHistory('chat-a', storage)[0]).toBe('prompt 1')
+    expect(readSentPromptHistory('chat-a', storage).at(-1)).toBe('prompt 20')
+    expect(readSentPromptHistory('chat-b', storage)).toEqual(['other chat'])
+  })
+
+  it('ignores malformed history values', () => {
+    const storage = new MemoryStorage()
+    storage.setItem('ciao-chat-sent-prompts', '{"chat-a":["valid",42,null]}')
+
+    expect(readSentPromptHistory('chat-a', storage)).toEqual(['valid'])
+  })
 })
+

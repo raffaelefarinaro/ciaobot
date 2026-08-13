@@ -8,81 +8,55 @@ Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspac
 
 ## Install
 
-**macOS 13+ ([Homebrew](https://brew.sh))** — recommended; installs
-`Ciaobot.app` plus the engine:
+**macOS 13+** — the supported end-user installation is:
 
 ```bash
-brew install raffaelefarinaro/ciaobot/ciaobot
-brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-Installing the fully qualified formula first grants Homebrew trust only to the
-Ciaobot engine; installing the fully qualified cask grants trust only to the
-desktop app. The cask then places `Ciaobot.app` in `/Applications`.
+The installer is per-user: it puts a self-contained `Ciaobot.app` in
+`~/Applications`, preserves an existing configured workspace, and starts the
+tray app through its per-user `Ciaobot` LaunchAgent. On a clean machine it
+starts bootstrap mode instead, so the first-run
+onboarding asks where to create or adopt a workspace and which password to set;
+it never hides a generated password in a new directory. It bundles Ciaobot's
+Python runtime and dependencies, so Python, `pip`, Homebrew, `sudo`, and a
+separate DMG are not required.
 
-The app is ad-hoc signed and not notarized, so macOS blocks the first launch
-with *"Apple could not verify Ciaobot is free of malware"*. Open `Ciaobot.app`
-once to trigger the block, then go to **System Settings → Privacy & Security**
-and scroll to **Security**:
+The installer verifies the signed release archive before extracting it. Ciaobot
+is currently ad-hoc signed and not notarized, so macOS may still show a
+Gatekeeper warning when the app is first opened. Apple Developer credentials
+are not required; release signatures protect the artifact but do not provide
+Apple trust.
 
-<img src="docs/gatekeeper-open-anyway.png" alt="System Settings, Privacy &amp; Security, Security section, with the Open Anyway button highlighted" width="620">
-
-Click **Open Anyway**, authenticate, then launch the app again and confirm
-**Open**. Two things worth knowing: Control-clicking the app and choosing
-**Open** does *not* clear this dialog — Apple removed that bypass in macOS 15 —
-and the **Open Anyway** button only appears for about an hour after a blocked
-launch, so re-trigger the block if you don't see it. You may need to repeat this
-after an app update or a macOS upgrade. Do not disable Gatekeeper. First launch
-opens the setup wizard when no server is configured.
-
-Already using the Homebrew engine from an earlier release? Move to the app
-without recreating your workspace:
+Updates normally come from the app's **Update…** action, which replaces the app
+and bundled engine together. Re-running the installer is also supported for
+recovery or a pinned version:
 
 ```bash
-brew update
-brew trust --formula raffaelefarinaro/ciaobot/ciaobot
-brew upgrade ciaobot
-brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
-open -a Ciaobot
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh \
+  | sh -s -- --version 0.8.0
 ```
 
-If a copy of `Ciaobot.app` is already in `/Applications` that Homebrew did not
-install — from the 0.6.0 DMG, say — the cask stops with `It seems there is
-already an App at '/Applications/Ciaobot.app'`. Quit Ciaobot and add `--force`
-so the cask adopts and replaces it; the bundle holds no user data, so your
-workspace, config, and desktop preferences survive:
+For security-conscious users, download `install.sh` first, inspect it, and run
+it locally instead of piping it directly to `sh`.
 
-```bash
-brew install --cask --force raffaelefarinaro/ciaobot/ciaobot-desktop
-```
-
-Upgrade the engine in the same sitting. The engine and app ship from one tag and
-are meant to report the same version; a split between them surfaces as an opaque
-`Invalid desktop-service response`, because the app resolves the `ciao`
-executable from fixed Homebrew paths.
-
-The first app launch reuses the existing workspace and server LaunchAgent,
-disables the legacy menu-bar helper, and moves the old `Ciaobot Server.app` to
-the Trash once the engine is reachable. Browser-installed PWA shortcuts are
-left alone. Future releases use the app's single **Update…** action to update
-the engine and desktop app together.
-
-**Any platform ([PyPI](https://pypi.org/project/ciaobot/))** — or macOS without Homebrew; requires Python 3.12 or newer:
-
-```bash
-python3.13 -m venv ~/.ciaobot-venv
-~/.ciaobot-venv/bin/pip install ciaobot
-~/.ciaobot-venv/bin/ciao run
-```
+Existing workspace files, credentials, schedules, and runtime data stay in
+place when the installer replaces an older installation. Future updates use
+the app updater or this installer. Browser-installed PWA shortcuts are left
+alone.
 
 Then open `http://localhost:8443` and follow the setup wizard:
 
 - **Workspace folder** (default `~/ciaobot`) — your second brain (`memory-vault/`) plus app config and runtime state. Sync this folder (GitHub, Drive, iCloud, …) so your vault follows you across machines.
+- **Dashboard password** — Ciaobot is password-protected by default: this is what you type to open it, and what another device needs to connect as a client. Change it later in Settings → PWA password.
 - **Model provider** — Claude Code, Codex, or another configured backend.
 
-The wizard writes config, initializes the workspace as a git repo (with a `.gitignore` for secrets and runtime state), and installs the macOS engine LaunchAgent. A cask installation uses `Ciaobot.app`; package-only installs retain the legacy recovery launcher during the migration release.
+The wizard writes config, initializes the workspace as a git repo (with a
+`.gitignore` for secrets and runtime state), and keeps the bundled engine
+LaunchAgent in sync.
 
-For scripted setups: `ciao setup --workspace <dir>`. If a setup link returns `invalid setup token`, mint a fresh one with `ciao setup-url --workspace <dir>`.
+For scripted setups: `ciao setup --workspace <dir> --auth-token <password>` (a random password is generated into `.env` when omitted; `--no-auth` opts out of protection entirely). If a setup link returns `invalid setup token`, mint a fresh one with `ciao setup-url --workspace <dir>`.
 
 Contributors running from a git checkout: see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
@@ -126,7 +100,7 @@ What that looks like in practice:
 - **A vault you own** — durable knowledge as plain markdown with wikilinks and an `INDEX.md`, inspired by [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Browse in [Obsidian](https://obsidian.md/) or any editor; sync via GitHub, Drive, or iCloud.
 - **Skills, subagents, and commands** — packaged defaults, extensible from Settings or workspace files (see [What ships by default](#what-ships-by-default)).
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
-- **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS, `Ciaobot.app` owns the window, menu bar, native notifications, and desktop updates while the engine runs as a background service.
+- **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app app updates. On macOS, `Ciaobot.app` owns the window, menu bar, native notifications, and desktop updates while the bundled engine runs as a background service.
 - **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
 - **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, delegates, schedules, loops, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
 
@@ -148,21 +122,22 @@ When your message mentions a name that appears in the vault index, the agent get
 
 - Sidebar workspaces per life area (personal, work, a client) — each with its own vault, projects, and default model.
 - Projects group related chats and inject durable notes and context into every turn.
-- Comment on any passage of a reply — select text, attach a note, and it rides along with your next prompt; queue follow-ups while the agent is still working.
+- Comment on any passage of a reply — select text, attach a note (typed or dictated), and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
 - Delegates: a chat's agent spawns writable delegate chats (own model, own resumable session, full tool access) to work in parallel, and is woken with a fresh turn when each finishes. Capped at 6 per chat; delegates cannot nest.
 
 **Voice — dictation and read-aloud**
 
-- Speech-to-text dictation in any chat: cloud transcription (OpenAI `gpt-transcribe`, overridable via `CIAO_TRANSCRIPTION_MODEL`) or free on-device via [mlx-whisper](https://pypi.org/project/mlx-whisper/) (Apple Silicon).
-- Text-to-speech read-aloud of replies: cloud voices or free on-device via [Kokoro](https://pypi.org/project/kokoro-onnx/); local models download on first use and are re-installed automatically after app upgrades.
+- Speech-to-text dictation in any chat, free and on-device using macOS speech recognition (macOS 26+, nothing to download, no API key).
+- Text-to-speech read-aloud of replies uses the free on-device macOS system voice through a small helper bundled in `Ciaobot.app`. There is no cloud voice, model download, or optional package to install. For better read-aloud, [add a Premium voice](https://support.apple.com/guide/mac-help/mchlp2290/mac) in System Settings — Ciaobot refreshes the installed voice list and uses the highest-quality voice you have installed.
 
 **Files and documents**
 
 - Completed turns surface touched files as clickable `Outputs` chips below the final reply. Expand `Activity` to inspect the chronological notes, tool calls, and file cards; click a file for history, diff, and restore.
-- Pin a document beside the chat and add line-level comments on the preview (attached to your next message, like chat comments).
+- Pin a document beside the chat and add line-level comments on the preview, dictated or typed (attached to your next message, like chat comments).
 - Rich previews: images inline, PDFs in a built-in viewer, PowerPoint (`.pptx`) converted to PDF for display (requires LibreOffice on the machine running Ciaobot).
+- Interactive HTML artifacts: ask for a dashboard, chart, annotated diff, timeline, or audio comparison and you get one self-contained `.html` page rendered live beside the chat, with a Preview/Code toggle. It runs in a sandboxed frame with no network access, so an artifact works offline and cannot reach the app's API or your session. Audio and video must be embedded as `data:` URLs.
 - Create, edit, and restore vault files from the UI, with snapshots behind every agent edit.
 
 **Memory, vault, and insight extraction**
@@ -182,13 +157,15 @@ When your message mentions a name that appears in the vault index, the agent get
 
 - Stock skills, subagents, and slash commands ship with the app; same-named workspace versions override them.
 - Install skills from GitHub repositories; they refresh automatically on restart.
+- Run declarative live evaluations for one skill or subagent through an isolated full chat, with deterministic output and tool assertions.
 - A weekly skill-evolution routine proposes improvements from real usage — reviewable proposals, never silent edits.
 
 **Providers and models**
 
 - Claude Code or OpenAI Codex with the subscription login you already have; Ollama (cloud or local) and OpenRouter as API backends.
 - Claude shell commands stay attached to the active turn until they return a result. Background subagents remain asynchronous and visible in the chat while they run.
-- haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models ([apfel](https://github.com/Arthur-Ficial/apfel)).
+- haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models (Apple Intelligence, no install required).
+- Image-capability pre-flight: when a turn carries images and the selected model can't see them, the chat pauses and offers same-backend vision models to switch to, instead of failing mid-turn or silently dropping the images.
 
 **Google Workspace**
 
@@ -196,7 +173,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 **App surface**
 
-- Installable PWA with web-push notifications and in-app package updates.
+- Installable PWA with web-push notifications and in-app app updates.
 - macOS desktop app: one Dock window and menu-bar companion with native notifications, updates, and a launchd-managed engine.
 - A local HTTP API an in-chat agent can drive (create chats, subagents, commands — see [PWA_API.md](PWA_API.md)).
 
@@ -231,7 +208,7 @@ Recurring schedules that ship enabled ([ciao/stock/schedules.json](ciao/stock/sc
 
 | Routine | Cadence | What it does |
 |---|---|---|
-| Memory curation | Daily | Reviews recent archived chats, memory proposals, and learnings; updates vault pages and `Workspace/Learnings.md`. Removes bounded-memory entries after a valid `[expires: YYYY-MM-DD]` date and reports malformed expiration tags without guessing. |
+| Memory curation | Daily | Reviews recent archived chats, memory proposals, and learnings; updates vault pages and `Workspace/Learnings.md`. Removes bounded-memory entries after a valid `[expires: YYYY-MM-DD]` date and reports malformed expiration tags without guessing. Then runs `ciao memory-audit --json` and repairs rot in the always-loaded regions: entries that record a chat event instead of a current value move to `Workspace/Learnings.md`, entries citing a path that no longer exists get corrected or dropped, and a subject holding two competing values gets collapsed to the current one. |
 | Workspace hygiene | Weekly (Sun) | Regenerates the vault index with `ciao vault-index --write`, then runs `ciao os-audit --json`. It can repair low-risk link and index drift, then verifies the remaining findings. |
 | Skill evolution | Weekly (Sun) | Drafts skill-improvement proposals from recent usage; never applies them automatically. |
 
@@ -245,7 +222,7 @@ Use the access you already have:
 - **OpenAI Codex** — `codex login`, including eligible ChatGPT subscription accounts.
 - **Ollama** — cloud or local daemon.
 - **OpenRouter** — `OPENROUTER_API_KEY`.
-- **On-device models** — for lightweight tasks where available: titles via [apfel](https://github.com/Arthur-Ficial/apfel), speech via [mlx-whisper](https://pypi.org/project/mlx-whisper/), and similar.
+- **On-device models** — for lightweight tasks where available: chat titles via Apple's on-device Foundation Model, dictation and read-aloud via the built-in macOS speech frameworks. All of it ships with macOS; none of it needs installing.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for env vars, OAuth, and per-task model routing (titles, insights, voice).
 

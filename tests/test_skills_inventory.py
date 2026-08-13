@@ -98,6 +98,16 @@ def test_build_skill_inventory_reports_codex_install_target(tmp_path: Path) -> N
     assert inventory["skills"][0]["installed_targets"] == ["claude", "codex"]
 
 
+def test_build_skill_inventory_can_omit_skill_content(tmp_path: Path) -> None:
+    _write_skill(tmp_path / "skills", "demo", "Demo")
+    _write_skill(tmp_path / ".claude" / "skills", "demo", "Demo")
+
+    inventory = build_skill_inventory(tmp_path, include_content=False)
+
+    assert inventory["skills"][0]["description"] == "Demo"
+    assert "content" not in inventory["skills"][0]
+
+
 def test_build_skill_inventory_reads_agents_canonical_github_skill(tmp_path: Path) -> None:
     _write_skill(tmp_path / ".agents" / "skills", "brainstorming", "Installed for Codex")
     tmp_path.joinpath("skills-lock.json").write_text(

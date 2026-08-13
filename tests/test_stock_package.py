@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from fnmatch import fnmatchcase
 from importlib import resources
 from pathlib import Path
 
@@ -46,8 +47,9 @@ def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
     assert stock.joinpath("deploy", "com.ciao.server.plist.tmpl").is_file()
     assert stock.joinpath("schedules", "weekly-review-template.md").is_file()
     plist = stock.joinpath("deploy", "com.ciao.server.plist.tmpl").read_text(encoding="utf-8")
-    assert "<string>ciao.cli</string>" in plist
-    assert "<string>run</string>" in plist
+    assert "<string>{{CIAO_EXECUTABLE}}</string>" in plist
+    assert "{{LAUNCHD_PROGRAM_ARGUMENTS}}" in plist
+    assert "<string>ciao.cli</string>" not in plist
 
     schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))
     assert {entry["schedule_id"] for entry in schedules["schedules"]} == EXPECTED_SYSTEM_SCHEDULES
@@ -97,8 +99,17 @@ def test_pyproject_packages_stock_data() -> None:
     pyproject = Path(__file__).parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
 
-    assert "ciao.stock" in data["tool"]["setuptools"]["packages"]
-    package_data = data["tool"]["setuptools"]["package-data"]
+    setuptools = data["tool"]["setuptools"]
+    # Either an explicit `packages` list (legacy) or a packages.find pattern
+    # that actually matches the stock subpackage.
+    if "packages" in setuptools and isinstance(setuptools["packages"], list):
+        assert "ciao.stock" in setuptools["packages"]
+    else:
+        find_cfg = setuptools.get("packages", {}).get("find", {})
+        includes = find_cfg.get("include", [])
+        assert any(fnmatchcase("ciao.stock", include) for include in includes), find_cfg
+
+    package_data = setuptools["package-data"]
     assert "agents/*.md" in package_data["ciao.stock"]
     assert "commands/*.md" in package_data["ciao.stock"]
     assert "skills/.gitkeep" in package_data["ciao.stock"]

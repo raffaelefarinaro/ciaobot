@@ -1,8 +1,8 @@
-const CACHE_NAME = 'ciaobot-v0.7.1'
+const CACHE_NAME = 'ciaobot-v0.8.0'
 const STATIC_ASSETS = ['/', '/index.html', '/manifest.json']
 const ICON = '/icons/icon-192.png'
 const BADGE = '/icons/icon-192.png'
-const UNREAD_CACHE = 'ciaobot-unread-v0.7.1'
+const UNREAD_CACHE = 'ciaobot-unread-v0.8.0'
 const UNREAD_KEY = '/__unread__'
 
 self.addEventListener('install', (event) => {
@@ -65,23 +65,43 @@ async function updateBadge(state) {
   return total
 }
 
+// Not every push belongs to a chat — the Google Workspace token-health push has
+// no chat_id — so unread counts for those live under one shared key.
+function unreadKey(chatId) {
+  return chatId || '_'
+}
+
 async function incUnread(chatId) {
   const state = await readUnread()
-  const key = chatId || '_'
+  const key = unreadKey(chatId)
   state[key] = (state[key] || 0) + 1
   await writeUnread(state)
   await updateBadge(state)
 }
 
+// Targeted, never wildcard. '' used to mean "clear everything" here, which made
+// every caller that forwarded a notification's chat_id one missing field away
+// from wiping the user's entire unread state: the chat-less token-health banner
+// did exactly that when tapped or swiped. Clearing all of it is a separate,
+// explicit call now, and an empty id clears the shared bucket it was counted in.
 async function clearUnread(chatId) {
   const state = await readUnread()
-  if (chatId) {
-    delete state[chatId]
-  } else {
-    for (const k of Object.keys(state)) delete state[k]
-  }
+  delete state[unreadKey(chatId)]
   await writeUnread(state)
   await updateBadge(state)
+}
+
+async function clearAllUnread() {
+  await writeUnread({})
+  await updateBadge({})
+}
+
+// Everything one delivered notification should clear. Sibling banners and the
+// pending target are per-chat, so they only apply when there is a chat.
+async function clearNotificationUnread(chatId) {
+  await clearUnread(chatId)
+  if (!chatId) return
+  await Promise.all([closeNotifications(chatId), clearPendingTarget(chatId)])
 }
 
 // Replace the SW unread cache wholesale with the page's view of truth.
@@ -128,14 +148,27 @@ async function getPendingTarget() {
   }
 }
 
-async function clearPendingTarget() {
+async function clearPendingTarget(chatId = '') {
   try {
+    if (chatId && (await getPendingTarget()) !== chatId) return
     const cache = await caches.open(UNREAD_CACHE)
     await cache.delete(PENDING_TARGET_KEY)
   } catch { /* ignore */ }
 }
 
 // --- Push -------------------------------------------------------------------
+
+async function closeNotifications(chatId = '') {
+  if (!self.registration.getNotifications) return
+  try {
+    const notifications = await self.registration.getNotifications(
+      chatId ? { tag: chatId } : {}
+    )
+    for (const notification of notifications) notification.close()
+  } catch {
+    // Notification Center access is not available on every browser/version.
+  }
+}
 
 self.addEventListener('push', (event) => {
   let data = {}
@@ -146,6 +179,14 @@ self.addEventListener('push', (event) => {
   }
   const title = data.title || 'ciaobot'
   const chatId = data.chat_id || ''
+  if (data.kind === 'clear') {
+    event.waitUntil(Promise.all([
+      closeNotifications(chatId),
+      clearUnread(chatId),
+      clearPendingTarget(chatId),
+    ]))
+    return
+  }
   const options = {
     body: data.body || '',
     icon: ICON,
@@ -172,18 +213,12 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close()
   const chatId = event.notification.data?.chat_id || ''
   if (event.action === 'dismiss') {
-    event.waitUntil(
-      (async () => {
-        await clearUnread(chatId)
-        await clearPendingTarget()
-      })()
-    )
+    event.waitUntil(clearNotificationUnread(chatId))
     return
   }
   const url = chatId ? `/chat/${encodeURIComponent(chatId)}` : '/'
   event.waitUntil((async () => {
-    await clearUnread(chatId)
-    await clearPendingTarget()
+    await clearNotificationUnread(chatId)
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
     for (const client of clients) {
       if ('focus' in client) {
@@ -207,13 +242,28 @@ self.addEventListener('notificationclick', (event) => {
   })())
 })
 
+self.addEventListener('notificationclose', (event) => {
+  const chatId = event.notification.data?.chat_id || ''
+  event.waitUntil(clearNotificationUnread(chatId))
+})
+
 // Page tells us a chat is now in focus -> clear its badge.
 self.addEventListener('message', (event) => {
   const msg = event.data || {}
   if (msg.type === 'chat-focused') {
-    event.waitUntil(clearUnread(msg.chat_id || ''))
+    event.waitUntil(Promise.all([
+      clearUnread(msg.chat_id || ''),
+      closeNotifications(msg.chat_id || ''),
+      clearPendingTarget(msg.chat_id || ''),
+    ]))
   } else if (msg.type === 'clear-badge') {
-    event.waitUntil(clearUnread(''))
+    // The one caller that genuinely means everything, and now the only one that
+    // can say so.
+    event.waitUntil(Promise.all([
+      clearAllUnread(),
+      closeNotifications(''),
+      clearPendingTarget(),
+    ]))
   } else if (msg.type === 'sync-unread') {
     // Wholesale reconciliation: page sends the authoritative unread map
     // (one entry per unread chat). Overwrites any stale push-incremented

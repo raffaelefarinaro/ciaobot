@@ -19,6 +19,9 @@
         <p class="line line--sys">
           Ciaobot is finishing setup. If you started it with ciao run, keep that terminal open until it says setup is complete and Ciaobot is moving to the background service. Then close the terminal and open Ciaobot Server.app.
         </p>
+        <p class="line line--sys">
+          When it comes back, log in with the password you just set.
+        </p>
         <div class="spinner-container">
           <span class="caret"></span>
         </div>
@@ -133,6 +136,35 @@
 
 
         <div class="form-group">
+          <label for="setup-password">Dashboard Password</label>
+          <input
+            id="setup-password"
+            v-model="password"
+            type="password"
+            class="form-input"
+            placeholder="choose a password"
+            autocomplete="new-password"
+            required
+            :disabled="loading"
+          />
+          <label for="setup-password-confirm">Confirm Password</label>
+          <input
+            id="setup-password-confirm"
+            v-model="passwordConfirm"
+            type="password"
+            class="form-input"
+            placeholder="type it again"
+            autocomplete="new-password"
+            required
+            :disabled="loading"
+          />
+          <span class="hint">Ciaobot is password-protected: this is what you type to open it
+            in a browser, and what another device needs to connect as a client. At least
+            {{ minPasswordLength }} characters — you can change it later in Settings → PWA password.</span>
+          <span v-if="passwordProblem" class="hint hint--warn">{{ passwordProblem }}</span>
+        </div>
+
+        <div class="form-group">
           <label>AI Provider Choice</label>
           <span class="hint">Pick one to get started — you can add more providers later in Settings.</span>
           <div class="provider-choices">
@@ -215,17 +247,6 @@
                   :disabled="loading"
                 />
               </div>
-            </div>
-            <div class="checkbox-row">
-              <label class="choice-label">
-                <input
-                  id="setup-auth-required"
-                  type="checkbox"
-                  v-model="authRequired"
-                  :disabled="loading"
-                />
-                Require password for PWA access
-              </label>
             </div>
             <div class="checkbox-row">
               <label class="choice-label">
@@ -439,7 +460,26 @@ const port = ref(8443)
 const python = ref('')
 const provider = ref('claude')
 const apiFallback = ref(false)
-const authRequired = ref(false)
+// Password protection is not optional (server-side too: /api/setup/finish
+// rejects a setup without one), so the wizard asks for it up front instead of
+// hiding a toggle under Advanced.
+const minPasswordLength = 4
+const password = ref('')
+const passwordConfirm = ref('')
+const passwordProblem = computed(() => {
+  const value = password.value
+  if (!value) return ''
+  if (value.length < minPasswordLength) {
+    return `Use at least ${minPasswordLength} characters.`
+  }
+  if (passwordConfirm.value && passwordConfirm.value !== value) {
+    return 'The two passwords do not match.'
+  }
+  return ''
+})
+const passwordReady = computed(
+  () => password.value.length >= minPasswordLength && passwordConfirm.value === password.value,
+)
 const isRestarting = ref(false)
 const workspaceName = ref('personal')
 const copyStatus = ref('')
@@ -615,6 +655,9 @@ const canFinish = computed(() => {
   if (!workspace.value.trim()) {
     return false
   }
+  if (!passwordReady.value) {
+    return false
+  }
   const currentProvider = provider.value
   const providerOk = setupStatus.value?.providers?.[currentProvider]?.ok
   if (!providerOk && !apiFallback.value) {
@@ -653,7 +696,7 @@ async function doFinish() {
       // with a default VAPID subject; no email is collected during setup.
       port: Number(port.value),
       python: python.value || undefined,
-      auth_required: authRequired.value,
+      password: password.value,
       provider: provider.value,
       restart: true,
     }
@@ -1016,6 +1059,9 @@ onUnmounted(() => {
 }
 .hint--muted {
   opacity: 0.75;
+}
+.hint--warn {
+  color: var(--warning);
 }
 
 .detected-workspaces {

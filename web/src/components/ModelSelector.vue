@@ -23,6 +23,10 @@ interface Props {
   placement?: 'bottom-start' | 'bottom-end' | 'top-start' | 'top-end'
   activeModels?: string[]
   triggerless?: boolean
+  // When set, only the section with this key is shown. Used by the
+  // image-capability card's "Open picker" to land the user on the current
+  // backend instead of the full cross-provider list.
+  filterSection?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -70,6 +74,7 @@ const popoverVisible = computed(() => props.triggerless || open.value)
 const filteredSections = computed<ModelSection[]>(() => {
   const q = normalizedQuery.value
   return normalizedSections.value
+    .filter((section) => !props.filterSection || section.key === props.filterSection)
     .map((section) => {
       if (section.disabled) {
         return section
@@ -202,6 +207,12 @@ function scrollActiveIntoView() {
 
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
+    // Claim the key. Dismissing this popover is the whole meaning of the press,
+    // and the global handler in ChatLayout treats an unclaimed Escape as "go
+    // home" - so without this, closing the picker also navigated away, out of
+    // half-finished Settings edits.
+    event.preventDefault()
+    event.stopPropagation()
     close()
     triggerRef.value?.focus()
     return

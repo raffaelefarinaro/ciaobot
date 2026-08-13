@@ -1,10 +1,11 @@
-"""Tests for transcription engine config and the local mlx-whisper path."""
+"""Dictation config and the Apple on-device path (the only engine)."""
 
 from __future__ import annotations
 
 import pytest
 
 import ciao.voice as voice
+from ciao import native_sidecar
 from ciao.config import CiaoConfig
 
 
@@ -18,84 +19,50 @@ def _config(env_extra: dict[str, str] | None = None, tmp_path=None) -> CiaoConfi
     return CiaoConfig.from_env(env)
 
 
-def test_engine_defaults_to_cloud(tmp_path):
-    config = _config(tmp_path=tmp_path)
-    assert config.transcription_engine == "cloud"
-    assert config.transcription_local_model == "mlx-community/whisper-large-v3-turbo"
-    assert config.transcription_model == "gpt-transcribe"
+def test_locale_env_override(tmp_path):
+    config = _config({"CIAO_TRANSCRIPTION_LOCALE": "it-IT"}, tmp_path)
+    assert config.transcription_locale == "it-IT"
 
 
-def test_engine_env_selection(tmp_path):
-    config = _config({"CIAO_TRANSCRIPTION_ENGINE": "local"}, tmp_path)
-    assert config.transcription_engine == "local"
-
-
-def test_engine_env_garbage_falls_back_to_cloud(tmp_path):
-    config = _config({"CIAO_TRANSCRIPTION_ENGINE": "telepathy"}, tmp_path)
-    assert config.transcription_engine == "cloud"
-
-
-def test_local_model_env_override(tmp_path):
-    config = _config(
-        {"CIAO_TRANSCRIPTION_LOCAL_MODEL": "mlx-community/whisper-tiny"}, tmp_path
+def test_apple_transcriber_refuses_when_dictation_is_unavailable(monkeypatch):
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: False)
+    monkeypatch.setattr(
+        voice, "dictation_unavailable_reason", lambda: "requires macOS 26 or newer"
     )
-    assert config.transcription_local_model == "mlx-community/whisper-tiny"
+    with pytest.raises(ValueError, match="requires macOS 26 or newer"):
+        voice.AppleDictationTranscriber("en-US")
 
 
-def test_cloud_model_env_override(tmp_path):
-    config = _config(
-        {"CIAO_TRANSCRIPTION_MODEL": "gpt-4o-mini-transcribe"}, tmp_path
-    )
-    assert config.transcription_model == "gpt-4o-mini-transcribe"
+def test_availability_probes_return_bools():
+    """They shell out to the sidecar, so they must never raise — Settings calls
+    them on every load, including on Linux where there is no sidecar at all."""
+    assert isinstance(voice.apple_dictation_available(), bool)
+    assert isinstance(voice.apple_speech_available(), bool)
+    assert isinstance(voice.dictation_unavailable_reason(), str)
 
 
-@pytest.mark.asyncio
-async def test_voice_transcriber_uses_config_model(tmp_path, monkeypatch):
-    """Regression: VoiceTranscriber must keep config so model isn't AttributeError."""
-    from types import SimpleNamespace
-    from pathlib import Path
-
-    captured: dict = {}
-
-    class FakeResponse:
-        text = "hello from cloud"
-
-    class FakeTranscriptions:
-        async def create(self, **kwargs):
-            captured.update(kwargs)
-            return FakeResponse()
-
-    class FakeAudio:
-        transcriptions = FakeTranscriptions()
-
-    class FakeClient:
-        audio = FakeAudio()
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-    monkeypatch.setattr(voice, "AsyncOpenAI", FakeClient)
-    config = SimpleNamespace(
-        openai_api_key="sk-test",
-        transcription_model="gpt-transcribe",
-    )
-    transcriber = voice.VoiceTranscriber(config)
-    audio_path = Path(tmp_path) / "clip.webm"
-    audio_path.write_bytes(b"fake-audio")
-    text = await transcriber.transcribe(audio_path)
-    assert text == "hello from cloud"
-    assert captured["model"] == "gpt-transcribe"
-    assert captured["response_format"] == "json"
+def test_probe_is_empty_without_a_sidecar(monkeypatch):
+    # Voice keeps a compatibility alias, but the shared probe resolves the
+    # sidecar through native_sidecar directly.
+    monkeypatch.setattr(native_sidecar, "sidecar_path", lambda: None)
+    voice.reset_voice_probe_cache()
+    try:
+        assert voice.apple_dictation_available() is False
+        assert voice.apple_speech_available() is False
+        assert "Ciaobot.app" in voice.dictation_unavailable_reason() or (
+            "macOS" in voice.dictation_unavailable_reason()
+        )
+    finally:
+        voice.reset_voice_probe_cache()
 
 
-def test_mlx_transcriber_requires_package(monkeypatch):
-    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: False)
-    with pytest.raises(ValueError, match="mlx-whisper is not installed"):
-        voice.MlxWhisperTranscriber("mlx-community/whisper-tiny")
-
-
-def test_mlx_whisper_available_is_bool():
-    assert isinstance(voice.mlx_whisper_available(), bool)
+def test_sidecar_path_honours_the_dev_override(tmp_path, monkeypatch):
+    binary = tmp_path / "ciaobot-native"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CIAO_NATIVE_SIDECAR", str(binary))
+    assert voice.sidecar_path() == binary
+    monkeypatch.setenv("CIAO_NATIVE_SIDECAR", str(tmp_path / "missing"))
+    assert voice.sidecar_path() is None
 
 
 def test_ollama_local_env_parsing(tmp_path):
@@ -115,14 +82,27 @@ def test_ollama_local_env_parsing(tmp_path):
     assert "gemma4:12b-it-qat" in config.claude_models
 
 
-async def test_transcribe_voice_local_not_installed(tmp_path, monkeypatch):
-    from pathlib import Path
-    from ciao.web.project_chats import ProjectChatManager
+
+
+def test_dictation_settings_have_no_engine_choice(tmp_path):
+    """Cloud transcription is gone with the openai dependency, so there is one
+    engine and nothing to select."""
+    config = _config(tmp_path=tmp_path)
+    assert config.transcription_locale == "en-US"
+    assert not hasattr(config, "transcription_engine")
+    assert not hasattr(config, "transcription_model")
+    assert not hasattr(config, "openai_api_key")
+
+
+async def test_transcribe_voice_reports_the_reason_when_unavailable(tmp_path, monkeypatch):
     from ciao.sessions import StateStore
     from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
 
-    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: False)
-    
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: False)
+    monkeypatch.setattr(
+        voice, "dictation_unavailable_reason", lambda: "requires macOS 26 or newer"
+    )
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -130,87 +110,37 @@ async def test_transcribe_voice_local_not_installed(tmp_path, monkeypatch):
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        transcription_engine="local",
     )
-    state = StateStore(config.state_path, tmp_path, config.media_root)
-    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
     pcm = ProjectChatManager(
         config,
-        state_store=state,
-        transcript_store=transcripts,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
         path=runtime / "web_projects.json",
     )
-
-    audio_path = tmp_path / "test.webm"
-    audio_path.touch()
-
-    with pytest.raises(ValueError) as exc_info:
-        await pcm.transcribe_voice(audio_path)
-    assert "mlx-whisper is not installed" in str(exc_info.value)
-    assert "Settings → Models" in str(exc_info.value)
-
-
-async def test_transcribe_voice_local_fails(tmp_path, monkeypatch):
-    from pathlib import Path
-    from ciao.web.project_chats import ProjectChatManager
-    from ciao.sessions import StateStore
-    from ciao.transcripts import TranscriptStore
-
-    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: True)
-    
-    class FailingTranscriber:
-        def __init__(self, model):
-            pass
-        async def transcribe(self, path):
-            raise RuntimeError("Out of memory on GPU")
-            
-    monkeypatch.setattr(voice, "MlxWhisperTranscriber", FailingTranscriber)
-
-    runtime = tmp_path / ".runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-    config = CiaoConfig(
-        pwa_auth_token="test-token",
-        workspace_root=tmp_path,
-        state_path=runtime / "state.json",
-        media_root=runtime / "media",
-        transcription_engine="local",
-    )
-    state = StateStore(config.state_path, tmp_path, config.media_root)
-    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
-    pcm = ProjectChatManager(
-        config,
-        state_store=state,
-        transcript_store=transcripts,
-        path=runtime / "web_projects.json",
-    )
-
-    audio_path = tmp_path / "test.webm"
-    audio_path.touch()
+    audio = tmp_path / "test.wav"
+    audio.touch()
 
     with pytest.raises(ValueError) as exc_info:
-        await pcm.transcribe_voice(audio_path)
-    assert "Local voice transcription failed" in str(exc_info.value)
-    assert "Out of memory on GPU" in str(exc_info.value)
-    assert "Settings → Models" in str(exc_info.value)
+        await pcm.transcribe_voice(audio)
+    # No cloud fallback left, so the message has to name what is wrong.
+    assert "requires macOS 26 or newer" in str(exc_info.value)
 
 
-async def test_transcribe_voice_cloud_model_and_cost(tmp_path, monkeypatch):
-    from pathlib import Path
-    from ciao.web.project_chats import ProjectChatManager
+async def test_transcribe_voice_is_free(tmp_path, monkeypatch):
     from ciao.sessions import StateStore
     from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
 
-    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: False)
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
 
     class FakeTranscriber:
-        def __init__(self, config):
-            self._config = config
+        def __init__(self, locale):
+            assert locale == "en-US"
 
         async def transcribe(self, path):
             return "transcribed text"
 
-    monkeypatch.setattr(voice, "VoiceTranscriber", FakeTranscriber)
-
+    monkeypatch.setattr(voice, "AppleDictationTranscriber", FakeTranscriber)
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -218,24 +148,15 @@ async def test_transcribe_voice_cloud_model_and_cost(tmp_path, monkeypatch):
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        transcription_engine="cloud",
-        transcription_model="gpt-transcribe",
-        openai_api_key="sk-test",
     )
-    state = StateStore(config.state_path, tmp_path, config.media_root)
-    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
     pcm = ProjectChatManager(
         config,
-        state_store=state,
-        transcript_store=transcripts,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
         path=runtime / "web_projects.json",
     )
+    audio = tmp_path / "test.wav"
+    audio.touch()
 
-    audio_path = tmp_path / "test.webm"
-    # 160000 bytes ≈ 10 s at the 16000 B/s OGG duration heuristic.
-    audio_path.write_bytes(b"x" * 160000)
-
-    text, cost = await pcm.transcribe_voice(audio_path)
-    assert text == "transcribed text"
-    # gpt-transcribe at $0.0045/min: 10 s → 10/60 * 0.0045.
-    assert cost == pytest.approx(10 / 60 * 0.0045)
+    text, cost = await pcm.transcribe_voice(audio)
+    assert (text, cost) == ("transcribed text", 0.0)

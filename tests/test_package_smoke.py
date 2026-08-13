@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import importlib.util
+import subprocess
 import sys
 import tomllib
+import zipfile
 from pathlib import Path
+
+import pytest
 
 from ciao.package_smoke import run_package_smoke
 
@@ -38,7 +43,12 @@ def test_package_smoke_runs_build_install_and_installed_probe(tmp_path: Path) ->
         repo,
     ) in commands
     assert any(cmd[:3] == [sys.executable, "-m", "venv"] for cmd, _cwd in commands)
-    assert any(cmd[1:3] == ["-m", "pip"] and "ciao-0.2.0-py3-none-any.whl" in cmd[-1] for cmd, _cwd in commands)
+    assert any(
+        cmd[1:3] == ["-m", "pip"]
+        and "--force-reinstall" in cmd
+        and "ciao-0.2.0-py3-none-any.whl" in cmd[-1]
+        for cmd, _cwd in commands
+    )
     assert any(cmd[1] == "-c" and "import ciao" in cmd[2] for cmd, _cwd in commands)
     assert any(cmd[1] == "-c" and "if True:" in cmd[2] for cmd, _cwd in commands)
 
@@ -68,3 +78,46 @@ def test_pyproject_ships_pwa_static_files() -> None:
     package_data = data["tool"]["setuptools"]["package-data"]
 
     assert "static/**/*" in package_data["ciao.web"]
+
+
+@pytest.mark.skipif(importlib.util.find_spec("build") is None, reason="build is required")
+def test_release_wheel_bundles_every_ciao_module(tmp_path: Path) -> None:
+    """Build the release wheel and keep its Python modules aligned with ciao/."""
+    repo = Path(__file__).resolve().parents[1]
+    outdir = tmp_path / "wheels"
+    outdir.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--outdir",
+            str(outdir),
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"python -m build failed:\n{result.stdout}\n{result.stderr}"
+
+    wheels = sorted(outdir.glob("*.whl"))
+    assert wheels, f"no wheel produced in {outdir}"
+
+    ciao_root = repo / "ciao"
+    expected_modules = {
+        path.relative_to(repo).as_posix()
+        for path in ciao_root.rglob("*.py")
+        if path.name != "__init__.py"
+        and not any(part.startswith("_") for part in path.relative_to(ciao_root).parts)
+    }
+    assert "ciao/native_sidecar.py" in expected_modules
+
+    with zipfile.ZipFile(wheels[-1]) as wheel:
+        bundled = set(wheel.namelist())
+
+    missing = sorted(expected_modules - bundled)
+    assert not missing, f"wheel is missing modules: {missing}"
+    assert "ciao/native_sidecar.py" in bundled

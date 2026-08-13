@@ -12,7 +12,7 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. When the real Tauri `Ciaobot.app` is installed, setup does not generate or load the legacy rumps agent or `Ciaobot Server.app`; package-only installs retain those assets for the migration/rollback window. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
+`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. Setup no longer generates the retired rumps agent or `Ciaobot Server.app`; it removes them when an older install left them behind. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
 Provider settings for custom compatible endpoints are persisted in the tracked workspace file `.ciao/custom_providers.json`; bearer tokens are kept separately in the gitignored `.runtime/custom_provider_tokens.json` and are never committed or returned by the API. Focused provider tests belong in `tests/test_custom_providers.py`.
 
@@ -40,6 +40,8 @@ ciao package-smoke --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
 ciao auth codex --print-only               # show Codex / ChatGPT login command
 ciao auth ollama                           # run provider login helper
+ciao scaffold eval example --workspace .  # create evals/example.json
+ciao eval --suite evals/example.json --workspace .
 ```
 
 ### macOS venv workarounds
@@ -51,21 +53,25 @@ On recent macOS, `scripts/run-ciao.sh` and the `scripts/dev.sh` wrapper source `
 
 No manual step is needed; `ensure-deps.sh` handles both. If you set up the venv by hand and hit either error, run `scripts/ensure-deps.sh` once to repair `activate`.
 
-### Homebrew distribution
+### End-user distribution
 
-macOS users can install from the [homebrew-ciaobot](https://github.com/raffaelefarinaro/homebrew-ciaobot) tap:
-
-```bash
-brew install raffaelefarinaro/ciaobot/ciaobot
-```
-
-The formula template lives in `deploy/homebrew/ciaobot.rb`. Regenerate it with:
+The supported macOS release path is the one-line installer:
 
 ```bash
-./scripts/update-homebrew-tap.sh <version> <wheel-sha256> <desktop-dmg-sha256>
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-On each GitHub release, `publish.yml` updates the tap automatically. Add a repo-scoped `HOMEBREW_TAP_GITHUB_TOKEN` secret to this repository so the workflow can push to `homebrew-ciaobot` (the default `GITHUB_TOKEN` cannot write across repos).
+The installer downloads the signed universal app archive, verifies it with the
+published native verifier, and installs the bundled runtime into `Ciaobot.app`.
+When a configured workspace is already referenced by the LaunchAgent, it
+preserves that workspace and password; on a clean machine it leaves setup to
+the app's bootstrap onboarding rather than generating a hidden password. It
+does not require Python, Homebrew, or sudo. A DMG is intentionally not built or
+attached to releases.
+
+The source template is `scripts/install.sh`. The release workflow substitutes
+the verifier checksum and attaches `install.sh`, the verifier, the signed app
+archive, its signature, and `latest.json`.
 
 ## Branching and releases
 
@@ -75,15 +81,17 @@ On each GitHub release, `publish.yml` updates the tap automatically. Add a repo-
 - **Release prep:** from a clean checkout, run:
 
 ```bash
-scripts/prepare-release --apply --create-pr --ready
+scripts/prepare-release --apply --run-release-evals --create-pr --ready
 ```
 
   That cuts `release/vX.Y.Z` from `develop`, aligns the Python, PWA, desktop
   npm/Cargo/Tauri versions and lockfiles, refreshes `CHANGELOG.md`, runs release
-  checks, and opens a PR into `main`. Use `--bump minor` or `--version X.Y.Z`
-  when needed.
+  checks, runs the Claude/Codex release scorecard, commits sanitized evidence
+  under `release-evidence/vX.Y.Z/`, and opens a PR into `main`. Use
+  `--bump minor` or `--version X.Y.Z` when needed. Live release evals require
+  both provider logins and may spend provider tokens.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the wheel, publishes to PyPI, and updates the Homebrew tap. A follow-up job merges `main` back into `develop`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA, embedded runtimes, universal app, native verifier, installer, and updater metadata. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 
@@ -95,22 +103,53 @@ That sets `develop` as the default branch and enables pull-request + CI requirem
 
 ## Frontend build
 
+Node 22 is the supported version (`.nvmrc`, and what CI uses). The floor is
+`^20.19.0 || ^22.13.0 || >=24.0.0`, set by jsdom — below it every jsdom test file
+fails to start its worker, and vitest still reports a pass for the subset that
+ran. `npm test` preflights this and exits with an explanation rather than
+producing a misleading green summary.
+
 ```bash
+nvm use              # reads .nvmrc → Node 22
 npm install          # optional root Node tooling
 cd web
 npm install
 npm run build        # typecheck + Vite build, outputs to ciao/web/static/
+npm test             # 42 files / 345 tests
 ```
 
 ## macOS desktop development
 
-The Tauri 2 shell requires macOS 13+, Node 22.x, and Rust 1.90.0 with
-`aarch64-apple-darwin` and `x86_64-apple-darwin` targets:
+The Tauri 2 shell requires macOS 13+, Node 22.x, Rust 1.90.0 with
+`aarch64-apple-darwin` and `x86_64-apple-darwin` targets, and `swiftc` from the
+Xcode Command Line Tools (it builds the `ciaobot-native` sidecar).
+
+`desktop/native/main.swift` uses Apple's FoundationModels, whose
+`GenerationOptions` initialiser was renamed: `sampling:` on the macOS 26 SDK,
+`samplingMode:` on macOS 27. **The file deliberately uses the older
+`sampling:`** — it is the only spelling that compiles on both, since the GitHub
+macOS runner currently tops out at Xcode 26.6 (Swift 6.3.3, macOS 26 SDK) where
+`samplingMode:` does not exist. On a macOS 27 SDK it still builds, with a
+deprecation warning. Switch to `samplingMode:` only once the runner image ships
+Xcode 27, or CI cannot build the sidecar at all.
+
+CI and the publish workflow both select the newest Xcode installed on the runner
+before building the sidecar and print `xcodebuild -version`, so a toolchain skew
+is visible in the log instead of looking like a code regression.
+
+`./scripts/check-desktop.sh` runs the whole gate — the same commands CI's
+`build-desktop` job does — and asserts the sidecar ends up bundled, universal,
+signed, and runnable inside the built app. Run it after any change under
+`desktop/`; `--fast` skips the bundle build when you have not touched
+`desktop/native/` or `tauri.conf.json`. `prepare-release` runs it too.
+
+The individual steps, if you need them separately:
 
 ```bash
 cd desktop
 npm ci
-npm run build
+npm run build            # desktop frontend (vite) only
+npm run build:native     # Swift sidecar -> src-tauri/binaries/ (also runs via pretauri)
 cd src-tauri
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
@@ -133,6 +172,12 @@ are preserved. Rust creates a short-lived, single-use grant under the runtime
 root; the local `/api/desktop-drop` route consumes it and either returns host
 paths or transfers client files to the host project. Verify both a host
 Finder-to-chat drop and a client-to-host transfer after changing this bridge.
+
+Read mutations are cross-device notification mutations too: the engine emits a
+clear control for the chat, remote PWA service workers close their matching
+notification tag, and the macOS shell removes delivered native banners. Keep
+the desktop notification-log and service-worker tests aligned when changing
+notification identifiers or payload shapes.
 
 ### Rebuilding the shell from Settings → Restart
 
@@ -157,9 +202,9 @@ Two things are load-bearing:
 The quit goes through AppleScript, not the tray's Quit item: the tray item also
 stops the engine, which is not what a rebuild wants.
 
-Engines that were installed rather than checked out (Homebrew cask, wheel) need
-`CIAO_APP_REPO` pointing at the checkout. Without it every deploy step resolves
-relative to the running module, which is `site-packages`.
+The bundled engine is resolved from `Ciaobot.app/Contents/Resources/ciao-runtime`.
+Development builds may still use the checkout's interpreter, but a packaged app
+must never fall back to Homebrew or another `PATH` installation.
 
 After PWA changes, rebuild and either restart the service or use the **Deploy** button in PWA Settings. **Never restart the ciao service from inside a PWA chat** (you'd sever your own session); ask the operator to deploy.
 
@@ -190,16 +235,108 @@ ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
+ciao memory-audit --json # Bounded-memory rot only (regions, no vault scan)
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
 
-The Settings → Automations list uses the registry-backed `uses_model` and
-`produces_outcome` fields from `GET /api/automation` for its capability badges;
-do not infer those labels from a job's latest run because never-run jobs are
-intentionally included in the response.
+### Declarative live evaluations
+
+Create a starter suite, then run it against the current workspace:
+
+```bash
+ciao scaffold eval example --workspace .
+ciao eval --suite evals/example.json --workspace .
+```
+
+The suite is schema-version 1 JSON. It declares routing defaults and ordered
+scenarios; each scenario selects exactly one `skill` or `subagent` target and
+contains deterministic assertions such as output text, regular expressions,
+and required or forbidden tools. Use `--filter` to select scenarios and
+`--provider`, `--model`, `--output`, `--turn-timeout`, or `--startup-timeout`
+to override execution settings. Routing precedence is CLI override, scenario,
+then suite default.
+
+Each scenario runs in a fresh temporary workspace and isolated Ciaobot server.
+Only the selected target is staged, workspace-owned targets take precedence
+over packaged targets, and the source workspace is not modified. Path and
+symlink boundary checks reject targets that escape their canonical source.
+
+The normal tests mock provider execution and require no credentials:
+
+```bash
+pytest -q tests/test_evals.py tests/test_eval_targets.py \
+  tests/test_eval_runner.py tests/test_eval_cli.py
+```
+
+Two opt-in fixtures exercise real provider credentials and may spend tokens:
+
+```bash
+ciao eval --suite tests/fixtures/evals/skill-smoke.json \
+  --workspace . --provider claude --output /tmp/ciao-eval-claude-skill
+
+ciao eval --suite tests/fixtures/evals/subagent-smoke.json \
+  --workspace . --provider codex --model sonnet \
+  --output /tmp/ciao-eval-codex-subagent
+```
+
+After every scenario, the output directory contains atomic `results.json` and
+`REPORT.md` snapshots. Results include status, assertion outcomes, output or
+error, routing, selected/effective model, normalized tools, usage, token
+totals, and timings. Live runs use the existing provider login and are not part
+of the normal credential-free test suite.
+
+### Public release evidence
+
+Release scorecards use the schema-version-2 suite in `evals/release.json`.
+They run both supported providers three times in cold, warm, and restart
+mode. Cold runs use a fresh isolated workspace; warm runs repeat the measured
+turns in one chat; restart runs preserve the synthetic vault while starting a
+new server and chat.
+
+```bash
+ciao eval release \
+  --suite evals/release.json \
+  --workspace . \
+  --version 0.0.0 \
+  --output release-evidence/v0.0.0 \
+  --from-ref v0.0.0
+
+ciao eval compare \
+  --baseline release-evidence/vPREVIOUS/summary.json \
+  --current release-evidence/vCURRENT/summary.json
+```
+
+The generated `REPORT.md`, `summary.json`, `changes.json`, and
+`rationale.md` are sanitized public artifacts. They contain aggregate
+context/cache/token/latency metrics, tool and memory-source summaries, and
+structural skill/MCP changes, but never prompts, model answers, vault content,
+tool arguments, or credentials. Performance and cache regressions are
+advisory; missing provider coverage and correctness failures stop release
+preparation. The evidence remains reviewable in the release PR and worktree;
+the release owner may attach or link it manually. No CI job runs or publishes
+the scorecard.
+
+Synthetic vault fixtures are the default. A local, sanitized vault can be used
+for a private operator run with `--vault-root /path/to/vault`; external source
+paths are hashed in the resulting public evidence and the vault is never copied
+into the repository or release assets.
+
+The Settings → Automations list is registry-driven: `GET /api/automation` carries
+each job's static `trigger` sentence, `schedule_id`, `one_time`, `uses_model`,
+and `produces_outcome`. Do not infer those from a job's latest run — never-run
+jobs are intentionally included in the response. When adding a job to
+`job_runs.REGISTRY`, give it a `trigger` (the page's answer to "when does this
+run?"); when removing one, add its id to `job_runs.RETIRED_JOBS`, because
+`job_runs_latest.json` keeps the last run of every job it ever saw and the row
+would otherwise linger with a stale badge. Set `schedule_only=True` only when a
+schedule is the job's *sole* trigger: such a job is hidden on machines where
+that schedule is not installed.
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
+For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests.
+For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths.
+For sidebar chat-group changes, verify that a supervisor's delegate disclosure has a visible `aria-expanded` state, keeps a 44px touch target, hides and restores only its delegate rows, and automatically reopens when the selected chat is a delegate.
 For composer drag-and-drop changes, test both local host and remote client roles:
 host paths must be absolute, while client files must upload into the active
 project on the host before the returned host path is inserted.
@@ -251,6 +388,44 @@ The status and process exit code are a stable contract:
 
 The weekly `system-workspace-hygiene` schedule runs `ciao vault-index --write` before `ciao os-audit --json`. A failed index rebuild blocks link and index repairs and prevents a healthy/no-op claim. The prompt treats audit exit 1 as findings and continues, but treats exit 2 as an unreliable scan and reports the errors without claiming success.
 
+### Bounded-memory rot audit
+
+`ciao/memory_audit.py` checks whether the content of the always-loaded
+`ciao:memory` / `ciao:profile` regions has rotted, as opposed to the mechanical
+checks (caps, expiry, exact duplicates) that `audit_memory` already ran. It rests
+on one rule: a remembered fact is either **state**, a current value that gets
+replaced when it changes, or an **event**, a thing that happened which gets
+appended to a log and never edited. The regions are a state surface.
+
+Three detectors, all model-free, because a model asked to tally a few hundred
+entries returns a confident number and a different one tomorrow:
+
+| Detector | Finds | Counted as actionable |
+|---|---|---|
+| `event_shaped_entries` | Transcript residue: `User said ... -> assistant ...`, leftover `[idx=]` citations. Belongs in `Workspace/Learnings.md`. | Yes |
+| `stale_path_entries` | A cited path that does not exist. The only detector with hard evidence. | Yes |
+| `superseded_state_candidates` | Two entries asserting state about one subject, meaning a value was appended instead of replaced. | No |
+
+The detectors are tuned for precision over recall: one that cries wolf trains
+the reader to skip the report. Two consequences worth knowing before you widen
+them. A file extension alone does not make a token a path, because the engine
+and vault live in sibling repos and a correct entry may cite `ciao/cli.py` from
+the vault repo, where no `ciao/` exists; a token must be explicitly rooted
+(`~/`, `/`, `./`) or start at a directory that exists in this workspace. And a
+path outside both the workspace and `$HOME` is counted as unverifiable rather
+than stale, since it may belong to another machine. `paths_checked` and
+`paths_unverifiable` are reported so an empty finding list is never mistaken for
+full coverage.
+
+`superseded_state_candidates` is deliberately excluded from `total_issues`,
+matching `rule_overlaps_found`. It is a judgement the user may legitimately
+decline, and a finding that can never be cleared would pin the whole audit at
+`needs_attention` until people stop reading it.
+
+`ciao memory-audit` reads one file and skips the vault scan, so the daily
+`system-memory-curation` schedule can afford to call it and fix what it finds.
+Exit 0 clean, 1 findings, 2 a region could not be read.
+
 ## Skills, subagents, and slash commands
 
 Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories and projects `.mcp.json` MCP servers into `.codex/config.toml` for Codex chats. The generated MCP block preserves user-owned Codex server tables and copies only environment references, never literal credentials. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
@@ -283,16 +458,14 @@ workspace/project/chat access, and have focused protocol plus domain tests.
 Self-affecting operations must defer until the caller chat drains. Provider
 tokens must never enter the model's shell environment or telemetry arguments.
 
-See `docs/MCP.md` for the catalog, Claude/Codex configuration, and the release
-benchmark/promotion rule. Smoke/partial results are diagnostic only; promotion
-requires all 8 scenarios and at least five repeats.
+See `docs/MCP.md` for the catalog and Claude/Codex configuration.
 
 ## Change guidelines
 
 - **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, refresh `docs/ARCHITECTURE.md`, this file, `CLAUDE.md`, and `INTEGRATIONS.md` against actual repo state before declaring the task complete. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.
 - **New API routes must be documented.** Add the route to `PWA_API.md`; state-changing routes also need an Agent recipe or an allowlist entry in `tests/test_pwa_api_docs.py`. New `CIAO_*` env vars must land in `INTEGRATIONS.md` or the allowlist in `tests/test_env_vars_documented.py`. Both are test-enforced.
 - **Never restart the ciao service yourself** from inside the PWA. Apply code changes and ask the operator to hit Deploy.
-- **Never commit `.env` or API keys.** `.env` minimum: `PWA_AUTH_TOKEN`.
+- **Never commit `.env` or API keys.** `.env` minimum: `PWA_AUTH_TOKEN` (the dashboard password; protection is on unless `PWA_AUTH_REQUIRED=false`).
 - **Keep edits minimal and consistent with existing patterns.** Don't refactor unrelated code; if unrelated changes appear, pause and ask.
 - **Avoid destructive git** (force push, hard reset on shared branches) unless explicitly asked.
 - **Use the branch model in `CONTRIBUTING.md`.** Day-to-day PRs target `develop`; release PRs target `main`.

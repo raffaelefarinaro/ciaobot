@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import mimetypes
@@ -25,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import subagent_tracking
+from ciao import desktop_build
 from ciao.config import (
     WorkspaceConfig,
     CLAUDE_AI_CONNECTORS,
@@ -134,26 +136,47 @@ _PROVIDER_KEY_META = {
         "description": "Optional key for critique/review model routing.",
     },
 }
-_SERVICE_KEY_META = {
-    "OPENAI_API_KEY": {
-        "label": "OpenAI voice API key",
-        "description": "Used directly by Ciaobot for cloud transcription and speech, not for Codex login.",
-    },
-}
+# Keys Ciaobot itself consumes, as opposed to provider logins. Empty since
+# voice moved on-device: OPENAI_API_KEY lived here for cloud transcription and
+# speech, and nothing else in the app ever read it.
+_SERVICE_KEY_META: dict[str, dict[str, str]] = {}
 _GWS_BUILTIN_PROFILES = ("personal", "work")
-_GWS_PROFILE_META = {
+# Annotated because the values are heterogeneous (str labels alongside a
+# list[str] of examples): without it mypy widens every lookup to Sequence[str],
+# and `meta["purpose"]` stops being usable where a str is expected.
+_GWS_PROFILE_META: dict[str, dict[str, Any]] = {
     "personal": {
         "label": "Personal Google account",
-        "purpose": "Private Gmail, Calendar, and Tasks. Keep this separate from company systems.",
+        "purpose": "Private Google account. Keep this separate from company systems.",
+        # Shown for accounts connected before scopes were recorded. Their
+        # credentials.json has no `scopes` key and re-consent is the only way
+        # to get one, so without this an upgrading user's connected account
+        # silently loses every chip it used to show.
         "examples": ["Gmail", "Calendar", "Tasks"],
     },
     "work": {
         "label": "Work Google account",
-        "purpose": "Company Drive, Docs, Sheets, Slides, Gmail, Calendar, and Tasks.",
+        "purpose": "Company Google account used for work Drive, Docs, Sheets, and Slides.",
         "examples": ["Drive", "Docs", "Sheets", "Slides", "Gmail", "Calendar"],
     },
 }
 _GWS_AUTH_FILES = ("credentials.json", "credentials.enc")
+
+
+def _gws_purpose_with_chips(purpose: str, chips: list[str]) -> str:
+    """Append the granted services to the profile's standing description.
+
+    The description is not replaced: for the personal profile it carries the
+    "keep this separate from company systems" guidance, which matters most
+    once an account is actually connected.
+    """
+    if len(chips) == 1:
+        joined = chips[0]
+    elif len(chips) == 2:
+        joined = f"{chips[0]} and {chips[1]}"
+    else:
+        joined = f"{', '.join(chips[:-1])}, and {chips[-1]}"
+    return f"{purpose} Connected to {joined}."
 
 
 def _known_workspace_names(pcm: object) -> set[str]:
@@ -1139,8 +1162,6 @@ def _provider_key_auth_method(config, key: str) -> str:
     file_value = _read_env_value(_env_path(config), key)
     if file_value:
         return "api_key"
-    if key == "OPENAI_API_KEY" and bool(getattr(config, "openai_api_key", None)):
-        return "api_key"
     if key == "CIAO_OLLAMA_API_KEY" and getattr(config.ollama, "api_key", "ollama") != "ollama":
         return "api_key"
     if key == "ANTHROPIC_API_KEY" and _claude_oauth_ready():
@@ -1258,9 +1279,7 @@ def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
             os.environ[key] = value
         else:
             os.environ.pop(key, None)
-        if key == "OPENAI_API_KEY":
-            config.openai_api_key = value or None
-        elif key == "CIAO_OLLAMA_API_KEY":
+        if key == "CIAO_OLLAMA_API_KEY":
             if value:
                 base_url = os.environ.get("CIAO_OLLAMA_URL", "").strip() or "https://ollama.com"
                 config.ollama = replace(config.ollama, api_key=value, base_url=base_url)
@@ -1388,7 +1407,6 @@ def _gws_profile_payload(
         {
             "label": f"{profile} Google profile",
             "purpose": "Custom Google Workspace profile configured outside the built-in personal/work wrapper.",
-            "examples": [],
         },
     )
     config_dir = _gws_profile_config_dir(config, profile)
@@ -1402,7 +1420,10 @@ def _gws_profile_payload(
         setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
         headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
 
+    from ciao import gws_auth
+
     email = ""
+    chips: list[str] = []
     if config_dir:
         creds_path = config_dir / "credentials.json"
         if creds_path.is_file():
@@ -1410,8 +1431,17 @@ def _gws_profile_payload(
                 with open(creds_path, "r", encoding="utf-8") as f:
                     creds_data = json.load(f)
                 email = creds_data.get("email") or ""
+                # gws_auth owns both the shape tolerance and the label
+                # catalogue, so a scope added to its scope sets cannot show up
+                # here as a raw URL without someone naming it there first.
+                chips = gws_auth.scope_labels(creds_data.get("scopes"))
             except Exception:
                 pass
+
+    # Connections made before scopes were recorded have none, and keep the
+    # profile's standing description and curated chip list.
+    examples = chips or list(meta.get("examples") or [])
+    purpose = _gws_purpose_with_chips(meta["purpose"], chips) if chips else meta["purpose"]
 
     # Cached token-health snapshot from the periodic monitor (issue #145).
     # Read-only and cheap — never runs the `auth status` subprocess here.
@@ -1426,8 +1456,8 @@ def _gws_profile_payload(
     return {
         "name": profile,
         "label": meta["label"],
-        "purpose": meta["purpose"],
-        "examples": meta["examples"],
+        "purpose": purpose,
+        "examples": examples,
         "configured": credentials_present,
         "credentials_present": credentials_present,
         "client_secret_present": client_secret_present,
@@ -2327,8 +2357,16 @@ async def chat_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     if request.method == "DELETE":
+        # `only_if_empty` is how closing a chat discards a never-used draft.
+        # The check has to happen here: "empty" means default title, no user
+        # turns, no session and no live stream, and `user_turn_count` is not
+        # in any payload the PWA receives — a client-side approximation of the
+        # rule deletes chats the server would have kept.
+        if request.query_params.get("only_if_empty") in {"1", "true"}:
+            if not pcm.is_empty_chat(chat_id):
+                return JSONResponse({"ok": False, "deleted": False, "reason": "not empty"})
         ok = pcm.delete_chat(chat_id)
-        return JSONResponse({"ok": ok})
+        return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
     if "control_surface" in body:
@@ -2551,12 +2589,28 @@ async def chat_archive(request: Request) -> JSONResponse:
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
     )
-    outcome = pcm.archive_chat(chat_id)
+    result = await pcm.archive_chat(chat_id)
+    outcome = result.outcome if result is not None else None
     if outcome is not None:
         pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
+    # Report the cascade per subchat rather than a bare ok. The client marks
+    # only what `archived_chat_ids` confirms — a delegate the server skipped is
+    # still live, and hiding it from the sidebar while it streams and spends
+    # tokens is worse than leaving the row visible. `stopped_chat_ids` is what
+    # the user is warned about; `failed_chat_ids` are the subchats they may
+    # still need to deal with by hand.
+    delegates = result.delegates if result is not None else []
     return JSONResponse({
         "ok": True,
         "archived_to": str(outcome.path) if outcome is not None else None,
+        # A chat with an empty transcript yields no ArchiveOutcome but is still
+        # archived, so this is keyed off the cascade running at all.
+        "archived_chat_ids": (
+            ([chat_id] + result.archived_ids()) if result is not None else []
+        ),
+        "stopped_chat_ids": result.stopped_ids() if result is not None else [],
+        "failed_chat_ids": result.failed_ids() if result is not None else [],
+        "subchats": [row.to_dict() for row in delegates],
     })
 
 
@@ -2904,10 +2958,7 @@ async def chat_messages(request: Request) -> JSONResponse:
             return JSONResponse(handover_messages + archived)
         return JSONResponse(handover_messages)
 
-    try:
-        from claude_agent_sdk import get_session_messages
-    except ImportError:
-        return JSONResponse({"error": "SDK not available"}, status_code=500)
+    from ciao.transcripts import get_session_messages_full
 
     result: list[dict] = []
     # A chat can rotate through more than one SDK session file within the
@@ -2921,7 +2972,7 @@ async def chat_messages(request: Request) -> JSONResponse:
         if not sid:
             continue
         try:
-            segment = get_session_messages(sid, directory=str(config.workspace_root))
+            segment = get_session_messages_full(sid, directory=str(config.workspace_root))
         except (FileNotFoundError, ValueError):
             # This segment's file doesn't exist on this machine (remote chat,
             # or pruned after rotating away). Skip it rather than blanking
@@ -2931,7 +2982,11 @@ async def chat_messages(request: Request) -> JSONResponse:
             msgs = []
         msgs.extend(segment)
 
-    if msgs is None:
+    # An SDK session can still exist while containing no renderable messages
+    # (for example after an archived session was compacted or partially
+    # cleaned up). Archived chats have a durable Markdown copy; use it in that
+    # case as well as when the provider-side session is missing entirely.
+    if msgs is None or (not msgs and chat.archived):
         archived = _messages_from_archived_transcript(pcm, config, chat)
         if archived is not None:
             return JSONResponse(handover_messages + archived)
@@ -3084,6 +3139,12 @@ async def chat_messages(request: Request) -> JSONResponse:
             # same rule, so the two turn counters stay aligned.
             if subagent_tracking.is_synthesis_nudge(content):
                 result.append({"role": "system", "content": _SYNTHESIS_NUDGE_LABEL})
+                continue
+            is_compact = (
+                isinstance(m.message, dict) and bool(m.message.get("isCompactSummary"))
+            ) or content.startswith("This session is being continued from a previous conversation")
+            if is_compact:
+                result.append({"role": "system", "content": content})
                 continue
         entry: dict = {
             "role": m.type,
@@ -3333,6 +3394,24 @@ async def chat_speak(request: Request) -> Response:
     )
 
 
+async def chat_reentry_summary(request: Request) -> JSONResponse:
+    """Return an ephemeral Apple Intelligence summary for a reopened chat."""
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "chat not found"}, status_code=404)
+    if chat.archived:
+        return JSONResponse({"available": True, "summary": ""})
+
+    try:
+        summary = await pcm.generate_reentry_summary(chat_id)
+    except Exception as exc:  # noqa: BLE001 — orientation aid must never block chat use
+        logger.info("Re-entry summary failed for %s: %s", chat_id, exc)
+        return JSONResponse({"available": False, "summary": ""})
+    return JSONResponse({"available": bool(summary), "summary": summary})
+
+
 # ── Images ───────────────────────────────────────────────────────────────
 
 async def chat_images(request: Request) -> JSONResponse:
@@ -3442,6 +3521,124 @@ async def workspace_file(request: Request) -> Response:
         resolved,
         media_type="text/plain; charset=utf-8",
         headers={"Cache-Control": "no-cache"},
+    )
+
+
+# ── HTML artifacts ───────────────────────────────────────────────────────
+# An artifact is a self-contained page the model authored (a dashboard, an
+# annotated diff, a comparison) that the PWA embeds in the pinned panel.
+# It is served from this host, so it needs a policy of its own.
+
+_WORKSPACE_HTML_EXTS = frozenset({".html", ".htm"})
+
+# Read this before "hardening" it: `script-src 'unsafe-inline'` is load-bearing.
+# An artifact inlines its own <script> and <style> — that is the entire point of
+# a single self-contained file — so removing 'unsafe-inline' does not tighten
+# this policy, it breaks every artifact and leaves a blank frame with a console
+# error the user never sees.
+#
+# Containment comes from the other directives, not from script-src:
+#   - `sandbox allow-scripts` (no allow-same-origin) puts the document in an
+#     opaque origin. It cannot read the session cookie, localStorage, or the
+#     embedding page, even though it is served from the same host.
+#   - `connect-src 'none'` kills fetch, XHR, WebSocket and EventSource.
+#   - `img-src data:` (no http/https) closes the beacon-through-an-image-URL
+#     exfiltration path that a permissive img-src leaves open.
+#   - `form-action 'none'` and `base-uri 'none'` stop navigation-based leaks.
+# The net effect: an artifact can render and respond to clicks, and has no way
+# to reach /api/*, phone home, or read anything of the user's.
+#
+# `allow-popups` and `blob:` sources remain absent. Self-contained audio/video
+# artifacts use data URLs, so media access is allowed only for embedded data.
+_ARTIFACT_CSP = "; ".join(
+    [
+        "default-src 'none'",
+        "script-src 'unsafe-inline'",
+        "style-src 'unsafe-inline'",
+        "img-src data:",
+        "media-src data:",
+        "font-src data:",
+        "connect-src 'none'",
+        "form-action 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'self'",
+        "sandbox allow-scripts",
+    ]
+)
+
+# CSP for host-rendered binary previews (PDF, and PPTX after conversion).
+# Looser than _ARTIFACT_CSP because the renderer here is the browser's own
+# viewer loading our assets, not model-authored markup.
+_EMBEDDED_PREVIEW_CSP = "; ".join(
+    [
+        "default-src 'self'",
+        "base-uri 'self'",
+        "object-src 'none'",
+        "frame-ancestors 'self'",
+        "form-action 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "img-src 'self' data: blob:",
+        "media-src 'self' blob:",
+        "font-src 'self' data: https://fonts.gstatic.com",
+        "connect-src 'self' ws: wss: https://fonts.googleapis.com https://fonts.gstatic.com",
+    ]
+)
+
+
+async def workspace_html(request: Request) -> Response:
+    """Serve a workspace ``.html`` file as a renderable page, not as source.
+
+    ``/api/workspace-file`` already serves ``.html`` but as ``text/plain``,
+    which is what the panel's Code view wants. This endpoint is the Preview
+    side: same file, ``text/html``, under ``_ARTIFACT_CSP``. See that constant
+    for why the policy is shaped the way it is.
+
+    Why a real endpoint instead of an ``srcdoc`` iframe: ``srcdoc`` and
+    ``blob:`` documents inherit the *embedder's* CSP, which is ``script-src
+    'self'`` (``ciao/web/security.py``). Inline artifact script would be
+    silently blocked. A frame loaded from a URL gets its own CSP from these
+    response headers instead.
+
+    The size cap is deliberately the same 2 MB as the text viewer and the
+    snapshot store, so there is no state where a file renders but has no
+    history, or has history but refuses to render. Over the cap the panel
+    shows a 413 and the user opens the file in a real browser instead
+    (``/api/workspace-open``).
+
+    Fuzzy resolution is kept for parity with the Code view, so the same path
+    string that shows the source also renders the page. Note that this means
+    fuzzy matching decides which document gets to execute script; the sandbox
+    above is what keeps that from mattering.
+    """
+    config = request.app.state.config
+    raw = request.query_params.get("path", "").strip()
+    roots = _allowed_roots(config)
+    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    if isinstance(result, Response):
+        return result
+    resolved = result
+
+    if resolved.suffix.lower() not in _WORKSPACE_HTML_EXTS:
+        return JSONResponse({"error": "unsupported type"}, status_code=415)
+    if resolved.stat().st_size > _WORKSPACE_FILE_MAX_BYTES:
+        return JSONResponse({"error": "file too large"}, status_code=413)
+
+    return FileResponse(
+        resolved,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Security-Policy": _ARTIFACT_CSP,
+            # SecurityHeadersMiddleware sets X-Frame-Options: DENY through
+            # setdefault, so an explicit value here wins and lets the PWA
+            # embed the frame. frame-ancestors above is the modern equivalent;
+            # both are sent because the desktop shell's webview is older.
+            "X-Frame-Options": "SAMEORIGIN",
+            # Same revalidation reasoning as workspace_file: the panel reloads
+            # the frame after the model revises an artifact, and a heuristically
+            # fresh cache entry would show the pre-edit page.
+            "Cache-Control": "no-cache",
+        },
     )
 
 
@@ -3732,19 +3929,6 @@ async def libreoffice_install_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "output": result.stdout})
 
 
-async def apfel_install_endpoint(request: Request) -> JSONResponse:
-    """Install apfel (Apple Intelligence CLI) via Homebrew. No server restart
-    needed — routines probe for the apfel binary fresh on each run, so titles
-    switch from the cloud fallback to on-device on the next run."""
-    from ciao.upgrade import upgrade_apfel
-
-    result = await upgrade_apfel()
-    if not result.success:
-        error = result.stderr.strip() or "Install failed."
-        return JSONResponse({"ok": False, "error": error}, status_code=500)
-    return JSONResponse({"ok": True, "output": result.stdout})
-
-
 async def workspace_binary(request: Request) -> Response:
     """Serve an allowlisted binary file from the workspace."""
     config = request.app.state.config
@@ -3842,21 +4026,7 @@ async def workspace_binary(request: Request) -> Response:
     headers = {
         "Content-Disposition": f'{disposition}; filename="{filename}"',
         "X-Frame-Options": "SAMEORIGIN",
-        "Content-Security-Policy": "; ".join(
-            [
-                "default-src 'self'",
-                "base-uri 'self'",
-                "object-src 'none'",
-                "frame-ancestors 'self'",
-                "form-action 'self'",
-                "script-src 'self'",
-                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-                "img-src 'self' data: blob:",
-                "media-src 'self' blob:",
-                "font-src 'self' data: https://fonts.gstatic.com",
-                "connect-src 'self' ws: wss: https://fonts.googleapis.com https://fonts.gstatic.com",
-            ]
-        ),
+        "Content-Security-Policy": _EMBEDDED_PREVIEW_CSP,
     }
     return FileResponse(
         resolved,
@@ -4207,35 +4377,80 @@ async def list_schedules(request: Request) -> JSONResponse:
 async def list_automation(request: Request) -> JSONResponse:
     """Status of background automations for the Settings → Automation page.
 
-    Reads the job-run log and returns one entry per known job (jobs that
-    never ran still appear), each with its last run, recent history, and
-    aggregate stats. Read-only.
+    Reads the job-run log and returns one entry per automation this machine
+    can actually run (jobs that never ran still appear), each with its last
+    run, recent history, and aggregate stats. Scheduled jobs whose schedule is
+    not installed here are omitted — nothing would ever trigger them.
+    Read-only.
     """
     from ciao import job_runs
 
-    return JSONResponse(job_runs.automation_summary())
+    installed: set[str] | None = None
+    try:
+        sm = request.app.state.schedule_manager
+        installed = {entry.schedule_id for entry in sm.list_entries()}
+    except Exception:  # noqa: BLE001 — no schedule manager: filter nothing
+        installed = None
+
+    return JSONResponse(job_runs.automation_summary(installed_schedules=installed))
 
 
 async def trigger_backfill_insights(request: Request) -> JSONResponse:
-    """Trigger the insights backfill process in the background."""
+    """Run session insights over every archive that is missing them.
+
+    Accepts an optional ``model`` for a one-off run with a different model —
+    the recovery path when the configured insights model keeps failing (it
+    times out on slow local backends). The stored Settings → Models choice is
+    left alone.
+    """
     import asyncio
     from ciao.job_runs import track
     from ciao.insights import backfill_insights_task, format_backfill_summary
 
     config = request.app.state.config
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — empty body means "use the configured model"
+        body = {}
+    model = (body or {}).get("model")
+    model = model.strip() if isinstance(model, str) else ""
 
     async def _run_backfill():
-        async with track("backfill_insights", "Insights backfill", category="system") as handle:
-            result = await backfill_insights_task(config, mode="both")
+        async with track(
+            "backfill_insights", "Insights backfill", category="system",
+            model=model,
+        ) as handle:
+            result = await backfill_insights_task(
+                config, mode="both", model_override=model,
+            )
             handle.extra.update(result)
             summary = format_backfill_summary(result)
             handle.extra["summary"] = summary
+            if model:
+                handle.extra["model_override"] = model
             if result["errors"]:
                 handle.status = "error"
                 handle.error = summary
 
     asyncio.create_task(_run_backfill())
-    return JSONResponse({"status": "started"}, status_code=202)
+    return JSONResponse({"status": "started", "model": model}, status_code=202)
+
+
+async def compare_apple_insights_route(request: Request) -> JSONResponse:
+    """Compare Apple Intelligence with a small sample of existing insights."""
+    from ciao.insights import compare_apple_insights
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — empty body uses the default sample size
+        body = {}
+    raw_limit = (body or {}).get("limit", 2) if isinstance(body, dict) else 2
+    try:
+        limit = max(1, min(int(raw_limit), 5))
+    except (TypeError, ValueError):
+        limit = 2
+    result = await compare_apple_insights(request.app.state.config, limit=limit)
+    return JSONResponse(result)
 
 
 async def create_schedule(request: Request) -> JSONResponse:
@@ -4709,15 +4924,21 @@ async def list_models(request: Request) -> JSONResponse:
 
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
-    import shutil
-    from ciao.voice import kokoro_available, mlx_whisper_available
+    from ciao import native_sidecar
+    from ciao.voice import (
+        apple_dictation_available,
+        apple_speech_available,
+        dictation_unavailable_reason,
+        system_voices,
+    )
 
     s = app_settings.settings
     ollama = config.ollama
     if config.title_model_override:
         title_effective = config.title_model_override
     else:
-        # Automatic resolves to the workspace haiku tier — apfel is opt-in
+        # Automatic resolves to the workspace haiku tier — Apple's on-device
+        # model is opt-in
         # (choose "Apple" explicitly), not the auto default just because the
         # binary is on PATH (it fails when Apple Intelligence is disabled).
         title_effective = config.haiku_model_for_workspace(config.primary_workspace())
@@ -4798,22 +5019,25 @@ def _routines_payload(config, app_settings) -> dict:
                 for provider in load_custom_providers(config)
             },
         },
-        # The "apple"/apfel title option only works when the CLI is on PATH;
-        # the Chat titles row warns instead of silently falling back.
-        "apfel_available": shutil.which("apfel") is not None,
+        # The "apple" title/insights options need macOS 26+, the desktop app,
+        # and Apple Intelligence switched on; the routine rows explain which
+        # prerequisite is missing instead of silently hiding the option.
+        "apple_model_available": native_sidecar.apple_model_available(),
+        "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
         "transcription": {
-            "engine": config.transcription_engine,
-            "cloud_model": config.transcription_model,
-            "local_model": config.transcription_local_model,
-            "local_available": mlx_whisper_available(),
-            "cloud_available": bool(config.openai_api_key),
+            "locale": config.transcription_locale,
+            # On-device dictation needs macOS 26+, the installed app, and a
+            # dictation language. Settings hides the local option entirely when
+            # it cannot run, and shows the reason when the user asks.
+            "available": apple_dictation_available(),
+            "unavailable_reason": dictation_unavailable_reason(),
         },
         "speech": {
-            "engine": config.tts_engine,
-            "cloud_voice": config.tts_cloud_voice,
             "local_voice": config.tts_local_voice,
-            "local_available": kokoro_available(),
-            "cloud_available": bool(config.openai_api_key),
+            "available": apple_speech_available(),
+            # Voices differ per machine, so the picker is populated from the
+            # system rather than a hardcoded list, best quality first.
+            "local_voices": system_voices(),
         },
         # Grouped options for the routine model selectors.
         "model_options": {
@@ -4880,7 +5104,10 @@ async def settings_routines(request: Request) -> JSONResponse:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         app_settings.apply_to_config(config)
-    return JSONResponse(_routines_payload(config, app_settings))
+    # _routines_payload probes the native sidecar, which spawns a subprocess on
+    # first call. Off the event loop: the availability checks it replaced were
+    # in-process find_spec/which calls, so this used to be free.
+    return JSONResponse(await asyncio.to_thread(_routines_payload, config, app_settings))
 
 
 # ── Status ───────────────────────────────────────────────────────────────
@@ -5021,9 +5248,21 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     if pcm is None:
         return JSONResponse({"chats": [], "attention_count": 0})
 
+    chats = pcm.list_chats()
+    # Delegate completion is internal model-to-model traffic: it wakes the
+    # supervisor, so the PWA deliberately does not report a nested delegate as
+    # a second unread chat. Keep the tray feed on the same rule. An archived or
+    # missing supervisor makes the delegate an orphan, which remains a normal
+    # visible chat and may be unread.
+    active_chat_ids = {
+        candidate.chat_id
+        for candidate in chats
+        if not candidate.archived
+    }
+
     rows: list[dict[str, object]] = []
     attention_count = 0
-    for chat in pcm.list_chats():
+    for chat in chats:
         if chat.archived:
             continue
         project = pcm.get_project(chat.project_id)
@@ -5031,7 +5270,11 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             continue
         activity = chat.last_activity_at or ""
         read = chat.last_read_at or ""
-        unread = bool(activity) and activity > read
+        nested_delegate = bool(
+            getattr(chat, "spawned_from_chat_id", "")
+            and getattr(chat, "spawned_from_chat_id", "") in active_chat_ids
+        )
+        unread = not nested_delegate and bool(activity) and activity > read
         needs_input = _menubar_chat_needs_input(chat.pending_question)
         if unread or needs_input:
             attention_count += 1
@@ -5079,56 +5322,6 @@ async def setup_status_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(setup_status(request.app.state.config))
 
 
-async def voice_install_local_endpoint(request: Request) -> JSONResponse:
-    """Install local voice transcription dependencies (mlx-whisper)."""
-    from ciao.voice_extras import VOICE_LOCAL_REQUIREMENT
-
-    return await _pip_install_and_restart(request, VOICE_LOCAL_REQUIREMENT)
-
-
-async def tts_install_local_endpoint(request: Request) -> JSONResponse:
-    """Install local speech synthesis dependencies (kokoro-onnx)."""
-    from ciao.voice_extras import TTS_LOCAL_REQUIREMENT
-
-    return await _pip_install_and_restart(request, TTS_LOCAL_REQUIREMENT)
-
-
-async def _pip_install_and_restart(request: Request, requirement: str) -> JSONResponse:
-    """pip-install one requirement into the running env, then restart."""
-    import sys
-    import subprocess
-
-    cmd = [sys.executable, "-m", "pip", "install", requirement]
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
-        if result.returncode == 0:
-            config = request.app.state.config
-            async def _do_restart():
-                await asyncio.sleep(2)
-                fn = getattr(request.app.state, "request_restart", None)
-                if callable(fn):
-                    fn(config.restart_exit_code)
-                else:
-                    from ciao.signals import RestartRequested
-                    raise RestartRequested(config.restart_exit_code)
-
-            asyncio.create_task(_do_restart())
-            return JSONResponse({"ok": True, "output": output})
-        else:
-            return JSONResponse(
-                {"ok": False, "error": f"Command exited with code {result.returncode}", "output": output},
-                status_code=500,
-            )
-    except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-
 
 def _host_name(value: str) -> str:
     host = value.strip()
@@ -5173,11 +5366,16 @@ def _setup_finish_origin_allowed(request: Request) -> bool:
 
 
 def _interactive_foreground_run() -> bool:
-    """True when this server was started from an interactive terminal."""
+    """True when setup can hand the bootstrap server to launchd.
+
+    The bundled desktop app deliberately starts bootstrap with no terminal
+    attached, but it still owns the one-time onboarding process and must hand
+    the configured server to the LaunchAgent when setup completes.
+    """
     try:
-        return sys.stderr.isatty()
+        return sys.stderr.isatty() or os.environ.get("CIAO_BOOTSTRAP_LAUNCHD_HANDOFF") == "1"
     except (AttributeError, ValueError):
-        return False
+        return os.environ.get("CIAO_BOOTSTRAP_LAUNCHD_HANDOFF") == "1"
 
 
 def _schedule_launchd_server_handoff() -> bool:
@@ -5294,19 +5492,42 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    written = setup_workspace(
-        workspace,
-        auth_token=str(body.get("auth_token", "")).strip() or config.pwa_auth_token,
-        auth_required=bool(body.get("auth_required", False)),
-        push_contact=push_contact,
-        vault_root=str(body.get("vault_root", "")).strip() or None,
-        vault_mode=vault_mode,
-        workspace_name=workspace_name,
-        default_provider=default_provider,
-        python_path=str(body.get("python", "")).strip() or None,
-        port=port,
-        launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
-        app_dir=str(body.get("app_dir", "")).strip() or None,
+    # Password protection is not optional: the wizard collects the password, and
+    # the bootstrap token it would otherwise inherit is a machine-generated
+    # value nobody could type on a second device.
+    from ciao.web.auth import MIN_PWA_PASSWORD_LENGTH
+
+    password = str(body.get("password") or body.get("auth_token") or "").strip()
+    if len(password) < MIN_PWA_PASSWORD_LENGTH:
+        return JSONResponse(
+            {
+                "error": (
+                    "password is required and must be at least "
+                    f"{MIN_PWA_PASSWORD_LENGTH} characters"
+                )
+            },
+            status_code=400,
+        )
+
+    # setup_workspace only writes workspace files and the bundled-engine
+    # LaunchAgent. The release installer owns app downloads, so setup remains
+    # responsive and never reaches out to GitHub.
+    written = await asyncio.to_thread(
+        functools.partial(
+            setup_workspace,
+            workspace,
+            auth_token=password,
+            auth_required=True,
+            push_contact=push_contact,
+            vault_root=str(body.get("vault_root", "")).strip() or None,
+            vault_mode=vault_mode,
+            workspace_name=workspace_name,
+            default_provider=default_provider,
+            python_path=str(body.get("python", "")).strip() or None,
+            port=port,
+            launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
+            app_dir=str(body.get("app_dir", "")).strip() or None,
+        )
     )
     # Hand the chosen workspace to the relaunched process. A foreground
     # `ciao run` restarts by re-execing itself with the current environment,
@@ -5314,29 +5535,19 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # this it boots straight back into the bootstrap wizard.
     os.environ["CIAO_WORKSPACE"] = str(Path(workspace).expanduser().resolve())
     os.environ["PWA_PORT"] = str(port)
-    # Best-effort: bring the menu bar companion up right away so setup ends
-    # with the icon visible instead of waiting for the next login. Only for
-    # the real per-user LaunchAgents dir — scripted/test setups pass a custom
-    # dir and must not register anything with launchd.
+    # Same reason for the credentials: `load_dotenv` does not override values
+    # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
+    # bootstrap process would outrank the password just written to .env.
+    os.environ["PWA_AUTH_TOKEN"] = password
+    os.environ["PWA_AUTH_REQUIRED"] = "true"
+    # Only the real per-user LaunchAgents dir may be registered with launchd —
+    # scripted/test setups pass a custom dir and must not touch it. Nothing
+    # menu-bar related happens here any more: Ciaobot.app is the menu bar, and
+    # setup_workspace above has just retired the old `com.ciao.menubar` agent.
     real_launch_agents = (
         sys.platform == "darwin"
         and not str(body.get("launch_agents_dir", "")).strip()
     )
-    if real_launch_agents:
-        menubar_plist = Path.home() / "Library" / "LaunchAgents" / "com.ciao.menubar.plist"
-        if menubar_plist.exists():
-            try:
-                loaded = subprocess.run(
-                    ["launchctl", "kickstart", f"gui/{os.getuid()}/com.ciao.menubar"],
-                    capture_output=True, timeout=10,
-                )
-                if loaded.returncode != 0:
-                    subprocess.run(
-                        ["launchctl", "load", "-w", str(menubar_plist)],
-                        capture_output=True, timeout=10,
-                    )
-            except (OSError, subprocess.SubprocessError):
-                logger.info("Could not start the menu bar agent; it will load at next login.")
 
     restart = bool(body.get("restart", True))
     # An interactive foreground `ciao run` (the documented install flow) hands
@@ -5579,34 +5790,59 @@ async def admin_snapshot(request: Request) -> JSONResponse:
 
 
 
-def _run_step(args: list[str], *, cwd: str, timeout: int) -> subprocess.CompletedProcess:
-    """Run a deploy step, turning missing-binary and timeout errors into a
-    failed CompletedProcess so the handler reports a structured error instead
-    of crashing with a 500. Under launchd the server PATH may omit Homebrew,
-    so a bare ``npm`` can raise FileNotFoundError before ``run`` returns."""
-    try:
-        return subprocess.run(
-            args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+# Enough of a failing step's tail to carry a traceback or a pip resolver
+# error. The old 500 was not enough for either.
+_DEPLOY_STEP_OUTPUT_CHARS = 4000
+
+
+def _record_step(step: str, result: subprocess.CompletedProcess) -> dict:
+    """Capture a step's output, keeping the part that says what went wrong.
+
+    Two things this must not do, both of which hid real failures:
+
+    * Truncate from the *head*. Build tools put progress chatter first and
+      the diagnosis last, so `[:500]` on a failed `pip install` showed
+      "Preparing editable metadata..." and cut off before the error.
+    * Take ``stdout or stderr``. pip writes progress to stdout and errors
+      to stderr, so stdout is never empty and stderr was always discarded.
+
+    The full output is logged regardless: the response is the only other
+    copy, and a truncated card was previously the sole record of a failure.
+    """
+    parts = [p for p in (result.stdout.strip(), result.stderr.strip()) if p]
+    combined = "\n".join(parts)
+    out = combined[-_DEPLOY_STEP_OUTPUT_CHARS:]
+    if len(combined) > _DEPLOY_STEP_OUTPUT_CHARS:
+        out = f"[earlier output trimmed]\n{out}"
+    ok = result.returncode == 0
+    if not ok:
+        logger.error(
+            "deploy step %r failed (exit %s):\n%s", step, result.returncode, combined
         )
-    except FileNotFoundError as exc:
-        return subprocess.CompletedProcess(
-            args=args, returncode=127, stdout="",
-            stderr=f"{args[0]} not found on PATH: {exc}",
+    return {"step": step, "ok": ok, "output": out}
+
+
+def _pip_install_hint(output: str) -> str:
+    """Turn a development deploy's "cannot uninstall" wall into guidance.
+
+    A packaged app cannot be replaced by the developer-only deploy action. The
+    raw installer output otherwise sends users to debug the wrong thing.
+    """
+    lowered = output.lower()
+    if "cannot uninstall" in lowered or "no record file" in lowered:
+        return (
+            "The running engine belongs to a packaged Ciaobot.app and cannot be "
+            "replaced by the development deploy action. Use the signed in-app "
+            "updater or re-run the one-line installer for production updates."
         )
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
-            args=args, returncode=124, stdout="",
-            stderr=f"{args[0]} timed out after {timeout}s",
-        )
+    return ""
 
 
 def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
-    ``CIAO_APP_REPO`` wins over the module path because the engine can be an
-    installed package (Homebrew cask, wheel): there ``__file__`` sits in
-    site-packages, which has no ``.git`` and no ``web/``, so every build step
-    below would operate on the wrong directory.
+    ``CIAO_APP_REPO`` wins over the module path for developer-mode deploys. A
+    packaged app does not resolve a checkout for production updates.
     """
     configured = getattr(config, "app_repo", None)
     if configured:
@@ -5637,7 +5873,7 @@ def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
             stdout="skipped: no root package.json",
             stderr="",
         )
-    return _run_step(args, cwd=str(codebase_root), timeout=180)
+    return desktop_build.run_step(args, cwd=str(codebase_root), timeout=180)
 
 
 async def admin_deploy(request: Request) -> JSONResponse:
@@ -5667,10 +5903,6 @@ async def admin_deploy(request: Request) -> JSONResponse:
     ws = config.workspace_root
     codebase_root = _resolve_codebase_root(config)
     steps = []
-
-    def _record(step: str, result: subprocess.CompletedProcess) -> dict:
-        out = (result.stdout.strip() or result.stderr.strip())[:500]
-        return {"step": step, "ok": result.returncode == 0, "output": out}
 
     problem = _checkout_problem(codebase_root)
     if problem:
@@ -5712,13 +5944,20 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 2. pip install
     import sys
     result = await asyncio.to_thread(
-        _run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
+        desktop_build.run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
         cwd=str(codebase_root), timeout=120,
     )
-    steps.append(_record("pip install", result))
+    steps.append(_record_step("pip install", result))
     if result.returncode != 0:
+        # str() because `steps` is inferred as list[dict[str, object]] from its
+        # first append; _record_step always puts a string here.
+        hint = _pip_install_hint(str(steps[-1]["output"]))
+        if hint:
+            steps[-1]["output"] = f"{hint}\n\n{steps[-1]['output']}"
+        # The step card renders the full output; the top-level error is the
+        # one-line headline above it, not a second copy of the same text.
         return JSONResponse(
-            {"steps": steps, "ok": False, "error": f"pip install failed: {steps[-1]['output']}"},
+            {"steps": steps, "ok": False, "error": hint or "pip install failed."},
             status_code=500,
         )
 
@@ -5728,15 +5967,15 @@ async def admin_deploy(request: Request) -> JSONResponse:
     result = await asyncio.to_thread(
         _run_root_npm_install, codebase_root,
     )
-    steps.append(_record("npm install (root)", result))
+    steps.append(_record_step("npm install (root)", result))
 
     # 3. npm build
     web_dir = codebase_root / "web"
     result = await asyncio.to_thread(
-        _run_step, ["npm", "run", "build"],
+        desktop_build.run_step, ["npm", "run", "build"],
         cwd=str(web_dir), timeout=120,
     )
-    steps.append(_record("npm build", result))
+    steps.append(_record_step("npm build", result))
     if result.returncode != 0:
         return JSONResponse(
             {"steps": steps, "ok": False, "error": f"npm build failed: {steps[-1]['output']}"},
@@ -5748,7 +5987,6 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # restart below. Released installs skip this: no checkout, no cargo. The
     # rebuild is minutes long, hence the staleness check rather than doing it on
     # every restart.
-    from ciao import desktop_build
 
     relaunch_desktop = False
     if getattr(config, "dev_mode", False):
@@ -5758,7 +5996,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
         else:
             steps.append({"step": "desktop app", "ok": True, "output": f"rebuilding: {reason}"})
             desktop_steps, relaunch_desktop = await asyncio.to_thread(
-                desktop_build.build_and_stage, codebase_root, runner=_run_step,
+                desktop_build.build_and_stage, codebase_root, runner=desktop_build.run_step,
             )
             steps.extend(desktop_steps)
             failed = next((s for s in desktop_steps if not s["ok"]), None)
@@ -5786,7 +6024,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
         if relaunch_desktop:
             try:
                 installed = await asyncio.to_thread(
-                    desktop_build.install_staged_and_relaunch, runner=_run_step,
+                    desktop_build.install_staged_and_relaunch, runner=desktop_build.run_step,
                 )
                 for step in installed:
                     if step["ok"]:

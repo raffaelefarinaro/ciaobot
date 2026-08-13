@@ -18,6 +18,7 @@ from typing import AsyncIterator
 
 from ciao.models import (
     AssistantTextDelta,
+    ModelCapabilityQuestionEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
@@ -487,6 +488,15 @@ def event_to_json(event: StreamEvent) -> dict | None:
             "message": event.message,
             "request_id": event.request_id,
         }
+    if isinstance(event, ModelCapabilityQuestionEvent):
+        return {
+            "type": "model_capability_question",
+            "request_id": event.request_id,
+            "missing": event.missing,
+            "current_model": event.current_model,
+            "candidates": event.candidates,
+            "timeout_s": event.timeout_s,
+        }
     return None
 
 
@@ -502,6 +512,10 @@ class ChatStream:
         "_pending_id_seq",
         "user_stopped",
         "background",
+        # Open capability questions keyed by request_id, each
+        # {"event": asyncio.Event(), "answer": None}. Populated by the
+        # image-capability pre-flight, resolved via `resolve_capability`.
+        "pending_capability",
     )
 
     def __init__(self, prompt_text: str = "", *, background: bool = False) -> None:
@@ -526,6 +540,7 @@ class ChatStream:
         # queued/steered user messages — a user send while one is active
         # starts a real turn instead (the drain is cancelled first).
         self.background: bool = background
+        self.pending_capability: dict[str, dict] | None = None
 
     def enqueue(
         self,
@@ -652,6 +667,52 @@ class ChatStream:
             )
         ]
         return len(self._events) < before
+
+    def open_capability(self, request_id: str) -> bool:
+        """Register an open capability question for ``request_id``.
+
+        Called by the image-capability pre-flight after it publishes the
+        question event, so the waiting coroutine and the client's eventual
+        ``capability_response`` share one asyncio.Event. Returns False when a
+        question for this request_id is already open.
+        """
+        if not request_id:
+            return False
+        if self.pending_capability is None:
+            self.pending_capability = {}
+        if request_id in self.pending_capability:
+            return False
+        self.pending_capability[request_id] = {"event": asyncio.Event(), "answer": None}
+        return True
+
+    def resolve_capability(
+        self, request_id: str, action: str, model_id: str = ""
+    ) -> bool:
+        """Resolve an open capability question with the client's answer.
+
+        Strips the question from the replay buffer (so a reconnect does not
+        re-render a card for an already-resolved request) and wakes the
+        pre-flight waiter with ``{"action": action, "model_id": model_id}``.
+        Returns False when no question is open for ``request_id``.
+        """
+        if not request_id:
+            return False
+        entry = None
+        if self.pending_capability is not None:
+            entry = self.pending_capability.pop(request_id, None)
+        self._events = [
+            ev
+            for ev in self._events
+            if not (
+                ev.get("type") == "model_capability_question"
+                and ev.get("request_id") == request_id
+            )
+        ]
+        if entry is None:
+            return False
+        entry["answer"] = {"action": action, "model_id": model_id}
+        entry["event"].set()
+        return True
 
     def finish(self) -> None:
         """Mark the stream complete and notify subscribers."""

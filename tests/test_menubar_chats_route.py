@@ -140,3 +140,40 @@ def test_a_chat_needing_attention_is_never_truncated_out_of_the_list() -> None:
     assert ids[1:] == ["recent-11", "recent-10", "recent-9", "recent-8"], ids
     flagged = [row for row in payload["chats"] if row["unread"] or row["needs_input"]]
     assert len(flagged) == payload["attention_count"]
+
+
+def test_nested_delegate_completion_does_not_create_a_second_unread_row() -> None:
+    work = SimpleNamespace(workspace="work")
+    chats = [
+        SimpleNamespace(
+            chat_id="supervisor",
+            project_id="p-work",
+            title="Supervisor",
+            archived=False,
+            last_activity_at="2026-08-11T22:00:00Z",
+            last_read_at="2026-08-11T21:00:00Z",
+            pending_question="",
+            spawned_from_chat_id="",
+        ),
+        SimpleNamespace(
+            chat_id="delegate",
+            project_id="p-work",
+            title="Internal task",
+            archived=False,
+            last_activity_at="2026-08-11T22:01:00Z",
+            last_read_at="2026-08-11T21:00:00Z",
+            pending_question="",
+            spawned_from_chat_id="supervisor",
+        ),
+    ]
+    pcm = SimpleNamespace(
+        list_chats=lambda: chats,
+        get_project=lambda project_id: work if project_id == "p-work" else None,
+    )
+
+    payload = _client(pcm=pcm).get("/api/menubar-chats").json()
+
+    assert payload["attention_count"] == 1
+    rows = {row["chat_id"]: row for row in payload["chats"]}
+    assert rows["supervisor"]["unread"] is True
+    assert rows["delegate"]["unread"] is False

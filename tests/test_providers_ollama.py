@@ -345,6 +345,7 @@ def test_create_chat_uses_personal_workspace_default(
     monkeypatch.setenv("CLAUDE_DEFAULT_MODEL_PERSONAL", "kimi-k2.7-code:cloud")
     monkeypatch.setenv("CLAUDE_DEFAULT_MODEL_WORK", "opus")
     monkeypatch.setenv("CIAO_OLLAMA_MODELS", "kimi-k2.7-code:cloud")
+    monkeypatch.setenv("CIAO_OLLAMA_API_KEY", "test-cloud-key")
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig.from_env()

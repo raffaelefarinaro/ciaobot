@@ -2,12 +2,38 @@
   <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handleFileLinkClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
-    <!-- Header -->
-    <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
+    <!-- Header. No page tag: the breadcrumb below already reads
+         `workspace / project / title`, so a "chat" marker beside it would name
+         what the breadcrumb and the transcript underneath it both already say.
+         This is also the most crowded header in the app, so the room goes to the
+         breadcrumb and the action icons instead. -->
+    <!-- No brand mark here. This is the densest header in the app - breadcrumb,
+         model picker, agent pill, archive - and the centred wordmark was
+         squeezing the chat title down to a few characters. The breadcrumb
+         already says where you are, and the mark is a click-to-reload
+         shortcut available on every other view. -->
+    <PaneHeader
+      :brand="false"
+      :active-bg-agents="store.activeBackgroundAgents"
+      @open-sidebar="$emit('open-sidebar')"
+    >
       <template #title>
         <div class="header-left">
-          <button class="close-btn desktop-only" @click="$emit('close')" title="Close chat">&times;</button>
+          <button class="close-btn" @click="$emit('close')" title="Close chat">&times;</button>
           <div class="header-breadcrumb" ref="breadcrumbRef">
+            <!-- The workspace was only ever implied here, through --accent. This
+                 is the screen where you are deepest inside one, so it says so —
+                 with its number key, which is otherwise only discoverable in
+                 the sidebar. -->
+            <span
+              v-if="workspaceCrumb"
+              class="breadcrumb-workspace"
+              :data-workspace-color="workspaceCrumb.color"
+              :title="`Workspace ${workspaceCrumb.name} (press ${workspaceCrumb.key})`"
+            >
+              {{ workspaceCrumb.name }}
+            </span>
+            <span v-if="workspaceCrumb" class="breadcrumb-separator">/</span>
             <span
               v-if="project && project.name !== 'General'"
               class="breadcrumb-project"
@@ -72,7 +98,7 @@
                       @click="openProjectFile(f)"
                       :title="f.path"
                     >
-                      <span class="context-file-icon">{{ f.kind === 'image' ? '🖼' : f.kind === 'markdown' ? '📄' : '📎' }}</span>
+                      <AppIcon class="context-file-icon" :name="f.kind === 'image' ? 'image' : f.kind === 'markdown' ? 'doc' : 'file'" />
                       <span class="context-file-name">{{ f.path }}</span>
                     </div>
                   </div>
@@ -110,7 +136,7 @@
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
-            <span aria-hidden="true">🧠</span>
+            <AppIcon name="model" :size="18" />
           </button>
           <button
             v-if="chat.provider"
@@ -125,6 +151,7 @@
             :model-value="canonicalTier(chat.model)"
             :active-models="activeModelHighlights"
             :sections="chatModelSections"
+            :filter-section="capabilityPickerSection"
             placeholder="Model"
             placement="bottom-end"
             @select="selectModel"
@@ -156,82 +183,98 @@
         <button
           class="archive-btn touch-hit"
           @click="doArchive"
-          title="Archive chat"
-          aria-label="Archive chat"
+          :title="archiveActionLabel"
+          :aria-label="archiveActionLabel"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         </button>
       </template>
     </PaneHeader>
 
-    <!-- Delegate parent banner: this chat was spawned from a supervisor chat -->
-    <div v-if="delegateParent" class="loop-banner">
-      <div class="loop-banner-row">
-        <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
-        <span class="loop-banner-text">
-          Delegate of <strong>{{ delegateParent.title || 'parent chat' }}</strong>
-        </span>
-        <router-link
-          :to="`/chat/${delegateParent.chat_id}`"
-          class="btn-small loop-banner-manage"
-        >Open parent</router-link>
-      </div>
-    </div>
-
-    <!-- Delegate children banner: this chat spawned one or more subchats -->
-    <div v-if="delegateChildren.length" class="loop-banner">
-      <div
-        v-for="child in delegateChildren"
-        :key="child.chat_id"
-        class="loop-banner-row"
+    <!-- Context bar: what this chat is attached to — a supervisor, subchats,
+         loops, schedules. These were four sibling banner blocks, each a v-for,
+         so a chat with all four opened with its first message below the fold.
+         Collapsed it is one line of counted chips; expanded it is the same
+         detail rows with the same actions. -->
+    <div v-if="contextRelations.length" class="ctx-bar" :class="{ 'ctx-bar--open': contextExpanded }">
+      <button
+        type="button"
+        class="ctx-summary"
+        :aria-expanded="contextExpanded"
+        @click="contextExpanded = !contextExpanded"
       >
-        <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
-        <span class="loop-banner-text">
-          Subchat <strong>{{ child.title || 'untitled' }}</strong>
-          <template v-if="store.isChatStreaming(child.chat_id)"> · working</template>
-          <template v-else-if="store.chatHasBackgroundAgents(child.chat_id)"> · agents running</template>
-          <template v-else-if="store.chatNeedsInput(child.chat_id)"> · needs input</template>
-          <template v-else-if="store.chatUnread(child.chat_id) > 0"> · unread</template>
+        <span class="ctx-chevron" aria-hidden="true">{{ contextExpanded ? '▾' : '▸' }}</span>
+        <span
+          v-for="rel in contextRelations"
+          :key="rel.key"
+          class="ctx-chip"
+        >
+          <span v-if="rel.glyph" class="ctx-chip-glyph" :class="{ live: rel.live }" aria-hidden="true">{{ rel.glyph }}</span>
+          {{ rel.label }}
         </span>
-        <router-link
-          :to="`/chat/${child.chat_id}`"
-          class="btn-small loop-banner-manage"
-        >Open</router-link>
-      </div>
-    </div>
+        <span v-if="contextNeedsAttention" class="ctx-attn" title="A subchat needs you">needs you</span>
+      </button>
 
-    <!-- Loop banner: this chat is driven by one or more loops -->
-    <div v-if="chatLoops.length" class="loop-banner">
-      <div v-for="l in chatLoops" :key="l.loop_id" class="loop-banner-row">
-        <span class="loop-banner-ico" aria-hidden="true">&#10227;</span>
-        <span class="loop-banner-text">
-          <strong>{{ l.title || 'Loop' }}</strong>
-          · every {{ l.interval_minutes }}m
-          · {{ l.running ? 'running' : 'stopped' }}<template v-if="l.last_status === 'busy'"> (waiting, chat busy)</template>
-          <template v-if="l.running && loopCountdown(l)"> · next {{ loopCountdown(l) }}</template>
-        </span>
-        <button class="btn-small" @click="toggleLoop(l)">{{ l.running ? 'Stop loop' : 'Start loop' }}</button>
-        <router-link :to="`/schedules/${l.loop_id}`" class="btn-small loop-banner-manage">Manage</router-link>
-      </div>
-    </div>
+      <div v-if="contextExpanded" class="ctx-detail">
+        <div v-if="delegateParent" class="loop-banner-row">
+          <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
+          <span class="loop-banner-text">
+            Delegate of <strong>{{ delegateParent.title || 'parent chat' }}</strong>
+          </span>
+          <router-link
+            :to="`/chat/${delegateParent.chat_id}`"
+            class="btn-small loop-banner-manage"
+          >Open parent</router-link>
+        </div>
 
-    <!-- Schedule banner: this chat was created or is driven by a schedule -->
-    <div v-if="chatSchedules.length" class="loop-banner">
-      <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
-        <span class="loop-banner-ico" aria-hidden="true">&#9201;</span>
-        <span class="loop-banner-text">
-          <strong>{{ s.title || 'Schedule' }}</strong>
-          · {{ scheduleCadence(s) }}
-          · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
-        </span>
-        <button class="btn-small" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
-        <router-link :to="`/schedules/${s.schedule_id}`" class="btn-small loop-banner-manage">Manage</router-link>
+        <div
+          v-for="child in delegateChildren"
+          :key="child.chat_id"
+          class="loop-banner-row"
+        >
+          <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
+          <!-- State comes from ChatSignals, not prose: this row used to spell
+               out "· working" / "· needs input", which was a fourth, divergent
+               rendering of the same facts the sidebar and home already draw. -->
+          <span class="loop-banner-text">
+            Subchat
+            <strong :class="{ 'subchat-unread': store.chatUnread(child.chat_id) > 0 }">{{ child.title || 'untitled' }}</strong>
+          </span>
+          <ChatSignals :chat-id="child.chat_id" density="row" />
+          <router-link
+            :to="`/chat/${child.chat_id}`"
+            class="btn-small loop-banner-manage"
+          >Open</router-link>
+        </div>
+
+        <div v-for="l in chatLoops" :key="l.loop_id" class="loop-banner-row">
+          <span class="loop-banner-ico" aria-hidden="true">&#10227;</span>
+          <span class="loop-banner-text">
+            <strong>{{ l.title || 'Loop' }}</strong>
+            · every {{ l.interval_minutes }}m
+            · {{ l.running ? 'running' : 'stopped' }}<template v-if="l.last_status === 'busy'"> (waiting, chat busy)</template>
+            <template v-if="l.running && loopCountdown(l)"> · next {{ loopCountdown(l) }}</template>
+          </span>
+          <button class="btn-small" @click="toggleLoop(l)">{{ l.running ? 'Stop loop' : 'Start loop' }}</button>
+          <router-link :to="`/schedules/${l.loop_id}`" class="btn-small loop-banner-manage">Manage</router-link>
+        </div>
+
+        <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
+          <AppIcon class="loop-banner-ico" name="clock" :size="18" />
+          <span class="loop-banner-text">
+            <strong>{{ s.title || 'Schedule' }}</strong>
+            · {{ scheduleCadence(s) }}
+            · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
+          </span>
+          <button class="btn-small" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
+          <router-link :to="`/schedules/${s.schedule_id}`" class="btn-small loop-banner-manage">Manage</router-link>
+        </div>
       </div>
     </div>
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" ref="messagesEl" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
+    <div class="messages" ref="messagesEl" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
       <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
@@ -243,7 +286,7 @@
             @click="toggleTrace(i)"
           >
             <span class="trace-chevron">{{ openTraces[i] ? '\u25BE' : '\u25B8' }}</span>
-            <span class="trace-icon">&#129504;</span>
+            <AppIcon class="trace-icon" name="activity" :size="14" />
             <span class="trace-label">Activity</span>
             <span class="trace-meta">
               <span
@@ -275,7 +318,7 @@
                 @click="openFileCard(step.file_path || step.content)"
                 :title="step.file_path || step.content"
               >
-                <span class="file-card-icon" aria-hidden="true">{{ fileCardIcon(step.file_path || step.content) }}</span>
+                <AppIcon class="file-card-icon" :name="fileCardIcon(step.file_path || step.content)" :size="18" />
                 <span class="file-card-main">
                   <span class="file-card-name">{{ fileCardBasename(step.file_path || step.content) }}</span>
                   <span class="file-card-meta">
@@ -285,11 +328,18 @@
                 </span>
                 <span class="file-card-chevron" aria-hidden="true">&#8599;</span>
               </button>
-              <div
-                v-else-if="step.tool_name === '_thinking'"
-                class="trace-text trace-thinking"
-                v-html="renderMarkdown(step.content)"
-              ></div>
+              <div v-else-if="step.tool_name === '_thinking'" class="thinking-block">
+                <button
+                  type="button"
+                  class="thinking-toggle"
+                  :aria-expanded="thinkingExpanded"
+                  @click.stop="toggleThinking"
+                >
+                  <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
+                  <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
+                </button>
+                <div v-if="thinkingExpanded" class="trace-text trace-thinking" v-html="renderMarkdown(step.content)"></div>
+              </div>
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
             <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" />
@@ -302,7 +352,7 @@
                 @click.stop="openFileCard(f.file_path)"
                 :title="f.file_path"
               >
-                <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
+                <AppIcon class="file-chip-icon" :name="fileCardIcon(f.file_path)" :size="14" />
                 <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
                 <span v-if="f.action === 'created'" class="file-chip-action">new</span>
                 <span class="file-chip-open" aria-hidden="true">&#8599;</span>
@@ -372,6 +422,10 @@
           <div class="message-row" @click="toggleMessageActions(`assistant-${i}`, $event)">
             <div class="message assistant" :class="{ error: item.msg.is_error }" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+              <div v-if="item.msg.is_error" class="error-attribution" role="status">
+                <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
+                <span>{{ classifyError(item.msg.content).copy }}</span>
+              </div>
               <div v-if="item.outputs?.length" class="answer-outputs" role="group" aria-label="Outputs">
                 <span class="answer-outputs-label">Outputs</span>
                 <div class="answer-output-files">
@@ -383,7 +437,7 @@
                     @click.stop="openFileCard(f.file_path)"
                     :title="f.file_path"
                   >
-                    <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
+                    <AppIcon class="file-chip-icon" :name="fileCardIcon(f.file_path)" :size="14" />
                     <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
                     <span v-if="f.action === 'created'" class="file-chip-action">new</span>
                     <span class="file-chip-open" aria-hidden="true">&#8599;</span>
@@ -452,6 +506,10 @@
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+          <div v-if="isErrorMsg(item.msg.content)" class="error-attribution" role="status">
+            <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
+            <span>{{ classifyError(item.msg.content).copy }}</span>
+          </div>
           <div v-if="isErrorMsg(item.msg.content)" class="error-actions">
             <button
               v-if="lastUserBefore(i)"
@@ -465,6 +523,22 @@
           </div>
         </div>
       </template>
+
+      <!-- Ephemeral orientation aid shown after reopening a chat. Keep it
+           after the rendered transcript so it reads as the latest message,
+           while the tag makes it clear that it is generated context rather
+           than a reply. -->
+      <div v-if="reentrySummary" class="message-wrap assistant reentry-summary-wrap">
+        <div class="message-row">
+          <div class="message assistant reentry-summary-message" role="status" aria-label="Apple Intelligence summary">
+            <div class="reentry-summary-header">
+              <span class="reentry-summary-badge">Summary</span>
+              <span class="reentry-summary-source">Apple Intelligence</span>
+            </div>
+            <div class="message-content" v-html="renderMarkdown(reentrySummary)"></div>
+          </div>
+        </div>
+      </div>
 
       <div
         v-if="store.hostConnectionUnavailable"
@@ -495,7 +569,7 @@
 
       <div v-if="chat.retry?.status === 'pending' && !store.isStreaming" class="retry-card">
         <div class="retry-card-main">
-          <span class="retry-card-icon">⏱</span>
+          <AppIcon class="retry-card-icon" name="clock" :size="18" />
           <div>
             <div class="retry-card-title">Retrying this turn every hour</div>
             <div class="retry-card-meta">
@@ -524,7 +598,6 @@
         >
           <span class="trace-chevron">{{ liveTraceOpen ? '\u25BE' : '\u25B8' }}</span>
           <span class="activity-spinner"></span>
-          <span class="trace-icon">&#129504;</span>
           <span class="trace-label">{{ liveTraceLabel }}</span>
           <span v-if="liveTraceMetaParts.length" class="trace-meta">
             <span
@@ -560,7 +633,7 @@
               @click="openFileCard(entry.file_path)"
               :title="entry.file_path"
             >
-              <span class="file-card-icon" aria-hidden="true">{{ fileCardIcon(entry.file_path) }}</span>
+              <AppIcon class="file-card-icon" :name="fileCardIcon(entry.file_path)" :size="18" />
               <span class="file-card-main">
                 <span class="file-card-name">{{ fileCardBasename(entry.file_path) }}</span>
                 <span class="file-card-meta">
@@ -570,11 +643,18 @@
               </span>
               <span class="file-card-chevron" aria-hidden="true">&#8599;</span>
             </button>
-            <div
-              v-else-if="entry.kind === 'thinking'"
-              class="trace-text trace-thinking"
-              v-html="renderMarkdown(entry.content)"
-            ></div>
+            <div v-else-if="entry.kind === 'thinking'" class="thinking-block">
+              <button
+                type="button"
+                class="thinking-toggle"
+                :aria-expanded="thinkingExpanded"
+                @click.stop="toggleThinking"
+              >
+                <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
+                <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
+              </button>
+              <div v-if="thinkingExpanded" class="trace-text trace-thinking" v-html="renderMarkdown(entry.content)"></div>
+            </div>
             <div
               v-else-if="entry.kind === 'status'"
               class="trace-text trace-status"
@@ -582,11 +662,18 @@
             ></div>
             <div v-else class="trace-text" v-html="renderMarkdown(entry.content)"></div>
           </template>
-          <div
-            v-if="store.currentStreamingThinking"
-            class="trace-text trace-thinking trace-streaming"
-            v-html="renderMarkdown(store.currentStreamingThinking)"
-          ></div>
+          <div v-if="store.currentStreamingThinking" class="thinking-block">
+            <button
+              type="button"
+              class="thinking-toggle"
+              :aria-expanded="thinkingExpanded"
+              @click.stop="toggleThinking"
+            >
+              <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
+              <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
+            </button>
+            <div v-if="thinkingExpanded" class="trace-text trace-thinking trace-streaming" v-html="renderMarkdown(store.currentStreamingThinking)"></div>
+          </div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
           <!-- Subagents for the in-flight turn nest in the live trace -->
           <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
@@ -607,12 +694,13 @@
           type="button"
           title="Comment on this selection"
         >
-          <span class="chat-comment-trigger-icon">💬</span>
+          <AppIcon class="chat-comment-trigger-icon" name="comment" />
           Comment
         </button>
 
       </Teleport>
       <CommentComposePopover
+        ref="commentComposeDraftRef"
         :anchor="commentDraft && draftAnchor ? draftAnchor : null"
         v-model="composeText"
         :images="commentDraftImages"
@@ -625,6 +713,7 @@
            opened it rather than to a selection, since the text it annotates may
            be scrolled out of view. -->
       <CommentComposePopover
+        ref="commentComposeEditRef"
         :anchor="editingChatCommentId ? chipEditAnchor : null"
         v-model="editingChatCommentText"
         :images="editingChatCommentImages"
@@ -662,9 +751,9 @@
          a structured question; we render an interactive option list so the
          answer flows back as the next user message. The SDK's built-in CLI
          picker can't run headless, so this is the only path. -->
-    <div v-if="activeQuestions.length" class="question-card">
+    <div v-if="activeQuestions.length && (dockPrimary === 'question' || dockExpanded)" class="question-card">
       <div class="question-card-header">
-        <span class="question-card-icon">&#10067;</span>
+        <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
         <button class="question-card-dismiss" @click="dismissQuestions" title="Dismiss">&times;</button>
       </div>
@@ -708,17 +797,68 @@
       </div>
     </div>
 
+    <!-- Image-capability question. The server paused before dispatch because
+         the selected model can't see images. The first candidate is the current
+         model, disabled; the rest are same-backend vision models. Picking one
+         switches the chat and re-dispatches the turn; "Open picker" hands over
+         to the full ModelSelector filtered to the current backend; Cancel (or
+         the 30s timeout) closes the turn with a system bubble. -->
+    <div v-if="activeCapabilityQuestions.length" class="question-card capability-card">
+      <div class="question-card-header">
+        <span class="question-card-icon">&#128444;</span>
+        <span class="question-card-title">This model can't see images</span>
+        <span class="capability-countdown">{{ capabilityRemaining(activeCapabilityQuestions[0]) }}s</span>
+      </div>
+      <div
+        v-for="q in activeCapabilityQuestions"
+        :key="q.request_id"
+        class="question-block"
+      >
+        <div class="question-options">
+          <button
+            v-for="c in q.candidates"
+            :key="c.id"
+            type="button"
+            class="question-option"
+            :disabled="c.disabled || capabilityExpired(q)"
+            @click="switchCapabilityModel(q, c.id)"
+          >
+            <span class="question-option-label">{{ c.label }}</span>
+            <span v-if="c.disabled" class="question-option-desc">current model</span>
+          </button>
+        </div>
+      </div>
+      <div class="question-card-actions">
+        <button
+          class="btn-sm"
+          type="button"
+          :disabled="capabilityExpired(activeCapabilityQuestions[0])"
+          @click="cancelCapability(activeCapabilityQuestions[0])"
+        >Cancel</button>
+        <button
+          class="btn-sm"
+          type="button"
+          :disabled="capabilityExpired(activeCapabilityQuestions[0])"
+          @click="openCapabilityPicker(activeCapabilityQuestions[0])"
+        >Open picker</button>
+      </div>
+    </div>
+
     <!-- Pending Auto-mode permission prompts. Shown above queued/input so
          the user can't miss them. Each prompt sticks until it's approved or
-         denied; the server resolves still-open prompts on turn teardown. -->
+         denied; the server resolves still-open prompts on turn teardown.
+         Only the first is expanded by default: a permission blocks a tool
+         mid-turn, so it outranks a question, but several stacked cards used to
+         push the transcript off screen. The rest are reachable via the dock
+         strip below. -->
     <div v-if="pendingApprovals.length" class="permission-requests">
       <div
-        v-for="p in pendingApprovals"
+        v-for="p in visibleApprovals"
         :key="p.request_id"
         class="permission-card"
       >
         <div class="permission-header">
-          <svg class="permission-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3.5v5c0 4.5-3 7.75-7 9-4-1.25-7-4.5-7-9v-5L12 3z"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
+          <svg class="permission-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter"><path d="M12 3l7 3.5v5c0 4.5-3 7.75-7 9-4-1.25-7-4.5-7-9v-5L12 3z"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
           <span class="permission-tool">{{ p.tool_name }}</span>
           <span v-if="permissionReason(p)" class="permission-message">{{ permissionReason(p) }}</span>
         </div>
@@ -748,7 +888,7 @@
     </div>
 
     <!-- Queued messages (sent while a response was already streaming). -->
-    <div v-if="store.currentQueued.length" class="queued-messages">
+    <div v-if="store.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
       <div
         v-for="(q, i) in store.currentQueued"
         :key="q.id || i"
@@ -818,7 +958,7 @@
         class="comment-chip"
         :class="{ 'is-editing': editingChatCommentId === c.id }"
       >
-        <span class="comment-chip-icon" aria-hidden="true">&#128172;</span>
+        <AppIcon class="comment-chip-icon" name="comment" :size="14" />
         <button
           type="button"
           class="comment-chip-body"
@@ -831,7 +971,7 @@
         <button class="comment-chip-remove" @click.stop.prevent="deleteChatComment(c.id)" title="Remove">&times;</button>
       </span>
       <span v-for="c in store.pendingComments" :key="`fc-${c.id}`" class="comment-chip">
-        <span class="comment-chip-icon" aria-hidden="true">&#128196;</span>
+        <AppIcon class="comment-chip-icon" name="doc" :size="14" />
         <button
           type="button"
           class="comment-chip-body"
@@ -848,22 +988,61 @@
       </span>
     </div>
 
-    <!-- Input -->
-    <!-- Background agents still running after the parent turn finished. -->
-    <div
-      v-if="store.activeBackgroundAgents > 0 && !chat.archived"
-      class="bg-agents-bar"
-      role="status"
-      aria-live="polite"
-    >
-      <span class="bg-agents-dot" aria-hidden="true"></span>
-      <span class="bg-agents-label">
-        {{ store.activeBackgroundAgents }}
-        background {{ store.activeBackgroundAgents === 1 ? 'agent' : 'agents' }} running…
-      </span>
+    <!-- Dock strip: one counted line for everything not expanded above, so the
+         dock never grows past one card plus this. Replaces the standalone
+         background-agents bar, which was a third rendering of a count the
+         header pill already shows. Nothing here is unreachable — the strip is a
+         disclosure. -->
+    <!-- Rendered whenever there is anything to collapse OR anything already
+         expanded, so the disclosure works in both directions. Gating purely on
+         dockDeferred made the strip unmount itself on click: every deferred
+         entry except background agents disappears once dockExpanded is true. -->
+    <div v-if="dockStripVisible" class="dock-strip-wrap">
+      <!-- aria-live sits on an inner span: an explicit role="status" on the
+           button would override its implicit button role and drop
+           aria-expanded, so assistive tech would stop treating it as a
+           control. -->
+      <button
+        type="button"
+        class="dock-strip"
+        :aria-expanded="dockExpanded"
+        @click="dockExpanded = !dockExpanded"
+      >
+        <span class="dock-chevron" aria-hidden="true">{{ dockExpanded ? '▾' : '▸' }}</span>
+        <span class="dock-strip-items" role="status" aria-live="polite">
+          <span
+            v-for="item in dockDeferred"
+            :key="item.key"
+            class="dock-pill"
+            :class="{ 'dock-pill--blocking': item.blocking }"
+          >{{ item.label }}</span>
+          <span v-if="dockExpanded && !dockDeferred.length" class="dock-pill">collapse</span>
+        </span>
+      </button>
     </div>
 
-    <!-- Slash-command picker (shown when the input starts with "/") -->
+    <!-- @-mention picker (textarea version: inserts plain backend-facing text) -->
+    <div v-if="showMentionPicker" class="commands-picker mention-picker" role="listbox" aria-label="Mentions">
+      <div
+        v-for="(item, i) in filteredMentions"
+        :key="`${item.kind}:${item.insertText}`"
+        class="commands-picker-row mention-picker-row"
+        :class="{ active: i === mentionHighlightIdx }"
+        role="option"
+        :aria-selected="i === mentionHighlightIdx"
+        @mousedown.prevent="mentionPicker.select(item)"
+        @mouseenter="mentionHighlightIdx = i"
+      >
+        <div class="commands-picker-head">
+          <span class="mention-picker-kind">{{ item.kind }}</span>
+          <span class="commands-picker-name" :title="`@${item.insertText}`">@{{ item.label }}</span>
+        </div>
+        <div class="commands-picker-desc">{{ item.description }}</div>
+      </div>
+    </div>
+
+    <!-- Slash-command picker. Skills can be picked from any slash token;
+         Ciao-owned commands remain start-of-message only. -->
     <div v-if="showCommandsPicker" class="commands-picker" role="listbox" aria-label="Slash commands">
       <div
         v-for="(cmd, i) in filteredCommands"
@@ -876,6 +1055,7 @@
         @mouseenter="commandHighlightIdx = i"
       >
         <div class="commands-picker-head">
+          <span v-if="cmd.source === 'skill'" class="commands-picker-kind">skill</span>
           <span class="commands-picker-name">/{{ cmd.name }}</span>
           <span v-if="cmd.argument_hint" class="commands-picker-hint">{{ cmd.argument_hint }}</span>
         </div>
@@ -900,9 +1080,10 @@
           :placeholder="inputPlaceholder"
           rows="1"
           @keydown="handleKeydown"
-          @input="autoResize"
+          @input="handleInput"
           @paste="handlePaste"
           @focus="handleInputFocus"
+          @click="refreshComposerPickers"
         ></textarea>
         <div class="input-actions">
           <!-- Voice recording is allowed during streaming too: the user's
@@ -947,11 +1128,15 @@ import SubagentPanel from './SubagentPanel.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
-import { readChatDraft, writeChatDraft } from '../lib/chatDrafts'
-import type { Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
+import type { AgentAssetsResponse, CommandsResponse, Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
+import ChatSignals from './ChatSignals.vue'
+import { colorForWorkspace } from '../lib/workspaceColors'
+import { archiveActionLabel as archiveLabel, archiveConfirmMessage } from '../lib/archiveCopy'
+import AppIcon, { type AppIconName } from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import {
@@ -963,11 +1148,26 @@ import {
   selectedModelEntry,
 } from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
+import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
+import {
+  cleanCommentSelection,
+  commentTextMatches,
+  commentTextOccurrenceIndex,
+  highlightCommentText,
+} from '../lib/commentHighlight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
+import {
+  useMentionPicker,
+  type MentionAgent,
+  type MentionChat,
+  type MentionFile,
+  type MentionProject,
+} from '../composables/useMentionPicker'
+import { useThinkingPreference } from '../composables/useThinkingPreference'
 import {
   clearPlanReturnMode,
   includeBuiltinPlanCommand,
@@ -1038,10 +1238,14 @@ const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
+const { thinkingExpanded, toggleThinking } = useThinkingPreference()
 const draftChatId = store.activeChatId
 const inputText = ref(readChatDraft(draftChatId))
 const inputRevision = ref(0)
 const inputEl = ref<HTMLTextAreaElement>()
+const promptHistoryIndex = ref(-1)
+const promptHistoryDraft = ref('')
+let settingPromptHistoryText = false
 const isContinuing = ref(false)
 const becomingHost = ref(false)
 const hostHandoverError = ref('')
@@ -1051,8 +1255,52 @@ const hostHandoverError = ref('')
 // chats immediately after typing.
 watch(inputText, (text) => {
   inputRevision.value += 1
-  writeChatDraft(draftChatId, text)
+  if (!settingPromptHistoryText) {
+    promptHistoryIndex.value = -1
+    promptHistoryDraft.value = ''
+    writeChatDraft(draftChatId, text)
+  }
 }, { flush: 'sync' })
+
+function promptHistory(): string[] {
+  return readSentPromptHistory(draftChatId)
+}
+
+function setPromptHistoryText(text: string): void {
+  settingPromptHistoryText = true
+  inputText.value = text
+  settingPromptHistoryText = false
+  nextTick(() => autoResize())
+}
+
+function handlePromptHistoryKey(e: KeyboardEvent): boolean {
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return false
+  const history = promptHistory()
+  if (!history.length) return false
+
+  if (e.key === 'ArrowUp') {
+    if (promptHistoryIndex.value < 0 && inputText.value.trim() !== '') return false
+    e.preventDefault()
+    if (promptHistoryIndex.value < 0) promptHistoryDraft.value = inputText.value
+    promptHistoryIndex.value = promptHistoryIndex.value < 0
+      ? history.length - 1
+      : Math.max(0, promptHistoryIndex.value - 1)
+    setPromptHistoryText(history[promptHistoryIndex.value])
+    return true
+  }
+
+  if (promptHistoryIndex.value < 0) return false
+  e.preventDefault()
+  if (promptHistoryIndex.value >= history.length - 1) {
+    promptHistoryIndex.value = -1
+    setPromptHistoryText(promptHistoryDraft.value)
+    promptHistoryDraft.value = ''
+  } else {
+    promptHistoryIndex.value += 1
+    setPromptHistoryText(history[promptHistoryIndex.value])
+  }
+  return true
+}
 
 async function disconnectAndBecomeHost() {
   if (becomingHost.value) return
@@ -1123,15 +1371,65 @@ function primaryAction() {
 const slashCommands = ref<SlashCommand[]>(includeBuiltinPlanCommand([]))
 const commandHighlightIdx = ref(0)
 
+interface SlashCommandTrigger {
+  start: number
+  end: number
+  query: string
+}
+
+/** Find a slash token immediately before the textarea caret. */
+function findSlashCommandTrigger(text: string, cursor: number): SlashCommandTrigger | null {
+  const end = Math.max(0, Math.min(cursor, text.length))
+  const beforeCaret = text.slice(0, end)
+  const match = beforeCaret.match(/(?:^|\s)\/([^\s/]*)$/)
+  if (!match) return null
+
+  const start = end - match[0].length + match[0].lastIndexOf('/')
+  return { start, end, query: match[1] || '' }
+}
+
+const slashCommandTrigger = ref<SlashCommandTrigger | null>(null)
+
+function dismissSlashCommandPicker(): void {
+  slashCommandTrigger.value = null
+  commandHighlightIdx.value = 0
+}
+
+function refreshSlashCommandPicker(): void {
+  const el = inputEl.value
+  if (!el || el.selectionStart !== el.selectionEnd) {
+    dismissSlashCommandPicker()
+    return
+  }
+  slashCommandTrigger.value = findSlashCommandTrigger(inputText.value, el.selectionStart)
+  commandHighlightIdx.value = 0
+}
+
+async function loadSlashCommands(): Promise<void> {
+  try {
+    const provider = encodeURIComponent(chat.value.provider || '')
+    const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}`)
+    slashCommands.value = includeBuiltinPlanCommand([
+      ...(response.commands || []),
+      ...(response.skills || []),
+    ])
+  } catch {
+    // Keep the built-in /plan entry available when asset discovery is offline.
+    slashCommands.value = includeBuiltinPlanCommand([])
+  }
+}
+
 const filteredCommands = computed<SlashCommand[]>(() => {
-  const text = inputText.value
-  if (!text.startsWith('/')) return []
-  // Only show while the user is typing the command name itself — once they
-  // add a space or newline, they're typing arguments and the picker steps aside.
-  const firstToken = text.slice(1).split(/\s/, 1)[0] ?? ''
-  if (text.slice(1).includes(' ') || text.slice(1).includes('\n')) return []
-  const needle = firstToken.toLowerCase()
-  return slashCommands.value.filter(c => c.name.toLowerCase().startsWith(needle))
+  const active = slashCommandTrigger.value
+  if (!active) return []
+  const needle = active.query.toLowerCase()
+  return slashCommands.value.filter(command =>
+    // Project/user commands are expanded only when they make up the prompt.
+    // Skills are native provider entries, so they remain available alongside
+    // file, chat, and other inline references anywhere in the draft.
+    (active.start === 0 || command.source === 'skill')
+    && command.name.toLowerCase().startsWith(needle),
+  )
 })
 
 const showCommandsPicker = computed(() => filteredCommands.value.length > 0)
@@ -1141,21 +1439,46 @@ watch(filteredCommands, (list) => {
 })
 
 function applyCommand(cmd: SlashCommand) {
-  // Trailing space only when the command expects arguments, so a naked
-  // `/brief` is ready to send without requiring an extra keystroke.
-  inputText.value = cmd.argument_hint ? `/${cmd.name} ` : `/${cmd.name}`
-  commandHighlightIdx.value = 0
+  const active = slashCommandTrigger.value
+  if (!active) return
+
+  const before = inputText.value.slice(0, active.start)
+  const after = inputText.value.slice(active.end)
+  const token = `/${cmd.name}`
+  // Keep the existing separator when this replaces a token in the middle of
+  // a draft; otherwise leave room for command arguments as before.
+  const suffix = cmd.argument_hint && !(after && /^\s/.test(after)) ? ' ' : ''
+  inputText.value = before + token + suffix + after
+  const cursor = before.length + token.length + suffix.length
+  dismissSlashCommandPicker()
   nextTick(() => {
-    inputEl.value?.focus()
+    const input = inputEl.value
+    if (!input) return
+    input.setSelectionRange(cursor, cursor)
+    input.focus()
     autoResize()
   })
 }
+
+watch(inputText, () => {
+  if (!slashCommandTrigger.value) return
+  const el = inputEl.value
+  const current = el && el.selectionStart === el.selectionEnd
+    ? findSlashCommandTrigger(inputText.value, el.selectionStart)
+    : null
+  if (current) slashCommandTrigger.value = current
+  else dismissSlashCommandPicker()
+})
 const messagesEl = ref<HTMLElement>()
 const scrollAnchor = ref<HTMLElement>()
 const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
+const reentrySummary = computed(() => store.reentrySummaries[chat.value.chat_id] || '')
+watch(() => chat.value.provider, () => {
+  void loadSlashCommands()
+})
 const planModeSaving = ref(false)
 
 async function togglePlanMode(
@@ -1260,11 +1583,128 @@ const delegateParent = computed(() => {
 })
 const delegateChildren = computed(() => {
   const cid = chat.value?.chat_id
-  if (!cid) return []
-  return store.chats.filter(
-    c => c.spawned_from_chat_id === cid && !c.archived && c.local !== false,
-  )
+  return cid ? store.activeDelegatesFor(cid) : []
 })
+
+// ── Context bar ─────────────────────────────────────────────────────
+// One counted chip per relation, so four v-for banner blocks can never again
+// push the transcript below the fold. Detail rows live behind the disclosure.
+const contextExpanded = ref(false)
+
+interface ContextRelation {
+  key: string
+  label: string
+  glyph?: string
+  live?: boolean
+}
+
+const contextRelations = computed<ContextRelation[]>(() => {
+  const rels: ContextRelation[] = []
+  if (delegateParent.value) {
+    rels.push({ key: 'parent', label: 'delegate', glyph: '↳' })
+  }
+  if (delegateChildren.value.length) {
+    const n = delegateChildren.value.length
+    rels.push({ key: 'children', label: `${n} subchat${n === 1 ? '' : 's'}`, glyph: '↳' })
+  }
+  if (chatLoops.value.length) {
+    const running = chatLoops.value.some(l => l.running)
+    const label = chatLoops.value.length === 1
+      ? `loop ${chatLoops.value[0].interval_minutes}m`
+      : `${chatLoops.value.length} loops`
+    rels.push({ key: 'loops', label, glyph: '↻', live: running })
+  }
+  if (chatSchedules.value.length) {
+    const label = chatSchedules.value.length === 1
+      ? `scheduled ${scheduleCadence(chatSchedules.value[0])}`
+      : `${chatSchedules.value.length} schedules`
+    rels.push({ key: 'schedules', label })
+  }
+  return rels
+})
+
+// Surfaced on the collapsed bar so a blocked subchat is never hidden behind a
+// disclosure. Same rule as everywhere else: filled means it needs the user.
+const contextNeedsAttention = computed(() =>
+  delegateChildren.value.some(c => store.chatNeedsInput(c.chat_id)),
+)
+
+// ── Action dock ─────────────────────────────────────────────────────
+// Six independent v-if blocks used to stack between the transcript and the
+// composer with nothing distinguishing blocking items from status. Now: exactly
+// one blocking item expanded by precedence, everything else on one counted
+// strip that expands.
+//
+// Precedence: a permission blocks a tool mid-turn, a question blocks the turn's
+// end, so the permission is the tighter deadline and wins.
+//
+// Staged attachments and the slash-command picker deliberately stay outside the
+// dock: both are immediate feedback for something the user just did, and hiding
+// them behind a disclosure would make the composer feel unresponsive.
+const dockExpanded = ref(false)
+
+const dockPrimary = computed<'permission' | 'question' | null>(() => {
+  if (pendingApprovals.value.length) return 'permission'
+  if (activeQuestions.value.length) return 'question'
+  return null
+})
+
+const visibleApprovals = computed(() =>
+  dockExpanded.value ? pendingApprovals.value : pendingApprovals.value.slice(0, 1),
+)
+
+interface DockItem {
+  key: string
+  label: string
+  blocking?: boolean
+}
+
+// Anything to collapse, or anything already expanded that needs a way back.
+const dockStripVisible = computed(() =>
+  dockDeferred.value.length > 0
+  || (dockExpanded.value && (pendingApprovals.value.length > 1
+    || activeQuestions.value.length > 0
+    || store.currentQueued.length > 0)),
+)
+
+const dockDeferred = computed<DockItem[]>(() => {
+  const items: DockItem[] = []
+  const extraApprovals = pendingApprovals.value.length - 1
+  if (!dockExpanded.value && extraApprovals > 0) {
+    items.push({ key: 'permissions', label: `${extraApprovals} more permission${extraApprovals === 1 ? '' : 's'}`, blocking: true })
+  }
+  if (!dockExpanded.value && dockPrimary.value === 'permission' && activeQuestions.value.length) {
+    items.push({ key: 'question', label: 'a question waiting', blocking: true })
+  }
+  if (!dockExpanded.value && dockPrimary.value && store.currentQueued.length) {
+    const n = store.currentQueued.length
+    items.push({ key: 'queued', label: `${n} queued` })
+  }
+  if (store.activeBackgroundAgents > 0 && !chat.value?.archived) {
+    const n = store.activeBackgroundAgents
+    items.push({ key: 'agents', label: `${n} agent${n === 1 ? '' : 's'} running` })
+  }
+  return items
+})
+
+const activeDelegateCount = computed(() => {
+  const cid = chat.value?.chat_id
+  // store.activeDelegatesFor is the single definition; the inline copy here
+  // dropped the local !== false guard and over-counted remote subchats.
+  return cid ? store.activeDelegatesFor(cid).length : 0
+})
+// Subchats working right now. Archiving stops them rather than waiting, so the
+// confirm dialog has to name them before the user commits. Background agents
+// count as working: they outlive the turn that spawned them, so a subchat with
+// no live turn can still have real work in flight.
+const busyDelegateCount = computed(() => {
+  const cid = chat.value?.chat_id
+  if (!cid) return 0
+  return store.activeDelegatesFor(cid).filter(
+    d => store.isChatStreaming(d.chat_id) || store.chatHasBackgroundAgents(d.chat_id),
+  ).length
+})
+const archiveActionLabel = computed(() => archiveLabel(activeDelegateCount.value))
 onMounted(() => {
   taskStore.fetchLoops().catch(() => {})
   taskStore.fetchSchedules().catch(() => {})
@@ -1339,6 +1779,21 @@ async function runScheduleNow(s: Schedule) {
   }
 }
 const project = computed(() => store.activeProject)
+
+// Workspace crumb: name, accent and the 1-9 shortcut that selects it. The index
+// comes from workspaceOptions so it always matches the sidebar pill and the home
+// lane badge for the same workspace.
+const workspaceCrumb = computed(() => {
+  const name = project.value?.workspace
+  if (!name) return null
+  const index = store.workspaceOptions.findIndex(w => w.name === name)
+  if (index < 0) return null
+  return {
+    name: name.split(/[-_\s]+/).filter(Boolean).join(' '),
+    color: colorForWorkspace(store.workspaceOptions[index]),
+    key: index < 9 ? String(index + 1) : '',
+  }
+})
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
@@ -1365,6 +1820,8 @@ function toggleMessageActions(key: string, e: MouseEvent): void {
 }
 const transcribing = ref(false)
 const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
+const commentComposeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
+const commentComposeEditRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 const isNearBottom = ref(true)
 let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && store.activeMessages.length > 0 && !isNearBottom.value))
@@ -1435,6 +1892,46 @@ const projectFiles = ref<ContextProjectFile[]>([])
 const projectFilesLoading = ref(false)
 const projectFilesError = ref('')
 const showProjectFiles = computed(() => Boolean(project.value?.vault_folder))
+const mentionAgents = ref<MentionAgent[]>([])
+const mentionChats = computed<MentionChat[]>(() => {
+  const activeProjects = new Map(store.projects.map(item => [item.project_id, item]))
+  return store.chats
+    .filter(chatItem => !chatItem.archived && chatItem.local !== false && activeProjects.has(chatItem.project_id))
+    .map(chatItem => ({
+      chat_id: chatItem.chat_id,
+      title: chatItem.title,
+      project_id: chatItem.project_id,
+      project_name: activeProjects.get(chatItem.project_id)?.name,
+      workspace: activeProjects.get(chatItem.project_id)?.workspace,
+      archived: chatItem.archived,
+      local: chatItem.local,
+    }))
+})
+const mentionProjects = computed<MentionProject[]>(() => store.projects.map(projectItem => ({
+  project_id: projectItem.project_id,
+  name: projectItem.name,
+  workspace: projectItem.workspace,
+})))
+const mentionFiles = computed<MentionFile[]>(() => projectFiles.value.map(file => ({
+  path: file.path,
+  vault_path: file.vault_path,
+})))
+const mentionPicker = useMentionPicker({
+  draft: inputText,
+  input: inputEl,
+  files: mentionFiles,
+  agents: mentionAgents,
+  chats: mentionChats,
+  projects: mentionProjects,
+})
+const filteredMentions = mentionPicker.filteredItems
+const mentionHighlightIdx = mentionPicker.highlightIndex
+const showMentionPicker = mentionPicker.showPicker
+
+function refreshComposerPickers(): void {
+  mentionPicker.refresh()
+  refreshSlashCommandPicker()
+}
 
 async function loadProjectFiles() {
   if (!project.value || !project.value.vault_folder) {
@@ -1476,9 +1973,19 @@ function openProjectFile(f: ContextProjectFile): void {
 
 watch(
   () => [showContext.value, project.value?.project_id, project.value?.vault_folder] as const,
-  ([open]) => { if (open) loadProjectFiles() },
+  ([open]) => { if (open || project.value?.vault_folder) loadProjectFiles() },
   { immediate: true }
 )
+
+async function loadMentionAgents(): Promise<void> {
+  try {
+    const response = await api.get<AgentAssetsResponse>('/api/agent-assets')
+    mentionAgents.value = Array.isArray(response.subagents) ? response.subagents : []
+  } catch {
+    // Mentions are an enhancement; an unavailable asset catalog leaves files usable.
+    mentionAgents.value = []
+  }
+}
 
 // Deduped list of files the agent has written/edited in this chat. Most
 // recent occurrence wins for action label; count shows how many times the
@@ -1753,6 +2260,71 @@ function dismissQuestions() {
   questionAnswers.value = {}
 }
 
+// Image-capability question. The server paused before dispatch because the
+// selected model can't see images; the card offers same-backend vision
+// candidates, an "Open picker" escape hatch, and a Cancel. The countdown
+// mirrors the server's 30s wait_for; when it hits zero the buttons disable
+// and the server closes the turn with a system bubble.
+const activeCapabilityQuestions = computed(() => {
+  const id = store.activeChatId
+  if (!id) return []
+  return store.activeCapabilityQuestions[id] || []
+})
+
+const capabilityNow = ref(Date.now())
+let capabilityTimer: number | undefined
+watch(activeCapabilityQuestions, (qs) => {
+  capabilityNow.value = Date.now()
+  if (qs.length && capabilityTimer === undefined) {
+    capabilityTimer = window.setInterval(() => { capabilityNow.value = Date.now() }, 1000)
+  } else if (!qs.length && capabilityTimer !== undefined) {
+    window.clearInterval(capabilityTimer)
+    capabilityTimer = undefined
+  }
+}, { immediate: true })
+onBeforeUnmount(() => {
+  if (capabilityTimer !== undefined) window.clearInterval(capabilityTimer)
+})
+
+function capabilityRemaining(q: { opened_at: number; timeout_s: number }): number {
+  const elapsed = Math.floor((capabilityNow.value - q.opened_at) / 1000)
+  return Math.max(0, q.timeout_s - elapsed)
+}
+
+function capabilityExpired(q: { opened_at: number; timeout_s: number }): boolean {
+  return capabilityRemaining(q) <= 0
+}
+
+function switchCapabilityModel(q: { request_id: string }, modelId: string) {
+  if (!chat.value) return
+  store.respondCapability(chat.value.chat_id, q.request_id, 'switch', modelId)
+}
+
+function openCapabilityPicker(q: { request_id: string }) {
+  if (!chat.value) return
+  store.respondCapability(chat.value.chat_id, q.request_id, 'picker')
+  // Land the picker on the current backend so the user only sees same-provider
+  // vision models, not the full cross-provider list.
+  capabilityPickerSection.value = capabilitySectionForBucket(activeBucket.value)
+  showModelPicker.value = true
+}
+
+function cancelCapability(q: { request_id: string }) {
+  if (!chat.value) return
+  store.respondCapability(chat.value.chat_id, q.request_id, 'cancel')
+}
+
+// Section key (ModelSelector) for a bucket, used to preselect the backend when
+// the capability card opens the full picker.
+function capabilitySectionForBucket(bucket: BucketKey): string {
+  if (bucket === 'codex') return 'codex'
+  if (bucket === 'openrouter') return 'openrouter'
+  if (bucket === 'claude_personal') return 'ollama'
+  return 'anthropic'
+}
+
+const capabilityPickerSection = ref('')
+
 const activeProvider = computed<ProviderKey>(() => {
   return (chat.value?.provider as ProviderKey) || 'claude'
 })
@@ -1927,24 +2499,8 @@ function getSelectionStartOffsetInElement(container: HTMLElement, range: Range):
 function computeOccurrenceIndex(contentEl: HTMLElement, range: Range, selection: string): number {
   const fullText = contentEl.textContent || ''
   const startOffset = getSelectionStartOffsetInElement(contentEl, range)
-  const needle = selection.trim()
-  if (startOffset === -1 || !needle) return 0
-
-  let occurrence = 0
-  let pos = 0
-  while (pos < fullText.length) {
-    const idx = fullText.indexOf(needle, pos)
-    if (idx === -1) break
-    if (idx === startOffset) {
-      return occurrence
-    }
-    if (idx > startOffset) {
-      break
-    }
-    occurrence++
-    pos = idx + 1
-  }
-  return Math.max(0, occurrence)
+  if (startOffset === -1) return 0
+  return commentTextOccurrenceIndex(fullText, selection, startOffset)
 }
 
 function computeParagraphIndex(contentEl: HTMLElement, range: Range): number {
@@ -2041,7 +2597,7 @@ function onChatSelectionChange(): void {
     selectionAnchor.value = null
     return
   }
-  const text = sel.toString().trim()
+  const text = cleanCommentSelection(sel.toString().trim())
   if (!text) {
     lastChatSelectionRange = null
     selectionAnchor.value = null
@@ -2217,130 +2773,12 @@ function clearHighlights(root: HTMLElement): void {
   }
 }
 
-function highlightInElement(root: HTMLElement, selection: string, commentId: string, occurrenceIndex?: number): boolean {
-  const text = selection.trim()
-  if (!text) return false
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-  const nodes: Text[] = []
-  let node: Node | null
-  while ((node = walker.nextNode())) nodes.push(node as Text)
-  if (!nodes.length) return false
-
-  let fullText = ''
-  const offsets: { node: Text; start: number; end: number }[] = []
-  for (const n of nodes) {
-    const start = fullText.length
-    fullText += n.textContent || ''
-    offsets.push({ node: n, start, end: fullText.length })
-  }
-
-  let matchStart = -1
-  let matchEnd = -1
-
-  // Match the specific occurrence index if specified
-  const targetOccurrence = occurrenceIndex ?? 0
-  let currentOccurrence = 0
-  let pos = 0
-  while (pos < fullText.length) {
-    const idx = fullText.indexOf(text, pos)
-    if (idx === -1) break
-    if (currentOccurrence === targetOccurrence) {
-      matchStart = idx
-      matchEnd = idx + text.length
-      break
-    }
-    currentOccurrence++
-    pos = idx + 1
-  }
-
-  // Fallback if target occurrence was not found (e.g. text changed): pick first exact match
-  if (matchStart === -1) {
-    const exactIdx = fullText.indexOf(text)
-    if (exactIdx !== -1) {
-      matchStart = exactIdx
-      matchEnd = exactIdx + text.length
-    }
-  }
-
-  if (matchStart === -1) {
-    // Fallback: whitespace-normalized match for selections that span
-    // <br>, block boundaries, or have extra whitespace from rendering.
-    const normFull = fullText.replace(/\s+/g, '')
-    const normText = text.replace(/\s+/g, '')
-    const normIdx = normFull.indexOf(normText)
-    if (normIdx !== -1) {
-      // Map normalized start index back to original text position
-      let charCount = 0
-      for (let i = 0; i < fullText.length; i++) {
-        if (!/\s/.test(fullText[i])) {
-          if (charCount === normIdx) {
-            matchStart = i
-            break
-          }
-          charCount++
-        }
-      }
-      // Map normalized end index back to original text position
-      if (matchStart !== -1) {
-        charCount = 0
-        for (let i = 0; i < fullText.length; i++) {
-          if (!/\s/.test(fullText[i])) {
-            charCount++
-            if (charCount === normIdx + normText.length) {
-              matchEnd = i + 1
-              break
-            }
-          }
-        }
-        if (matchEnd === -1) matchEnd = fullText.length
-      }
-    }
-  }
-
-  if (matchStart === -1 || matchEnd === -1) {
-    console.warn('Comment highlight not found:', commentId, text.slice(0, 80))
-    return false
-  }
-
-  let success = false
-  for (let i = offsets.length - 1; i >= 0; i--) {
-    const o = offsets[i]
-    if (o.end <= matchStart || o.start >= matchEnd) continue
-    const localStart = Math.max(0, matchStart - o.start)
-    const localEnd = Math.min(o.end - o.start, matchEnd - o.start)
-    if (localStart >= localEnd) continue
-
-    const textNode = o.node
-    const slice = textNode.textContent?.slice(localStart, localEnd) || ''
-    if (!slice.trim()) continue
-
-    try {
-      // Split off the tail after the match so the slice we want to wrap
-      // becomes its own text node. Order matters: split the end first so
-      // `localStart` still references valid offsets in the original node.
-      textNode.splitText(localEnd)
-      const mid = textNode.splitText(localStart)
-      const span = document.createElement('span')
-      span.className = 'comment-highlight'
-      span.dataset.commentId = commentId
-      mid.parentNode?.replaceChild(span, mid)
-      span.appendChild(mid)
-      success = true
-    } catch {
-      // Skip this node; other nodes may still wrap successfully.
-    }
-  }
-  return success
-}
-
 function findBubbleForComment(root: HTMLElement, c: { id: string; selection: string; messageId?: string; messageIndex?: number; messageRole?: string }): HTMLElement | null {
   const stored = commentBubbleById.get(c.id)
   if (stored && root.contains(stored)) {
     const content = stored.querySelector('.message-content')
     const text = content?.textContent || ''
-    const normText = text.replace(/\s+/g, '')
-    const normSelection = c.selection.replace(/\s+/g, '')
-    if (text.includes(c.selection) || normText.includes(normSelection)) {
+    if (commentTextMatches(text, c.selection)) {
       return stored
     }
   }
@@ -2365,9 +2803,7 @@ function findBubbleForComment(root: HTMLElement, c: { id: string; selection: str
     const content = el.querySelector('.message-content')
     if (!content) continue
     const text = content.textContent || ''
-    const normText = text.replace(/\s+/g, '')
-    const normSelection = c.selection.replace(/\s+/g, '')
-    if (text.includes(c.selection) || normText.includes(normSelection)) {
+    if (commentTextMatches(text, c.selection)) {
       return el
     }
   }
@@ -2382,7 +2818,7 @@ function applyHighlights(): void {
   for (const c of store.pendingChatComments) {
     const bubble = findBubbleForComment(root, c)
     if (bubble) {
-      highlightInElement(bubble, c.selection, c.id, c.occurrenceIndex)
+      highlightCommentText(bubble, c.selection, c.id, c.occurrenceIndex)
     } else {
       console.warn('Bubble not found for comment', c.id, c.selection.slice(0, 80))
     }
@@ -2392,7 +2828,7 @@ function applyHighlights(): void {
   // they're commenting on while they type, not only after saving.
   const draft = commentDraft.value
   if (draft && draftBubbleEl && root.contains(draftBubbleEl)) {
-    highlightInElement(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID, draft.occurrenceIndex)
+    highlightCommentText(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID, draft.occurrenceIndex)
   }
 }
 
@@ -2539,10 +2975,8 @@ onMounted(async () => {
     providerDefaults.value = r.provider_defaults || {}
     thinkingLevels.value = r.thinking_levels || {}
   } catch { /* use defaults */ }
-  try {
-    const r = await api.get<{ commands: SlashCommand[] }>('/api/commands')
-    slashCommands.value = includeBuiltinPlanCommand(r.commands ?? [])
-  } catch { /* keep the built-in /plan entry available */ }
+  await loadSlashCommands()
+  await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
@@ -2562,7 +2996,10 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  writeChatDraft(draftChatId, inputText.value)
+  writeChatDraft(
+    draftChatId,
+    promptHistoryIndex.value < 0 ? inputText.value : promptHistoryDraft.value,
+  )
   window.removeEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
   window.removeEventListener('ciao:native-file-drop', handleNativeFileDrop)
@@ -2867,13 +3304,13 @@ function fileCardDirname(filePath: string): string {
   return slash > 0 ? filePath.slice(0, slash) : ''
 }
 
-function fileCardIcon(filePath: string): string {
-  if (_IMAGE_EXT_RE.test(filePath)) return '\u{1F5BC}'  // 🖼
-  if (/\.(md|markdown|txt)$/i.test(filePath)) return '\u{1F4DD}'  // 📝
-  if (/\.(json|ya?ml|toml|ini|cfg)$/i.test(filePath)) return '\u{2699}️'  // ⚙
-  if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return '\u{1F4C4}'  // 📄
-  if (/\.(ipynb)$/i.test(filePath)) return '\u{1F4D3}'  // 📓
-  return '\u{1F4C4}'  // 📄
+// Emoji cannot inherit currentColor, so file glyphs are SVG names now; see
+// docs/DESIGN_SYSTEM.md rule S4.
+function fileCardIcon(filePath: string): AppIconName {
+  if (_IMAGE_EXT_RE.test(filePath)) return 'image'
+  if (/\.(md|markdown|txt)$/i.test(filePath)) return 'doc'
+  if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return 'doc'
+  return 'file'
 }
 
 const renderData = computed<{
@@ -3105,6 +3542,10 @@ watch(
 // Force-scroll to bottom when switching to a different chat.
 watch(() => store.activeChatId, () => {
   isNearBottom.value = true
+  // Both disclosures are per-chat state; carrying them across a switch meant a
+  // chat you never expanded opened with its dock and context bar already open.
+  dockExpanded.value = false
+  contextExpanded.value = false
   nextTick(() => {
     if (messagesEl.value) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
@@ -3151,7 +3592,16 @@ function autoResize() {
   }
 }
 
+function handleInput(): void {
+  autoResize()
+  refreshComposerPickers()
+}
+
 function handleKeydown(e: KeyboardEvent) {
+  // Mention navigation uses the same keyboard-first picker contract as slash
+  // commands, but only consumes keys while an @ token is active.
+  if (mentionPicker.handleKeydown(e)) return
+
   // Slash-command picker navigation takes precedence over send/newline.
   if (showCommandsPicker.value) {
     if (e.key === 'ArrowDown') {
@@ -3180,6 +3630,28 @@ function handleKeydown(e: KeyboardEvent) {
       return
     }
   }
+  // Esc closes the chat from the composer. ChatLayout also binds Esc globally,
+  // but that handler is gated on the route, so closing from here means it works
+  // wherever the composer does. Losing the half-typed message is fine: drafts
+  // are persisted per chat and restored when it reopens. The slash-command
+  // picker above claims Esc first (and stops propagation) so it can dismiss
+  // itself without also closing the chat.
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    // Claim it: ChatLayout's global handler would otherwise close the chat a
+    // second time off the same press. Arrow keys already taught us what two
+    // listeners on one key costs.
+    e.stopPropagation()
+    emit('close')
+    return
+  }
+
+  // Recalling history is deliberately limited to the textarea's empty state
+  // so ArrowUp/ArrowDown keep their normal cursor-navigation meaning while a
+  // prompt is being edited. Once recall starts, the arrows walk that session's
+  // bounded history and Down restores the draft that was present beforehand.
+  if (handlePromptHistoryKey(e)) return
+
   // Cmd+Enter (mac) / Ctrl+Enter (linux/win) sends the message. Bare Enter
   // inserts a newline: this avoids accidental sends, especially on phones
   // where Enter is the default virtual-keyboard action. Mid-stream sends are
@@ -3192,6 +3664,7 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 function handleInputFocus() {
+  refreshComposerPickers()
   if (window.innerWidth < 768 && messagesEl.value) {
     // Wait for the keyboard animation, then scroll messages to the bottom
     // so the latest content sits above the input. Use direct scrollTop
@@ -3219,6 +3692,7 @@ function send() {
     void handlePlanCommand(action, originChatId, returnMode, submittedText, submittedRevision)
     return
   }
+  if (text) recordSentPrompt(chat.value.chat_id, inputText.value)
   // Always "queue": when a response is in flight the backend buffers and
   // flushes on turn end; for a fresh turn this starts it.
   let sendText = text
@@ -3251,23 +3725,37 @@ function send() {
 
 // Retry support: error messages are system bubbles whose content starts
 // with "Error:" (set in stores/projects.ts error-event handler). If the
-// prior user turn is still in the timeline, we can resend its text.
+// prior user turn is still in the timeline, we can resend its text plus
+// any images it carried — without draining the live composer.
 function isErrorMsg(content: string): boolean {
   return typeof content === 'string' && content.startsWith('Error:')
 }
-function lastUserBefore(errorIdx: number): string | null {
+function lastUserBefore(errorIdx: number): { text: string; images: string[] } | null {
   const items = renderItems.value
   for (let k = errorIdx - 1; k >= 0; k--) {
     const it = items[k]
-    if (it.kind === 'user') return it.msg.content
+    if (it.kind === 'user') {
+      const images = Array.isArray(it.msg.images) ? [...it.msg.images] : []
+      return { text: it.msg.content, images }
+    }
   }
   return null
 }
 function retryFromError(errorIdx: number) {
   if (chat.value.archived) return
-  const text = lastUserBefore(errorIdx)
-  if (!text) return
-  store.sendMessage(chat.value.chat_id, text, 'queue')
+  const prior = lastUserBefore(errorIdx)
+  if (!prior) return
+  // Build a PreparedMessage so sendMessage sends the prior turn's image
+  // refs alongside the text. We bypass prepareMessage (which would pull
+  // from the live composer) and pass `prepared` to skip the
+  // consumePreparedAttachments drain — a retry must not erase whatever
+  // the user has currently staged for a fresh send.
+  store.sendMessage(
+    chat.value.chat_id,
+    prior.text,
+    'queue',
+    { composed: prior.text, imageRefs: prior.images.length ? prior.images : undefined, fileComments: [], chatComments: [] },
+  )
 }
 
 // Open a fresh chat in the General project seeded with this error + the last
@@ -3276,7 +3764,8 @@ function retryFromError(errorIdx: number) {
 async function openFixChat(errorIdx: number) {
   const it = renderItems.value[errorIdx]
   const errorText = it && 'msg' in it ? it.msg.content : ''
-  const context = lastUserBefore(errorIdx) || undefined
+  const prior = lastUserBefore(errorIdx)
+  const context = prior ? prior.text : undefined
   try {
     await store.fixError({ errorText, context })
   } catch (e) {
@@ -3544,7 +4033,12 @@ async function selectThinking(level: string) {
 
 /* Close picker on click outside or Escape */
 watch(showModelPicker, (open) => {
-  if (!open) return
+  if (!open) {
+    // A capability-card "Open picker" filtered the sections; drop the filter
+    // so the next normal open shows the full list again.
+    capabilityPickerSection.value = ''
+    return
+  }
   const clickHandler = (e: MouseEvent) => {
     if (modelPickerRef.value && !modelPickerRef.value.contains(e.target as Node)) {
       showModelPicker.value = false
@@ -3562,11 +4056,18 @@ watch(showModelPicker, (open) => {
 })
 
 async function doArchive() {
-  if (!await askConfirm('Archive this chat? You can reopen it from the archive.', {
+  const message = archiveConfirmMessage(activeDelegateCount.value, busyDelegateCount.value)
+  if (!await askConfirm(message, {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return
-  await store.archiveChat(chat.value.chat_id)
+  try {
+    await store.archiveChat(chat.value.chat_id)
+  } catch {
+    // archiveChat already reconnected the sockets and raised an error toast.
+    // Keep the pane open so the still-live chat stays reachable.
+    return
+  }
   // Notify ChatLayout so it closes the chat pane.
   emit('close')
 }
@@ -3827,7 +4328,17 @@ function insertImageRef(n: number) {
 
 // Cmd+D toggles a voice recording from the composer: first press starts,
 // second press stops (same as the on-screen mic/stop button).
+// When a comment compose popover is open, the shortcut is routed there instead
+// of the main chat composer.
 function toggleDictation() {
+  if (commentComposeDraftRef.value) {
+    commentComposeDraftRef.value.toggleDictation()
+    return
+  }
+  if (commentComposeEditRef.value) {
+    commentComposeEditRef.value.toggleDictation()
+    return
+  }
   voiceRecorderRef.value?.toggleRecording()
 }
 
@@ -3838,7 +4349,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, archiveActiveChat })
+defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
 </script>
 
 <style scoped>
@@ -3941,8 +4452,25 @@ defineExpose({ toggleDictation, archiveActiveChat })
   position: relative;
 }
 
+/* Hue is workspace identity, so the crumb is tinted by data-workspace-color
+   rather than inheriting whatever the active accent happens to be. */
+.breadcrumb-workspace {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--text-lg);
+  color: var(--accent);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+@media (max-width: 600px) {
+  /* The chat title is what matters on a phone; the crumb is orientation. */
+  .breadcrumb-workspace { display: none; }
+  .breadcrumb-workspace + .breadcrumb-separator { display: none; }
+}
+
 .breadcrumb-project {
-  font-size: 16px;
+  font-size: var(--text-lg);
   color: var(--fg2);
   white-space: nowrap;
   overflow: hidden;
@@ -3958,7 +4486,10 @@ defineExpose({ toggleDictation, archiveActiveChat })
 
 .breadcrumb-separator {
   color: var(--fg3);
-  font-size: 16px;
+  /* Same step as the crumb either side of it. The hardcoded 16px here sat
+     visibly smaller than --text-lg once the font scale was applied, and did not
+     move with the Appearance setting at all. */
+  font-size: var(--text-lg);
   user-select: none;
   flex-shrink: 0;
 }
@@ -4346,6 +4877,22 @@ defineExpose({ toggleDictation, archiveActiveChat })
   gap: 6px;
   flex-wrap: wrap;
 }
+
+.error-attribution {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  margin-top: 8px;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.error-attribution-label {
+  color: var(--error);
+  font-weight: 600;
+}
 .fix-btn { color: var(--accent); border-color: var(--accent); }
 .fix-btn:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 
@@ -4563,6 +5110,32 @@ defineExpose({ toggleDictation, archiveActiveChat })
   min-width: 0;
   overflow-wrap: break-word;
 }
+
+.thinking-block {
+  min-width: 0;
+}
+
+.thinking-toggle {
+  min-height: var(--touch);
+  padding: 4px 8px 4px 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  opacity: 0.85;
+}
+
+.thinking-toggle:hover { color: var(--fg); }
+.thinking-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .trace-text :deep(a) {
   color: var(--accent);
   text-decoration: underline;
@@ -4805,12 +5378,28 @@ details[open] > .activity-summary::before {
 .activity-icon { font-size: var(--text-base); }
 
 .activity-spinner {
+  position: relative;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
   animation: activity-pulse 1.1s ease-in-out infinite;
   flex-shrink: 0;
+  /* The halo and the expanding ring paint ~3px beyond this element's box, so the
+     row's 8px gap looked like ~5px and the dot read as touching the label. */
+  margin-right: var(--space-1);
+}
+
+.activity-spinner::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.45;
+  animation: activity-ring 1.1s ease-out infinite;
+  pointer-events: none;
 }
 
 @keyframes activity-pulse {
@@ -4818,8 +5407,14 @@ details[open] > .activity-summary::before {
   50% { transform: scale(1); opacity: 1; }
 }
 
+@keyframes activity-ring {
+  0%   { transform: scale(0.7); opacity: 0.55; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .activity-spinner { animation-duration: 2.2s; }
+  .activity-spinner::before { animation-duration: 2.2s; }
 }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
@@ -5212,8 +5807,14 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: flex-start;
   gap: 6px;
-  width: 220px;
-  max-width: min(220px, 100%);
+  /* Shrinkable basis, not a fixed 220px: with flex-wrap the line break is
+     decided on the base size, so fixed-width chips wrapped onto their own row
+     as soon as the chat pane got narrow (pinned file panel open). A small
+     basis plus grow lets two or three chips share one row and split the
+     available width, capped so a single chip does not stretch. */
+  flex: 1 1 140px;
+  min-width: 0;
+  max-width: 220px;
   height: 48px;
   padding: 6px 8px;
   background: var(--bg);
@@ -5285,17 +5886,65 @@ details[open] > .activity-summary::before {
 .comment-chip-remove:hover { background: var(--bg2); color: var(--fg); }
 
 
-/* Background agents running after the parent turn finished. */
-.bg-agents-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  padding-left: calc(12px + var(--safe-left));
-  padding-right: calc(12px + var(--safe-right));
+/* Dock strip: the single counted line for everything the dock defers. */
+.dock-strip-wrap {
+  flex-shrink: 0;
   border-top: 1px solid var(--border);
   background: var(--bg);
-  flex-shrink: 0;
+}
+
+.dock-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--touch);
+  padding: var(--space-2) var(--space-3);
+  padding-left: calc(var(--space-3) + var(--safe-left));
+  padding-right: calc(var(--space-3) + var(--safe-right));
+  border: 0;
+  background: none;
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+
+.dock-strip:hover { background: var(--bg2); }
+
+.dock-strip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.dock-chevron { color: var(--fg3); flex-shrink: 0; }
+
+.dock-strip-items {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.dock-pill {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+/* Deferred blocking work is still the user's move, so it is marked — but it
+   stays outlined rather than filled, because the filled treatment belongs to
+   the one item actually expanded above. */
+.dock-pill--blocking {
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  background: none;
 }
 
 .bg-agents-dot {
@@ -5312,10 +5961,6 @@ details[open] > .activity-summary::before {
   50% { opacity: 1; }
 }
 
-.bg-agents-label {
-  font-size: var(--text-sm);
-  color: var(--fg2);
-}
 
 /* Voice transcribing spinner */
 .voice-transcribing {
@@ -5369,6 +6014,14 @@ details[open] > .activity-summary::before {
   font-weight: 600;
   flex-shrink: 0;
 }
+.commands-picker-kind {
+  color: var(--accent2);
+  font-size: 0.72em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
 .commands-picker-hint {
   color: var(--muted, #888);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -5386,6 +6039,26 @@ details[open] > .activity-summary::before {
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.mention-picker-row {
+  min-height: var(--touch);
+  box-sizing: border-box;
+  touch-action: manipulation;
+}
+.mention-picker-kind {
+  color: var(--accent2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.mention-picker-row .commands-picker-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Input bar */
@@ -5634,6 +6307,13 @@ details[open] > .activity-summary::before {
 }
 .question-card-icon { font-size: 16px; color: var(--accent); }
 .question-card-title { flex: 1 1 auto; }
+.capability-countdown {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg2);
+  font-variant-numeric: tabular-nums;
+}
 .question-card-dismiss {
   background: transparent;
   border: 0;
@@ -6220,14 +6900,109 @@ details[open] > .activity-summary::before {
   100% { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
 }
 
+/* ── Ephemeral re-entry summary ── */
+.reentry-summary-message {
+  background: color-mix(in srgb, var(--accent2) 12%, var(--bg2));
+  border-color: color-mix(in srgb, var(--accent2) 45%, var(--border));
+  border-left-color: var(--accent2);
+}
+.reentry-summary-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.reentry-summary-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent2) 70%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent2) 18%, transparent);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+.reentry-summary-source {
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+}
+.reentry-summary-message .message-content {
+  color: var(--fg);
+}
+
 /* ── Loop banner ── */
-.loop-banner {
+/* ── Context bar ─────────────────────────────────────────────────────
+   Collapsed: one line of counted chips. Expanded: the detail rows, which
+   keep the original .loop-banner-row layout and actions. */
+.ctx-bar {
   border-bottom: 1px solid var(--border);
   background: var(--bg2);
-  padding: 6px 16px;
+}
+.ctx-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  background: none;
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
+  flex-wrap: wrap;
+  min-height: var(--touch);
+}
+.ctx-summary:hover { background: var(--bg3); }
+.ctx-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.ctx-chevron { color: var(--fg3); flex-shrink: 0; }
+.ctx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--fg2);
+  white-space: nowrap;
+}
+.ctx-chip-glyph {
+  color: var(--fg3);
+  font-weight: 700;
+  line-height: 1;
+}
+/* A running loop is the one thing here that is actively happening. */
+.ctx-chip-glyph.live { color: var(--accent); }
+/* Filled, because it means the user is the blocker — same rule as the
+   sidebar, home lanes and the action dock. */
+.ctx-attn {
+  margin-left: auto;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--bg);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  white-space: nowrap;
+}
+:global(:root.theme-light) .ctx-attn { color: var(--fg); }
+.ctx-detail {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
+  padding: 0 var(--space-4) var(--space-2);
 }
 .loop-banner-row {
   display: flex;
@@ -6249,5 +7024,9 @@ details[open] > .activity-summary::before {
   min-width: 0;
 }
 .loop-banner-text strong { color: var(--fg); }
+
+/* Chat-level unread is title weight everywhere; chatUnread() is binary so a
+   digit could only ever read "1". */
+.loop-banner-text strong.subchat-unread { font-weight: 700; }
 .loop-banner-manage { text-decoration: none; }
 </style>

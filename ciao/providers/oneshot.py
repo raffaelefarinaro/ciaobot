@@ -253,6 +253,32 @@ async def run_oneshot(
     if model.endswith("[1m]"):
         model = model[: -len("[1m]")]
 
+    # Apple's on-device model is not an upstream id — it is a sentinel meaning
+    # "run this through the bundled helper". Dispatching it here means every
+    # caller (chat titles, session insights, the backfill, re-entry summaries)
+    # asks for a model and gets one, instead of each re-testing the sentinel and
+    # branching. Before this, a caller that forgot the test sent the literal
+    # string "apple" upstream and failed with "there's an issue with the
+    # selected model (apple)".
+    from ciao import native_sidecar
+
+    if native_sidecar.is_apple_model(model):
+        prompt, dropped = native_sidecar.fit_apple_input(prompt)
+        if dropped:
+            logger.info(
+                "One-shot prompt over the %d-char Apple budget; dropped %d oldest line(s)",
+                native_sidecar.APPLE_MAX_INPUT_CHARS,
+                dropped,
+            )
+        try:
+            return await native_sidecar.respond(
+                prompt, instructions=system_prompt, timeout=timeout_s
+            )
+        except native_sidecar.SidecarError as exc:
+            # Not transient: the reasons are "wrong macOS", "Apple Intelligence
+            # off", "still downloading" — a retry fails the same way.
+            raise OneShotError(str(exc)) from exc
+
     if provider == "codex":
         async def _attempt() -> str:
             return await _run_codex_oneshot(

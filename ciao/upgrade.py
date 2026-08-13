@@ -94,7 +94,7 @@ async def upgrade_project_deps(project_root: str) -> dict[str, tuple[str, str]]:
     Returns a dict of ``{package: (before, after)}`` for packages whose version changed.
     """
     # Packages we care about tracking individually
-    tracked = ["openai", "claude-agent-sdk", "notebooklm-py", "apfel"]
+    tracked = ["claude-agent-sdk", "notebooklm-py"]
 
     async def _get_versions() -> dict[str, str]:
         versions: dict[str, str] = {}
@@ -110,7 +110,7 @@ async def upgrade_project_deps(project_root: str) -> dict[str, tuple[str, str]]:
     # We do not use --upgrade or install untracked explicit packages,
     # because they are strictly pinned in pyproject.toml now.
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "pip", "install", "-e", f"{project_root}[test,voice-local]",
+        sys.executable, "-m", "pip", "install", "-e", f"{project_root}[test]",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     await proc.communicate()
@@ -254,24 +254,6 @@ async def upgrade_web_npm(project_root: str) -> UpgradeResult:
     )
 
 
-async def upgrade_apfel() -> UpgradeResult:
-    """Install or upgrade apfel via Homebrew on macOS."""
-    brew_bin = shutil.which("brew")
-    if brew_bin is None:
-        return UpgradeResult(
-            command=["brew", "install", "apfel"],
-            changed=False, success=False,
-            stdout="", stderr="brew not found (Homebrew is required for apfel on macOS)",
-            before_version="", after_version="",
-        )
-    apfel_installed = shutil.which("apfel") is not None
-    install_command = [brew_bin, "upgrade", "apfel"] if apfel_installed else [brew_bin, "install", "apfel"]
-    return await run_upgrade(
-        install_command=install_command,
-        version_command=["apfel", "--version"],
-    )
-
-
 async def upgrade_libreoffice() -> UpgradeResult:
     """Install LibreOffice via Homebrew Cask on macOS."""
     brew_bin = shutil.which("brew")
@@ -348,20 +330,19 @@ async def upgrade_all(project_root: str) -> str | None:
     codex_task = asyncio.create_task(upgrade_codex())
     root_npm_task = asyncio.create_task(upgrade_root_npm(project_root))
     web_npm_task = asyncio.create_task(upgrade_web_npm(project_root))
-    apfel_task = asyncio.create_task(upgrade_apfel())
     libreoffice_task = asyncio.create_task(upgrade_libreoffice())
     scrapling_task = asyncio.create_task(upgrade_scrapling())
     (
         pip_changed, gws_result, defuddle_result,
         claude_result, codex_result, root_npm_result, web_npm_result,
-        apfel_result, libreoffice_result, scrapling_result,
+        libreoffice_result, scrapling_result,
     ) = cast(
         "tuple[dict[str, tuple[str, str]], UpgradeResult, UpgradeResult, "
         "UpgradeResult, UpgradeResult, UpgradeResult, UpgradeResult, "
-        "UpgradeResult, UpgradeResult, UpgradeResult]",
+        "UpgradeResult, UpgradeResult]",
         await asyncio.gather(
             pip_task, gws_task, defuddle_task, claude_task, codex_task,
-            root_npm_task, web_npm_task, apfel_task, libreoffice_task,
+            root_npm_task, web_npm_task, libreoffice_task,
             scrapling_task,
         ),
     )
@@ -376,7 +357,6 @@ async def upgrade_all(project_root: str) -> str | None:
         ("codex", codex_result),
         ("root-npm", root_npm_result),
         ("web-npm", web_npm_result),
-        ("apfel", apfel_result),
         ("libreoffice", libreoffice_result),
         ("scrapling", scrapling_result),
     ]

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -303,3 +304,82 @@ def discover_cloud_models(
         suffix = "" if ":" in name else ":cloud"
         names.append(f"{name}{suffix}")
     return tuple(dict.fromkeys(names))
+
+
+# 24h TTL for the vision capability cache. Image sends are rare enough that
+# a model's vision status does not meaningfully change within a day, and the
+# probe is only ever a best-effort hint anyway.
+_VISION_CACHE_TTL_S = 24 * 60 * 60
+# (probe_url, model_id) -> (timestamp, supports_vision). Module-level so
+# repeated image sends against the same model reuse the probe answer without
+# another round-trip to the daemon/cloud.
+_VISION_CACHE: dict[tuple[str, str], tuple[float, bool]] = {}
+
+
+def _ollama_payload_supports_vision(payload: object) -> bool:
+    """True when an ``/api/show`` payload describes a vision-capable model.
+
+    Ollama marks vision models with a non-empty ``projector_info`` (the
+    mmproj file) and/or ``model_info`` keys under a ``vision.*`` prefix
+    (e.g. ``vision.clip``).
+    """
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("projector_info"):
+        return True
+    info = payload.get("model_info")
+    if isinstance(info, dict) and any(
+        isinstance(k, str) and k.startswith("vision.")
+        for k in info
+    ):
+        return True
+    return False
+
+
+def vision_support_ollama(
+    model_id: str, settings: OllamaSettings, timeout_s: float = 2.0
+) -> bool | None:
+    """Best-effort vision capability check via ``POST /api/show``.
+
+    Returns True/False when the daemon or cloud answers, None when the
+    model is not Ollama-routed, the endpoint is unreachable, or the
+    response is malformed — callers treat None as "unknown" and default to
+    capable. Never blocks a turn: the probe runs synchronously with a short
+    timeout and the answer is cached 24h per (endpoint, model).
+
+    The probe endpoint mirrors :func:`ollama_env_for_model`: local-daemon
+    models are looked up against ``local_url``, cloud ids against
+    ``base_url``. A ``:tag``/``:cloud`` id with no cloud API key configured
+    is not routable at all, so it is never probed.
+    """
+    if not model_id:
+        return None
+    headers = {"Content-Type": "application/json"}
+    if is_local_ollama_model(model_id, settings):
+        probe_url = settings.local_url
+    elif _looks_like_ollama_id(model_id) and _cloud_available(settings):
+        probe_url = settings.base_url
+        # The cloud endpoint rejects an unauthenticated /api/show, so the probe
+        # failed for every cloud model, logged "unreachable", and returned None
+        # without caching - re-running the same doomed round trip on each image
+        # send. The model catalog fetch above already authenticates this way.
+        headers["Authorization"] = f"Bearer {settings.api_key}"
+    else:
+        return None
+    key = (probe_url, model_id)
+    now = time.time()
+    cached = _VISION_CACHE.get(key)
+    if cached is not None and now - cached[0] < _VISION_CACHE_TTL_S:
+        return cached[1]
+    url = probe_url.rstrip("/") + "/api/show"
+    body = json.dumps({"name": model_id}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, ValueError) as exc:
+        logger.info("Ollama vision probe skipped (%s unreachable: %s)", url, exc)
+        return None
+    supports = _ollama_payload_supports_vision(payload)
+    _VISION_CACHE[key] = (now, supports)
+    return supports

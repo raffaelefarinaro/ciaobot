@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 
 import pytest
@@ -315,8 +316,11 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     )
 
     assert rc == 0
-    assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:2] == [
+    assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:3] == [
         "PWA_AUTH_TOKEN=test-token",
+        # Password protection is the default and is pinned explicitly, so an
+        # unset value never has to be guessed at on the next start.
+        "PWA_AUTH_REQUIRED=true",
         "CIAO_PUSH_CONTACT=mailto:owner@example.com",
     ]
     assert (workspace / ".claude" / "agents" / "memory.md").is_file()
@@ -346,137 +350,86 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert plist.is_file()
     plist_text = plist.read_text(encoding="utf-8")
     assert "<string>/opt/ciao/bin/python</string>" in plist_text
-    assert "<string>-m</string>" in plist_text
-    assert "<string>ciao.cli</string>" in plist_text
     assert "<string>run</string>" in plist_text
     assert f"<string>{workspace.resolve()}</string>" in plist_text
     assert "<string>9443</string>" in plist_text
     assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
-    menubar_plist = launch_agents / "com.ciao.menubar.plist"
-    assert menubar_plist.is_file()
-    menubar_text = menubar_plist.read_text(encoding="utf-8")
-    # Login Items groups both agents under Ciaobot Server.app instead of python3.13.
+    # No menu-bar agent and no launcher bundle: Ciaobot.app is the menu bar
+    # now, and nothing writes the retired rumps helper.
+    assert not (launch_agents / "com.ciao.menubar.plist").exists()
+    assert not (apps / "Ciaobot Server.app").exists()
+    # Login Items still groups the server agent under the desktop app.
     assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
     assert "<string>local.ciaobot.app</string>" in plist_text
-    assert "<key>AssociatedBundleIdentifiers</key>" in menubar_text
-    assert "<string>local.ciaobot.app</string>" in menubar_text
-    assert "<string>com.ciao.menubar</string>" in menubar_text
-    app_bundle = apps / "Ciaobot Server.app"
-    menubar_app_exe = app_bundle / "Contents" / "MacOS" / "CiaobotMenuBar"
-    assert menubar_app_exe.is_file()
-    assert menubar_app_exe.stat().st_mode & 0o111
-    assert f"<string>{menubar_app_exe.resolve()}</string>" in menubar_text
-    assert "<string>/opt/ciao/bin/python</string>" not in menubar_text
-    assert "<string>menubar</string>" not in menubar_text
-    assert "<string>9443</string>" in menubar_text
-    assert f"<string>{workspace.resolve()}/.runtime/ciao.menubar.stdout.log</string>" in menubar_text
-    app_exe = app_bundle / "Contents" / "MacOS" / "CiaobotServer"
-    assert app_exe.is_file()
-    assert app_exe.stat().st_mode & 0o111
-    app_text = app_exe.read_text(encoding="utf-8")
-    # The launcher reads the one-time setup token live from disk (it is
-    # deleted after first login), so it must NOT bake a frozen token value
-    # into the URL -- otherwise a second launch shows "invalid setup token".
-    token_file = workspace / ".runtime" / "setup-token"
-    assert f'token=$(tr -d "[:space:]" < "{token_file}"' in app_text
-    assert 'url="http://localhost:9443/?setup=$token"' in app_text
-    assert 'url="http://localhost:9443/"' in app_text
-    # The launcher starts the server and menu bar agents when they're down,
-    # without permanently re-enabling labels the tray toggle disabled.
-    assert 'launchctl print-disabled "gui/$(id -u)"' in app_text
-    assert 'launchctl kickstart "gui/$(id -u)/$label"' in app_text
-    assert 'launchctl enable "gui/$(id -u)/$label"' in app_text
-    assert 'launchctl disable "gui/$(id -u)/$label"' in app_text
-    assert (
-        'start_agent "com.ciao.server" "$HOME/Library/LaunchAgents/com.ciao.server.plist"'
-        in app_text
-    )
-    assert (
-        'start_agent "com.ciao.menubar" "$HOME/Library/LaunchAgents/com.ciao.menubar.plist"'
-        in app_text
-    )
-    # Opens the UI in the browser (no native window). The launcher just opens
-    # the URL — reliable, and web push handles notifications.
-    assert 'open "$url"' in app_text
-    assert "ciao.window" not in app_text
-    setup_token = token_file.read_text(encoding="utf-8").strip()
+    # Setup always mints the one-time login token, even with no desktop app:
+    # the summary prints it as the login URL.
+    setup_token = (workspace / ".runtime" / "setup-token").read_text(
+        encoding="utf-8"
+    ).strip()
     assert setup_token
-    # The literal token value must not appear in the script -- it is read live.
-    assert setup_token not in app_text
-    icns = app_bundle / "Contents" / "Resources" / "CiaobotServer.icns"
-    assert icns.is_file() and icns.stat().st_size > 0
-    info_plist = (app_bundle / "Contents" / "Info.plist").read_text(encoding="utf-8")
-    assert "<key>CFBundleIconFile</key>" in info_plist
-    assert "<string>CiaobotServer</string>" in info_plist
-    assert "<key>CFBundleDisplayName</key>" in info_plist
-    assert "<string>Ciaobot Server</string>" in info_plist
-    menubar_info = (app_bundle / "Contents" / "Info.plist").read_text(encoding="utf-8")
-    assert "<string>local.ciaobot.app</string>" in menubar_info
-    menubar_script = menubar_app_exe.read_text(encoding="utf-8")
-    # Resolves the bundle python symlink to the real venv interpreter so
-    # `import ciao` works (invoking the symlink resolves outside the venv).
-    assert 'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi' in menubar_script
-    assert 'exec "$PY" -m ciao.cli menubar' in menubar_script
-    assert (menubar_app_exe.parent / "python").is_symlink()
 
 
-def _isolate_app_roots(monkeypatch, *roots: Path) -> None:
-    """Keep the desktop-app check off the developer's real /Applications."""
+def test_setup_no_auth_opts_out_of_password_protection(tmp_path: Path) -> None:
+    """`--no-auth` is the only way a scripted setup gets an unprotected
+    dashboard, and it must be pinned in .env — an unset value now means on."""
+    workspace = tmp_path / "workspace"
 
-    monkeypatch.setattr(cli, "_app_search_roots", lambda: tuple(roots))
-
-
-def test_refresh_app_bundle_skips_when_version_current(tmp_path: Path, monkeypatch) -> None:
-    import ciao
-
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
-    monkeypatch.setattr(ciao, "__version__", "9.9.9")
-    _isolate_app_roots(monkeypatch, tmp_path / "Applications")
-    monkeypatch.setattr(cli, "_installed_app_dir", lambda: tmp_path / "Applications")
-    marker = cli._app_bundle_marker_path(tmp_path)
-    marker.parent.mkdir(parents=True)
-    marker.write_text("9.9.9\n", encoding="utf-8")
-    calls: list = []
-    monkeypatch.setattr(cli, "_write_app_shortcut", lambda **k: calls.append(k))
-
-    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
-    assert calls == []  # bundle already current — not rewritten
-
-
-def test_refresh_app_bundle_rewrites_when_stale(tmp_path: Path, monkeypatch) -> None:
-    import ciao
-
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
-    monkeypatch.setattr(ciao, "__version__", "9.9.9")
-    app_dir = tmp_path / "Applications"
-    _isolate_app_roots(monkeypatch, app_dir)
-    monkeypatch.setattr(cli, "_installed_app_dir", lambda: app_dir)
-    marker = cli._app_bundle_marker_path(tmp_path)
-    marker.parent.mkdir(parents=True)
-    marker.write_text("9.9.8\n", encoding="utf-8")  # previous version
-    calls: list = []
-    monkeypatch.setattr(
-        cli, "_write_app_shortcut", lambda **k: calls.append(k) or (k["app_dir"] / "Ciaobot Server.app")
+    rc = cli.main(
+        [
+            "setup",
+            "--workspace",
+            str(workspace),
+            "--auth-token",
+            "test-token",
+            "--no-auth",
+            "--launch-agents-dir",
+            str(tmp_path / "LaunchAgents"),
+            "--app-dir",
+            str(tmp_path / "Applications"),
+        ]
     )
 
-    result = cli.refresh_app_bundle_if_stale(tmp_path, 8443)
-    assert result == app_dir / "Ciaobot Server.app"
-    assert calls[0]["workspace"] == tmp_path and calls[0]["port"] == 8443
+    assert rc == 0
+    env_lines = (workspace / ".env").read_text(encoding="utf-8").splitlines()
+    assert "PWA_AUTH_REQUIRED=false" in env_lines
+    assert "PWA_AUTH_REQUIRED=true" not in env_lines
 
 
-def test_refresh_app_bundle_noop_without_installed_bundle(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
-    monkeypatch.setattr(cli, "_installed_app_dir", lambda: None)
-    called: list = []
-    monkeypatch.setattr(cli, "_write_app_shortcut", lambda **k: called.append(k))
+def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao"
+    monkeypatch.setenv("CIAO_ENGINE_PATH", engine)
+    launch_agents = tmp_path / "LaunchAgents"
 
-    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
-    assert called == []
+    cli.setup_workspace(
+        tmp_path / "workspace",
+        launch_agents_dir=launch_agents,
+        python_path=None,
+    )
+
+    with (launch_agents / "com.ciao.server.plist").open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["ProgramArguments"][0] == engine
+    assert plist["ProgramArguments"][1:] == ["run"]
+    assert plist["EnvironmentVariables"]["CIAO_NATIVE_SIDECAR"] == (
+        "/Applications/Ciaobot.app/Contents/MacOS/ciaobot-native"
+    )
 
 
-def test_refresh_app_bundle_noop_off_darwin(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(cli.sys, "platform", "linux")
-    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
+def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> None:
+    launch_agents = tmp_path / "LaunchAgents"
+
+    cli.setup_workspace(
+        tmp_path / "workspace",
+        launch_agents_dir=launch_agents,
+        python_path="/opt/ciao/bin/python3.12",
+    )
+
+    with (launch_agents / "com.ciao.server.plist").open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["ProgramArguments"][1:] == ["-m", "ciao.cli", "run"]
+    assert plist["EnvironmentVariables"]["CIAO_NATIVE_SIDECAR"] == ""
 
 
 def _write_desktop_app(app_dir: Path) -> Path:
@@ -502,79 +455,6 @@ def test_remove_legacy_app_shortcuts_keeps_the_tauri_desktop_app(tmp_path: Path)
 
     assert cli._remove_legacy_app_shortcuts(tmp_path) is False
     assert (app_root / "Contents" / "MacOS" / "ciaobot-desktop").is_file()
-
-
-def test_refresh_app_bundle_skips_when_desktop_app_shares_the_dir(
-    tmp_path: Path, monkeypatch
-) -> None:
-    import ciao
-
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
-    monkeypatch.setattr(ciao, "__version__", "9.9.9")
-    app_dir = tmp_path / "Applications"
-    _write_desktop_app(app_dir)
-    _isolate_app_roots(monkeypatch, app_dir)
-    monkeypatch.setattr(cli, "_installed_app_dir", lambda: app_dir)
-    marker = cli._app_bundle_marker_path(tmp_path)
-    marker.parent.mkdir(parents=True)
-    marker.write_text("9.9.8\n", encoding="utf-8")  # stale: would rewrite
-    calls: list = []
-    monkeypatch.setattr(cli, "_write_app_shortcut", lambda **k: calls.append(k))
-
-    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
-    assert calls == []  # never reaches the rmtree that ate the cask app
-
-
-def test_refresh_app_bundle_skips_when_desktop_app_is_in_another_root(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # Non-admin layout: the launcher lives in ~/Applications while the cask
-    # installs into /Applications. Checking only the launcher's own directory
-    # resurrects Ciaobot Server.app on every `brew upgrade`.
-    import ciao
-
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
-    monkeypatch.setattr(ciao, "__version__", "9.9.9")
-    home_apps = tmp_path / "home-apps"
-    system_apps = tmp_path / "system-apps"
-    home_apps.mkdir()
-    _write_desktop_app(system_apps)
-    _isolate_app_roots(monkeypatch, home_apps, system_apps)
-    monkeypatch.setattr(cli, "_installed_app_dir", lambda: home_apps)
-    marker = cli._app_bundle_marker_path(tmp_path)
-    marker.parent.mkdir(parents=True)
-    marker.write_text("9.9.8\n", encoding="utf-8")  # stale: would rewrite
-    calls: list = []
-    monkeypatch.setattr(cli, "_write_app_shortcut", lambda **k: calls.append(k))
-
-    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
-    assert calls == []
-
-
-def test_migrate_menubar_launch_agent_repoints_legacy_bundle(tmp_path: Path) -> None:
-    launch_dir = tmp_path / "LaunchAgents"
-    launch_dir.mkdir()
-    plist_path = launch_dir / "com.ciao.menubar.plist"
-    plist_path.write_bytes(
-        cli.plistlib.dumps({
-            "Label": "com.ciao.menubar",
-            "ProgramArguments": [
-                "/Applications/Ciaobot.app/Contents/MacOS/CiaobotMenuBar"
-            ],
-        })
-    )
-    app_root = tmp_path / "Applications" / "Ciaobot Server.app"
-
-    assert cli._migrate_menubar_launch_agent(
-        app_root,
-        launch_agents_dir=launch_dir,
-    ) is True
-
-    with plist_path.open("rb") as handle:
-        migrated = cli.plistlib.load(handle)
-    assert migrated["ProgramArguments"] == [
-        str(app_root / "Contents" / "MacOS" / "CiaobotMenuBar")
-    ]
 
 
 def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool = False) -> list[str]:
@@ -654,7 +534,8 @@ def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
 
     assert rc == 0
     assert not (apps / "Ciao.app").exists()
-    assert (apps / "Ciaobot Server.app").is_dir()
+    # The launcher is retired: cleanup runs, nothing is written back.
+    assert not (apps / "Ciaobot Server.app").exists()
     assert not foreign.exists()  # untouched (never created); guard for typos
 
 
@@ -683,7 +564,8 @@ def test_setup_migrates_native_ciaobot_app_without_removing_pwa(tmp_path: Path) 
     ]) == 0
 
     assert not (apps / "Ciaobot.app").exists()
-    assert (apps / "Ciaobot Server.app").is_dir()
+    # The launcher is retired: cleanup runs, nothing is written back.
+    assert not (apps / "Ciaobot Server.app").exists()
     assert (apps / "Chrome Apps.localized" / "Ciaobot.app").is_dir()
 
 
@@ -707,7 +589,8 @@ def test_setup_keeps_browser_pwa_named_ciaobot_app(tmp_path: Path) -> None:
     ]) == 0
 
     assert (apps / "Ciaobot.app").is_dir()
-    assert (apps / "Ciaobot Server.app").is_dir()
+    # The launcher is retired: cleanup runs, nothing is written back.
+    assert not (apps / "Ciaobot Server.app").exists()
 
 
 def test_setup_skips_legacy_companion_when_tauri_app_is_installed(
@@ -734,37 +617,7 @@ def test_setup_skips_legacy_companion_when_tauri_app_is_installed(
     assert not (apps / "Ciaobot Server.app").exists()
 
 
-def test_setup_skips_legacy_companion_when_tauri_app_is_in_another_root(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # Non-admin default: setup writes to ~/Applications, the cask sits in
-    # /Applications. Without --app-dir the check spans every standard root.
-    home_apps = tmp_path / "home-apps"
-    system_apps = tmp_path / "system-apps"
-    home_apps.mkdir()
-    _write_desktop_app(system_apps)
-    _isolate_app_roots(monkeypatch, home_apps, system_apps)
-    monkeypatch.setattr(cli, "_default_app_dir", lambda: home_apps)
-    launch_agents = tmp_path / "LaunchAgents"
-
-    assert cli.main([
-        "setup",
-        "--workspace",
-        str(tmp_path / "workspace"),
-        "--launch-agents-dir",
-        str(launch_agents),
-    ]) == 0
-
-    assert (launch_agents / "com.ciao.server.plist").is_file()
-    assert not (launch_agents / "com.ciao.menubar.plist").exists()
-    assert not (home_apps / "Ciaobot Server.app").exists()
-
-
-def test_default_app_dir_prefers_system_applications(monkeypatch) -> None:
-    monkeypatch.setattr(cli.os, "access", lambda path, mode: True)
-    assert cli._default_app_dir() == Path("/Applications")
-
-    monkeypatch.setattr(cli.os, "access", lambda path, mode: False)
+def test_default_app_dir_matches_the_release_installer() -> None:
     assert cli._default_app_dir() == Path.home() / "Applications"
 
 
@@ -791,7 +644,7 @@ def test_setup_cleans_our_bundles_from_home_applications(tmp_path: Path, monkeyp
 
     assert not (home_apps / "Ciao.app").exists()
     assert not (home_apps / "Ciaobot.app").exists()
-    assert (system_apps / "Ciaobot Server.app").is_dir()
+    assert not (system_apps / "Ciaobot Server.app").exists()
 
 
 def test_setup_keeps_unrelated_ciao_app(tmp_path: Path) -> None:
@@ -1048,3 +901,41 @@ def test_create_chat_command_uses_active_workspace_without_name_clamp(
     assert "Workspace: client" in capsys.readouterr().out
 
 
+
+
+def test_desktop_uninstall_reports_when_nothing_is_installed(
+    tmp_path: Path, capsys
+) -> None:
+    assert cli.main(["desktop", "uninstall", "--app-dir", str(tmp_path)]) == 0
+    assert "Nothing to remove" in capsys.readouterr().out
+
+
+def test_desktop_uninstall_json_reports_a_refusal(tmp_path: Path, capsys) -> None:
+    pwa = tmp_path / "Ciaobot.app" / "Contents" / "MacOS"
+    pwa.mkdir(parents=True)
+    (pwa / "app_mode_loader").write_text("chrome pwa", encoding="utf-8")
+
+    assert cli.main(["desktop", "uninstall", "--app-dir", str(tmp_path), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "not the Ciaobot desktop app" in payload["error"]
+
+
+def test_setup_does_not_download_or_install_the_desktop_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Workspace setup is local; the release installer owns app installation."""
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    monkeypatch.setattr(cli, "_default_app_dir", lambda: apps)
+
+    written = cli.setup_workspace(
+        tmp_path / "workspace",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=apps,
+    )
+
+    assert written
+    assert not (apps / "Ciaobot.app").exists()
+    assert not (apps / "Ciaobot Server.app").exists()

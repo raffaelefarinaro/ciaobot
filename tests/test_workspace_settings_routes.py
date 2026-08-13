@@ -385,31 +385,30 @@ def test_provider_config_status_and_write_only_patch(tmp_path, monkeypatch):
     monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
     env_path = tmp_path / ".env"
     env_path.write_text(
-        "PWA_AUTH_TOKEN=t\nCIAO_PUSH_CONTACT=mailto:owner@example.com\nANTHROPIC_API_KEY=sk-anthropic\nOPENAI_API_KEY=old\n",
+        "PWA_AUTH_TOKEN=t\nCIAO_PUSH_CONTACT=mailto:owner@example.com\nANTHROPIC_API_KEY=sk-anthropic\n",
         encoding="utf-8",
     )
     client, _config, _pcm = _client(
         tmp_path,
         {
             "ANTHROPIC_API_KEY": "sk-anthropic",
-            "OPENAI_API_KEY": "old",
             "CIAO_OLLAMA_API_KEY": "",
         },
     )
 
     data = client.get("/api/settings/providers").json()
     assert "ANTHROPIC_API_KEY" not in data["keys"]
-    assert data["service_keys"]["OPENAI_API_KEY"]["configured"] is True
+    # service_keys is empty since voice moved on-device: OPENAI_API_KEY was
+    # the only entry, and nothing in the app reads it any more.
+    assert data["service_keys"] == {}
     assert data["keys"]["CIAO_OLLAMA_API_KEY"]["configured"] is False
     assert data["auto_update_github_skills"] is False
     assert "sk-anthropic" not in json.dumps(data)
-    assert "OPENAI_API_KEY=old" not in json.dumps(data)
 
     resp = client.patch(
         "/api/settings/providers",
         json={
             "keys": {
-                "OPENAI_API_KEY": "",
                 "CIAO_OLLAMA_API_KEY": "sk-ollama",
                 "UNSUPPORTED_KEY": "nope",
             }
@@ -421,13 +420,12 @@ def test_provider_config_status_and_write_only_patch(tmp_path, monkeypatch):
     resp = client.patch(
         "/api/settings/providers",
         json={
-            "keys": {"OPENAI_API_KEY": "", "CIAO_OLLAMA_API_KEY": "sk-ollama"},
+            "keys": {"CIAO_OLLAMA_API_KEY": "sk-ollama"},
             "auto_update_github_skills": False
         },
     )
     assert resp.status_code == 200
     env_text = env_path.read_text(encoding="utf-8")
-    assert "OPENAI_API_KEY=" not in env_text
     assert "CIAO_OLLAMA_API_KEY=sk-ollama" in env_text
     assert "CIAO_AUTO_UPDATE_GITHUB_SKILLS=false" in env_text
     assert "sk-ollama" not in json.dumps(resp.json())
@@ -710,3 +708,166 @@ def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):
         json={"profile": "personal", "code": "test-code"},
     )
     assert resp.status_code == 200
+
+
+def test_gws_profile_payload_uses_granted_scopes_for_chips_and_purpose(tmp_path):
+    client, config, _ = _client(tmp_path)
+    config_dir = config.workspace_root / "secrets" / "gws-personal"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "credentials.json").write_text(
+        json.dumps(
+            {
+                "client_id": "cid",
+                "client_secret": "csecret",
+                "refresh_token": "rtok",
+                "type": "authorized_user",
+                "email": "me@example.com",
+                "scopes": [
+                    "https://www.googleapis.com/auth/gmail.modify",
+                    "https://www.googleapis.com/auth/calendar",
+                    "https://www.googleapis.com/auth/drive",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.get("/api/integrations/gws")
+    assert resp.status_code == 200
+    payload = resp.json()
+    personal = next(p for p in payload["profiles"] if p["name"] == "personal")
+    assert personal["examples"] == ["Gmail", "Calendar", "Drive"]
+    assert "Gmail" in personal["purpose"]
+    assert "Calendar" in personal["purpose"]
+    assert "Drive" in personal["purpose"]
+    # Singular list of one scope collapses to a single-clause sentence.
+    (config_dir / "credentials.json").write_text(
+        json.dumps(
+            {
+                "client_id": "cid",
+                "client_secret": "csecret",
+                "refresh_token": "rtok",
+                "type": "authorized_user",
+                "scopes": ["https://www.googleapis.com/auth/tasks"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    resp = client.get("/api/integrations/gws")
+    personal = next(p for p in resp.json()["profiles"] if p["name"] == "personal")
+    assert personal["examples"] == ["Tasks"]
+    assert personal["purpose"].endswith("Connected to Tasks.")
+
+
+def test_gws_profile_payload_never_shows_a_raw_scope_url(tmp_path):
+    """Feed the payload the scopes production actually requests.
+
+    The other scope tests hand-pick URLs that happen to be in the label
+    catalogue, so they pass whether or not the catalogue is complete. Every
+    profile also requests `openid` and the two `userinfo.*` scopes, which had
+    no labels and fell through as verbatim googleapis.com URLs in the sentence
+    shown under the account name. Drive this from `scopes_for_profile` so
+    adding a scope without naming it fails here.
+    """
+    from ciao.gws_auth import scopes_for_profile
+
+    client, config, _ = _client(tmp_path)
+    config_dir = config.workspace_root / "secrets" / "gws-personal"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "credentials.json").write_text(
+        json.dumps(
+            {
+                "client_id": "cid",
+                "client_secret": "csecret",
+                "refresh_token": "rtok",
+                "type": "authorized_user",
+                "scopes": scopes_for_profile("personal"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.get("/api/integrations/gws")
+    assert resp.status_code == 200
+    personal = next(p for p in resp.json()["profiles"] if p["name"] == "personal")
+
+    assert not any("googleapis.com" in chip for chip in personal["examples"])
+    assert "googleapis.com" not in personal["purpose"]
+    assert "openid" not in personal["purpose"]
+    # The services the user actually recognises still appear.
+    assert "Gmail" in personal["examples"]
+    assert "Forms" in personal["examples"]
+
+
+def test_gws_profile_payload_falls_back_to_static_meta_when_no_scopes(tmp_path):
+    client, config, _ = _client(tmp_path)
+    # No credentials.json on disk -> configured is false, but the static
+    # purpose should still be sent so the user sees something before connecting.
+    resp = client.get("/api/integrations/gws")
+    payload = resp.json()
+    personal = next(p for p in payload["profiles"] if p["name"] == "personal")
+    assert personal["configured"] is False
+    # The curated chips describe what the profile is for, before there is any
+    # connection to report.
+    assert personal["examples"] == ["Gmail", "Calendar", "Tasks"]
+    assert "Private Google account" in personal["purpose"]
+
+
+def test_gws_profile_payload_keeps_chips_for_a_connection_predating_scopes(tmp_path):
+    """An account connected before scopes were recorded must not lose its chips.
+
+    credentials.json written by an older release has no `scopes` key, and
+    re-running OAuth consent is the only way to add one. Deriving chips purely
+    from granted scopes therefore blanked the card for every already-connected
+    user on upgrade.
+    """
+    client, config, _ = _client(tmp_path)
+    # `work` maps to secrets/gws, not secrets/gws-work (gws_auth.profile_config_dir).
+    config_dir = config.workspace_root / "secrets" / "gws"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "credentials.json").write_text(
+        json.dumps(
+            {
+                "client_id": "cid",
+                "client_secret": "csecret",
+                "refresh_token": "rtok",
+                "type": "authorized_user",
+                "email": "me@work.example",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.get("/api/integrations/gws")
+    work = next(p for p in resp.json()["profiles"] if p["name"] == "work")
+    assert work["configured"] is True
+    assert work["examples"] == ["Drive", "Docs", "Sheets", "Slides", "Gmail", "Calendar"]
+    assert "Company Google account" in work["purpose"]
+
+
+def test_gws_personal_purpose_keeps_the_separation_warning_once_connected(tmp_path):
+    """The "keep this separate" guidance matters most after connecting.
+
+    Recomposing the sentence from the label alone dropped it exactly when the
+    account went live, which is the only moment it is actionable.
+    """
+    client, config, _ = _client(tmp_path)
+    config_dir = config.workspace_root / "secrets" / "gws-personal"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "credentials.json").write_text(
+        json.dumps(
+            {
+                "client_id": "cid",
+                "client_secret": "csecret",
+                "refresh_token": "rtok",
+                "type": "authorized_user",
+                "scopes": ["https://www.googleapis.com/auth/gmail.modify"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.get("/api/integrations/gws")
+    personal = next(p for p in resp.json()["profiles"] if p["name"] == "personal")
+    assert "Keep this separate from company systems." in personal["purpose"]
+    assert personal["purpose"].endswith("Connected to Gmail.")

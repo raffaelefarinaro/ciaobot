@@ -19,14 +19,9 @@
         </svg>
       </button>
       <template v-if="!collapsed">
-        <button
-          type="button"
-          class="brand wordmark wordmark--sm"
-          :class="{ 'brand--refreshing': refreshing }"
-          @click="onBrandClick"
-          :title="refreshing ? 'Reloading...' : 'Click to reload the latest app build'"
-          :aria-busy="refreshing"
-        ><span class="brand-label">{{ brandLabel }}</span></button>
+        <!-- The wordmark used to sit here, between the toggle and these icons.
+             It is `BrandMark` in the pane header now, where it is centred and
+             does not have to share the sidebar's width. -->
         <div class="nav-links">
           <router-link
             to="/"
@@ -46,6 +41,7 @@
               <line x1="6" y1="13" x2="18" y2="13" />
               <polyline points="8 18 8 21 11 18" />
             </svg>
+                      <span class="nav-item-label" aria-hidden="true">chats</span>
           </router-link>
           <router-link
             to="/schedules"
@@ -67,8 +63,20 @@
               <line x1="19" y1="12" x2="21" y2="12" />
               <polyline points="12 8 12 12 15 14" />
             </svg>
+                      <span class="nav-item-label" aria-hidden="true">automations</span>
           </router-link>
-          <router-link to="/settings" class="nav-item touch-hit" active-class="nav-item--active" title="settings" aria-label="settings">
+          <!-- mode, not active-class: every settings tab is its own route
+               (/settings/providers, /settings/models, ...) and none of them match
+               the /settings record, so active-class left this item inactive on
+               nearly every settings page - and with it the label collapsed. The
+               sibling links already key off mode for the same reason. -->
+          <router-link
+            to="/settings"
+            class="nav-item touch-hit"
+            :class="{ 'nav-item--active': mode === 'settings' }"
+            title="settings"
+            aria-label="settings"
+          >
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -79,27 +87,34 @@
               <rect x="7" y="10" width="4" height="4" fill="currentColor" />
               <rect x="15" y="15" width="4" height="4" fill="currentColor" />
             </svg>
+                      <span class="nav-item-label" aria-hidden="true">settings</span>
           </router-link>
           <NotificationBell class="sidebar-bell" />
         </div>
       </template>
     </div>
 
+    <!-- No section title here: the nav pill above already names this view, and
+         the create action sits in the footer like the chat sidebar's, so both
+         modes put "make a new one" in the same place. -->
     <template v-if="!collapsed && (mode === 'schedules')">
-      <div class="sidebar-section-header">
-        <span class="sidebar-section-title">automations</span>
-        <button class="btn-small" @click="emit('new-schedule')" title="New automation">+ New</button>
-      </div>
       <div class="workspace-toggle">
         <button
           v-for="workspace in store.workspaceOptions"
           :key="workspace.name"
           :class="{ active: store.activeWorkspace === workspace.name }"
           :aria-pressed="store.activeWorkspace === workspace.name"
+          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
           :data-workspace-color="colorForWorkspace(workspace)"
+          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
           @click="selectAutomationWorkspace(workspace.name)"
         >
-          {{ workspaceLabel(workspace.name) }}
+          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
+          <!-- Wrapped, not a bare text node: the buttons are nowrap so a long
+               workspace name needs a shrinkable element to ellipse inside, or it
+               overflows into its neighbour. The button's title carries the full
+               name. -->
+          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
           <span
             v-if="missedCountFor(workspace.name) > 0"
             class="badge badge--missed"
@@ -234,6 +249,10 @@
           </div>
         </template>
       </div>
+
+      <div class="sidebar-footer">
+        <button class="add-automation-btn" @click="emit('new-schedule')">+ New Automation</button>
+      </div>
     </template>
 
     <template v-if="!collapsed && mode === 'settings'">
@@ -301,12 +320,35 @@
           :key="workspace.name"
           :class="{ active: store.activeWorkspace === workspace.name }"
           :aria-pressed="store.activeWorkspace === workspace.name"
+          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
           :data-workspace-color="colorForWorkspace(workspace)"
+          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
           @click="store.switchWorkspace(workspace.name)"
         >
-          {{ workspaceLabel(workspace.name) }}
-          <span v-if="store.workspaceIsStreaming(workspace.name)" class="spinner-dot" title="A chat is working" />
-          <span v-else-if="store.workspaceUnread(workspace.name) > 0" class="badge">{{ store.workspaceUnread(workspace.name) }}</span>
+          <!-- Shortcut badge comes from workspaceShortcut(), which also backs the
+               aria-keyshortcuts on this button and returns '' past the 9th
+               workspace. Marks follow the signal grammar: needs-you outranks
+               working, and unread is a separate count. -->
+          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
+          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
+          <span
+            v-if="store.workspaceNeedsInput(workspace.name) > 0"
+            class="workspace-status-dot"
+            title="A chat needs your answer"
+            aria-label="A chat needs your answer"
+          />
+          <span
+            v-else-if="store.workspaceIsStreaming(workspace.name)"
+            class="workspace-status-ring"
+            title="A chat is working"
+            aria-label="A chat is working"
+          ><span class="workspace-status-core" aria-hidden="true" /></span>
+          <span
+            v-if="store.workspaceUnread(workspace.name) > 0"
+            class="badge"
+            :title="`${store.workspaceUnread(workspace.name)} unread chats`"
+            :aria-label="`${store.workspaceUnread(workspace.name)} unread chats`"
+          >{{ store.workspaceUnread(workspace.name) }}</span>
         </button>
       </div>
 
@@ -325,7 +367,6 @@
               :class="{
                 active: chat.chat_id === store.activeChatId,
                 remote: chat.local === false,
-                'needs-input': store.chatNeedsInput(chat.chat_id),
               }"
               @click="chat.local !== false && selectChat(chat.chat_id)"
               :disabled="chat.local === false"
@@ -337,15 +378,20 @@
                 aria-label="Generating title"
                 title="Generating title..."
               />
-              <span v-else class="recent-title">{{ chat.title }}</span>
-              <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
-              <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
-              <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer" aria-label="Needs your answer">?</span>
+              <span
+                v-else
+                class="recent-title"
+                :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
+              >{{ chat.title }}</span>
+              <ChatSignals
+                :chat-id="chat.chat_id"
+                density="row"
+                :hue="colorForChat(chat)"
+              />
               <span v-if="chat.local === false" class="remote-chip">remote</span>
               <span class="recent-project" v-if="store.projectFor(chat.chat_id)?.name">
                 {{ store.projectFor(chat.chat_id)?.name }}
               </span>
-              <span v-else-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
             </button>
           </div>
         </div>
@@ -382,14 +428,31 @@
               <button
                 type="button"
                 class="project-name"
+                :data-workspace-color="colorForProject(project.workspace)"
                 v-if="editingProject !== project.project_id"
                 @click="openProject(project.project_id)"
                 title="Open project page"
               >
                 {{ project.name }}
                 <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
-                <span v-if="store.projectIsStreaming(project.project_id)" class="spinner-dot" title="A chat in this project is working" />
-                <span v-if="store.projectUnread(project.project_id) > 0" class="badge">{{ store.projectUnread(project.project_id) }}</span>
+                <span
+                  v-if="store.projectNeedsInput(project.project_id) > 0"
+                  class="rollup-needs-dot"
+                  title="A chat in this project needs your answer"
+                  aria-label="A chat in this project needs your answer"
+                />
+                <span
+                  v-else-if="store.projectIsStreaming(project.project_id)"
+                  class="rollup-ring"
+                  title="A chat in this project is working"
+                  aria-label="A chat in this project is working"
+                ><span class="rollup-ring-core" aria-hidden="true" /></span>
+                <span
+                  v-if="store.projectUnread(project.project_id) > 0"
+                  class="badge"
+                  :title="`${store.projectUnread(project.project_id)} unread chats`"
+                  :aria-label="`${store.projectUnread(project.project_id)} unread chats`"
+                >{{ store.projectUnread(project.project_id) }}</span>
               </button>
               <input
                 v-else
@@ -434,62 +497,71 @@
 
             <!-- Chats in project -->
             <div v-if="expandedProjects.has(project.project_id)" class="chat-list">
-              <div
+              <template
                 v-for="{ chat, isDelegate } in store.projectChatRows(project.project_id)"
                 :key="chat.chat_id"
-                class="chat-item"
-                :class="{
-                  active: chat.chat_id === store.activeChatId,
-                  remote: chat.local === false,
-                  'needs-input': store.chatNeedsInput(chat.chat_id),
-                  delegate: isDelegate,
-                  dragging: dragChatId === chat.chat_id,
-                }"
-                :draggable="chat.local !== false"
-                @click="chat.local !== false && selectChat(chat.chat_id)"
-                @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
-                @keydown.space.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
-                @dragstart="onChatDragStart(chat, $event)"
-                @dragend="onChatDragEnd"
-                @contextmenu.prevent="toggleChatMenu($event, chat.chat_id)"
-                role="link"
-                :tabindex="chat.local === false ? -1 : 0"
-                :aria-disabled="chat.local === false"
-                :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
               >
-                <span
-                  v-if="isDelegate"
-                  class="delegate-mark"
-                  title="Delegate: spawned by this chat's supervisor"
-                  aria-label="Delegate chat"
-                >&#8627;</span>
-                <span
-                  v-if="chat.title_status === 'pending'"
-                  class="title-shimmer"
-                  aria-label="Generating title"
-                  title="Generating title..."
-                />
-                <span v-else class="chat-title">{{ chat.title }}</span>
-                <span
-                  v-if="chatLoopBadge(chat.chat_id)"
-                  class="loop-mark"
-                  :class="{ stopped: !chatLoopBadge(chat.chat_id)!.running }"
-                  :title="chatLoopBadge(chat.chat_id)!.title"
-                  :aria-label="chatLoopBadge(chat.chat_id)!.title"
-                >&#10227;</span>
-                <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
-                <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
-                <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer" aria-label="Needs your answer">?</span>
-                <span v-else-if="chat.retry?.status === 'pending'" class="retry-dot" title="Retry scheduled" />
-                <span v-if="chat.local === false" class="remote-chip">remote</span>
-                <span v-else-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
-                <button
-                  class="chat-actions-btn"
-                  aria-label="Chat actions"
-                  title="Copy ID, rename, move, archive, delete"
-                  @click.stop="toggleChatMenu($event, chat.chat_id)"
-                >&middot;&middot;&middot;</button>
-              </div>
+                <div
+                  v-if="!isDelegate || subchatsExpanded(chat.spawned_from_chat_id || '')"
+                  class="chat-item"
+                  :class="{
+                    active: chat.chat_id === store.activeChatId,
+                    remote: chat.local === false,
+                    delegate: isDelegate,
+                    dragging: dragChatId === chat.chat_id,
+                  }"
+                  :draggable="chat.local !== false"
+                  @click="chat.local !== false && selectChat(chat.chat_id)"
+                  @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
+                  @keydown.space.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
+                  @dragstart="onChatDragStart(chat, $event)"
+                  @dragend="onChatDragEnd"
+                  @contextmenu.prevent="toggleChatMenu($event, chat.chat_id)"
+                  role="link"
+                  :tabindex="chat.local === false ? -1 : 0"
+                  :aria-disabled="chat.local === false"
+                  :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
+                >
+                  <span
+                    v-if="isDelegate"
+                    class="delegate-mark"
+                    title="Delegate: spawned by this chat's supervisor"
+                    aria-label="Delegate chat"
+                  >&#8627;</span>
+                  <button
+                    v-else-if="visibleSubchatCount(project.project_id, chat.chat_id) > 0"
+                    type="button"
+                    class="subchat-toggle"
+                    :aria-expanded="subchatsExpanded(chat.chat_id)"
+                    :aria-label="(subchatsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subchats for ' + chat.title"
+                    :title="(subchatsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subchats'"
+                    @click.stop="toggleSubchats(chat.chat_id)"
+                  >{{ subchatsExpanded(chat.chat_id) ? '▾' : '▸' }}</button>
+                  <span
+                    v-if="chat.title_status === 'pending'"
+                    class="title-shimmer"
+                    aria-label="Generating title"
+                    title="Generating title..."
+                  />
+                  <span
+                    v-else
+                    class="chat-title"
+                    :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
+                  >{{ chat.title }}</span>
+                  <ChatSignals
+                    :chat-id="chat.chat_id"
+                    density="row"
+                    :hue="colorForChat(chat)"
+                  />
+                  <span v-if="chat.local === false" class="remote-chip">remote</span>
+                  <button
+                    class="chat-actions-btn"
+                    aria-label="Chat actions"
+                    title="Copy ID, rename, move, archive, delete"
+                    @click.stop="toggleChatMenu($event, chat.chat_id)"
+                  >&middot;&middot;&middot;</button>
+                </div>
+              </template>
 
               <!-- Chat context menu - teleported to body -->
               <Teleport to="body">
@@ -508,7 +580,9 @@
                       <button v-if="moveTargets.length" @click="openMoveSubmenu()">Move to...</button>
                       <button v-if="chatMenuChat?.retry?.status === 'pending'" @click="stopRetry(chatMenu!)">Stop trying</button>
                       <button v-else @click="setRetry(chatMenu!)">Set to retry</button>
-                      <button @click="doArchiveChat(chatMenu!)">Archive</button>
+                      <button @click="doArchiveChat(chatMenu!)">
+                        {{ archiveMenuLabel(chatMenu!) }}
+                      </button>
                       <button @click="confirmDeleteChat(chatMenu!)">Delete</button>
                     </template>
                     <template v-else>
@@ -597,15 +671,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import NotificationBell from './NotificationBell.vue'
+import ChatSignals from './ChatSignals.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
+import { archiveMenuLabel as menuLabel, archiveConfirmMessage } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
@@ -634,32 +710,6 @@ const workspaceLoops = computed(() =>
     store.projects,
   )),
 )
-
-// Loop-driven chats get a ↻ marker in the list so it's obvious the chat has
-// a heartbeat of its own and new turns will appear without anyone typing.
-// Keyed lookup (not a filter per row) so a long chat list stays O(n).
-const loopsByChat = computed(() => {
-  const byChat = new Map<string, { count: number; running: boolean }>()
-  for (const l of taskStore.loops) {
-    const prev = byChat.get(l.web_chat_id)
-    byChat.set(l.web_chat_id, {
-      count: (prev?.count || 0) + 1,
-      running: (prev?.running || false) || !!l.running,
-    })
-  }
-  return byChat
-})
-function chatLoopBadge(chatId: string): { running: boolean; title: string } | null {
-  const info = loopsByChat.value.get(chatId)
-  if (!info) return null
-  const plural = info.count > 1 ? `${info.count} loops` : 'A loop'
-  return {
-    running: info.running,
-    title: info.running
-      ? `${plural} running in this chat`
-      : `${plural} attached to this chat (stopped)`,
-  }
-}
 
 const oneOffSchedules = computed(() => {
   return workspaceSchedules.value
@@ -704,6 +754,11 @@ function openProject(projectId: string) {
 }
 
 const expandedProjects = reactive(new Set<string>())
+// Keep supervisor groups open by default so the existing sidebar remains
+// unchanged until the user explicitly collapses one. This is deliberately
+// component-local, matching the project disclosure state above and the chat
+// context disclosure in ChatPanel.
+const collapsedSubchatParents = reactive(new Set<string>())
 const projectMenu = ref<string | null>(null)
 const chatMenu = ref<string | null>(null)
 const chatMenuPos = ref<{ top: number; left: number }>({ top: 0, left: 0 })
@@ -712,11 +767,6 @@ const moveSubmenu = ref(false)
 const editingProject = ref<string | null>(null)
 const renamingChat = ref<string | null>(null)
 const renameValue = ref('')
-const refreshing = ref(false)
-const BRAND_TEXT = 'ciaobot'
-const PIXEL_CHARS = '█▓▒░▄▀▐▌▆▅▃▂▪▫◆●○·'
-const brandLabel = ref(BRAND_TEXT)
-
 const isAnyChatWorking = computed(() => {
   return Object.values(store.streaming).some(Boolean) ||
          Object.values(store.projectStreaming).some(Boolean) ||
@@ -727,29 +777,6 @@ const hasAutomationWarning = computed(() => {
   return taskStore.schedules.some(s => s.enabled && s.missed) ||
          taskStore.loops.some(l => l.running && (l.last_status === 'error' || l.last_status === 'missing-chat'))
 })
-let brandPixelTimer: ReturnType<typeof setInterval> | null = null
-
-function startBrandPixelAnimation() {
-  stopBrandPixelAnimation()
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-  brandPixelTimer = setInterval(() => {
-    brandLabel.value = BRAND_TEXT
-      .split('')
-      .map((char) => (Math.random() < 0.18 ? char : PIXEL_CHARS[Math.floor(Math.random() * PIXEL_CHARS.length)]))
-      .join('')
-  }, 80)
-}
-
-function stopBrandPixelAnimation() {
-  if (brandPixelTimer !== null) {
-    clearInterval(brandPixelTimer)
-    brandPixelTimer = null
-  }
-  brandLabel.value = BRAND_TEXT
-}
-
-onBeforeUnmount(stopBrandPixelAnimation)
-
 // Destination projects for "Move to..." — same workspace as the chat,
 // excluding the chat's current project. Backend rejects cross-workspace moves.
 const chatMenuChat = computed<ChatInfo | null>(() => {
@@ -816,6 +843,27 @@ function closeChatMenus() {
   moveSubmenu.value = false
 }
 
+function activeSubchatCount(chatId: string): number {
+  return store.activeDelegatesFor(chatId).length
+}
+
+function archiveMenuLabel(chatId: string): string {
+  return menuLabel(activeSubchatCount(chatId))
+}
+
+// Subchats working right now. Archiving stops them instead of waiting, so the
+// confirm dialog names them first. Background agents count as working: they
+// outlive their turn, so a subchat with no live turn can still be busy.
+function busySubchatCount(chatId: string): number {
+  return store.activeDelegatesFor(chatId).filter(
+    d => store.isChatStreaming(d.chat_id) || store.chatHasBackgroundAgents(d.chat_id),
+  ).length
+}
+
+function archiveConfirmation(chatId: string): string {
+  return archiveConfirmMessage(activeSubchatCount(chatId), busySubchatCount(chatId))
+}
+
 // Reset the submenu whenever the active chat menu changes (open, close,
 // switch chats), so re-opening always starts at the top-level menu.
 watch(chatMenu, () => { moveSubmenu.value = false })
@@ -836,30 +884,6 @@ async function moveChatToProject(chatId: string, targetProjectId: string) {
   }
 }
 
-async function onBrandClick() {
-  if (refreshing.value) return
-  refreshing.value = true
-  startBrandPixelAnimation()
-  try {
-    // Force the service worker to update without unregistering it,
-    // so push subscriptions survive across builds.
-    if ('serviceWorker' in navigator) {
-      const regs = await navigator.serviceWorker.getRegistrations()
-      await Promise.all(regs.map(r => r.update()))
-    }
-    if (typeof caches !== 'undefined') {
-      const keys = await caches.keys()
-      await Promise.all(keys.map(k => caches.delete(k)))
-    }
-  } catch (e) {
-    console.warn('Hard refresh cleanup failed', e)
-  }
-  // Bust HTTP cache too via a query string; replace so no back-button stale entry.
-  const url = new URL(window.location.href)
-  url.searchParams.set('_r', String(Date.now()))
-  window.location.replace(url.toString())
-}
-
 // Auto-expand all projects when they load (and keep new ones expanded)
 watch(() => store.workspaceProjects, (projects) => {
   for (const p of projects) {
@@ -872,6 +896,10 @@ watch(() => store.activeChatId, (chatId) => {
   const project = store.projectFor(chatId)
   if (project) {
     expandedProjects.add(project.project_id)
+  }
+  const chat = store.chats.find(c => c.chat_id === chatId)
+  if (chat?.spawned_from_chat_id) {
+    collapsedSubchatParents.delete(chat.spawned_from_chat_id)
   }
 }, { immediate: true })
 
@@ -975,6 +1003,23 @@ function toggleProject(id: string) {
   }
 }
 
+function visibleSubchatCount(projectId: string, chatId: string): number {
+  return store.projectChatGroups(projectId)
+    .find(group => group.chat.chat_id === chatId)?.delegates.length || 0
+}
+
+function subchatsExpanded(chatId: string): boolean {
+  return !collapsedSubchatParents.has(chatId)
+}
+
+function toggleSubchats(chatId: string) {
+  if (subchatsExpanded(chatId)) {
+    collapsedSubchatParents.add(chatId)
+  } else {
+    collapsedSubchatParents.delete(chatId)
+  }
+}
+
 async function addProject() {
   const name = prompt('Project name:')
   if (!name) return
@@ -989,6 +1034,20 @@ function workspaceLabel(name: string): string {
     .filter(Boolean)
     .map(part => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ')
+}
+
+function workspaceShortcut(name: string): string {
+  const index = store.workspaceOptions.findIndex(workspace => workspace.name === name) + 1
+  return index >= 1 && index <= 9 ? String(index) : ''
+}
+
+function colorForChat(chat: { project_id: string }) {
+  const project = store.projects.find(item => item.project_id === chat.project_id)
+  return colorForWorkspace(store.workspaceOptions.find(item => item.name === project?.workspace))
+}
+
+function colorForProject(workspace: string) {
+  return colorForWorkspace(store.workspaceOptions.find(item => item.name === workspace))
 }
 
 // ── Completed (archived) projects ──────────────────────────────────────
@@ -1092,11 +1151,16 @@ async function doArchiveChat(chatId: string) {
   chatMenu.value = null
   // This path never asked for confirmation, unlike the chat header's archive
   // button, so archiving from the sidebar menu was a single misclick.
-  if (!await askConfirm('Archive this chat? You can reopen it from the archive.', {
+  if (!await askConfirm(archiveConfirmation(chatId), {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return
-  await store.archiveChat(chatId)
+  try {
+    await store.archiveChat(chatId)
+  } catch {
+    // archiveChat reconnected the sockets and raised an error toast already;
+    // swallow the rejection so it is not an unhandled one.
+  }
 }
 
 async function setRetry(chatId: string) {
@@ -1130,8 +1194,11 @@ async function confirmDeleteChat(chatId: string) {
 
 <style scoped>
 .sidebar {
-  width: 280px;
-  min-width: 280px;
+  /* Fallback only: ChatLayout sets the real width inline (drag-resizable,
+     remembered per user). Matches DEFAULT_SIDEBAR_WIDTH so the two agree
+     before that inline style applies. */
+  width: 340px;
+  min-width: 340px;
   background: var(--bg2);
   border-right: 1px solid var(--border);
   display: flex;
@@ -1154,6 +1221,10 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Queried below so the nav label answers to the width it actually has -
+     the sidebar is drag-resizable and remembers its width per user, so a
+     viewport media query cannot know whether "automations" fits. */
+  container-type: inline-size;
   /* Keep the collapsed rail aligned with the expanded nav and pane headers. */
   height: 61px;
   flex-shrink: 0;
@@ -1177,47 +1248,6 @@ async function confirmDeleteChat(chatId: string) {
 .toggle-btn:hover { color: var(--fg); }
 .toggle-btn:active { transform: scale(0.94); }
 .toggle-btn--collapsed svg { transform: scaleX(-1); }
-
-.brand {
-  /* Inherits .wordmark base from App.vue; override size and add interaction. */
-  font-size: calc(16px * var(--font-scale));
-  cursor: pointer;
-  transition: opacity 120ms var(--ease);
-  min-height: var(--touch);
-  align-items: center;
-  padding: 0 4px;
-  border: 0;
-  background: transparent;
-}
-.brand::before {
-  content: none;
-}
-.brand:hover { opacity: 0.85; }
-.brand:active { opacity: 0.7; }
-.brand-label {
-  display: inline-block;
-  min-width: 7ch;
-  text-align: left;
-}
-.brand--refreshing {
-  opacity: 1;
-  color: var(--accent);
-  pointer-events: none;
-}
-.brand--refreshing .brand-label {
-  animation: brand-pixel-jitter 0.12s steps(2, end) infinite;
-  text-shadow:
-    1px 0 color-mix(in srgb, var(--accent) 75%, transparent),
-    -1px 0 color-mix(in srgb, var(--accent2) 55%, transparent),
-    0 1px color-mix(in srgb, var(--fg) 35%, transparent);
-}
-@keyframes brand-pixel-jitter {
-  0%, 100% { transform: translate(0, 0); }
-  50% { transform: translate(1px, -1px); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .brand--refreshing .brand-label { animation: none; }
-}
 
 /* Pulsing dot used inline next to project / chat names to signal activity.
    A breathing scale+opacity pulse reads as "alive" at a glance, unlike a
@@ -1243,52 +1273,53 @@ async function confirmDeleteChat(chatId: string) {
   .spinner-dot { animation-duration: 2.2s; }
 }
 
-/* Slower, dimmer variant: background subagents still working after the
-   parent turn ended (no turn is streaming, but the chat isn't idle). */
-.spinner-dot.bg-agents {
-  background: var(--accent2);
-  animation-duration: 1.8s;
-}
-
-.retry-dot {
-  display: inline-block;
-  width: 9px;
-  height: 9px;
-  margin-left: 6px;
+.workspace-status-dot,
+.rollup-needs-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
   border-radius: 50%;
-  border: 1px solid rgba(255, 193, 7, 0.8);
-  background: rgba(255, 193, 7, 0.22);
-  flex-shrink: 0;
+  background: var(--accent);
 }
 
-/* AskUserQuestion: blocked until the user picks an answer. Pink ? badge
-   matches the question card accent and stays visible on the active chat. */
-.needs-input-badge {
+/* Working, at rollup level. Same treatment as the chat transcript's own
+   activity pulse and ChatSignals: a solid accent dot with a halo plus an
+   expanding ring. The outlined ring this replaced was nearly invisible at this
+   size against the sidebar ground. */
+.rollup-ring,
+.workspace-status-ring {
+  position: relative;
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  margin-left: 6px;
-  border-radius: 9px;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
   background: var(--accent);
-  color: var(--bg);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  line-height: 1;
-  flex-shrink: 0;
+  box-shadow: 0 0 4px var(--accent);
   animation: ciao-pulse 1.1s ease-in-out infinite;
 }
 
-.recent-item.needs-input,
-.chat-item.needs-input {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+.rollup-ring::before,
+.workspace-status-ring::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.45;
+  animation: ciao-ring 1.1s ease-out infinite;
+  pointer-events: none;
 }
 
-.recent-item.needs-input.active,
-.chat-item.needs-input.active {
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg3));
+/* The inner core is now the dot itself, so the nested span is decorative. */
+.workspace-status-core,
+.rollup-ring-core {
+  display: none;
+}
+
+@keyframes ciao-ring {
+  0% { transform: scale(0.6); opacity: 0.45; }
+  100% { transform: scale(1.6); opacity: 0; }
 }
 
 /* Scrollable area for chats and projects */
@@ -1409,21 +1440,105 @@ async function confirmDeleteChat(chatId: string) {
 .nav-links {
   display: flex;
   align-items: center;
-  gap: 4px;
+  /* The wordmark used to take the middle of this row, leaving these four icons
+     huddled at a 4px gap against the right edge. It is in the pane header now, and
+     the ~90px it gives back is spent here: the icons spread across a 200px strip,
+     so each 30px glyph gets ~27px of air and its 44px touch target no longer
+     overlaps its neighbour's. The glyphs stay 30px, because the pane header sizes
+     its own icons to match the sidebar - see the note there.
+     `space-between` over a capped basis rather than a fixed gap, because that
+     degrades in both directions: a sidebar dragged out to 500px does not fling the
+     icons to the far edge (the strip stops at 200px), and one dragged down to its
+     180px minimum packs them back to the --space-1 floor instead of overflowing
+     the rail. The strip is narrower on mobile, where the bell hides - see below. */
+  /* Sized to content now rather than a fixed strip: the active item carries an
+     expanding label, so the row's width depends on which page you are on. */
+  flex: 0 1 auto;
+  justify-content: flex-end;
+  /* Wider than the old icon-only 4px: the active item now ends in text, and a
+     4px gap between a word and the next glyph reads as a collision. */
+  gap: var(--space-2);
   margin-left: auto;
+  min-width: 0;
 }
 
 .nav-item {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
+  gap: var(--space-1);
+  /* min-width, not width: the active item grows to fit its label. */
+  min-width: 30px;
   height: 30px;
+  /* Padding is left to .touch-hit, uniformly. Trading the inline half down to
+     var(--space-1) packed the rail by 6px per item, but .touch-hit paints its
+     pill by insetting that padding on every side: at 4px the highlight landed
+     3px *inside* the glyph, clipping the icon instead of padding it, and the
+     matching negative margin shrank each item's footprint to 24px. Uniform
+     padding restores the 30px control with a 44px touch target, and matches
+     the bell beside it, which never overrode this. */
+  border-radius: var(--radius-sm);
   position: relative;
   isolation: isolate;
   color: var(--fg2);
   text-decoration: none;
   transition: color 120ms var(--ease);
+}
+
+/* The page you are on names itself, next to its own icon, instead of a separate
+   tag elsewhere in the window. Inactive items stay glyph-only, so the row reads
+   as one selected item among icons rather than a list of words. Collapsed with
+   max-width so it animates, and aria-hidden because .nav-item already carries a
+   full aria-label - otherwise the accessible name would read "automations
+   automations". */
+.nav-item-label {
+  max-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  opacity: 0;
+  transition: max-width 160ms var(--ease), opacity 120ms var(--ease);
+}
+
+.nav-item--active .nav-item-label {
+  /* Room for the longest label ("automations", 11 characters) plus a little, so
+     it is never clipped mid-word. At 9ch it read as "automatio" hard against the
+     next glyph. */
+  max-width: 13ch;
+  opacity: 1;
+}
+
+/* Below this the rail cannot hold a full label and every glyph at once, so trade
+   the label away rather than the icons. */
+@media (max-width: 900px) {
+  .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
+}
+
+/* The row's contents need roughly: toggle (44) + active item with label (~118)
+   + two bare items (88) + bell (44) + gaps (24) = 318. Under that the flex row
+   shrinks the only thing that can give - the label - and "automations" rendered
+   as "automation" jammed against the pill edge. Drop the label instead of
+   clipping a word in half; the icon and its tooltip still say what it is.
+   Keyed to the header's own width, so a user who drags the sidebar narrow (or
+   kept a width saved from before it grew) gets the icons-only row.
+
+   A container query resolves against the container's *content* box, so this
+   compares against 318 with the header's own 16px padding already excluded -
+   not against the sidebar's outer width. At the 340px default the header
+   measures 340 - 1 (sidebar border) - 16 (its padding) - any --safe-left inset
+   = 323 on a desktop window, which clears it. On a device with a left inset the
+   headroom shrinks and the label hides earlier, which is the intended
+   degradation rather than a clipped word.
+
+   Known limit: the cap above is in ch and this threshold is in px, so at a
+   large --font-scale the label can outgrow the budget and clip again. Fixing
+   that properly needs measurement rather than a breakpoint. */
+@container (max-width: 317px) {
+  .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
 }
 
 .nav-item:hover {
@@ -1536,8 +1651,24 @@ async function confirmDeleteChat(chatId: string) {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.workspace-shortcut {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  color: var(--fg3);
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+  flex: 0 0 auto;
 }
 
 .workspace-toggle button:hover {
@@ -1549,6 +1680,13 @@ async function confirmDeleteChat(chatId: string) {
 .workspace-toggle button.active {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 18%, var(--bg3));
+}
+
+/* Keep workspace status markers visually separate from the workspace name,
+   matching the spacing used by project-level state dots. */
+.workspace-toggle button .workspace-status-dot,
+.workspace-toggle button .workspace-status-ring {
+  margin-left: var(--space-2);
 }
 
 .project-list {
@@ -1618,7 +1756,7 @@ async function confirmDeleteChat(chatId: string) {
   height: 14px;
   padding: 0 5px;
   margin-left: 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg3);
   color: var(--fg2);
   font-size: calc(9px * var(--font-scale));
@@ -1661,6 +1799,17 @@ async function confirmDeleteChat(chatId: string) {
   letter-spacing: inherit;
 }
 .project-name:hover { color: var(--fg); }
+
+/* The project header is a text button, not a flex row, so the state marks sit
+   flush against the last letter of the name. Space them the same 6px .badge
+   already gives itself, and align them to the text rather than the baseline.
+   Scoped here on purpose: the workspace pill puts the same marks in a flex row
+   with a gap, where a margin would double up. */
+.project-name .rollup-needs-dot,
+.project-name .rollup-ring {
+  margin-left: var(--space-2);
+  vertical-align: middle;
+}
 
 .edit-input {
   flex: 1;
@@ -1732,27 +1881,34 @@ async function confirmDeleteChat(chatId: string) {
   line-height: 1;
 }
 
+/* A supervisor's disclosure sits inside the parent chat row. It uses the same
+   44px hit area as the project disclosure while keeping the glyph compact, so
+   collapsing a busy supervisor does not make the child rows unreachable on a
+   touch device. */
+.subchat-toggle {
+  flex: 0 0 var(--touch);
+  width: var(--touch);
+  height: var(--touch);
+  margin: 0 0 0 -14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg3, var(--fg2));
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  text-align: center;
+}
+.subchat-toggle:hover { color: var(--fg); }
+.subchat-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
+
 /* Loop marker on a chat row. Accent while the cadence is live, muted when the
    loop exists but is stopped, so "this chat re-runs itself" reads at a glance
    without competing with the streaming dot next to it. */
-.loop-mark {
-  flex: 0 0 auto;
-  /* Badge-sized (11px) was too small to see: ⟳ is a thin outline glyph, so it
-     read as a speck beside the solid 8px streaming dot. Sized above the row
-     text, and through the token so it follows the Settings > Appearance font
-     scale that a hardcoded px ignored. Still under the 18px unread badge, so
-     the row height does not move. */
-  font-size: var(--text-lg);
-  font-weight: 700;
-  line-height: 1;
-  color: var(--accent);
-}
-
-.loop-mark.stopped {
-  color: var(--fg3, var(--fg2));
-  opacity: 0.7;
-}
-
 .badge {
   display: inline-flex;
   align-items: center;
@@ -1805,6 +1961,33 @@ async function confirmDeleteChat(chatId: string) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-title--unread {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.workspace-shortcut {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.workspace-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rollup-ring,
+  .workspace-status-ring { animation: none; }
+  .rollup-ring::before,
+  .workspace-status-ring::before { animation: none; opacity: 0.3; }
 }
 
 /* Shimmer placeholder shown in the sidebar while the server auto-titles
@@ -1882,7 +2065,8 @@ async function confirmDeleteChat(chatId: string) {
   box-sizing: border-box;
 }
 
-.add-project-btn {
+.add-project-btn,
+.add-automation-btn {
   flex: 1;
   height: var(--touch);
   padding: 6px;
@@ -1900,7 +2084,8 @@ async function confirmDeleteChat(chatId: string) {
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
 
-.add-project-btn:hover {
+.add-project-btn:hover,
+.add-automation-btn:hover {
   background: var(--bg);
   border-color: var(--accent);
   color: var(--fg);
@@ -2057,6 +2242,10 @@ async function confirmDeleteChat(chatId: string) {
   }
   .add-chat-btn { opacity: 1; }
   .sidebar-bell { display: none; }
+  /* Three icons here instead of four (the pane header carries the bell on mobile),
+     so the strip narrows to match. Left at 200px it would space three glyphs
+     40px apart and read as scattered rather than spread. */
+  .nav-links { flex-basis: 150px; }
 }
 
 /* Schedules list in sidebar (schedules mode) */
@@ -2074,6 +2263,11 @@ async function confirmDeleteChat(chatId: string) {
 }
 .schedules-list {
   display: flex;
+  /* Fills the space between the workspace toggle and the footer, so the create
+     button pins to the bottom exactly like the chat sidebar's. min-height:0 is
+     what lets it actually scroll inside a column flex parent. */
+  flex: 1;
+  min-height: 0;
   flex-direction: column;
   overflow-y: auto;
   padding: 8px 8px 12px;

@@ -12,10 +12,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>{{CIAO_PYTHON}}</string>
-        <string>-m</string>
-        <string>ciao.cli</string>
-        <string>run</string>
+        <string>{{CIAO_EXECUTABLE}}</string>
+{{LAUNCHD_PROGRAM_ARGUMENTS}}
     </array>
 
     <key>WorkingDirectory</key>
@@ -25,12 +23,26 @@
     <dict>
         <key>CIAO_WORKSPACE</key>
         <string>{{CIAO_WORKSPACE}}</string>
+        <key>CIAO_RUNTIME_ROOT</key>
+        <string>{{CIAO_RUNTIME_ROOT}}</string>
         <key>CIAO_PORT</key>
         <string>{{CIAO_PORT}}</string>
         <key>PATH</key>
         <string>{{CIAO_PATH}}</string>
+        <key>CIAO_NATIVE_SIDECAR</key>
+        <string>{{CIAO_NATIVE_SIDECAR}}</string>
     </dict>
 
+    <!-- Deliberately no LimitLoadToSessionType. It looks like the fix for
+         FoundationModels' ModelManagerServices error 1008 (the agent lands in
+         gui/<uid> but launchd still reports `spawn type = daemon`, and a
+         daemon-spawned process cannot use the model-manager connection).
+         Measured: adding `Aqua` does not change the spawn type when the job is
+         bootstrapped into gui/<uid>, which is how both `ciao setup` and
+         Ciaobot.app load it — so it buys nothing and would additionally stop
+         the agent loading on a headless host. Generation crosses into the user
+         session from the code side instead; see
+         native_sidecar._respond_in_user_session. -->
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

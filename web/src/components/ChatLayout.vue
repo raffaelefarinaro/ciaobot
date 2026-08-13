@@ -39,38 +39,44 @@
           />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-            <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
           </div>
           <!-- On mobile, the sidebar already lists every active chat. Showing the
                homepage behind it after closing a chat would just duplicate the
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-            <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
-            <div class="empty-state">
-              <div class="empty-mark">
-                <button
-                  type="button"
-                  class="empty-face-btn"
-                  aria-label="Say hello"
-                  @click="onFaceClick"
-                  @mouseenter="onFaceEnter"
-                  @mouseleave="onFaceLeave"
-                >
-                  <Transition name="face-bubble">
-                    <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                      {{ speechGreeting }}
-                    </div>
-                  </Transition>
-                  <img
-                    class="empty-face"
-                    :src="faceSrc"
-                    alt=""
-                    draggable="false"
-                  />
-                </button>
+            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+            <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
+              <div class="empty-home-header">
+                <!-- With chats on screen the mark is decoration beside a status line, so it
+                     is a plain image: no button, no hover handlers, no greeting bubble. The
+                     bubble belongs to the big first-run face below, where it is the only
+                     thing on the screen and has room to be a greeting. Next to a sentence
+                     that already reads "nothing needs you" it just collided with it. -->
+                <template v-if="store.activeChatsAll.length">
+                  <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
+                  <span class="empty-status-text">{{ homeStatus }}</span>
+                </template>
+                <div v-else class="empty-mark">
+                  <button
+                    type="button"
+                    class="empty-face-btn"
+                    aria-label="Say hello"
+                    @click="onFaceClick"
+                    @mouseenter="onFaceEnter"
+                    @mouseleave="onFaceLeave"
+                  >
+                    <Transition name="face-bubble">
+                      <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                        {{ speechGreeting }}
+                      </div>
+                    </Transition>
+                    <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
+                  </button>
+                </div>
               </div>
-              <HomeRecentChats ref="homeRecentRef" />
-              <div class="empty-actions">
+              <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
+              <div v-if="showGlobalNewChatActions" class="empty-actions">
                 <button
                   v-for="action in generalWorkspaceActions"
                   :key="action.workspace"
@@ -99,7 +105,7 @@
             transition: isDraggingSplit ? 'none' : undefined
           }"
         >
-          <PinnedFilePanel :file-path="pinnedFilePath" @close="unpinCurrent" />
+          <PinnedFilePanel :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
         </div>
       </template>
       <template v-else>
@@ -119,38 +125,44 @@
         />
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-          <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
         </div>
         <!-- On mobile, the sidebar already lists every active chat. Showing the
              homepage behind it after closing a chat would just duplicate the
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
-          <div class="empty-state">
-            <div class="empty-mark">
-              <button
-                type="button"
-                class="empty-face-btn"
-                aria-label="Say hello"
-                @click="onFaceClick"
-                @mouseenter="onFaceEnter"
-                @mouseleave="onFaceLeave"
-              >
-                <Transition name="face-bubble">
-                  <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                    {{ speechGreeting }}
-                  </div>
-                </Transition>
-                <img
-                  class="empty-face"
-                  :src="faceSrc"
-                  alt=""
-                  draggable="false"
-                />
-              </button>
+          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+          <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
+            <div class="empty-home-header">
+              <!-- With chats on screen the mark is decoration beside a status line, so it
+                   is a plain image: no button, no hover handlers, no greeting bubble. The
+                   bubble belongs to the big first-run face below, where it is the only
+                   thing on the screen and has room to be a greeting. Next to a sentence
+                   that already reads "nothing needs you" it just collided with it. -->
+              <template v-if="store.activeChatsAll.length">
+                <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
+                <span class="empty-status-text">{{ homeStatus }}</span>
+              </template>
+              <div v-else class="empty-mark">
+                <button
+                  type="button"
+                  class="empty-face-btn"
+                  aria-label="Say hello"
+                  @click="onFaceClick"
+                  @mouseenter="onFaceEnter"
+                  @mouseleave="onFaceLeave"
+                >
+                  <Transition name="face-bubble">
+                    <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                      {{ speechGreeting }}
+                    </div>
+                  </Transition>
+                  <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
+                </button>
+              </div>
             </div>
-            <HomeRecentChats ref="homeRecentRef" />
-            <div class="empty-actions">
+            <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
+            <div v-if="showGlobalNewChatActions" class="empty-actions">
               <button
                 v-for="action in generalWorkspaceActions"
                 :key="action.workspace"
@@ -174,6 +186,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
@@ -188,8 +201,10 @@ import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
 import { isDesktopApp } from '../lib/desktop'
+import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
 
 const store = useProjectStore()
+const fileViewer = useFileViewerStore()
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
 // reach composer-owned actions (dictation, archive).
@@ -204,7 +219,16 @@ const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
 // Ref into HomeRecentChats for arrow-key navigation on the home screen.
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
 
-const DEFAULT_SIDEBAR_WIDTH = 280
+// Reactive handle on the global font scale. Used by the Cmd/Ctrl+Shift+= and
+// Cmd/Ctrl+Shift+- shortcuts (below); the same composable is consumed by
+// Settings → Appearance so the +/- buttons and the shortcuts stay in sync.
+const fontScale = useFontScale()
+
+// Wide enough for the nav row to show the active item's label ("automations" is
+// the longest) beside all four glyphs. At 280 the row could not fit it and the
+// label was clipped mid-word; below ~334 the header now drops the label rather
+// than cutting it, so this is the width at which the labelled row is intact.
+const DEFAULT_SIDEBAR_WIDTH = 340
 const MIN_SIDEBAR_WIDTH = 180
 const MAX_SIDEBAR_WIDTH = 500
 const SIDEBAR_SNAP_THRESHOLD = 15 // px
@@ -393,6 +417,26 @@ const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings'>(() => {
   if (projectIdParam.value) return 'project'
   return 'chat'
 })
+// Whether the chat-surface keyboard shortcuts apply. Only the full-screen
+// views own the keyboard: `viewMode` is 'project' on /project/:projectId --
+// the same ChatLayout, sidebar and open chat as /chat/:id -- so gating those
+// shortcuts on `=== 'chat'` silently killed Esc and the arrow keys for anyone
+// who reached a chat through a project. It read as "Esc only works after I
+// click somewhere else", because clicking a chat in the sidebar navigates to
+// /chat/:id and revived the handler. One predicate, so the next view mode
+// added has a single place to declare itself.
+// Split in two so the number-key workspace shortcut, which is useful on the
+// schedules view, does not have to restate the rest of the gate and drift
+// from it. Anything that owns the screen — a confirm dialog, the file viewer
+// modal — belongs in the base predicate, so a new overlay is declared once.
+const viewShortcutsActive = computed(() =>
+  viewMode.value !== 'settings'
+  && !pendingConfirm.value
+  && !fileViewer.isOpen,
+)
+const shortcutsActive = computed(() =>
+  viewShortcutsActive.value && viewMode.value !== 'schedules',
+)
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
@@ -405,6 +449,13 @@ const currentProjectId = computed(() => {
   if (chat?.project_id) return chat.project_id
   return ''
 })
+// Only for the true empty state. Every lane carries its own "+ new" and lanes
+// no longer collapse at narrow widths, so on a phone with chats these were a
+// second, louder copy of an action already on screen — and a saturated fill
+// spent on something non-blocking, which the design system reserves for
+// "needs the user".
+const showGlobalNewChatActions = computed(() => !store.activeChatsAll.length)
+
 const generalWorkspaceActions = computed(() => {
   return store.workspaceOptions
     .map(workspace => {
@@ -420,6 +471,27 @@ const generalWorkspaceActions = computed(() => {
       }
     })
     .filter(action => action.projectId)
+})
+
+const homeStatus = computed(() => {
+  const chats = store.activeChatsAll
+  // Unread replies need attention even when they do not block the agent on a
+  // direct answer. Keep the explicit-question state visible in its own lane,
+  // but include both kinds of actionable chat in the glanceable summary.
+  const needs = chats.filter(chat =>
+    store.chatNeedsInput(chat.chat_id) || store.chatUnread(chat.chat_id) > 0,
+  ).length
+  const working = chats.filter(chat =>
+    store.isChatStreaming(chat.chat_id) || store.chatHasBackgroundAgents(chat.chat_id),
+  ).length
+  const needVerb = needs === 1 ? 'needs' : 'need'
+  const needText = needs
+    ? `${needs} chat${needs === 1 ? '' : 's'} ${needVerb} your attention`
+    : 'nothing needs your attention'
+  const workingText = working
+    ? `${working} agent${working === 1 ? '' : 's'} still working`
+    : 'no agents working'
+  return `${needText}. ${workingText}.`
 })
 
 function workspaceLabel(name: string): string {
@@ -557,22 +629,25 @@ function onChatSelected() {
 }
 
 function closeChat() {
-  store.activeChatId = null
+  void store.closeChat().catch((error) => {
+    store.pushErrorToast('Could not close chat', error instanceof Error ? error.message : 'Could not close chat')
+  })
 }
 
 // ── Global keyboard shortcuts ───────────────────────────────────────
-// Desktop-only (the PWA in a browser would fight the OS for Cmd+T etc.).
-// These run inside the Tauri webview, where those combos are free.
+// Bound in both the PWA and the desktop app, but on different modifiers: the
+// Tauri webview owns Cmd+T / Cmd+D / Cmd+A, while a browser tab has already
+// spent them on new-tab / bookmark / select-all, so the PWA uses Option
+// instead. See onShortcutKeydown for the pairs.
 function isTypingTarget(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
 }
 
-// Keys the browser does not reserve, so they can be bound in the PWA as well
-// as the desktop app: arrow keys roam the home recent-chat grid (Enter opens
-// the focused card natively) and Esc closes the open chat. Anything with a
-// modifier stays in onShortcutKeydown, which is desktop-only because a browser
-// tab owns Cmd+T / Cmd+A.
+// Unmodified keys, which no browser reserves: number keys switch to the
+// corresponding workspace, arrow keys roam the home recent-chat grid (Enter
+// opens the focused card natively), and Esc closes the open chat. Anything
+// carrying a modifier stays in onShortcutKeydown.
 //
 // These must live in exactly ONE listener. They were previously handled here
 // AND again in onShortcutKeydown; in the desktop app both listeners are bound,
@@ -580,62 +655,168 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
-  if (viewMode.value !== 'chat') return
-  if (pendingConfirm.value) return
+  // Workspace navigation is also useful from the automations view, where the
+  // chat-only shortcuts are disabled. Match the visible workspace order and
+  // keep the shortcut out of text fields so numbers remain typeable.
+  if (viewShortcutsActive.value && !isTypingTarget(e.target)
+    && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+    && /^[1-9]$/.test(e.key)) {
+    const workspace = store.workspaceOptions[Number(e.key) - 1]
+    if (workspace) {
+      e.preventDefault()
+      // The schedules view has no chat to transition into.
+      void store.switchWorkspace(workspace.name, {
+        transition: viewMode.value !== 'schedules',
+      })
+      return
+    }
+  }
+
+  // Esc runs before the chat-only gate: it is the universal way back, and
+  // previously it did nothing at all on settings or automations because those
+  // views are excluded from shortcutsActive.
+  //
+  // It closes the open chat even while typing in the composer: escaping a chat
+  // is the more useful meaning of the key, and requiring a click-out first was
+  // the common complaint. Widgets that genuinely own Esc claim it with
+  // stopPropagation (the slash-command picker in ChatPanel, the notification
+  // bell), so this never steals the key from them.
+  if (e.key === 'Escape') {
+    // The confirm dialog and the file viewer own Esc while they are up.
+    if (pendingConfirm.value || fileViewer.isOpen) return
+    // A nested control that handled the key already, without claiming it. Popups
+    // like ModelSelector close on Esc but do not stopPropagation, and treating
+    // that press as "go home" both discarded their dismissal and navigated away
+    // from half-finished settings edits.
+    if (e.defaultPrevented) return
+
+    // Settings and Automations come first, ahead of any chat handling.
+    // activeChatId deliberately stays populated when either is opened from a
+    // chat, so checking the chat first meant Esc ran closeChat() on a chat that
+    // was not even on screen - disconnecting it, and deleting it outright when it
+    // was an unused draft with an unsent composer message. Leaving the view is
+    // what the key means there.
+    //
+    // Project routes stay chat-first on purpose: Esc closing the chat you opened
+    // through a project is long-standing, tested behaviour, and a project page is
+    // one press further from home either way.
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules') {
+      e.preventDefault()
+      void router.push('/')
+      return
+    }
+    if (store.activeChat) {
+      e.preventDefault()
+      closeChat()
+      return
+    }
+    if (projectIdParam.value) {
+      e.preventDefault()
+      void router.push('/')
+      return
+    }
+    return
+  }
+
+  if (!shortcutsActive.value) return
 
   if (e.key.startsWith('Arrow')) {
     // Arrows keep deferring to text fields, or they would break caret movement.
     if (store.activeChat || isTypingTarget(e.target)) return
+    // ...and to any open menu that already consumed the key. The Escape branch
+    // above checks this; without the same check here, an arrow inside the home
+    // lane's project menu moved the menu's focus *and* roamed the chat grid,
+    // leaving the menu open with focus somewhere else entirely.
+    if (e.defaultPrevented) return
     if (homeRecentRef.value?.onArrow(e.key)) e.preventDefault()
     return
   }
 
-  // Esc closes the open chat even while typing in the composer: escaping a
-  // chat is the more useful meaning of the key, and requiring a click-out
-  // first was the common complaint. Widgets that genuinely own Esc claim it
-  // with stopPropagation (see the slash-command picker in ChatPanel), so this
-  // never steals the key from them.
-  if (e.key === 'Escape') {
-    if (!store.activeChat) return
-    e.preventDefault()
-    closeChat()
-  }
 }
 
 function onShortcutKeydown(e: KeyboardEvent) {
-  // Defer to full-screen views (settings, schedules) and the confirm dialog.
-  if (viewMode.value !== 'chat') return
-  if (pendingConfirm.value) return
+  if (!shortcutsActive.value) return
 
   // Arrow keys and Esc are handled by onUnreservedKeydown, which is bound in
   // both the PWA and the desktop app. Handling them here too made the desktop
   // app run them twice.
+  const isDesktop = isDesktopApp()
   const mod = e.metaKey || e.ctrlKey
+  const alt = e.altKey
 
-  // Cmd+T: new chat in the default General project.
-  if (mod && (e.key === 't' || e.key === 'T')) {
+  // New Chat: Cmd+T (Desktop) or Option+N (Web/PWA).
+  if ((isDesktop && mod && (e.key === 't' || e.key === 'T')) || (!isDesktop && alt && (e.key === 'n' || e.key === 'N'))) {
     e.preventDefault()
     void store.newChatInGeneral()
     return
   }
 
-  // Cmd+D: toggle dictation in the active chat's composer (start/stop).
-  if (mod && (e.key === 'd' || e.key === 'D')) {
+  // Dictation: Cmd+D (Desktop) or Option+D (Web/PWA).
+  if ((isDesktop && mod && (e.key === 'd' || e.key === 'D')) || (!isDesktop && alt && (e.key === 'd' || e.key === 'D'))) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.toggleDictation()
     return
   }
 
-  // Cmd+A: archive the active chat. Skip while typing so Cmd+A keeps its
+  // Archive: Cmd+A (Desktop) or Option+A (Web/PWA). Skip while typing so Cmd+A/Alt+A keeps its
   // select-all meaning inside text fields.
-  if (mod && (e.key === 'a' || e.key === 'A')) {
+  if ((isDesktop && mod && (e.key === 'a' || e.key === 'A')) || (!isDesktop && alt && (e.key === 'a' || e.key === 'A'))) {
     if (isTypingTarget(e.target) || !store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
     return
   }
 
+  // Sidebar: Cmd+S (Desktop) or Option+S (Web/PWA), where Cmd+S is the
+  // browser's Save Page. Skipped while typing for the same reason as archive:
+  // in a text field Option+S is how you type ß, and stealing it would break
+  // text entry for the sake of a view toggle.
+  if ((isDesktop && mod && (e.key === 's' || e.key === 'S')) || (!isDesktop && alt && (e.key === 's' || e.key === 'S'))) {
+    if (isTypingTarget(e.target)) return
+    e.preventDefault()
+    sidebarCollapsed.value = !sidebarCollapsed.value
+    return
+  }
+
+  // Model picker: Cmd+Shift+M (Desktop) or Option+M (Web/PWA). Plain Cmd+M is
+  // reserved by macOS for Minimize Window and cannot be intercepted reliably.
+  // Not gated on the typing target, like dictation: opening the picker is the
+  // useful reading of the key even mid-compose, and the picker is a popover,
+  // not a text mutation.
+  if ((isDesktop && mod && e.shiftKey && !alt && (e.key === 'm' || e.key === 'M')) || (!isDesktop && alt && (e.key === 'm' || e.key === 'M'))) {
+    if (!store.activeChat) return
+    e.preventDefault()
+    chatPanelRef.value?.toggleModelPicker()
+    return
+  }
+
+  // Font zoom: Cmd+Shift+= / Cmd+Shift+- in the desktop app, Option+= /
+  // Option+- in the PWA — the same split as every other modifier shortcut
+  // here, and for the same reason.
+  //
+  // Cmd+Shift+= cannot be used in a browser: on a US layout that chord *is*
+  // Cmd++, the browser's own zoom-in, which is handled above the page and
+  // ignores preventDefault. The page zoomed *and* the font grew, two steps at
+  // once, while Cmd+Shift+- (not a browser chord) moved one — so the two
+  // directions disagreed and browser zoom-in became unusable on its own.
+  //
+  // Skipped while typing because Option+= / Option+- type ≠ and – on macOS.
+  // Step, bounds and persistence come from useFontScale, shared with the
+  // Settings +/- buttons.
+  const zoomModifier = isDesktop ? (mod && e.shiftKey && !alt) : (alt && !mod)
+  if (zoomModifier && !isTypingTarget(e.target)) {
+    if (e.key === '=' || e.key === '+') {
+      e.preventDefault()
+      fontScale.adjust(FONT_SCALE_STEP)
+      return
+    }
+    if (e.key === '-' || e.key === '_') {
+      e.preventDefault()
+      fontScale.adjust(-FONT_SCALE_STEP)
+      return
+    }
+  }
 }
 
 function closeProject() {
@@ -698,9 +879,7 @@ onMounted(() => {
   window.addEventListener('touchcancel', onTouchEnd, { passive: true })
   // Arrow keys and Esc are not browser-reserved, so they bind in the PWA too.
   window.addEventListener('keydown', onUnreservedKeydown)
-  // Global keyboard shortcuts (Cmd+T, Cmd+A, Cmd+D) live in the desktop app
-  // only: in a browser tab those combos are owned by the browser.
-  if (isDesktopApp()) window.addEventListener('keydown', onShortcutKeydown)
+  window.addEventListener('keydown', onShortcutKeydown)
 })
 
 onBeforeUnmount(() => {
@@ -710,7 +889,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchend', onTouchEnd)
   window.removeEventListener('touchcancel', onTouchEnd)
   window.removeEventListener('keydown', onUnreservedKeydown)
-  if (isDesktopApp()) window.removeEventListener('keydown', onShortcutKeydown)
+  window.removeEventListener('keydown', onShortcutKeydown)
   window.removeEventListener('mousemove', handleSidebarDrag)
   window.removeEventListener('mouseup', stopSidebarDrag)
   window.removeEventListener('mousemove', handleSplitDrag)
@@ -733,6 +912,10 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  /* PaneHeader must respond to the space left after the resizable sidebar,
+     not only to the browser viewport width. */
+  container-type: inline-size;
+  container-name: chat-pane;
 }
 
 .empty-shell {
@@ -751,7 +934,9 @@ onBeforeUnmount(() => {
   justify-content: center;
   gap: var(--space-3);
   color: var(--fg2);
-  padding: calc(var(--space-4) + var(--safe-top))
+  /* PaneHeader already owns the top safe-area inset. Adding it here again
+     creates a large empty band above the home status row on mobile. */
+  padding: var(--space-4)
            calc(var(--space-4) + var(--safe-right))
            calc(var(--space-4) + var(--safe-bottom))
            calc(var(--space-4) + var(--safe-left));
@@ -760,6 +945,36 @@ onBeforeUnmount(() => {
      (scrollable) when the full jump-back-in list overflows the viewport. */
   justify-content: safe center;
   overflow-y: auto;
+}
+
+.empty-state--active {
+  align-items: stretch;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.empty-home-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: var(--home-max);
+  min-height: 44px;
+  gap: 10px;
+  margin: 0 auto;
+}
+
+.empty-state--active .empty-home-header {
+  justify-content: flex-start;
+}
+
+.empty-status-text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .empty-state .empty-mark {
@@ -794,6 +1009,12 @@ onBeforeUnmount(() => {
     drop-shadow(0 1px 0 color-mix(in srgb, var(--accent) 40%, transparent))
     drop-shadow(0 -1px 0 color-mix(in srgb, var(--accent) 40%, transparent));
 }
+
+.empty-state .empty-face--compact {
+  width: 30px;
+  height: 30px;
+}
+
 .face-speech-bubble {
   position: absolute;
   bottom: calc(100% + 10px);
@@ -855,12 +1076,9 @@ onBeforeUnmount(() => {
 }
 
 .empty-actions {
-  /* Mirror the jump-back-in tile grid so the new-chat buttons line up with
-     the cards (same 560px column, same auto-fit tracks and gap). auto-fit
-     collapses empty tracks so a lone workspace button — or the last one on
-     an odd-count row — stretches full width. */
+  /* Keep the genuine empty state aligned with the lane container. */
   width: 100%;
-  max-width: 560px;
+  max-width: 1040px;
   margin: 0 auto;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

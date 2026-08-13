@@ -41,11 +41,11 @@ pub fn status_label(snapshot: &TraySnapshot) -> String {
     if !snapshot.reachable {
         return "Engine: not running".into();
     }
-    if !snapshot.startup.overall_ready {
-        return "Engine: starting…".into();
-    }
     let role = snapshot.startup.node_role.to_ascii_lowercase();
     if matches!(role.as_str(), "client" | "standby") {
+        if !snapshot.startup.overall_ready {
+            return "Client — waiting for host…".into();
+        }
         if let Ok(peer) = url::Url::parse(&snapshot.startup.active_peer_url)
             && let Some(host) = peer.host_str()
         {
@@ -53,7 +53,15 @@ pub fn status_label(snapshot: &TraySnapshot) -> String {
         }
         return "Engine: client (no host)".into();
     }
+    if !snapshot.startup.overall_ready {
+        return "Engine: starting…".into();
+    }
     "Engine: host".into()
+}
+
+pub fn is_client(snapshot: &TraySnapshot) -> bool {
+    let role = snapshot.startup.node_role.to_ascii_lowercase();
+    matches!(role.as_str(), "client" | "standby")
 }
 
 // The engine reports availability against the GitHub release tag, which ships
@@ -113,6 +121,7 @@ pub fn build_menu(
     notifications_enabled: bool,
     notifications_denied: bool,
     start_at_login: bool,
+    hide_dock_icon: bool,
 ) -> tauri::Result<TrayMenu> {
     let menu = Menu::new(app)?;
     let mut working_items = Vec::new();
@@ -122,6 +131,9 @@ pub fn build_menu(
             .enabled(false)
             .build(app)?,
     )?;
+    if is_client(snapshot) {
+        append_item(&menu, app, "disconnect", "Disconnect from Host…")?;
+    }
     if !snapshot.chats.is_empty() {
         append_separator(&menu, app)?;
         // A disabled header names the section, matching platform menu convention.
@@ -198,6 +210,11 @@ pub fn build_menu(
             .checked(start_at_login)
             .build(app)?,
     )?;
+    advanced.append(
+        &CheckMenuItemBuilder::with_id("hide-dock-icon", "Hide Dock Icon")
+            .checked(hide_dock_icon)
+            .build(app)?,
+    )?;
     advanced.append(&PredefinedMenuItem::separator(app)?)?;
     advanced.append(&MenuItemBuilder::with_id("github", "View on GitHub").build(app)?)?;
     advanced.append(&MenuItemBuilder::with_id("report-issue", "Report an Issue").build(app)?)?;
@@ -242,6 +259,15 @@ mod tests {
             ..TraySnapshot::default()
         };
         assert_eq!(status_label(&starting), "Engine: starting…");
+        let waiting = TraySnapshot {
+            reachable: true,
+            startup: StartupStatus {
+                node_role: "client".into(),
+                ..StartupStatus::default()
+            },
+            ..TraySnapshot::default()
+        };
+        assert_eq!(status_label(&waiting), "Client — waiting for host…");
         let client = TraySnapshot {
             reachable: true,
             startup: StartupStatus {
@@ -262,6 +288,36 @@ mod tests {
             ..TraySnapshot::default()
         };
         assert_eq!(status_label(&host), "Engine: host");
+    }
+
+    #[test]
+    fn disconnect_is_available_only_for_client_nodes() {
+        let host = TraySnapshot {
+            reachable: true,
+            startup: StartupStatus {
+                node_role: "host".into(),
+                ..StartupStatus::default()
+            },
+            ..TraySnapshot::default()
+        };
+        let client = TraySnapshot {
+            startup: StartupStatus {
+                node_role: "client".into(),
+                ..StartupStatus::default()
+            },
+            ..TraySnapshot::default()
+        };
+        let legacy_client = TraySnapshot {
+            startup: StartupStatus {
+                node_role: "standby".into(),
+                ..StartupStatus::default()
+            },
+            ..TraySnapshot::default()
+        };
+
+        assert!(!is_client(&host));
+        assert!(is_client(&client));
+        assert!(is_client(&legacy_client));
     }
 
     #[test]

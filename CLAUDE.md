@@ -18,7 +18,15 @@ Verification:
 - Run focused tests for the changed behavior.
 - Run `pytest tests/` before claiming backend work is complete.
 - Run `cd web && npm run build` after frontend changes.
+- Run `./scripts/check-desktop.sh` after changes under `desktop/` — nothing else
+  compiles the Rust shell, the Swift native sidecar, or assembles `Ciaobot.app`,
+  so those break in CI rather than locally. Use `--fast` to skip the bundle step
+  when you have not touched `desktop/native/` or `tauri.conf.json`. It needs
+  Rust (`brew install rustup && rustup default 1.90.0`) and `swiftc`
+  (`xcode-select --install`).
 - For UI changes, verify keyboard focus, browser zoom, and mobile touch targets.
+- Workspace shortcuts map unmodified `1`–`9` to the visible sidebar order and
+  must remain inert while a text field is focused.
 
 Use plain, factual engineering notes in commits and pull requests.
 

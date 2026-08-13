@@ -1,5 +1,9 @@
 use serde_json::Value;
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 /// Tracks which notification entries this process has already posted.
 ///
@@ -30,6 +34,14 @@ fn entry_ts(entry: &Value) -> f64 {
 
 fn entry_id(entry: &Value) -> String {
     entry.to_string()
+}
+
+fn is_clear_entry(entry: &Value) -> bool {
+    entry.get("kind").and_then(Value::as_str) == Some("clear")
+}
+
+fn entry_chat_id(entry: &Value) -> &str {
+    entry.get("chat_id").and_then(Value::as_str).unwrap_or("")
 }
 
 impl NotificationLogTail {
@@ -65,11 +77,19 @@ impl NotificationLogTail {
             .iter()
             .map(entry_ts)
             .fold(None::<f64>, |acc, ts| Some(acc.map_or(ts, |a| a.max(ts))));
-        let fresh: Vec<Value> = entries
-            .iter()
-            .filter(|entry| !self.seen.contains(&entry_id(entry)))
-            .cloned()
-            .collect();
+        // Against the *old* seen set, and skipped entirely while priming, which
+        // asks with cursor 0.0 and would otherwise deep-clone the whole log only
+        // to drop it. It has to be built before `self.seen` is replaced below,
+        // or every entry sharing the newest timestamp would filter itself out.
+        let fresh: Vec<Value> = if priming {
+            Vec::new()
+        } else {
+            entries
+                .iter()
+                .filter(|entry| !self.seen.contains(&entry_id(entry)))
+                .cloned()
+                .collect()
+        };
 
         if let Some(newest) = newest {
             // The cursor is inclusive, so entries sharing the newest timestamp
@@ -83,7 +103,33 @@ impl NotificationLogTail {
                 .collect();
         }
 
-        if priming { Vec::new() } else { fresh }
+        // Do not replay old banners at launch, but do replay clear controls:
+        // a read may have happened while this companion was not running and
+        // the delivered macOS banner can still be present in Notification
+        // Center from the previous process.
+        //
+        // Only the *last* entry for a chat describes that chat's current state.
+        // Replaying every clear in the log meant an old read dismissed a newer,
+        // still-unread banner for the same chat at launch: read chat X (clear
+        // logged), a new message for X arrives and posts a banner, then the app
+        // restarts and re-applies the stale clear. A clear speaks for a chat
+        // only when nothing followed it.
+        if priming {
+            let mut last_index: HashMap<&str, usize> = HashMap::new();
+            for (index, entry) in entries.iter().enumerate() {
+                last_index.insert(entry_chat_id(entry), index);
+            }
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(index, entry)| {
+                    is_clear_entry(entry) && last_index.get(entry_chat_id(entry)) == Some(index)
+                })
+                .map(|(_, entry)| entry.clone())
+                .collect()
+        } else {
+            fresh
+        }
     }
 
     /// Local log entries at or after the cursor. A malformed or partially
@@ -187,5 +233,37 @@ mod tests {
         let mut tail = NotificationLogTail::at_end("/nonexistent/notifications.jsonl");
         assert!(tail.poll(None).is_empty());
         assert!(tail.poll(None).is_empty());
+    }
+
+    #[test]
+    fn the_first_poll_preserves_clear_controls_without_replaying_banners() {
+        let mut tail = NotificationLogTail::at_end("/nonexistent");
+        let entries = vec![
+            entry(1.0, "old banner"),
+            json!({"ts": 2.0, "kind": "clear", "chat_id": "chat-1"}),
+        ];
+        let pending = tail.poll(Some(entries));
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["kind"], "clear");
+    }
+
+    // A clear only describes a chat that has not spoken since. Replaying every
+    // clear in the log dismissed a banner the user had never seen: read chat-1,
+    // a new message for chat-1 arrives, then the app restarts.
+    #[test]
+    fn a_clear_superseded_by_a_newer_message_is_not_replayed() {
+        let mut tail = NotificationLogTail::at_end("/nonexistent");
+        let entries = vec![
+            json!({"ts": 1.0, "kind": "clear", "chat_id": "chat-1"}),
+            json!({"ts": 2.0, "title": "unread again", "chat_id": "chat-1"}),
+            json!({"ts": 3.0, "kind": "clear", "chat_id": "chat-2"}),
+        ];
+        let pending = tail.poll(Some(entries));
+        assert_eq!(
+            pending.len(),
+            1,
+            "only the clear that nothing followed may replay"
+        );
+        assert_eq!(pending[0]["chat_id"], "chat-2");
     }
 }
