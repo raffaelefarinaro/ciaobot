@@ -127,10 +127,6 @@ export interface ChatInfo {
   last_activity_at?: string
   last_read_at?: string
   local?: boolean
-  // Whether some client is holding unsent composer text for this chat. The
-  // text itself never leaves that browser; this only stops the server's
-  // empty-chat sweeps from deleting a chat the user has typed into.
-  has_unsent_draft?: boolean
   // Transient UI flag: 'pending' while the server is auto-titling a brand
   // new chat, 'ready' otherwise. Drives the shimmer placeholder in the
   // sidebar.

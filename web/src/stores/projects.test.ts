@@ -638,8 +638,7 @@ describe('chat closing and re-entry orientation', () => {
   test('keeps a chat holding an unsent composer draft', async () => {
     // Esc closes the chat even while the composer is focused, so a chat whose
     // only content is a typed-but-unsent prompt must not be treated as a
-    // discardable draft — the text lives in a localStorage key that becomes
-    // unreachable the moment the chat id leaves the store.
+    // discardable draft.
     const store = useProjectStore()
     const chatId = 'chat-with-draft'
     store.chats = [{
@@ -652,20 +651,23 @@ describe('chat closing and re-entry orientation', () => {
       session_id: '',
       created_at: '',
       archived: false,
-      has_unsent_draft: true,
     }]
     store.messages[chatId] = []
     store.activeChatId = chatId
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ [chatId]: 'half a thought' }))
 
     await store.closeChat()
 
     expect(apiDel).not.toHaveBeenCalled()
     expect(store.chats).toHaveLength(1)
+    localStorage.removeItem('ciao-chat-drafts')
   })
 
-  test('claims a draft for this client only when the flag flips', async () => {
+  test('salvages the draft when the server sweeps its chat', async () => {
+    // The server cannot see a draft, so its empty-chat sweep can take a chat
+    // the user typed into. Losing the row is fine; losing the text is not.
     const store = useProjectStore()
-    const chatId = 'chat-draft-report'
+    const chatId = 'chat-swept'
     store.chats = [{
       chat_id: chatId,
       project_id: 'p1',
@@ -677,125 +679,46 @@ describe('chat closing and re-entry orientation', () => {
       created_at: '',
       archived: false,
     }]
-    // The server aggregates every client's claim, so its answer is the truth
-    // about whether the chat is protected - not this tab's local guess.
-    apiPost.mockImplementation((path: string, body: { active: boolean }) =>
-      String(path).endsWith('/draft-claim')
-        ? Promise.resolve({ has_unsent_draft: body.active })
-        : Promise.resolve({}),
-    )
+    store.activeChatId = chatId
+    store.connectEventsWs()
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ [chatId]: 'the prompt I typed' }))
 
-    // The composer re-asserts on open and on wake; only transitions are worth
-    // a request.
-    await store.setChatDraftState(chatId, true)
-    await store.setChatDraftState(chatId, true)
-    await store.setChatDraftState(chatId, true)
-
-    const claims = apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))
-    expect(claims).toHaveLength(1)
-    expect(claims[0][0]).toBe(`/api/chats/${chatId}/draft-claim`)
-    expect(claims[0][1]).toMatchObject({ active: true })
-    // Tagged with this browser, so releasing here cannot cancel another
-    // device's claim on the same chat.
-    expect(typeof claims[0][1].client_id).toBe('string')
-    expect(claims[0][1].client_id.length).toBeGreaterThan(0)
-    expect(store.chats[0].has_unsent_draft).toBe(true)
-
-    await store.setChatDraftState(chatId, false)
-
-    const after = apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))
-    expect(after).toHaveLength(2)
-    expect(after[1][1]).toMatchObject({ active: false })
-    expect(store.chats[0].has_unsent_draft).toBe(false)
-  })
-
-  test('retries the claim after a failed request', async () => {
-    const store = useProjectStore()
-    const chatId = 'chat-draft-retry'
-    store.chats = []
-    apiPost.mockRejectedValueOnce(new Error('offline'))
-
-    await store.setChatDraftState(chatId, true)
-    const first = apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))
-    expect(first).toHaveLength(1)
-
-    // A failed claim must not be remembered as reported, or the chat would stay
-    // sweepable for the rest of the session.
-    apiPost.mockResolvedValue({})
-    await store.setChatDraftState(chatId, true)
-    expect(apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))).toHaveLength(2)
-  })
-
-  test('a second tab does not release a claim the profile still needs', async () => {
-    // The client id is per browser profile, and so is the staged content: an
-    // image pasted in one tab is in localStorage, which the other tab has not
-    // re-read since page load. Computing the claim from storage rather than
-    // from this tab's hydrated buckets is what stops it releasing a claim the
-    // pasted screenshot still needs.
-    const store = useProjectStore()
-    const chatId = 'chat-other-tab'
-    store.chats = []
-    apiPost.mockResolvedValue({ has_unsent_draft: true })
-    localStorage.setItem('ciao-pending-images', JSON.stringify({ [chatId]: ['img-1'] }))
-
-    await store.syncChatDraftClaim(chatId)
-
-    const claims = apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))
-    expect(claims).toHaveLength(1)
-    expect(claims[0][1]).toMatchObject({ active: true })
-    localStorage.removeItem('ciao-pending-images')
-  })
-
-  test('releases once the profile holds nothing for the chat', async () => {
-    const store = useProjectStore()
-    const chatId = 'chat-emptied'
-    store.chats = []
-    apiPost.mockResolvedValue({ has_unsent_draft: false })
-
-    await store.syncChatDraftClaim(chatId)
-
-    const claims = apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))
-    expect(claims).toHaveLength(1)
-    expect(claims[0][1]).toMatchObject({ active: false })
-  })
-
-  test('re-asserts a claim on demand even when the flag has not changed', async () => {
-    // A tab left open for weeks never flips its boolean, so without this its
-    // claim would expire at the server TTL and the chat would be swept.
-    const store = useProjectStore()
-    const chatId = 'chat-refresh'
-    store.chats = []
-    apiPost.mockResolvedValue({ has_unsent_draft: true })
-
-    await store.setChatDraftState(chatId, true)
-    await store.setChatDraftState(chatId, true)
-    expect(apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))).toHaveLength(1)
-
-    await store.setChatDraftState(chatId, true, { refresh: true })
-    expect(apiPost.mock.calls.filter(([path]) => String(path).endsWith('/draft-claim'))).toHaveLength(2)
-  })
-
-  test('serialises claim and release so they cannot cross on the wire', async () => {
-    const store = useProjectStore()
-    const chatId = 'chat-draft-order'
-    store.chats = []
-    const order: boolean[] = []
-    let releaseFirst: (() => void) | null = null
-    apiPost.mockImplementation((_path: string, body: { active: boolean }) => {
-      order.push(body.active)
-      if (body.active) return new Promise<unknown>(resolve => { releaseFirst = () => resolve({}) })
-      return Promise.resolve({})
+    fakeSockets[fakeSockets.length - 1].onmessage?.({
+      data: JSON.stringify({ type: 'chat_deleted', chat_id: chatId }),
     })
 
-    // Type one character then immediately delete it: the release must wait for
-    // the claim, or the server can be left claimed by a client holding nothing.
-    const claiming = store.setChatDraftState(chatId, true)
-    const releasing = store.setChatDraftState(chatId, false)
-    await vi.waitFor(() => expect(releaseFirst).not.toBeNull())
-    releaseFirst!()
-    await Promise.all([claiming, releasing])
+    expect(store.chats).toHaveLength(0)
+    expect(localStorage.getItem('ciao-salvaged-draft')).toBe('the prompt I typed')
+    // The dead chat's own key is cleared, so nothing is left pointing at an id
+    // that no longer exists.
+    expect(JSON.parse(localStorage.getItem('ciao-chat-drafts') || '{}')[chatId]).toBeUndefined()
+    localStorage.removeItem('ciao-salvaged-draft')
+    localStorage.removeItem('ciao-chat-drafts')
+  })
 
-    expect(order).toEqual([true, false])
+  test('does not stash anything when the swept chat had no draft', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-swept-empty'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'New Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    store.activeChatId = chatId
+    store.connectEventsWs()
+
+    fakeSockets[fakeSockets.length - 1].onmessage?.({
+      data: JSON.stringify({ type: 'chat_deleted', chat_id: chatId }),
+    })
+
+    expect(store.chats).toHaveLength(0)
+    expect(localStorage.getItem('ciao-salvaged-draft')).toBeNull()
   })
 
   test('keeps a chat the server declines to delete', async () => {

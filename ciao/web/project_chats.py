@@ -235,94 +235,6 @@ def _classify_file(path: Path) -> str:
 _CC_CLI_PROJECT_ID = "proj-cc-cli"
 _CC_CHAT_PREFIX = "chat-cc-"
 
-# How long an unsent-draft claim keeps a chat out of the empty-chat sweeps.
-# Long enough that a draft left over a holiday is still there; short enough
-# that a browser which claimed and never came back cannot pin an empty chat in
-# the sidebar permanently. Clients that still hold the draft re-assert on every
-# mount, so an actively used draft never ages out.
-_DRAFT_CLAIM_TTL_S = 14 * 24 * 60 * 60
-
-# Stands in for the retired has_unsent_draft boolean on upgrade. No browser
-# owns it, so any client release clears it too.
-_LEGACY_DRAFT_CLAIM_ID = "legacy-unsent-draft"
-
-
-def _parse_claim_stamp(stamp: str) -> datetime | None:
-    """A claim timestamp as an aware datetime, or None if it cannot be read."""
-    try:
-        claimed_at = datetime.fromisoformat(str(stamp))
-    except ValueError:
-        return None
-    if claimed_at.tzinfo is None:
-        claimed_at = claimed_at.replace(tzinfo=UTC)
-    return claimed_at
-
-
-def _claim_needs_refresh(stamp: str) -> bool:
-    """Whether a re-asserted claim is old enough to be worth persisting again.
-
-    A day, against a 14-day TTL: far enough from expiry that a client which
-    keeps re-asserting can never lose its claim, and rare enough that opening a
-    chat does not rewrite the state file every time.
-    """
-    claimed_at = _parse_claim_stamp(stamp)
-    if claimed_at is None:
-        return True
-    return datetime.now(UTC) - claimed_at >= timedelta(days=1)
-
-
-def _load_draft_claims(chat_data: dict) -> dict[str, str]:
-    """Draft claims from persisted chat state, tolerating older and odd shapes.
-
-    Migration: the first cut of this feature stored a single
-    ``has_unsent_draft`` boolean. A user who upgrades while holding an unsent
-    prompt would otherwise have the chat fall straight back to "empty" and be
-    swept on the next cleanup — losing exactly the draft the flag was
-    protecting — so a truthy legacy flag becomes a claim under a synthetic
-    client id.
-
-    That claim is aged from the chat's own last activity, not from load time.
-    No client can release it (a browser's release carries its own client id),
-    so dating it "now" would give a months-old abandoned draft a fresh 14 days
-    of protection, and re-date it on every restart — leaving rows that cannot
-    be dismissed. Aged properly, an abandoned one is already stale and a recent
-    one keeps the protection it had. ``set_draft_claim`` also drops it whenever
-    any client releases, since the flag it stands in for was profile-agnostic.
-
-    A non-dict value degrades to no claims rather than raising: ``_load`` only
-    catches JSON and OS errors, so an AttributeError here would take the engine
-    down over one malformed chat record.
-    """
-    raw = chat_data.get("draft_claims")
-    if isinstance(raw, dict):
-        return {str(k): str(v) for k, v in raw.items()}
-    if raw is None and chat_data.get("has_unsent_draft"):
-        claimed_at = (
-            chat_data.get("last_activity_at")
-            or chat_data.get("created_at")
-            or _now_iso()
-        )
-        return {_LEGACY_DRAFT_CLAIM_ID: str(claimed_at)}
-    return {}
-
-
-def _fresh_draft_claims(claims: dict[str, str]) -> dict[str, str]:
-    """Claims still inside the TTL, dropping stale and unparseable ones.
-
-    An unreadable timestamp is treated as stale rather than as forever-fresh:
-    the failure mode of dropping a claim is one chat swept a bit early, while
-    the failure mode of keeping it is a chat nothing can ever reclaim.
-    """
-    if not claims:
-        return {}
-    cutoff = datetime.now(UTC) - timedelta(seconds=_DRAFT_CLAIM_TTL_S)
-    fresh: dict[str, str] = {}
-    for client_id, stamp in claims.items():
-        claimed_at = _parse_claim_stamp(stamp)
-        if claimed_at is not None and claimed_at >= cutoff:
-            fresh[client_id] = str(stamp)
-    return fresh
-
 # A vault_folder must be a single directory name under projects/active/ or
 # projects/completed/. Reject path separators, parent-directory traversal,
 # leading dots, and non-printable characters. Names are free-form (lowercase
@@ -1044,21 +956,6 @@ class ChatInfo:
     # key when recording image attachments so we can re-emit them alongside
     # the replayed SDK session history (which strips attachments).
     user_turn_count: int = 0
-    # Which clients are holding unsent composer content for this chat, as
-    # {client_id: ISO timestamp}. The draft itself stays in the browser that
-    # typed it; only the claim is shared, because the emptiness rule lives here
-    # (see _is_empty_chat) and three sweeps act on it — without it the server
-    # deleted chats whose only content was a typed, unsent prompt, stranding it
-    # under a chat id that no longer existed.
-    #
-    # Per client and timestamped rather than one shared boolean, because both
-    # simpler forms are wrong in opposite directions: a shared flag lets one
-    # browser clearing its composer strip the protection another browser's
-    # draft still needs, and a flag nothing expires leaves an abandoned draft
-    # exempting an empty chat from every sweep forever — the dead-shell pile-up
-    # the sweeps exist to prevent. A claim only speaks for the client that made
-    # it, and only until it goes stale.
-    draft_claims: dict[str, str] = field(default_factory=dict)
     # Map of user-turn index → list of image ref filenames (relative to
     # media_root). JSON round-trip turns int keys into strings, so lookups
     # must tolerate both.
@@ -1170,10 +1067,6 @@ class ChatInfo:
             "schedule_title": self.schedule_title,
             "spawned_from_chat_id": self.spawned_from_chat_id,
             "delegation_id": self.delegation_id,
-            # Derived, not the raw claims: clients only need to know whether
-            # the chat is protected, and one browser has no business seeing
-            # another's client id.
-            "has_unsent_draft": bool(_fresh_draft_claims(self.draft_claims)),
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -1512,7 +1405,6 @@ class ProjectChatManager:
                     cd.get("last_activity_at", cd.get("created_at", "")),
                 ),
                 user_turn_count=cd.get("user_turn_count", 0),
-                draft_claims=_load_draft_claims(cd),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
@@ -1605,7 +1497,6 @@ class ProjectChatManager:
                     "last_activity_at": c.last_activity_at,
                     "last_read_at": c.last_read_at,
                     "user_turn_count": c.user_turn_count,
-                    "draft_claims": c.draft_claims,
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
                     "user_turn_unattended": c.user_turn_unattended,
@@ -3156,46 +3047,6 @@ class ProjectChatManager:
         self._events.publish({"type": "chat_created", "chat": chat.to_dict(local=True)})
         return chat
 
-    def set_draft_claim(
-        self, chat_id: str, client_id: str, active: bool
-    ) -> ChatInfo | None:
-        """Record or release one client's claim that it holds an unsent draft.
-
-        Only the claim crosses the wire: the draft text itself stays in the
-        browser that typed it. That is enough, because what the server needs to
-        know is not what was typed but whether the chat is still empty — a
-        question three sweeps ask (`only_if_empty` delete, the `create_chat`
-        cleanup, and the startup cleanup) and only the server can answer, since
-        `user_turn_count` never reaches the client.
-
-        A client may only add or drop *its own* claim. Two browsers open on the
-        same new chat therefore cannot cancel each other: clearing the composer
-        on the desktop leaves the phone's claim, and the phone's draft, intact.
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return None
-        claims = dict(_fresh_draft_claims(chat.draft_claims))
-        if active:
-            # Clients re-assert on open and on wake, which is what keeps a live
-            # draft from ageing out — but rewriting the timestamp every time
-            # would rewrite the whole state file for a no-op. Only refresh once
-            # the claim is old enough that the difference matters.
-            existing = claims.get(client_id)
-            if existing is not None and not _claim_needs_refresh(existing):
-                return chat
-            claims[client_id] = _now_iso()
-        else:
-            claims.pop(client_id, None)
-            # The migrated flag had no owner, so a real client saying "nothing
-            # here" is the only signal that will ever retire it.
-            claims.pop(_LEGACY_DRAFT_CLAIM_ID, None)
-        if claims == chat.draft_claims:
-            return chat
-        chat.draft_claims = claims
-        self._save(reason="chat_draft_claim")
-        return chat
-
     def is_empty_chat(self, chat_id: str) -> bool:
         """Public form of `_is_empty_chat`, for the conditional-delete route.
 
@@ -3226,8 +3077,6 @@ class ProjectChatManager:
         if chat.session_id:
             return False
         if chat.user_turn_count > 0:
-            return False
-        if _fresh_draft_claims(chat.draft_claims):
             return False
         if self._broker.get(chat.chat_id) is not None:
             return False
@@ -5189,13 +5038,6 @@ class ProjectChatManager:
             raise ValueError(f"Chat '{chat_id}' not found")
         if chat.archived:
             raise ValueError("Cannot send messages to an archived chat")
-        # The composer text just became a turn, so whatever draft the client was
-        # holding is spent. The client reports this too, but a send is the one
-        # moment the server knows first-hand - and a client that dies mid-send
-        # would otherwise leave the chat permanently exempt from the sweeps.
-        if chat.draft_claims:
-            chat.draft_claims = {}
-            self._save(reason="chat_draft_sent")
 
         provider = self._get_provider(chat_id)
         handover_context_sent = bool(

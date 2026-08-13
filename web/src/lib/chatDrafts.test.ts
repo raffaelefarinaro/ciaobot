@@ -3,6 +3,8 @@ import {
   readChatDraft,
   readSentPromptHistory,
   recordSentPrompt,
+  stashSalvagedDraft,
+  takeSalvagedDraft,
   writeChatDraft,
 } from './chatDrafts'
 
@@ -73,5 +75,33 @@ describe('chat drafts', () => {
     storage.setItem('ciao-chat-sent-prompts', '{"chat-a":["valid",42,null]}')
 
     expect(readSentPromptHistory('chat-a', storage)).toEqual(['valid'])
+  })
+})
+
+describe('salvaged drafts', () => {
+  it('hands back a stashed draft once and then forgets it', () => {
+    const storage = new MemoryStorage()
+
+    stashSalvagedDraft('a prompt whose chat was swept', storage)
+
+    expect(takeSalvagedDraft(storage)).toBe('a prompt whose chat was swept')
+    expect(takeSalvagedDraft(storage)).toBe('')
+  })
+
+  it('ignores whitespace-only text', () => {
+    const storage = new MemoryStorage()
+
+    stashSalvagedDraft('   \n  ', storage)
+
+    expect(takeSalvagedDraft(storage)).toBe('')
+  })
+
+  it('keeps the most recent of two orphaned drafts', () => {
+    const storage = new MemoryStorage()
+
+    stashSalvagedDraft('older', storage)
+    stashSalvagedDraft('newer', storage)
+
+    expect(takeSalvagedDraft(storage)).toBe('newer')
   })
 })
