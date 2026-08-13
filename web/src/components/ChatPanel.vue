@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handleFileLinkClick">
+  <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header. No page tag: the breadcrumb below already reads
@@ -1160,6 +1160,7 @@ import {
   selectedModelEntry,
 } from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
+import { handleCodeCopyClick } from '../lib/codeCopy'
 import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
@@ -3239,6 +3240,15 @@ function handleFileLinkClick(e: MouseEvent): void {
   } else {
     fileViewer.open(path, Number.isFinite(line as number) ? line : null, cid)
   }
+}
+
+// One delegated listener at the panel root serves every clickable thing the
+// markdown renderer emits. Code-block copy buttons live inside `v-html`
+// output that is rebuilt on each streamed token, so they can only be reached
+// by delegation — a per-button listener would be dropped on every re-render.
+function handlePanelClick(e: MouseEvent): void {
+  if (handleCodeCopyClick(e)) return
+  handleFileLinkClick(e)
 }
 
 const liveTraceMetaParts = computed(() => {
@@ -5604,6 +5614,83 @@ details[open] > .activity-summary::before {
   padding: 0;
   background: transparent;
   font-size: var(--text-sm);
+}
+
+/* Fenced code blocks (lib/codeCopy.ts emits the wrapper + button). The rule is
+   anchored on .chat-panel rather than .message-content so it also covers the
+   code blocks inside activity traces and the streaming bubble. */
+/* The button sits in its own row above the block rather than floating over it:
+   on a phone-width block an overlay would cover the start of the code. */
+.chat-panel :deep(.code-block) {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 0;
+  margin: 6px 0;
+}
+
+.chat-panel :deep(.code-block pre) {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+}
+
+.chat-panel :deep(.code-copy-btn) {
+  position: relative;
+  margin-bottom: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+  /* Dimmed but always present: this PWA runs on phones, where :hover never
+     fires and a hover-only control would be unreachable. */
+  opacity: 0.6;
+  transition: opacity 120ms var(--ease), background 120ms var(--ease), color 120ms var(--ease);
+}
+
+/* Touch: grow the chip and expand its hit area to a full touch target without
+   moving anything around it. The expander is dropped for fine pointers, where
+   it would only steal clicks from the text next to the chip. */
+@media (hover: none) {
+  .chat-panel :deep(.code-copy-btn) {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .chat-panel :deep(.code-copy-btn::after) {
+    content: '';
+    position: absolute;
+    inset: calc(-1 * var(--space-2));
+    min-width: var(--touch);
+  }
+}
+
+.chat-panel :deep(.code-copy-btn:hover),
+.chat-panel :deep(.code-copy-btn:focus-visible) {
+  opacity: 1;
+  background: var(--bg3);
+  color: var(--fg);
+}
+
+.chat-panel :deep(.code-copy-btn:active) {
+  transform: scale(0.96);
+}
+
+.chat-panel :deep(.code-copy-btn[data-copy-state="copied"]) {
+  opacity: 1;
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+}
+
+.chat-panel :deep(.code-copy-btn[data-copy-state="failed"]) {
+  opacity: 1;
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, var(--border));
 }
 
 .message-content :deep(:is(h1, h2, h3, h4)) {
