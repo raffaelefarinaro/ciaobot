@@ -1,5 +1,5 @@
 <template>
-  <header class="pane-header">
+  <header class="pane-header" :class="{ 'pane-header--no-center': !hasCenter }">
     <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
         <line x1="4" y1="7" x2="20" y2="7"/>
@@ -35,7 +35,7 @@ import { computed, useSlots } from 'vue'
 import NotificationBell from './NotificationBell.vue'
 import BrandMark from './BrandMark.vue'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   activeBgAgents?: number
   /** Short marker for the current view: 'home', 'settings', 'automations', … */
   pageTag?: string
@@ -49,6 +49,9 @@ const slots = useSlots()
 // a second row. Views with no title of their own (home, settings, the automations
 // list) drop the element and let the page tag name them instead.
 const hasTitle = computed(() => !!slots.title)
+// The middle track only earns its symmetric siblings when it has something
+// to centre.
+const hasCenter = computed(() => props.brand || !!props.pageTag)
 </script>
 
 <style scoped>
@@ -76,6 +79,17 @@ const hasTitle = computed(() => !!slots.title)
   column-gap: var(--space-2);
   flex-shrink: 0;
   box-sizing: border-box;
+}
+
+/* Nothing in the middle column to centre, so there is nothing for the symmetric
+   side tracks to buy - and they are not free: `1fr` on the trailing track holds
+   back half the spare width for actions that only need their own size, while
+   the title ellipses in the other half. The chat header is exactly this case
+   (`:brand="false"`, no page tag), which is where a title truncated to "Hourly
+   skills page m..." sat next to an empty stretch of header. Size the trail to
+   its content and give the remainder to the title. */
+.pane-header--no-center {
+  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 .header-title {
   grid-column: 1;
