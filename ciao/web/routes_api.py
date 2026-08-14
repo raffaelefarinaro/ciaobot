@@ -4339,12 +4339,29 @@ def _enrich_schedule(
         entry_dict["effective_model"] = entry.model
     web_project_id = entry_dict.get("web_project_id")
     web_chat_id = entry_dict.get("web_chat_id")
+    # Whether the target still resolves. Stated explicitly because the PWA
+    # cannot infer it from context_label: that field is always set, so a
+    # truthy label suppressed the "unavailable" indicator and a stale target
+    # rendered as an ordinary one (previously as a bare `proj-...` id).
+    entry_dict["context_available"] = True
     if web_project_id and pcm:
         project = pcm.get_project(web_project_id)
-        entry_dict["context_label"] = f"{project.name} (new chat per run)" if project else web_project_id
+        if project:
+            entry_dict["context_label"] = f"{project.name} (new chat per run)"
+        else:
+            # A stale id is not a label. Show the remembered name, which is
+            # also what the dispatcher re-homes by.
+            remembered = (entry_dict.get("web_project_name") or "").strip()
+            entry_dict["context_label"] = (
+                f"{remembered} (new chat per run)" if remembered else "Project not found"
+            )
+            entry_dict["context_available"] = bool(
+                remembered and pcm.find_project(remembered, entry_dict.get("workspace") or "")
+            )
     elif web_chat_id and pcm:
         chat = pcm.get_chat(web_chat_id)
         entry_dict["context_label"] = chat.title if chat else web_chat_id
+        entry_dict["context_available"] = chat is not None
     else:
         entry_dict["context_label"] = ""
     next_run = compute_next_run(entry)
@@ -4538,6 +4555,10 @@ async def create_schedule(request: Request) -> JSONResponse:
         run_at_date=run_at_date,
         web_chat_id=web_chat_id,
         web_project_id=web_project_id,
+        web_project_name=(
+            (pcm.get_project(web_project_id).name if pcm.get_project(web_project_id) else "")
+            if web_project_id else ""
+        ),
         archive_policy=archive_policy,
         workspace=workspace if workspace in known_workspaces else "",
         title=str(body.get("title", "")).strip(),
@@ -4600,11 +4621,13 @@ async def schedule_detail(request: Request) -> JSONResponse:
         entry.web_chat_id = body["web_chat_id"] or None
     if "web_project_id" in body:
         entry.web_project_id = body["web_project_id"] or None
-        # Re-stamp the workspace to match the new target project so the
-        # stale-id fallback keeps routing to the right General project.
+        # Re-stamp the workspace and the target's name. Project ids regenerate
+        # per instance, so the name is what lets a later run find the same
+        # project again instead of silently falling back to General.
         pcm = request.app.state.project_chat_manager
         project = pcm.get_project(entry.web_project_id) if entry.web_project_id else None
         entry.workspace = project.workspace if project else ""
+        entry.web_project_name = project.name if project else ""
     if "workspace" in body:
         ws = (body["workspace"] or "").strip().lower()
         pcm = request.app.state.project_chat_manager

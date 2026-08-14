@@ -198,3 +198,76 @@ def test_schedule_inheritance_is_resolved_again_after_workspace_change(
         "sonnet",
         "personal",
     )
+
+
+# ── re-homing by remembered project name ────────────────────────────────
+#
+# Falling back to General discards the project the user picked, silently. The
+# recorded name survives the id regeneration that caused the staleness, so it
+# is what makes the schedule land where it was configured to.
+
+
+def _named_entry(*, name: str, workspace: str = "work") -> ScheduleEntry:
+    entry = _entry(schedule_id="sched-ee193709", workspace=workspace)
+    entry.web_project_name = name
+    return entry
+
+
+def test_a_stale_id_re_homes_to_the_project_of_the_same_name(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    target = pcm.create_project(name="docs-improvement", workspace="work")
+
+    resolved = pcm._resolve_schedule_project("proj-stale00", _named_entry(name="docs-improvement"))
+
+    assert resolved is not None
+    assert resolved.project_id == target.project_id
+    assert resolved.name == "docs-improvement"
+
+
+def test_re_homing_stays_inside_the_schedule_workspace(tmp_path: Path) -> None:
+    """A same-named project in another workspace must not capture the run."""
+    pcm = _make_manager(tmp_path)
+    pcm.create_project(name="shared-name", workspace="personal")
+    work_target = pcm.create_project(name="shared-name", workspace="work")
+
+    resolved = pcm._resolve_schedule_project("proj-stale00", _named_entry(name="shared-name"))
+
+    assert resolved is not None
+    assert resolved.project_id == work_target.project_id
+    assert resolved.workspace == "work"
+
+
+def test_an_unmatched_name_still_falls_back_to_general(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+
+    resolved = pcm._resolve_schedule_project("proj-stale00", _named_entry(name="deleted-project"))
+
+    assert resolved is not None
+    assert resolved.name == "General"
+    assert resolved.workspace == "work"
+
+
+def test_entries_without_a_recorded_name_keep_the_old_behaviour(tmp_path: Path) -> None:
+    """Schedules written before the name was stored must not regress."""
+    pcm = _make_manager(tmp_path)
+    pcm.create_project(name="docs-improvement", workspace="work")
+
+    resolved = pcm._resolve_schedule_project(
+        "proj-stale00", _entry(schedule_id="sched-ee193709", workspace="work")
+    )
+
+    assert resolved is not None
+    assert resolved.name == "General"
+
+
+def test_the_name_round_trips_through_the_schedule_store(tmp_path: Path) -> None:
+    """It has to survive serialization, or it is useless on the next run."""
+    store = ScheduleStore(tmp_path)
+    created = store.create(
+        daily_time_utc="08:00", prompt="p", chat_id=0, model="", mode="normal",
+        web_project_id="proj-24db8110", web_project_name="docs-improvement",
+        workspace="work",
+    )
+    reloaded = ScheduleStore(tmp_path).get(created.schedule_id)
+    assert reloaded is not None
+    assert reloaded.web_project_name == "docs-improvement"

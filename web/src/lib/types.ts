@@ -429,6 +429,10 @@ export interface Schedule {
   days_of_week: string[] | null
   thread_id: number | null
   context_label: string
+  // Whether the schedule's target project/chat still resolves. Explicit
+  // because context_label is always set, so its truthiness says nothing
+  // about whether the target is still there.
+  context_available?: boolean
   frequency: 'daily' | 'weekly' | 'monthly' | 'manual' | 'once'
   day_of_month: number | null
   run_at_date: string | null

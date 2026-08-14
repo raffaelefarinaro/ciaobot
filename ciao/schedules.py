@@ -237,6 +237,13 @@ class ScheduleEntry:
     run_at_date: str | None = None         # "YYYY-MM-DD" in timezone_name; used when frequency="once" (fires once then deletes)
     web_chat_id: str | None = None         # PWA chat target (e.g. "chat-a1b2c3d4"); when set, dispatches to web instead of Telegram
     web_project_id: str | None = None    # PWA project target; when set, each run creates a NEW chat in this project
+    # The target project's name, recorded alongside its id. Project ids are
+    # per-instance and regenerate on a fresh init, so the id alone silently
+    # decays into "no target" and the run lands in General with the user's
+    # choice discarded. The name survives that and lets the resolver re-home
+    # to the same project and repair the id. Empty for entries created before
+    # this field existed; those still fall back to General.
+    web_project_name: str = ""
     # Workspace the schedule belongs to (e.g. "acme" | "home" | "default"). Project IDs
     # regenerate per device on fresh init, so web_project_id goes stale across
     # devices; this field lets the resolver re-target the right General project
@@ -303,6 +310,7 @@ class ScheduleStore:
         run_at_date: str | None = None,
         web_chat_id: str | None = None,
         web_project_id: str | None = None,
+        web_project_name: str = "",
         provider: str = "",
         archive_policy: str = "manual",
         workspace: str = "",
@@ -326,6 +334,7 @@ class ScheduleStore:
             run_at_date=run_at_date or None,
             web_chat_id=web_chat_id or None,
             web_project_id=web_project_id or None,
+            web_project_name=web_project_name or "",
             archive_policy=normalize_archive_policy(archive_policy),
             workspace=workspace or "",
             title=title or "",
@@ -535,6 +544,7 @@ class ScheduleManager:
         run_at_date: str | None = None,
         web_chat_id: str | None = None,
         web_project_id: str | None = None,
+        web_project_name: str = "",
         provider: str = "",
         archive_policy: str = "manual",
         workspace: str = "",
@@ -552,6 +562,7 @@ class ScheduleManager:
             days_of_week=days_of_week,
             web_chat_id=web_chat_id,
             web_project_id=web_project_id,
+            web_project_name=web_project_name,
             thread_id=thread_id,
             frequency=frequency,
             day_of_month=day_of_month,

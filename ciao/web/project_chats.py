@@ -8251,27 +8251,69 @@ class ProjectChatManager:
         ))
         return result
 
+    def find_project(self, name: str, workspace: str) -> ProjectInfo | None:
+        """The project with this name in this workspace, or None.
+
+        Names are unique per workspace, which is what lets a schedule survive
+        the per-instance id regeneration that strands ``web_project_id``.
+        """
+        wanted = (name or "").strip()
+        if not wanted:
+            return None
+        return next(
+            (
+                project
+                for project in self._projects.values()
+                if project.workspace == workspace and project.name == wanted
+            ),
+            None,
+        )
+
     def _resolve_schedule_project(
         self, stale_id: str, entry: object
     ) -> ProjectInfo | None:
         """Resolve a stale web_project_id to a local project.
 
         schedules.json is shared via git but project IDs are per-instance
-        (regenerated on each fresh init). When the ID doesn't match, infer
-        the workspace from the schedule ID convention and fall back to the
-        matching General project.
+        (regenerated on each fresh init), so the id alone decays into "no
+        target". The recorded project *name* survives that, so it is tried
+        first and the entry's id is repaired in place — otherwise every run
+        re-resolves and the schedule editor keeps showing a dead id.
+
+        Only when there is no name to match (entries written before the name
+        was recorded) does this fall back to the workspace's General project.
+        That fallback discards the user's choice, so it is logged as a warning
+        rather than an info line.
         """
         # Prefer the explicit workspace field; it survives the per-device id
         # regeneration that makes web_project_id go stale. Legacy entries use
         # the historical id-prefix fallback, while stock ``default`` routines
         # resolve to the first configured workspace.
         workspace = self._schedule_workspace_hint(entry)
+
+        wanted = (getattr(entry, "web_project_name", "") or "").strip()
+        if wanted:
+            match = self.find_project(wanted, workspace)
+            if match is not None:
+                logger.info(
+                    "Re-homed schedule from stale project %s to %s (%s/%s)",
+                    stale_id, match.project_id, workspace, match.name,
+                )
+                return match
+            logger.warning(
+                "Schedule target project %r no longer exists in workspace %s; "
+                "falling back to General",
+                wanted, workspace,
+            )
+
         for p in self._projects.values():
             if p.workspace == workspace and p.name == "General":
-                logger.info(
-                    "Resolved stale project %s -> %s (%s General)",
-                    stale_id, p.project_id, workspace,
-                )
+                if not wanted:
+                    logger.warning(
+                        "Schedule target %s is stale and records no project name; "
+                        "falling back to %s General. Re-pick the project to repair it.",
+                        stale_id, workspace,
+                    )
                 return p
         return None
 

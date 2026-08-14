@@ -1002,6 +1002,10 @@ function contextLabel(s: Schedule): string {
 }
 
 function contextUnavailable(s: Schedule): boolean {
+  // The server states this outright. Inferring it from context_label was
+  // wrong: that field is always set, so a stale target rendered as an
+  // ordinary one and the indicator never appeared.
+  if (s.context_available !== undefined) return !s.context_available
   if (s.context_label) return false
   if (s.web_project_id) {
     return !projectStore.projects.some(p => p.project_id === s.web_project_id)
