@@ -144,6 +144,46 @@ describe('HomeRecentChats lanes and tiers', () => {
     const wrapper = await mountHome()
     expect(wrapper.find('.home-tier--quiet .home-chat-item').element.tagName).toBe('BUTTON')
   })
+
+  // Regression: with focus on the body (empty-space click, or Esc back out of a
+  // chat), the first arrow used to jump to the first lane in DOM order. When
+  // the active workspace was the second lane, that landed on a card in a random
+  // workspace and every arrow after it stayed trapped there.
+  it('anchors the first arrow press to the active workspace lane, not the first lane', async () => {
+    const store = seedChats()
+    store.activeWorkspace = 'work'
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
+
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    const workCards = wrapper.find('[data-lane-key="work"]').findAll('.home-chat-item')
+    expect(document.activeElement).toBe(workCards[0].element)
+    expect(document.activeElement).not.toBe(
+      wrapper.find('[data-lane-key="personal"]').findAll('.home-chat-item')[0].element,
+    )
+    wrapper.unmount()
+  })
+
+  // Regression: focus landing on a lane's "+ new" header control (via Tab or a
+  // click) used to make the next arrow jump to the first lane. It now stays in
+  // the lane that holds the focused control.
+  it('keeps arrows in the lane whose header control has focus', async () => {
+    const wrapper = await mountHome()
+    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
+
+    const workNew = wrapper.find('[data-lane-key="work"] .home-lane-new').element as HTMLElement
+    workNew.focus()
+    expect(document.activeElement).toBe(workNew)
+
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    const workCards = wrapper.find('[data-lane-key="work"]').findAll('.home-chat-item')
+    expect(document.activeElement).toBe(workCards[0].element)
+    wrapper.unmount()
+  })
 })
 
 

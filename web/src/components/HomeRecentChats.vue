@@ -469,7 +469,13 @@ function onArrow(key: string): boolean {
   let laneIndex = model.findIndex(lane => lane.includes(document.activeElement as HTMLElement))
   let itemIndex = laneIndex >= 0 ? model[laneIndex].indexOf(document.activeElement as HTMLElement) : -1
   if (laneIndex < 0) {
-    laneIndex = model.findIndex(lane => lane.length > 0)
+    // Focus is somewhere the grid does not model: a lane header control ("+ new"
+    // or the caret), the sidebar, or the body after a click on empty space or a
+    // return from a chat. Anchor to the lane the user is actually looking at —
+    // the lane holding that focus, or the active workspace's lane — instead of
+    // jumping to whichever lane comes first in DOM order, which read as the
+    // arrow landing on a card in a random workspace.
+    laneIndex = anchorLaneIndex(model)
     itemIndex = -1
   }
 
@@ -498,6 +504,23 @@ function onArrow(key: string): boolean {
 
 function clamp(value: number, lower: number, upper: number): number {
   return Math.min(upper, Math.max(lower, value))
+}
+
+// Where arrows start when nothing in the chat grid has focus. Prefer the lane
+// the focused element already lives in (a "+ new" / caret control), then the
+// active workspace's lane (the one the raised surface and hue rule highlight),
+// then any lane with cards. The model's lane order matches the DOM `.home-lane`
+// order because focusableLanes() builds from the same query.
+function anchorLaneIndex(model: HTMLElement[][]): number {
+  const lanes = () => Array.from(lanesEl.value?.querySelectorAll<HTMLElement>('.home-lane') ?? [])
+  const host = (document.activeElement as HTMLElement | null)?.closest?.('.home-lane') as HTMLElement | null
+  if (host) {
+    const index = lanes().indexOf(host)
+    if (index >= 0 && model[index]?.length) return index
+  }
+  const activeIndex = lanes().findIndex(lane => lane.dataset.laneKey === store.activeWorkspace)
+  if (activeIndex >= 0 && model[activeIndex]?.length) return activeIndex
+  return model.findIndex(lane => lane.length > 0)
 }
 
 defineExpose({ onArrow })

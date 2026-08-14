@@ -741,6 +741,11 @@ describe('ChatLayout', () => {
 
 describe('ChatLayout home arrow navigation', () => {
   beforeEach(() => {
+    // The store restores the persisted active workspace on creation, and an
+    // earlier test persists 'work' via switchWorkspace. Without a clean slate
+    // the arrow-anchoring tests here would start on a different lane than the
+    // fixture describes, depending on which tests ran first in the file.
+    localStorage.clear()
     setActivePinia(createPinia())
     if (!Element.prototype.scrollIntoView) {
       Element.prototype.scrollIntoView = () => {}
