@@ -26,6 +26,21 @@ from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ChatInfo, ProjectChatManager
 
 
+def _isolate_workspace(monkeypatch, tmp_path: Path) -> None:
+    """Make the environment the only thing ``CiaoConfig.from_env()`` reads.
+
+    With ``CIAO_WORKSPACE`` unset, ``from_env()`` falls back to the bootstrap
+    workspace (``~/.ciao/bootstrap``) and loads its registry, whose ``personal``
+    and ``work`` entries carry an explicit ``default_model`` of ``""`` and a
+    null ``disallowed_tools``. Those beat the ``CLAUDE_DEFAULT_MODEL_*`` and
+    ``CIAO_DISALLOWED_TOOLS_*`` variables a test sets, so the assertions fail
+    for anyone who has ever run Ciaobot on this machine — a permanently-red
+    test that has stopped catching regressions. An empty directory has no
+    registry and no ``.env``, so only the test's own values are left.
+    """
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+
+
 def test_is_ollama_model_matches_dynamic_shape() -> None:
     # Cloud configured: any :tag/:cloud-shaped id routes dynamically.
     cloud = OllamaSettings(
@@ -341,6 +356,7 @@ def test_create_chat_uses_personal_workspace_default(
     tmp_path: Path, monkeypatch
 ) -> None:
     """A new chat in a personal project picks ``CLAUDE_DEFAULT_MODEL_PERSONAL``."""
+    _isolate_workspace(monkeypatch, tmp_path)
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CLAUDE_DEFAULT_MODEL_PERSONAL", "kimi-k2.7-code:cloud")
     monkeypatch.setenv("CLAUDE_DEFAULT_MODEL_WORK", "opus")
@@ -368,6 +384,9 @@ def test_create_chat_uses_personal_workspace_default(
 def test_create_chat_uses_work_workspace_default(
     tmp_path: Path, monkeypatch
 ) -> None:
+    # Passed under the leaked bootstrap registry too — its fallback also landed
+    # on "opus" — so it was green without ever reading CLAUDE_DEFAULT_MODEL_WORK.
+    _isolate_workspace(monkeypatch, tmp_path)
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CLAUDE_DEFAULT_MODEL_PERSONAL", "kimi-k2.7-code:cloud")
     monkeypatch.setenv("CLAUDE_DEFAULT_MODEL_WORK", "opus")
@@ -498,10 +517,11 @@ def test_personal_workspace_allows_claude_ai_mcps_by_default(monkeypatch) -> Non
     )
 
 
-def test_disallowed_tools_env_override_unions_with_toggle(monkeypatch) -> None:
+def test_disallowed_tools_env_override_unions_with_toggle(monkeypatch, tmp_path) -> None:
     """CIAO_DISALLOWED_TOOLS_* sets the extra denylist. It unions with the
     claude.ai connector set when the toggle is off, and stands alone when the
     toggle is on (the default)."""
+    _isolate_workspace(monkeypatch, tmp_path)
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_PERSONAL", "Bash,mcp__custom_tool")
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_WORK", "mcp__claude_ai_Sentry")
@@ -515,8 +535,9 @@ def test_disallowed_tools_env_override_unions_with_toggle(monkeypatch) -> None:
     assert config.disallowed_tools_for_workspace("work") == ["mcp__claude_ai_Sentry"]
 
 
-def test_claude_ai_mcps_toggle_env_override(monkeypatch) -> None:
+def test_claude_ai_mcps_toggle_env_override(monkeypatch, tmp_path) -> None:
     """CIAO_CLAUDE_AI_MCPS_* controls the connector set independently of extras."""
+    _isolate_workspace(monkeypatch, tmp_path)
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     # Flip personal on → connectors allowed, only the n8n extra stays.
     monkeypatch.setenv("CIAO_CLAUDE_AI_MCPS_PERSONAL", "true")
@@ -534,10 +555,11 @@ def test_claude_ai_mcps_toggle_env_override(monkeypatch) -> None:
     assert config.claude_ai_mcps_for_workspace("work") is False
 
 
-def test_disallowed_tools_personal_can_be_disabled(monkeypatch) -> None:
+def test_disallowed_tools_personal_can_be_disabled(monkeypatch, tmp_path) -> None:
     """Fully clearing the personal denylist needs the toggle on AND extras
     cleared. An empty CIAO_DISALLOWED_TOOLS_PERSONAL still applies defaults
     (unset == empty); the literal ``none`` clears the extras only."""
+    _isolate_workspace(monkeypatch, tmp_path)
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_PERSONAL", "")
     config = CiaoConfig.from_env()
@@ -645,6 +667,7 @@ def test_resolve_schedule_default_model_uses_personal_workspace(
     """When a schedule is being created against a personal project,
     the default model resolves to ``CLAUDE_DEFAULT_MODEL_PERSONAL``.
     """
+    _isolate_workspace(monkeypatch, tmp_path)
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CLAUDE_DEFAULT_MODEL_PERSONAL", "kimi-k2.7-code:cloud")
     monkeypatch.setenv("CLAUDE_DEFAULT_MODEL_WORK", "opus")
@@ -670,6 +693,7 @@ def test_resolve_schedule_default_model_uses_personal_workspace(
 def test_resolve_schedule_default_model_uses_work_workspace(
     tmp_path: Path, monkeypatch
 ) -> None:
+    _isolate_workspace(monkeypatch, tmp_path)
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CLAUDE_DEFAULT_MODEL_PERSONAL", "kimi-k2.7-code:cloud")
     monkeypatch.setenv("CLAUDE_DEFAULT_MODEL_WORK", "opus")
