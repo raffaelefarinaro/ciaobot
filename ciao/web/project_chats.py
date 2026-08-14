@@ -678,31 +678,6 @@ def _is_contentless_prompt(text: str) -> bool:
     return normalized in _CONTENTLESS_PROMPTS
 
 
-# Question-shaped openers ("why is X broken?", "what does Y mean?") are often
-# meta-inquiries whose real topic only emerges in the assistant's reply: the
-# user asks "why no recent sessions?" to diagnose something, the assistant
-# pivots to the actual cause, and a title built from the question alone ("No
-# Recent Sessions") misnames the chat. Defer those to the post-reply path so
-# the titler sees both sides and can prefer the assistant's framing (#176).
-_QUESTION_OPENER_RE = re.compile(
-    r"^(why|what|how|when|where|who|whom|whose|which|"
-    r"is|are|am|was|were|"
-    r"do|does|did|can|could|will|would|shall|should|may|might|must|"
-    r"has|have|had)\b",
-    re.IGNORECASE,
-)
-
-
-def _is_question_shaped_prompt(text: str) -> bool:
-    """True for meta-inquiry openers. We defer titling these until the first
-    assistant reply so the title reflects the conclusion, not the question.
-    """
-    snippet = (text or "").strip()
-    if not snippet:
-        return False
-    return bool(_QUESTION_OPENER_RE.match(snippet))
-
-
 def _fallback_title(user_text: str) -> str | None:
     """Deterministic fallback title derived from the user's first message.
 
@@ -6467,12 +6442,14 @@ class ProjectChatManager:
         # would have, but the cheap Ollama free-tier title model
         # absorbs that cost easily and we can always rename manually.
         #
-        # Exception: question-shaped meta-inquiries ("why no recent sessions?")
-        # get deferred until the first assistant reply. Their real topic only
-        # emerges in the reply, so a title from the prompt alone would name
-        # the question, not the conclusion (#176). `defer_title` is closed
-        # over by _drive below, which fires the title once the turn lands.
-        defer_title = False
+        # This includes question-shaped meta-inquiries ("why no recent sessions?").
+        # Earlier code (#176) deferred those until the first reply so the title
+        # could prefer the assistant's framing, but that left the sidebar entry
+        # blank for the full first turn and was reported as a regression. The
+        # post-reply path in `_drive()` still runs the titleer a second time
+        # with both sides of the exchange and overwrites the early title if it
+        # disagrees, so the assistant's framing can still win on the rare cases
+        # where it matters.
         if chat_meta and chat_meta.title == "New Chat" and prompt.strip():
             chat_meta.title_status = "pending"
             self._events.publish({
@@ -6481,14 +6458,9 @@ class ProjectChatManager:
                 "title": chat_meta.title,
                 "status": "pending",
             })
-            if _is_question_shaped_prompt(prompt):
-                # Wait for the first assistant reply so the titler can prefer
-                # its framing; _drive fires the title after the turn ends.
-                defer_title = True
-            else:
-                asyncio.create_task(
-                    self._auto_title_and_publish(chat_id, prompt, "")
-                )
+            asyncio.create_task(
+                self._auto_title_and_publish(chat_id, prompt, "")
+            )
 
         # Announce stream start to the global awareness hub so non-active
         # clients (different chat selected, sidebar only) can render the
@@ -6894,12 +6866,14 @@ class ProjectChatManager:
                     current_images = merged_images or None
                     current_turn_index = turn_index2
             finally:
-                # Question-shaped openers deferred title generation until the
-                # first reply landed (#176). Fire it now with both sides of
-                # the exchange so the title reflects the conclusion, not the
-                # question. Fire-and-forget like the early path; an empty
-                # reply (error / abort) falls back to the user-only prompt.
-                if defer_title:
+                # Every first turn re-runs the titleer with both sides of the
+                # exchange so the title can prefer the assistant's framing when
+                # the prompt alone is a question-shaped meta-inquiry. The publish
+                # step is a no-op when the new title matches the live one, so
+                # this only fires a second chat_title event when the late title
+                # actually differs from the early one. An empty reply (error /
+                # abort) falls back to the user-only prompt path.
+                if prompt and chat_meta and chat_meta.title == "New Chat":
                     asyncio.create_task(
                         self._auto_title_and_publish(
                             chat_id, prompt, last_assistant_text
@@ -6999,14 +6973,25 @@ class ProjectChatManager:
         # title generation produced nothing (e.g. user renamed mid-flight,
         # or all fallbacks returned None). Leaving title_status="pending"
         # would hang the shimmer in the sidebar indefinitely.
+        #
+        # Short-circuit a second publish when the new title matches the live
+        # one. The post-reply path in `_drive()` always runs the titleer so
+        # the assistant's framing can win on question-shaped openers, but for
+        # most turns the late title equals the early one and the sidebar does
+        # not need a redundant chat_title event.
         chat = self._chats.get(chat_id)
         if chat is None:
             return
+        resolved_title = new_title or chat.title
+        if resolved_title == chat.title and chat.title_status == "ready":
+            chat.title_status = "ready"
+            return
+        chat.title = resolved_title
         chat.title_status = "ready"
         self._events.publish({
             "type": "chat_title",
             "chat_id": chat_id,
-            "title": new_title or chat.title,
+            "title": resolved_title,
             "status": "ready",
         })
 
