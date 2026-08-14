@@ -1,7 +1,11 @@
 <template>
   <header class="pane-header" :class="{ 'pane-header--no-center': !hasCenter }">
     <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+      <!-- 18px at stroke 2, the size and weight every other icon in this header
+           and in the sidebar uses (see the .btn-icon block below). At 22px and
+           stroke 2.2 it read as a heavier glyph than the actions it shares the
+           row with. -->
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <line x1="4" y1="7" x2="20" y2="7"/>
         <line x1="4" y1="12" x2="20" y2="12"/>
         <line x1="4" y1="17" x2="20" y2="17"/>
