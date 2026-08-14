@@ -129,7 +129,12 @@ async function switchBackToHost() {
     window.location.assign('/')
   } catch (e) {
     switchingToHost.value = false
-    window.alert(errorMessage(e, 'Failed to switch back to host'))
+    // Not `window.alert`: the desktop webview shows no native dialog, so this
+    // failure was invisible there. See lib/prompt for the same constraint.
+    projectStore.pushErrorToast(
+      'Could not switch back to host',
+      errorMessage(e, 'The request failed.'),
+    )
   }
 }
 

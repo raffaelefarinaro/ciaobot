@@ -1181,7 +1181,13 @@ async function setRetry(chatId: string) {
   const lastUser = [...msgs].reverse().find(m => m.role === 'user')
   const text = lastUser?.content?.trim()
   if (!text) {
-    alert('Open the chat or type a message first. No user turn found to retry.')
+    // Not `alert`: it is a no-op in the desktop webview, so the menu entry
+    // looked broken rather than unavailable.
+    store.pushToast({
+      chat_id: '',
+      title: 'Nothing to retry',
+      body: 'Open the chat or send a message first — there is no user turn to retry.',
+    })
     return
   }
   await store.setChatRetry(chatId, text, lastUser?.images)

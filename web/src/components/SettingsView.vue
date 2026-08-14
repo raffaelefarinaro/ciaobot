@@ -1017,6 +1017,7 @@
           :automation-error="automationError"
           :fetch-automation="fetchAutomation"
           :notify-saved="notifySaved"
+          :notify-failed="notifyFailed"
           :routines="routines"
           :provider-labels="aliasProviderLabels"
         />
@@ -2612,7 +2613,7 @@ async function createMcpViaChat() {
     projectId = projectStore.projects[0]?.project_id
   }
   if (!projectId) {
-    alert('Please create a project first before starting a chat.')
+    notifySaved('Create a project first, then start the chat.', 'No project yet')
     return
   }
 
@@ -2625,7 +2626,7 @@ async function createMcpViaChat() {
       })
     }
   } catch (e) {
-    alert(`Failed to create chat: ${errorMessage(e)}`)
+    notifyFailed('Could not create chat', errorMessage(e))
   }
 }
 
@@ -2683,7 +2684,7 @@ async function deleteCustomMcpServer(name: string) {
     delete mcpToolsError.value[name]
     notifySaved(`Removed MCP server ${name}.`)
   } catch (e) {
-    alert(errorMessage(e, `Failed to delete MCP server ${name}`))
+    notifyFailed(`Could not delete MCP server ${name}`, errorMessage(e, 'The request failed.'))
   }
 }
 
@@ -3541,7 +3542,7 @@ async function handleClientSecretUpload(event: Event, profileName: string) {
     })
     gwsIntegration.value = updated
   } catch (e) {
-    alert(errorMessage(e, 'Failed to upload client secret'))
+    notifyFailed('Could not upload the client secret', errorMessage(e, 'The upload failed.'))
   } finally {
     gwsSavingProfile.value = null
     target.value = ''
@@ -3558,7 +3559,7 @@ async function startGwsAuth(profileName: string) {
     gwsRedirectUrls.value[profileName] = ''
     window.open(res.auth_url, '_blank')
   } catch (e) {
-    alert(errorMessage(e, 'Failed to generate authorization URL'))
+    notifyFailed('Could not generate the authorization URL', errorMessage(e, 'The request failed.'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3578,7 +3579,7 @@ async function exchangeGwsCode(profileName: string) {
     delete gwsAuthUrls.value[profileName]
     delete gwsRedirectUrls.value[profileName]
   } catch (e) {
-    alert(errorMessage(e, 'Failed to complete connection'))
+    notifyFailed('Could not complete the connection', errorMessage(e, 'The request failed.'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3609,7 +3610,7 @@ async function disconnectGwsProfile(profileName: string, deleteClientSecret: boo
     gwsIntegration.value = updated
     cancelGwsAuth(profileName)
   } catch (e) {
-    alert(errorMessage(e, 'Failed to update profile connection'))
+    notifyFailed('Could not update the profile connection', errorMessage(e, 'The request failed.'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -4379,7 +4380,7 @@ async function createSkillViaChat() {
     projectId = projectStore.projects[0]?.project_id
   }
   if (!projectId) {
-    alert('Please create a project first before starting a chat.')
+    notifySaved('Create a project first, then start the chat.', 'No project yet')
     return
   }
 
@@ -4390,7 +4391,7 @@ async function createSkillViaChat() {
       projectStore.sendMessage(chat.chat_id, prompt)
     }
   } catch (e) {
-    alert(`Failed to start chat: ${errorMessage(e)}`)
+    notifyFailed('Could not start chat', errorMessage(e))
   }
 }
 
@@ -4478,6 +4479,15 @@ function isStandalone(): boolean {
 // leaving persistent inline text under the form.
 function notifySaved(body: string, title = 'settings') {
   projectStore.pushToast({ chat_id: '', title, body })
+}
+
+// The failure sibling of notifySaved. `alert` cannot be used for this: wry's
+// WKUIDelegate implements no JS dialog panels, so inside the desktop app the
+// native dialog never appears and every failure reported through it was
+// completely invisible -- the action just seemed to do nothing. Error toasts
+// persist until dismissed and can seed a fix chat from `detail`.
+function notifyFailed(title: string, detail: string) {
+  projectStore.pushErrorToast(title, detail)
 }
 const workspacesLoaded = ref(false)
 const workspacesError = ref('')
@@ -4871,7 +4881,7 @@ async function doSnapshot(confirmWarnings = false) {
     const blockers = errorPayloadList(e, 'blockers')
     const warnings = errorPayloadList(e, 'warnings')
     if (blockers) {
-      alert(`Snapshot blocked by secrets:\n\n${blockers.join('\n')}`)
+      notifyFailed('Snapshot blocked by secrets', blockers.join('\n'))
       actionResult.value = 'Blocked by secrets.'
     } else if (warnings) {
       if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
@@ -4926,7 +4936,7 @@ async function doDeploy(confirmWarnings = false) {
     const warnings = errorPayloadList(e, 'warnings')
     if (Array.isArray(payload?.steps)) deploySteps.value = payload.steps
     if (blockers) {
-      alert(`Restart blocked by secrets:\n\n${blockers.join('\n')}`)
+      notifyFailed('Restart blocked by secrets', blockers.join('\n'))
       actionResult.value = 'Blocked by secrets.'
     } else if (warnings) {
       if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
@@ -4972,7 +4982,7 @@ async function fixDeployErrorInChat() {
     try {
       project = await projectStore.createProject('General')
     } catch (e) {
-      alert(`Failed to create project: ${errorMessage(e)}`)
+      notifyFailed('Could not create project', errorMessage(e))
       return
     }
   }
@@ -4986,7 +4996,7 @@ async function fixDeployErrorInChat() {
       router.push(`/chat/${chat.chat_id}`)
     }
   } catch (e) {
-    alert(`Failed to start chat: ${errorMessage(e)}`)
+    notifyFailed('Could not start chat', errorMessage(e))
   }
 }
 
@@ -5031,7 +5041,7 @@ async function fixIssuesInChat() {
       router.push(`/chat/${chat.chat_id}`)
     }
   } catch (e) {
-    alert(`Failed to start issue-triage chat: ${errorMessage(e)}`)
+    notifyFailed('Could not start the issue-triage chat', errorMessage(e))
   } finally {
     debugPending.value = false
   }
@@ -5156,7 +5166,7 @@ async function localHandback(confirmWarnings = false) {
     const blockers = errorPayloadList(e, 'blockers')
     const warnings = errorPayloadList(e, 'warnings')
     if (blockers) {
-      alert(`Sync blocked by secrets:\n\n${blockers.join('\n')}`)
+      notifyFailed('Sync blocked by secrets', blockers.join('\n'))
       actionResult.value = 'Blocked by secrets.'
     } else if (warnings) {
       if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {

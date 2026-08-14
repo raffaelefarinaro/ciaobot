@@ -114,6 +114,9 @@ const props = defineProps<{
   automationError: string
   fetchAutomation: () => Promise<void>
   notifySaved: (body: string, title?: string) => void
+  // The failure channel. `alert` cannot be used: it shows nothing at all in the
+  // desktop webview, so a failed run looked like a button that did nothing.
+  notifyFailed: (title: string, detail: string) => void
   // Model routing table, so a model-backed job that keeps failing can be
   // retried with a different model without leaving the page.
   routines: RoutineSettings | null
@@ -185,7 +188,7 @@ async function runJob(item: AutomationProcess, model: string) {
     props.notifySaved(`Started "${item.label}" via the ${scheduleId} schedule.`, 'Automations')
     await props.fetchAutomation()
   } catch (e) {
-    alert(`Failed to run ${item.label}: ${errorMessage(e)}`)
+    props.notifyFailed(`Could not run "${item.label}"`, errorMessage(e))
   } finally {
     runningJobs.value[item.job] = false
   }
