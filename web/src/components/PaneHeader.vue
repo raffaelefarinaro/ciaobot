@@ -126,17 +126,21 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
 
 /* A wide viewport can still leave this pane narrow when the sidebar has been
    dragged near its maximum. The header's action trail is unshrinkable, so
-   hide the decorative brand/tag based on the pane width as well as the
-   viewport width. */
+   let the mark shrink to the available column rather than overflow into the
+   hamburger or actions. Same trade on mobile: the wordmark stays, sized down
+   so it fits between the hamburger and the bell. Hiding it left the home
+   screen with an empty header strip and no click target to reload the app. */
 @container chat-pane (max-width: 460px) {
-  .header-center { display: none; }
+  .header-center { min-width: 0; }
 }
 
-/* Very narrow viewports: drop the mark outright rather than clip it. The trail's
-   controls cannot shrink, so something has to go, and the mark is the only thing
-   here that is not an action. */
+/* Same idea at viewport level: keep the wordmark on mobile (it is the only
+   reload entry point the home screen has), and shrink it instead of clipping.
+   font-size lands on --text-sm, the same size the mobile title uses. */
 @media (max-width: 460px) {
-  .header-center { display: none; }
+  .header-center { min-width: 0; }
+  .header-center :deep(.brand) { font-size: var(--text-sm); }
+  .header-center :deep(.brand-label) { min-width: 5ch; }
 }
 /* Kept in the document, not on the screen. The page now names itself next to
    its own nav icon in the sidebar, which is where it was asked for, so a second

@@ -3430,6 +3430,14 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
+        if mode is not None and mode not in {"normal", "plan", "auto", "bypass"}:
+            # Reject unknown modes so a buggy client can't put a chat into a
+            # state the next turn can't dispatch (the SDK mode mapper falls
+            # back to bypassPermissions for anything outside the table, which
+            # would silently downgrade security).
+            raise ValueError(
+                f"Unknown mode '{mode}' (allowed: normal, plan, auto, bypass)"
+            )
         was_codex_fable = (
             chat.provider == "codex" and canonical_tier(chat.model) == "fable"
         )

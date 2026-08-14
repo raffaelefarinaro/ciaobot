@@ -173,6 +173,23 @@
             @select="selectModel"
             @close="showModelPicker = false"
           >
+            <template #header>
+              <div class="mode-picker-row">
+                <span class="mode-picker-row__label">Mode</span>
+                <div class="mode-picker-row__chips">
+                  <button
+                    v-for="opt in modePickerOptions"
+                    :key="opt.value"
+                    type="button"
+                    class="mode-row-chip"
+                    :class="{ 'mode-row-chip--active': chat.mode === opt.value }"
+                    :disabled="modeChipSaving"
+                    :title="opt.description"
+                    @click="selectMode(opt.value)"
+                  >{{ opt.label }}</button>
+                </div>
+              </div>
+            </template>
             <template #footer>
               <div
                 v-if="showThinkingLevels"
@@ -1573,6 +1590,62 @@ async function togglePlanMode(
 
 function leavePlanMode(): void {
   void togglePlanMode('exit')
+}
+
+// Mode row, rendered inside the model picker popover's header slot (see
+// ``modePickerOptions`` usage in the template). Plan has its own chip above
+// because leaving plan mid-session has different UX implications (the chat
+// returns to the previous mode, not a chosen one) and its own disabled state
+// while toggling.
+//
+// The four modes here mirror ``BridgeMode`` in ciao.models. We treat
+// ``"normal"`` as the SDK's default ("Manual" in Claude Code terms): every
+// tool call prompts. ``"auto"`` is the classifier-backed mode that auto-
+// approves most calls and only escalates risky ones — the mode Sebastien
+// was asking about. ``"bypass"`` is ``bypassPermissions``: every tool runs
+// without a prompt, use only in containers.
+//
+// ``modeChipSaving`` is intentionally separate from ``planModeSaving`` so a
+// stuck plan switch doesn't lock the row — they're independent paths.
+
+const MODE_PICKER_OPTIONS: ReadonlyArray<{ value: string; label: string; description: string }> = [
+  { value: 'auto', label: 'Auto', description: 'Fewer prompts, classifier approves safe actions' },
+  { value: 'bypass', label: 'Bypass', description: 'Skip all checks (use in containers only)' },
+  { value: 'normal', label: 'Manual', description: 'Approve each tool call' },
+  { value: 'plan', label: 'Plan', description: 'Read-only — propose, do not act' },
+]
+const modePickerOptions = MODE_PICKER_OPTIONS
+
+const modeChipSaving = ref(false)
+
+async function selectMode(target: string): Promise<void> {
+  if (modeChipSaving.value || chat.value.archived) return
+  if (target === chat.value.mode) {
+    showModelPicker.value = false
+    return
+  }
+  // Route plan mode through the existing togglePlanMode path so the
+  // rememberPlanReturnMode bookkeeping still applies when leaving a mode
+  // that the user might want to come back to.
+  if (target === 'plan') {
+    showModelPicker.value = false
+    void togglePlanMode('enter')
+    return
+  }
+  // Leaving plan for any other mode: clear the stored return-to mode so
+  // a later plan entry doesn't snap back to a stale value.
+  if (chat.value.mode === 'plan') {
+    clearPlanReturnMode(chat.value.chat_id)
+  }
+  modeChipSaving.value = true
+  try {
+    await store.updateChat(chat.value.chat_id, { mode: target })
+    showModelPicker.value = false
+  } catch (e) {
+    store.pushErrorToast('Could not change mode', errorMessage(e, 'Could not change mode'))
+  } finally {
+    modeChipSaving.value = false
+  }
 }
 
 async function handlePlanCommand(
@@ -5676,6 +5749,57 @@ details[open] > .activity-summary::before {
 .plan-mode-chip:hover::before { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 .plan-mode-chip:active { transform: scale(0.96); }
 .plan-mode-chip:disabled { opacity: 0.55; cursor: wait; transform: none; }
+
+/* Mode row, rendered in the model picker popover's header slot. Mirrors
+   .thinking-levels below it in the footer slot: same label treatment, same
+   pill-chip row, so the popover reads as one cohesive "chat behavior"
+   picker instead of two different widgets glued together. */
+.mode-picker-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mode-picker-row__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg2);
+}
+
+.mode-picker-row__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mode-row-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.mode-row-chip:hover {
+  background: var(--bg3);
+}
+
+.mode-row-chip--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.mode-row-chip:disabled { opacity: 0.55; cursor: wait; }
 
 @keyframes bg-agents-pulse {
   0%, 100% { opacity: 1; }
