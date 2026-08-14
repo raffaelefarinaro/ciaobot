@@ -821,7 +821,10 @@ def setup_workspace(
                     "name": ws_name,
                     "vault_root": stored_root,
                     "default_provider": provider,
-                    "gws_profile": ws_name,
+                    # No Google account is linked at scaffold time: which
+                    # accounts exist is the user's choice, made in Settings →
+                    # Workspaces after setup.
+                    "gws_profile": "",
                     "model_bucket": model_bucket,
                 }
             )
@@ -855,7 +858,7 @@ def setup_workspace(
                         "name": name,
                         "vault_root": stored_root,
                         "default_provider": provider,
-                        "gws_profile": name,
+                        "gws_profile": "",
                         "model_bucket": model_bucket,
                     }
                 ],

@@ -641,6 +641,12 @@ export interface ProviderConnection {
   protocol?: string
   mcps?: string[]
   skills?: string[]
+  /** Docs page for installing the CLI, set when `auth === 'not_installed'`. */
+  install_url?: string
+  /** Desktop app found while the CLI is missing. */
+  app_path?: string
+  /** Absolute path of the CLI binary Ciaobot would run. */
+  cli_path?: string
 }
 
 export interface CustomProviderSettings {
@@ -1031,6 +1037,12 @@ export interface SetupProviderStatus {
   auth?: string
   command?: string
   detail?: string
+  /** Documentation page for installing the provider CLI (`auth: 'not_installed'`). */
+  install_url?: string
+  /** Desktop app found while the CLI is missing, so setup can say which step is left. */
+  app_path?: string
+  /** Absolute path of the CLI binary Ciaobot would run. */
+  cli_path?: string
 }
 
 /** One requirement row inside {@link SetupStatus}. */

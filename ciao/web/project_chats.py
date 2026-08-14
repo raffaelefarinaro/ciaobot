@@ -4522,10 +4522,14 @@ class ProjectChatManager:
             if project.workspace != "personal":
                 vault_root = self._display_path(self._workspace_vault_root(project.workspace))
                 gws_profile = self._workspace_gws_profile(project.workspace)
+                # Only name an account that exists; a workspace with no Google
+                # account linked gets no calendar/email instruction at all.
+                gws_note = (
+                    f" Use {gws_profile} GWS profile for calendar/email." if gws_profile else ""
+                )
                 parts.append(
                     f"[CONTEXT: {project.workspace} -- Workspace. "
-                    f"Files at {vault_root}/. "
-                    f"Use {gws_profile} GWS profile for calendar/email.]"
+                    f"Files at {vault_root}/.{gws_note}]"
                 )
             if project.context:
                 parts.append(f"[Project context: {project.context}]")
@@ -4843,10 +4847,24 @@ class ProjectChatManager:
         self._discover_vault_projects()
 
     def _workspace_gws_profile(self, workspace: str | None) -> str:
+        """The Google account this workspace uses, or "" when none is linked.
+
+        The operator-level default only counts when it names an account that
+        actually exists: pointing a chat at a credential directory nobody ever
+        created just produces confusing auth errors mid-task.
+        """
         workspace_config = self._config.workspace(workspace)
         if workspace_config and workspace_config.gws_profile:
             return workspace_config.gws_profile
-        return self._config.gws_default_profile
+        default = self._config.gws_default_profile
+        if not default:
+            return ""
+        try:
+            from ciao import gws_auth
+
+            return default if default in gws_auth.known_profiles(self._config) else ""
+        except Exception:
+            return default
 
     def _workspace_model_bucket(self, workspace: str | None) -> str:
         workspace_config = self._config.workspace(workspace)

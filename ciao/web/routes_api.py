@@ -144,7 +144,9 @@ _PROVIDER_KEY_META = {
 # voice moved on-device: OPENAI_API_KEY lived here for cloud transcription and
 # speech, and nothing else in the app ever read it.
 _SERVICE_KEY_META: dict[str, dict[str, str]] = {}
-_GWS_BUILTIN_PROFILES = ("personal", "work")
+# Labels and example chips for the two account names that predate the account
+# registry. Nothing creates them any more — a fresh install starts with no
+# Google account — but an install that already has one keeps its wording.
 # Annotated because the values are heterogeneous (str labels alongside a
 # list[str] of examples): without it mypy widens every lookup to Sequence[str],
 # and `meta["purpose"]` stops being usable where a str is expected.
@@ -1387,24 +1389,59 @@ def _gws_file_present(config_dir: Path | None, names: tuple[str, ...]) -> bool:
 
 
 def _gws_profile_usage(config) -> dict[str, list[str]]:
-    default_profile = getattr(config, "gws_default_profile", "personal") or "personal"
+    """Workspaces per profile.
+
+    Only explicit links count: a workspace with no account selected is listed
+    under none, rather than being attributed to an operator-level default it
+    never chose.
+    """
     usage: dict[str, list[str]] = {}
     for workspace in config.workspaces.values():
-        profile = (getattr(workspace, "gws_profile", "") or default_profile).strip()
+        profile = str(getattr(workspace, "gws_profile", "") or "").strip()
         if not profile:
-            profile = default_profile
+            continue
         usage.setdefault(profile, []).append(getattr(workspace, "name", ""))
     return usage
 
 
 def _gws_profile_names(config) -> list[str]:
-    names = list(_GWS_BUILTIN_PROFILES)
-    default_profile = getattr(config, "gws_default_profile", "personal") or "personal"
-    for profile in [default_profile, *_gws_profile_usage(config).keys()]:
-        profile = str(profile).strip()
-        if profile and profile not in names:
-            names.append(profile)
-    return names
+    """The Google accounts to show: the ones the user added or connected.
+
+    No built-in list: a fresh install shows none until an account is added.
+    """
+    from ciao import gws_auth
+
+    return gws_auth.known_profiles(config)
+
+
+def _ensure_gws_profile_registered(config, profile: str) -> None:
+    """Record ``profile`` in the account registry if it is not there yet.
+
+    Disconnecting deletes the credential files, which is also all that makes an
+    unregistered (pre-registry or terminal-created) account discoverable. The
+    account itself must survive that, or "Disconnect" would silently delete the
+    card and leave no way back to it.
+    """
+    from ciao import gws_auth
+
+    entries = gws_auth.load_profile_registry(config)
+    if any(entry["name"] == profile for entry in entries):
+        return
+    label = str(_GWS_PROFILE_META.get(profile, {}).get("label", "")) or f"{profile} Google account"
+    entries.append({"name": profile, "label": label})
+    try:
+        gws_auth.save_profile_registry(config, entries)
+    except OSError:
+        logger.exception("Failed to persist the Google account registry")
+
+
+def _valid_gws_profile(profile: object) -> str:
+    """Return the profile slug, or "" when the name cannot address a directory."""
+    from ciao import gws_auth
+
+    if not isinstance(profile, str):
+        return ""
+    return gws_auth.slugify_profile(profile)
 
 
 def _gws_profile_payload(
@@ -1412,24 +1449,27 @@ def _gws_profile_payload(
     profile: str,
     usage: dict[str, list[str]],
     health: dict | None = None,
+    labels: dict[str, str] | None = None,
 ) -> dict:
+    custom_label = (labels or {}).get(profile, "")
     meta = _GWS_PROFILE_META.get(
         profile,
         {
-            "label": f"{profile} Google profile",
-            "purpose": "Custom Google Workspace profile configured outside the built-in personal/work wrapper.",
+            "label": custom_label or f"{profile} Google account",
+            "purpose": "Google account you added. Link it to the workspaces that should use it.",
         },
     )
+    if custom_label:
+        meta = {**meta, "label": custom_label}
     config_dir = _gws_profile_config_dir(config, profile)
     credentials_present = _gws_file_present(config_dir, _GWS_AUTH_FILES)
     client_secret_present = _gws_file_present(config_dir, ("client_secret.json",))
     wrapper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
     helper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-auth-helper.py"
-    setup_command = ""
-    headless_auth_command = ""
-    if profile in _GWS_BUILTIN_PROFILES:
-        setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
-        headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
+    # The wrapper and helper take the profile name, so every account — not just
+    # the two legacy ones — gets a working terminal alternative.
+    setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
+    headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
 
     from ciao import gws_auth
 
@@ -1496,15 +1536,26 @@ def _gws_integration_payload(config) -> dict:
         health = gws_auth.read_health_cache(Path(config.state_path).parent)
     except Exception:
         health = {}
+    labels = {
+        entry["name"]: entry["label"]
+        for entry in gws_auth.load_profile_registry(config)
+        if entry.get("label")
+    }
+    names = _gws_profile_names(config)
+    # An operator default that names no existing account is not a default the
+    # UI should advertise; workspaces then show "No Google account" instead.
+    default_profile = str(getattr(config, "gws_default_profile", "") or "").strip()
+    if default_profile not in names:
+        default_profile = ""
     return {
         "installed": bool(binary_path),
         "binary_path": binary_path,
-        "default_profile": getattr(config, "gws_default_profile", "personal") or "personal",
+        "default_profile": default_profile,
         "wrapper_path": str(wrapper_path) if wrapper_path.is_file() else "",
         "headless_helper_path": str(helper_path) if helper_path.is_file() else "",
         "profiles": [
-            _gws_profile_payload(config, profile, usage, health.get(profile))
-            for profile in _gws_profile_names(config)
+            _gws_profile_payload(config, profile, usage, health.get(profile), labels)
+            for profile in names
         ],
     }
 
@@ -1592,8 +1643,9 @@ async def gws_save_client_secret(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
 
     if not client_secret_str:
         return JSONResponse({"error": "Missing client_secret content"}, status_code=400)
@@ -1628,8 +1680,9 @@ async def gws_auth_url(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
 
     config_dir = _gws_profile_config_dir(config, profile)
     if config_dir is None:
@@ -1665,8 +1718,9 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
 
     if not code_or_url:
         return JSONResponse({"error": "Missing authorization code or redirect URL"}, status_code=400)
@@ -1716,12 +1770,16 @@ async def gws_disconnect(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
 
     config_dir = _gws_profile_config_dir(config, profile)
     if config_dir is None:
         return JSONResponse({"error": "Could not determine config directory"}, status_code=500)
+
+    # Disconnecting keeps the account; only "remove" deletes it.
+    _ensure_gws_profile_registered(config, profile)
 
     try:
         for name in ("credentials.json", "credentials.enc", "token_cache.json",
@@ -1736,6 +1794,89 @@ async def gws_disconnect(request: Request) -> JSONResponse:
                 secret_path.unlink()
     except Exception as e:
         return JSONResponse({"error": f"Failed to disconnect profile: {str(e)}"}, status_code=500)
+
+    return JSONResponse(_gws_integration_payload(config))
+
+
+async def gws_add_profile(request: Request) -> JSONResponse:
+    """Register a Google account so workspaces can be linked to it.
+
+    Adding is bookkeeping only: it records the name and label. Credentials
+    arrive later through the OAuth flow, which creates the credential dir.
+    """
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
+
+    from ciao import gws_auth
+
+    raw_name = str(body.get("name", "") or "").strip()
+    profile = _valid_gws_profile(raw_name)
+    if not profile:
+        return JSONResponse(
+            {"error": "Give the account a name using letters, numbers, dashes, or underscores."},
+            status_code=400,
+        )
+    if profile in _gws_profile_names(config):
+        return JSONResponse(
+            {"error": f"A Google account named '{profile}' already exists."},
+            status_code=400,
+        )
+    label = str(body.get("label", "") or "").strip() or f"{raw_name} Google account"
+    entries = gws_auth.load_profile_registry(config)
+    entries.append({"name": profile, "label": label})
+    try:
+        gws_auth.save_profile_registry(config, entries)
+    except OSError as exc:
+        return JSONResponse({"error": f"Failed to save the account list: {exc}"}, status_code=500)
+    return JSONResponse(_gws_integration_payload(config))
+
+
+async def gws_remove_profile(request: Request) -> JSONResponse:
+    """Forget a Google account and delete its stored credentials.
+
+    Workspaces pointing at it are unlinked in the same pass so the registry
+    cannot keep a dangling reference to an account that no longer exists.
+    """
+    config = request.app.state.config
+    try:
+        body = await request.json()
+        profile = body.get("profile")
+    except Exception:
+        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
+
+    from ciao import gws_auth
+
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
+
+    config_dir = _gws_profile_config_dir(config, profile)
+    if config_dir is not None and config_dir.is_dir():
+        try:
+            shutil.rmtree(config_dir)
+        except OSError as exc:
+            return JSONResponse(
+                {"error": f"Failed to delete stored credentials: {exc}"}, status_code=500
+            )
+
+    entries = [
+        entry for entry in gws_auth.load_profile_registry(config) if entry["name"] != profile
+    ]
+    try:
+        gws_auth.save_profile_registry(config, entries)
+    except OSError as exc:
+        return JSONResponse({"error": f"Failed to save the account list: {exc}"}, status_code=500)
+
+    unlinked = False
+    for workspace in config.workspaces.values():
+        if getattr(workspace, "gws_profile", "") == profile:
+            workspace.gws_profile = ""
+            unlinked = True
+    if unlinked:
+        config.persist_workspace_registry()
 
     return JSONResponse(_gws_integration_payload(config))
 
@@ -1770,8 +1911,9 @@ async def gws_relogin_start(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
 
     manager = _gws_relogin_manager(request)
     try:
@@ -1785,9 +1927,9 @@ async def gws_relogin_start(request: Request) -> JSONResponse:
 
 async def gws_relogin_status(request: Request) -> JSONResponse:
     """Poll a pending re-login. Returns pending/completed/error/none."""
-    profile = request.query_params.get("profile", "")
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(request.query_params.get("profile", ""))
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
     manager = _gws_relogin_manager(request)
     result = manager.status(profile)
     # When a re-login just completed, refresh the health cache so Settings and
@@ -1809,8 +1951,9 @@ async def gws_relogin_cancel(request: Request) -> JSONResponse:
         profile = body.get("profile")
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
     manager = _gws_relogin_manager(request)
     return JSONResponse(manager.cancel(profile))
 

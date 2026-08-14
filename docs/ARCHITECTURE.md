@@ -141,8 +141,8 @@ scripts/
   dev.sh                       Compatibility wrapper for `ciao dev`.
   create-chat.py               Compatibility wrapper for `ciao create-chat`.
   ensure-deps.sh               Dependency verification and venv repair (macOS libexpat and SSL workarounds). Sourced by run-ciao.sh and dev.sh.
-  gws-profile.sh               Switch GWS profile (personal | work). Uses exec, do NOT source.
-  gws-auth-helper.py           Interactive headless OAuth re-auth for gws (personal | work).
+  gws-profile.sh               Route gws to a Google account's credential dir (any profile name). Uses exec, do NOT source.
+  gws-auth-helper.py           Interactive headless OAuth re-auth for gws (any profile name).
   install-custom-skills.sh     Compatibility wrapper for `ciao sync-skills`.
   skills_add.py                Add an upstream skill repo to skills-lock.json.
   skills_sync.py               Compatibility wrapper for `ciao skills-sync`.

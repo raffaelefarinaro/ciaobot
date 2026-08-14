@@ -91,8 +91,9 @@
               @click="openPicker()"
             >Browse…</button>
           </div>
-          <span class="hint">Pick a brand-new folder or the notes folder you already have — Ciaobot
-            detects what's inside and adjusts automatically: an empty folder gets a fresh
+          <span class="hint">Type a path, or press <strong>Browse…</strong> to pick an existing folder or
+            create a new one. Either a brand-new folder or the notes folder you already have works —
+            Ciaobot detects what's inside and adjusts automatically: an empty folder gets a fresh
             second brain; existing notes are adapted in place into its structure.</span>
         </div>
 
@@ -190,7 +191,7 @@
               class="badge"
               :class="setupStatus.providers[provider].ok ? 'badge--success' : 'badge--error'"
             >
-              {{ setupStatus.providers[provider].ok ? '[ok] Ready' : '[!] Not Configured' }}
+              {{ providerBadgeLabel }}
             </span>
             <span class="provider-detail">{{ setupStatus.providers[provider].detail }}</span>
           </div>
@@ -208,6 +209,19 @@
                 {{ copyStatus || 'Copy' }}
               </button>
             </div>
+            <p v-if="setupStatus.providers[provider].install_url" class="hint">
+              Other ways to install (Homebrew, WinGet, Linux packages):
+              <a
+                class="install-link"
+                :href="setupStatus.providers[provider].install_url"
+                target="_blank"
+                rel="noopener noreferrer"
+              >installation guide ↗</a>
+            </p>
+            <p v-if="setupStatus.providers[provider].auth === 'not_installed'" class="hint">
+              This check refreshes on its own — finish the install in a terminal and
+              the badge above turns green.
+            </p>
           </div>
         </div>
 
@@ -284,6 +298,11 @@
           >
             <div class="picker-head">
               <span class="picker-title">Choose Workspace Folder</span>
+              <span class="picker-help">
+                Click a folder below to open it, or create one at the bottom. Nothing is
+                selected until you press <strong>Use this folder</strong>.
+              </span>
+              <span class="picker-current-label">Currently viewing</span>
               <code class="picker-path">{{ pickerDisplayPath || '…' }}</code>
             </div>
             <div class="picker-toolbar">
@@ -309,23 +328,28 @@
                   @click="loadPickerDirs(dir.path)"
                 >{{ dir.name }}/</button>
               </li>
-              <li v-if="!pickerLoading && !pickerDirs.length" class="picker-empty">no subfolders</li>
+              <li v-if="!pickerLoading && !pickerDirs.length" class="picker-empty">
+                No subfolders here — create one below, or use this folder as it is.
+              </li>
             </ul>
-            <div class="picker-new">
-              <input
-                v-model="newFolderName"
-                type="text"
-                class="form-input"
-                placeholder="new folder name"
-                :disabled="pickerLoading"
-                @keydown.enter.prevent="createPickerFolder"
-              />
-              <button
-                type="button"
-                class="btn-small"
-                :disabled="!newFolderName.trim() || pickerLoading"
-                @click="createPickerFolder"
-              >New folder</button>
+            <div class="picker-new-block">
+              <span class="picker-new-label">Or create a new folder here</span>
+              <div class="picker-new">
+                <input
+                  v-model="newFolderName"
+                  type="text"
+                  class="form-input"
+                  placeholder="e.g. ciaobot"
+                  :disabled="pickerLoading"
+                  @keydown.enter.prevent="createPickerFolder"
+                />
+                <button
+                  type="button"
+                  class="btn-small"
+                  :disabled="!newFolderName.trim() || pickerLoading"
+                  @click="createPickerFolder"
+                >Create folder</button>
+              </div>
             </div>
             <p v-if="pickerError" class="line line--error">
               <span class="prompt prompt--err">!</span>{{ pickerError }}
@@ -337,7 +361,7 @@
                 class="prompt-submit picker-select"
                 :disabled="!pickerPath || pickerLoading"
                 @click="selectPickerFolder"
-              >Select this folder</button>
+              >Use this folder{{ pickerFolderName ? `: ${pickerFolderName}` : '' }}</button>
             </div>
           </div>
         </div>
@@ -536,6 +560,15 @@ const pickerError = ref('')
 const pickerLoading = ref(false)
 const newFolderName = ref('')
 
+// Basename of the folder the picker is currently showing, so the confirm button
+// names what it will select instead of an anonymous "this folder".
+const pickerFolderName = computed(() => {
+  const path = pickerDisplayPath.value || pickerPath.value
+  const trimmed = path.replace(/\/+$/, '')
+  if (!trimmed || trimmed === '~') return ''
+  return trimmed.slice(trimmed.lastIndexOf('/') + 1)
+})
+
 function fetchListing(path?: string): Promise<DirListing> {
   const query = path ? `?path=${encodeURIComponent(path)}` : ''
   return api.get<DirListing>(`/api/setup/list-dirs${query}`)
@@ -600,7 +633,11 @@ async function createPickerFolder() {
       path: pickerPath.value,
       name,
     })
-    applyPickerListing(listing)
+    // The server returns the parent listing. Step into the folder that was just
+    // created so "Use this folder" means the new one — leaving the picker on the
+    // parent is how people end up selecting their home directory by accident.
+    const created = (listing.dirs || []).find((dir) => dir.name === name)
+    applyPickerListing(created ? await fetchListing(created.path) : listing)
     newFolderName.value = ''
   } catch (e) {
     pickerError.value = errorMessage(e, 'failed to create folder')
@@ -620,6 +657,12 @@ function closePicker() {
 }
 
 const providerInstruction = computed(() => {
+  const status = setupStatus.value?.providers?.[provider.value]
+  if (status?.auth === 'not_installed') {
+    return status.app_path
+      ? 'The desktop app is installed, but Ciaobot drives the CLI. Install it in your Terminal:'
+      : 'Not installed yet. Run this in your Terminal to install it:'
+  }
   if (provider.value === 'openrouter') {
     return 'Add this environment variable in your workspace .env:'
   }
@@ -627,6 +670,13 @@ const providerInstruction = computed(() => {
     return 'Install Codex if needed, then run `ciao auth codex` and refresh this check:'
   }
   return 'To authorize, run this command in your Terminal:'
+})
+
+const providerBadgeLabel = computed(() => {
+  const status = setupStatus.value?.providers?.[provider.value]
+  if (status?.ok) return '[ok] Ready'
+  if (status?.auth === 'not_installed') return '[!] Not Installed'
+  return '[!] Not Configured'
 })
 
 async function doLogin() {
@@ -1057,6 +1107,9 @@ onUnmounted(() => {
   font-size: var(--text-xs);
   line-height: 1.4;
 }
+.hint strong {
+  color: var(--fg2);
+}
 .hint--muted {
   opacity: 0.75;
 }
@@ -1158,6 +1211,26 @@ onUnmounted(() => {
   color: var(--fg2);
   font-size: var(--text-sm);
   font-weight: 600;
+}
+.picker-help {
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+.picker-help strong {
+  color: var(--fg2);
+}
+.picker-current-label,
+.picker-new-label {
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.picker-new-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 .picker-path {
   font-family: inherit;
@@ -1339,6 +1412,10 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 8px;
 }
+.install-link {
+  color: var(--accent);
+}
+
 .command-row code {
   font-family: monospace;
   font-size: var(--text-xs);

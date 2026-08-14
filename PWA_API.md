@@ -125,6 +125,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/integrations/gws/auth-url` | Generate Google OAuth authorization URL for a profile |
 | POST | `/api/integrations/gws/exchange` | Complete Google OAuth flow and exchange code for credentials |
 | POST | `/api/integrations/gws/disconnect` | Disconnect Google profile and clean up local credentials/client_secret |
+| POST | `/api/integrations/gws/profiles/add` | Register a Google account (`name`, optional `label`) so workspaces can link to it |
+| POST | `/api/integrations/gws/profiles/remove` | Forget a Google account: delete its credential directory and unlink workspaces |
 | POST | `/api/integrations/gws/relogin/start` | Start a server-managed OAuth re-login; returns the consent URL and keeps a loopback callback listener alive in-process |
 | GET | `/api/integrations/gws/relogin/status` | Poll a pending re-login (pending/completed/error/none) |
 | POST | `/api/integrations/gws/relogin/cancel` | Cancel a pending re-login and tear down its loopback listener |

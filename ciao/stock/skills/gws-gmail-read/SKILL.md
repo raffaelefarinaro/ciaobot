@@ -14,7 +14,7 @@ Read a message and extract its body or headers
 ## Usage
 
 ```bash
-scripts/gws-profile.sh <personal|work> gmail +read --id <ID>
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +read --id <ID>
 ```
 
 ## Flags
@@ -30,9 +30,9 @@ scripts/gws-profile.sh <personal|work> gmail +read --id <ID>
 ## Examples
 
 ```bash
-scripts/gws-profile.sh <personal|work> gmail +read --id 18f1a2b3c4d
-scripts/gws-profile.sh <personal|work> gmail +read --id 18f1a2b3c4d --headers
-scripts/gws-profile.sh <personal|work> gmail +read --id 18f1a2b3c4d --format json | jq '.body'
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +read --id 18f1a2b3c4d
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +read --id 18f1a2b3c4d --headers
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +read --id 18f1a2b3c4d --format json | jq '.body'
 ```
 
 ## Tips

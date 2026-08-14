@@ -517,12 +517,60 @@ def test_relogin_reports_google_error(tmp_path: Path) -> None:
 
 def test_relogin_requires_client_secret(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
+    # The account exists (the user added it); only its OAuth client is missing.
+    gws_auth.save_profile_registry(cfg, [{"name": "personal", "label": "Personal"}])
     manager = gws_auth.GwsReloginManager(cfg)
     with pytest.raises(ValueError, match="client_secret.json not found"):
         manager.start("personal")
 
 
 def test_relogin_rejects_unknown_profile(tmp_path: Path) -> None:
+    """Only accounts this install actually has can be re-logged-in."""
     manager = gws_auth.GwsReloginManager(_config(tmp_path))
     with pytest.raises(ValueError, match="Invalid profile"):
         manager.start("bogus")
+
+
+# ── Account registry ─────────────────────────────────────────────────────
+
+
+def test_known_profiles_is_empty_on_a_fresh_install(tmp_path: Path) -> None:
+    """No built-in personal/work pair: the user names their own accounts."""
+    assert gws_auth.known_profiles(_config(tmp_path)) == []
+
+
+def test_known_profiles_keeps_accounts_connected_before_the_registry(
+    tmp_path: Path,
+) -> None:
+    """Credential dirs written by an older release still list their accounts."""
+    cfg = _config(tmp_path)
+    (tmp_path / "secrets" / "gws").mkdir(parents=True)
+    (tmp_path / "secrets" / "gws" / "credentials.json").write_text("{}", encoding="utf-8")
+    _write_client_secret(tmp_path / "secrets" / "gws-acme")
+    # A directory with no credential material is not an account.
+    (tmp_path / "secrets" / "gws-empty").mkdir(parents=True)
+
+    assert gws_auth.known_profiles(cfg) == ["acme", "work"]
+
+
+def test_profile_registry_round_trip_keeps_registry_order_first(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    _write_client_secret(tmp_path / "secrets" / "gws-ondisk")
+    gws_auth.save_profile_registry(
+        cfg, [{"name": "Acme Corp", "label": "Acme"}, {"name": "side", "label": ""}]
+    )
+
+    assert [entry["name"] for entry in gws_auth.load_profile_registry(cfg)] == [
+        "acme-corp",
+        "side",
+    ]
+    assert gws_auth.known_profiles(cfg) == ["acme-corp", "side", "ondisk"]
+
+
+def test_slugify_profile_cannot_escape_the_secrets_directory(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    assert gws_auth.slugify_profile("../../etc") == "etc"
+    assert gws_auth.slugify_profile("   ") == ""
+    assert gws_auth.profile_config_dir(cfg, "../../etc") == (
+        tmp_path / "secrets" / "gws-etc"
+    )

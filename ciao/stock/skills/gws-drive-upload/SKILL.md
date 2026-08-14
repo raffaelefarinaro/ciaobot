@@ -14,7 +14,7 @@ Upload a file with automatic metadata
 ## Usage
 
 ```bash
-scripts/gws-profile.sh <personal|work> drive +upload <file>
+scripts/gws-profile.sh "$GWS_PROFILE" drive +upload <file>
 ```
 
 ## Flags
@@ -28,9 +28,9 @@ scripts/gws-profile.sh <personal|work> drive +upload <file>
 ## Examples
 
 ```bash
-scripts/gws-profile.sh <personal|work> drive +upload ./report.pdf
-scripts/gws-profile.sh <personal|work> drive +upload ./report.pdf --parent FOLDER_ID
-scripts/gws-profile.sh <personal|work> drive +upload ./data.csv --name 'Sales Data.csv'
+scripts/gws-profile.sh "$GWS_PROFILE" drive +upload ./report.pdf
+scripts/gws-profile.sh "$GWS_PROFILE" drive +upload ./report.pdf --parent FOLDER_ID
+scripts/gws-profile.sh "$GWS_PROFILE" drive +upload ./data.csv --name 'Sales Data.csv'
 ```
 
 ## Tips

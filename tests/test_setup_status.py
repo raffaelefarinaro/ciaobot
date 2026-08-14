@@ -24,6 +24,20 @@ from ciao.web.routes_api import (
 )
 
 
+@pytest.fixture(autouse=True)
+def claude_cli_present(monkeypatch):
+    """Pretend the ``claude`` CLI is installed.
+
+    Claude readiness now reports the install step first, so without this the
+    rest of the module's expectations would depend on whether the machine
+    running the tests happens to have Claude Code on PATH.
+    """
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_cli_path", lambda: "/usr/local/bin/claude"
+    )
+    monkeypatch.setattr("ciao.setup_status._cli_version", lambda binary: "2.0.0 (Claude Code)")
+
+
 def _config(tmp_path, env_extra: dict[str, str] | None = None) -> CiaoConfig:
     env = {
         "PWA_AUTH_TOKEN": "test-token",
@@ -205,6 +219,50 @@ def test_setup_status_ignores_empty_oauth_account(tmp_path) -> None:
     assert data["providers"]["claude"]["auth"] == "missing"
 
 
+def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(
+    tmp_path, monkeypatch
+) -> None:
+    """No CLI means no chats, so setup asks for the install, not for a login.
+
+    An API key alone does not make Claude usable: Ciaobot drives the ``claude``
+    binary through the Agent SDK.
+    """
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
+    config = _config(tmp_path)
+
+    claude = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})["providers"]["claude"]
+
+    assert claude["ok"] is False
+    assert claude["auth"] == "not_installed"
+    assert claude["install_url"].startswith("https://code.claude.com/docs/")
+    assert "install" in claude["command"]
+    assert "not installed" in claude["detail"]
+
+
+def test_setup_status_names_the_desktop_app_when_only_the_cli_is_missing(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "/Applications/Claude.app")
+    config = _config(tmp_path)
+
+    claude = setup_status(config, env={})["providers"]["claude"]
+
+    assert claude["auth"] == "not_installed"
+    assert claude["app_path"] == "/Applications/Claude.app"
+    assert "/Applications/Claude.app" in claude["detail"]
+
+
+def test_setup_status_reports_the_resolved_cli_path(tmp_path) -> None:
+    """The wizard shows which binary it would run, not just that one exists."""
+    config = _config(tmp_path)
+
+    claude = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})["providers"]["claude"]
+
+    assert claude["cli_path"] == "/usr/local/bin/claude"
+
+
 def test_setup_status_detects_ollama_cloud_key_or_local_daemon(tmp_path, monkeypatch) -> None:
     config = _config(tmp_path, {"CIAO_OLLAMA_API_KEY": "sk-ollama"})
     data = setup_status(config, env={"CIAO_OLLAMA_API_KEY": "sk-ollama"})
@@ -366,7 +424,9 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     registry = _json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
     assert [w["name"] for w in registry] == ["life"]
     assert registry[0]["vault_root"] == "memory-vault/life"
-    assert registry[0]["gws_profile"] == "life"
+    # Setup links no Google account: which accounts exist is the user's choice,
+    # made in Settings → Workspaces after onboarding.
+    assert registry[0]["gws_profile"] == ""
 
 
 def test_setup_finish_rejects_a_traversal_workspace_name(tmp_path) -> None:

@@ -42,6 +42,8 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/auth-url": "browser GWS integration auth url request",
     "/api/integrations/gws/exchange": "browser GWS integration oauth token exchange",
     "/api/integrations/gws/disconnect": "browser GWS integration disconnect/removal",
+    "/api/integrations/gws/profiles/add": "browser Settings action; registers a Google account for linking",
+    "/api/integrations/gws/profiles/remove": "browser Settings action; deletes a Google account and its local credentials",
     "/api/automation/backfill-insights": "browser Settings button to trigger insights backfill",
     "/api/automation/compare-apple-insights": "browser Settings button for an on-device insights comparison",
     "/api/node/connect": "browser Settings host/client connect; tunnels this node to a remote host",

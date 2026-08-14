@@ -56,6 +56,7 @@ def _write_client_secret(config) -> None:
 
 def test_relogin_start_requires_client_secret(tmp_path: Path) -> None:
     client, _config = _client(tmp_path)
+    gws_auth.save_profile_registry(_config, [{"name": "personal", "label": "Personal"}])
     resp = client.post("/api/integrations/gws/relogin/start", json={"profile": "personal"})
     assert resp.status_code == 400
     assert "client_secret" in resp.json()["error"]

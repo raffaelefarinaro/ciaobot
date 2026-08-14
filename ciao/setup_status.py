@@ -128,6 +128,9 @@ def _provider(
     protocol: str = "",
     skills: list[str] | None = None,
     mcps: list[str] | None = None,
+    install_url: str = "",
+    app_path: str = "",
+    cli_path: str = "",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -147,6 +150,12 @@ def _provider(
         row["skills"] = skills
     if mcps is not None:
         row["mcps"] = mcps
+    if install_url:
+        row["install_url"] = install_url
+    if app_path:
+        row["app_path"] = app_path
+    if cli_path:
+        row["cli_path"] = cli_path
     return row
 
 
@@ -188,7 +197,7 @@ def discover_claude_system_skills() -> list[str]:
 
 
 def _discover_claude_system_skills_uncached() -> list[str]:
-    binary = shutil.which("claude") or ""
+    binary = claude_cli_path()
     if binary:
         try:
             res = subprocess.run(
@@ -345,7 +354,7 @@ def _discover_claude_mcps_uncached(
         workspace_root=workspace_root,
         config_path=config_path,
     )
-    binary = shutil.which("claude") or ""
+    binary = claude_cli_path()
     if not binary:
         return connected
     try:
@@ -407,6 +416,76 @@ def opencode_status_probe(
     return opencode_login_status(env)
 
 
+# Where the wizard sends someone who has no Claude Code at all. Kept as a
+# constant so the PWA and the CLI point at the same page.
+CLAUDE_INSTALL_DOCS_URL = (
+    "https://code.claude.com/docs/en/quickstart#step-1-install-claude-code"
+)
+
+
+def claude_install_command() -> str:
+    """The documented one-line installer for this platform."""
+    if sys.platform == "win32":
+        return "irm https://claude.ai/install.ps1 | iex"
+    return "curl -fsSL https://claude.ai/install.sh | bash"
+
+
+def claude_app_path() -> str:
+    """Path to an installed Claude desktop app, or "".
+
+    The desktop app ships Claude Code too, but Ciaobot drives the ``claude``
+    CLI through the Agent SDK, so an app-only install still needs the CLI.
+    Detecting it lets setup say "you have the app, add the CLI" instead of the
+    blunter "not installed".
+    """
+    home = Path.home()
+    candidates: list[Path] = []
+    if sys.platform == "darwin":
+        candidates = [
+            Path("/Applications/Claude.app"),
+            home / "Applications" / "Claude.app",
+            Path("/Applications/Claude Code.app"),
+            home / "Applications" / "Claude Code.app",
+        ]
+    elif sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            candidates = [
+                Path(local) / "AnthropicClaude",
+                Path(local) / "Programs" / "Claude",
+            ]
+    else:
+        candidates = [Path("/opt/Claude"), Path("/usr/share/claude")]
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return str(candidate)
+        except OSError:
+            continue
+    return ""
+
+
+def claude_cli_path() -> str:
+    """Absolute path to the ``claude`` CLI Ciaobot would run, or "".
+
+    Prefers the binary bundled with the desktop build, then the user's own
+    install. ``resolve_tool`` (not ``shutil.which``) because the engine often
+    runs under launchd with a stripped PATH that omits ``~/.local/bin`` and
+    Homebrew, where the documented installers put ``claude``.
+    """
+    from ciao.providers.claude import get_bundled_claude_path
+    from ciao.tool_path import resolve_tool
+
+    bundled = get_bundled_claude_path()
+    if bundled:
+        return str(bundled)
+    try:
+        resolved = resolve_tool("claude")
+    except Exception:
+        resolved = None
+    return resolved or shutil.which("claude") or ""
+
+
 def _claude_status(
     env: Mapping[str, str],
     credentials_path: Path,
@@ -414,12 +493,32 @@ def _claude_status(
     *,
     workspace_root: Path | None = None,
 ) -> dict[str, Any]:
-    from ciao.providers.claude import get_bundled_claude_path
-
-    binary = get_bundled_claude_path() or shutil.which("claude") or ""
+    binary = claude_cli_path()
     version = _cli_version(binary) if binary else "not installed"
     claude_skills = discover_claude_system_skills()
     claude_mcps = discover_claude_mcps(workspace_root, config_path=config_path)
+    if not binary:
+        # No CLI means no chats, whatever credentials exist: report the install
+        # step rather than an auth command the user cannot run yet.
+        app_path = claude_app_path()
+        detail = (
+            f"The Claude desktop app is installed ({app_path}), but Ciaobot runs "
+            "chats through the claude CLI, which is not on PATH."
+            if app_path
+            else "Claude Code is not installed on this machine."
+        )
+        return _provider(
+            name="claude",
+            ok=False,
+            auth="not_installed",
+            command=claude_install_command(),
+            detail=detail,
+            version=version,
+            skills=claude_skills,
+            mcps=claude_mcps,
+            install_url=CLAUDE_INSTALL_DOCS_URL,
+            app_path=app_path,
+        )
     if env.get("ANTHROPIC_API_KEY", "").strip():
         return _provider(
             name="claude",
@@ -432,6 +531,7 @@ def _claude_status(
             protocol="Agent SDK ready",
             skills=claude_skills,
             mcps=claude_mcps,
+            cli_path=binary,
         )
     if credentials_path.is_file():
         return _provider(
@@ -445,6 +545,7 @@ def _claude_status(
             protocol="Agent SDK ready",
             skills=claude_skills,
             mcps=claude_mcps,
+            cli_path=binary,
         )
     account = _claude_oauth_account(config_path)
     if account:
@@ -459,6 +560,7 @@ def _claude_status(
             protocol="Agent SDK ready",
             skills=claude_skills,
             mcps=claude_mcps,
+            cli_path=binary,
         )
     return _provider(
         name="claude",
@@ -469,6 +571,7 @@ def _claude_status(
         version=version,
         skills=claude_skills,
         mcps=claude_mcps,
+        cli_path=binary,
     )
 
 

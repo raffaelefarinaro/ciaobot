@@ -14,7 +14,7 @@ Append text to a document
 ## Usage
 
 ```bash
-scripts/gws-profile.sh <personal|work> docs +write --document <ID> --text <TEXT>
+scripts/gws-profile.sh "$GWS_PROFILE" docs +write --document <ID> --text <TEXT>
 ```
 
 ## Flags
@@ -27,7 +27,7 @@ scripts/gws-profile.sh <personal|work> docs +write --document <ID> --text <TEXT>
 ## Examples
 
 ```bash
-scripts/gws-profile.sh <personal|work> docs +write --document DOC_ID --text 'Hello, world!'
+scripts/gws-profile.sh "$GWS_PROFILE" docs +write --document DOC_ID --text 'Hello, world!'
 ```
 
 ## Tips

@@ -14,7 +14,7 @@ Reply-all to a message (handles threading automatically)
 ## Usage
 
 ```bash
-scripts/gws-profile.sh <personal|work> gmail +reply-all --message-id <ID> --body <TEXT>
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id <ID> --body <TEXT>
 ```
 
 ## Flags
@@ -36,12 +36,12 @@ scripts/gws-profile.sh <personal|work> gmail +reply-all --message-id <ID> --body
 ## Examples
 
 ```bash
-scripts/gws-profile.sh <personal|work> gmail +reply-all --message-id 18f1a2b3c4d --body 'Sounds good to me!'
-scripts/gws-profile.sh <personal|work> gmail +reply-all --message-id 18f1a2b3c4d --body 'Updated' --remove bob@example.com
-scripts/gws-profile.sh <personal|work> gmail +reply-all --message-id 18f1a2b3c4d --body 'Adding Eve' --cc eve@example.com
-scripts/gws-profile.sh <personal|work> gmail +reply-all --message-id 18f1a2b3c4d --body '<i>Noted</i>' --html
-scripts/gws-profile.sh <personal|work> gmail +reply-all --message-id 18f1a2b3c4d --body 'Notes attached' -a notes.pdf
-scripts/gws-profile.sh <personal|work> gmail +reply-all --message-id 18f1a2b3c4d --body 'Draft reply' --draft
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Sounds good to me!'
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Updated' --remove bob@example.com
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Adding Eve' --cc eve@example.com
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body '<i>Noted</i>' --html
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Notes attached' -a notes.pdf
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Draft reply' --draft
 ```
 
 ## Tips

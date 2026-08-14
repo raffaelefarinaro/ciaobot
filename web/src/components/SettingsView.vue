@@ -796,6 +796,16 @@
                       <span v-if="conn.account">{{ conn.account }}</span>
                       <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
                     </p>
+                    <p v-if="conn.auth === 'not_installed'" class="hint hint--compact">
+                      {{ conn.detail }}
+                      Install it with <code>{{ conn.command }}</code>
+                      <a
+                        v-if="conn.install_url"
+                        :href="conn.install_url"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >installation guide ↗</a>
+                    </p>
                   </div>
                   <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
                     {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
@@ -1092,13 +1102,13 @@
                       <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
                       <div class="field-info-panel">
                         <p>
-                          Selects the Google Workspace profile used by this workspace. Manage profiles and credentials below.
+                          Selects which Google account this workspace uses. Accounts are added and connected in the Google Workspace card below.
                         </p>
                       </div>
                     </details>
                   </div>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
-                    <option value="">Default ({{ defaultGwsProfileName }})</option>
+                    <option value="">{{ gwsUnlinkedOptionLabel }}</option>
                     <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
                       {{ profile.label }} ({{ profile.email || profile.name }})
                     </option>
@@ -1214,13 +1224,13 @@
                         <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
                         <div class="field-info-panel">
                           <p>
-                            Selects the Google Workspace profile used by this workspace. Manage profiles and credentials below.
+                            Selects which Google account this workspace uses. Accounts are added and connected in the Google Workspace card below.
                           </p>
                         </div>
                       </details>
                     </div>
                     <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
-                      <option value="">Default ({{ defaultGwsProfileName }})</option>
+                      <option value="">{{ gwsUnlinkedOptionLabel }}</option>
                       <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
                         {{ profile.label }} ({{ profile.email || profile.name }})
                       </option>
@@ -1277,12 +1287,14 @@
                         Stock <code>gws-*</code> skills ship with the app once <code>gws</code> is installed and authenticated.
                       </p>
                       <p>
-                        Use separate <strong>personal</strong> and <strong>work</strong> profiles so a personal chat never inherits work Drive or calendar access.
-                        Each workspace picks its profile.
+                        Add one account per Google login you use, and keep them separate so a
+                        personal chat never inherits work Drive or calendar access. Each
+                        workspace picks which account it uses.
                       </p>
-                      <p><strong>One-time setup per profile</strong></p>
+                      <p><strong>One-time setup per account</strong></p>
                       <ol class="field-info-steps">
                         <li>Install <code>gws</code> (button below or <code>npm install -g @googleworkspace/cli</code>).</li>
+                        <li>Add the account below and give it a short name.</li>
                         <li>
                           In
                           <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console &rarr; Credentials</a>,
@@ -1299,8 +1311,10 @@
                   </details>
                 </div>
                 <p class="hint">
-                  Connect Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through separate local <code>gws</code> profiles.
-                  Workspaces choose which profile to use above.
+                  Add one account per Google login you use, then link each workspace to the
+                  account it should use (the <strong>Google profile</strong> field above).
+                  Accounts are local <code>gws</code> profiles: Gmail, Calendar, Drive, Docs,
+                  Sheets, Slides, and Tasks.
                 </p>
               </div>
               <span
@@ -1334,6 +1348,43 @@
                 </div>
                 <p v-if="gwsInstallResult" class="hint hint--compact gws-install-result">{{ gwsInstallResult }}</p>
               </div>
+              <div class="gws-account-add">
+                <span class="ws-label">Add a Google account</span>
+                <div class="gws-account-add-row">
+                  <input
+                    class="routine-input"
+                    v-model="newGwsProfileName"
+                    placeholder="short name (e.g. personal, acme)"
+                    :disabled="gwsProfileAdding"
+                    @keyup.enter="addGwsProfile"
+                  />
+                  <input
+                    class="routine-input"
+                    v-model="newGwsProfileLabel"
+                    placeholder="display name (optional)"
+                    :disabled="gwsProfileAdding"
+                    @keyup.enter="addGwsProfile"
+                  />
+                  <button
+                    class="btn-primary btn-small"
+                    :disabled="!newGwsProfileName.trim() || gwsProfileAdding"
+                    @click="addGwsProfile"
+                  >
+                    {{ gwsProfileAdding ? 'Adding…' : 'Add account' }}
+                  </button>
+                </div>
+                <p class="hint hint--compact">
+                  The short name identifies the account in chats and in
+                  <code>secrets/gws-&lt;name&gt;/</code>. You connect the Google login in the
+                  card that appears.
+                </p>
+                <p v-if="gwsProfileActionError" class="hint hint--warn">{{ gwsProfileActionError }}</p>
+              </div>
+
+              <p v-if="!gwsIntegration.profiles?.length" class="hint hint--compact">
+                No Google accounts yet. Workspaces run without Google access until you add one.
+              </p>
+
               <div class="gws-profile-list">
                 <div
                   v-for="profile in gwsIntegration.profiles"
@@ -1346,9 +1397,16 @@
                       <p v-if="profile.email" class="gws-profile-email">{{ profile.email }}</p>
                       <p class="hint hint--compact"><code>{{ profile.name }}</code> profile</p>
                     </div>
-                    <span class="badge" :class="gwsProfileBadgeClass(profile)">
-                      {{ gwsProfileStatus(profile) }}
-                    </span>
+                    <div class="gws-profile-header-actions">
+                      <span class="badge" :class="gwsProfileBadgeClass(profile)">
+                        {{ gwsProfileStatus(profile) }}
+                      </span>
+                      <button
+                        class="btn-small btn-danger"
+                        :disabled="gwsSavingProfile === profile.name"
+                        @click="removeGwsProfile(profile)"
+                      >Remove account</button>
+                    </div>
                   </div>
                   <p class="gws-profile-purpose">{{ profile.purpose }}</p>
                   <div v-if="profile.examples.length" class="gws-example-row">
@@ -3358,18 +3416,23 @@ function gwsProfileBadgeClass(profile: GwsProfile): string {
   return 'badge--error'
 }
 
-const defaultGwsProfileName = computed(() => gwsIntegration.value?.default_profile || 'personal')
+const defaultGwsProfileName = computed(() => gwsIntegration.value?.default_profile || '')
 
-const gwsProfileOptions = computed(() => {
-  const profiles = gwsIntegration.value?.profiles || []
-  if (profiles.length) {
-    return profiles.map((profile) => ({ name: profile.name, label: profile.label, email: profile.email }))
-  }
-  return [
-    { name: 'personal', label: 'Personal Google account', email: '' },
-    { name: 'work', label: 'Work Google account', email: '' },
-  ]
-})
+// Only the accounts this install actually has. No built-in personal/work pair:
+// a fresh install has none until the user adds one below.
+const gwsProfileOptions = computed(() =>
+  (gwsIntegration.value?.profiles || []).map((profile) => ({
+    name: profile.name,
+    label: profile.label,
+    email: profile.email,
+  })),
+)
+
+const gwsUnlinkedOptionLabel = computed(() =>
+  defaultGwsProfileName.value
+    ? `Default (${defaultGwsProfileName.value})`
+    : 'No Google account',
+)
 
 function workspaceCustomGwsProfile(profile: string): boolean {
   const name = profile.trim()
@@ -3384,6 +3447,55 @@ async function fetchGwsIntegration() {
     gwsIntegrationError.value = `Failed to load Google Workspace integration: ${errorMessage(e)}`
   } finally {
     gwsIntegrationLoaded.value = true
+  }
+}
+
+const newGwsProfileName = ref('')
+const newGwsProfileLabel = ref('')
+const gwsProfileAdding = ref(false)
+const gwsProfileActionError = ref('')
+
+async function addGwsProfile() {
+  const name = newGwsProfileName.value.trim()
+  if (!name || gwsProfileAdding.value) return
+  gwsProfileAdding.value = true
+  gwsProfileActionError.value = ''
+  try {
+    gwsIntegration.value = await api.post<GwsIntegrationSettings>(
+      '/api/integrations/gws/profiles/add',
+      { name, label: newGwsProfileLabel.value.trim() },
+    )
+    newGwsProfileName.value = ''
+    newGwsProfileLabel.value = ''
+  } catch (e) {
+    gwsProfileActionError.value = errorMessage(e, 'Failed to add the account')
+  } finally {
+    gwsProfileAdding.value = false
+  }
+}
+
+async function removeGwsProfile(profile: GwsProfile) {
+  const linked = profile.workspaces.length
+    ? ` ${profile.workspaces.join(', ')} will lose their Google access until you link another account.`
+    : ''
+  if (!await askConfirm(
+    `Remove ${profile.label} and delete its stored Google credentials from this machine?${linked}`,
+    { title: 'Remove Google account?', confirmLabel: 'Remove account', destructive: true },
+  )) {
+    return
+  }
+  gwsSavingProfile.value = profile.name
+  gwsProfileActionError.value = ''
+  try {
+    gwsIntegration.value = await api.post<GwsIntegrationSettings>(
+      '/api/integrations/gws/profiles/remove',
+      { profile: profile.name },
+    )
+    await fetchWorkspacesList()
+  } catch (e) {
+    gwsProfileActionError.value = errorMessage(e, 'Failed to remove the account')
+  } finally {
+    gwsSavingProfile.value = null
   }
 }
 
@@ -5993,6 +6105,30 @@ a.btn-secondary {
   gap: var(--space-3);
 }
 .gws-profile-heading {
+  min-width: 0;
+}
+.gws-profile-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+.gws-account-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: var(--space-3);
+}
+.gws-account-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+.gws-account-add-row .routine-input {
+  flex: 1 1 180px;
   min-width: 0;
 }
 .gws-profile-title {

@@ -104,6 +104,101 @@ def scopes_for_profile(profile: str) -> str:
     return _WORK_SCOPES if profile == "work" else _PERSONAL_SCOPES
 
 
+# ── Account registry ─────────────────────────────────────────────────────
+#
+# Which Google accounts exist is the user's choice, not ours. ``personal`` and
+# ``work`` are only the two names whose credential directories predate the
+# registry, so they keep their legacy paths and labels; a fresh install starts
+# with no accounts at all and the user adds the ones they actually have.
+
+PROFILE_REGISTRY_NAME = "gws_profiles.json"
+
+# Directory name → profile name for the two pre-registry layouts.
+_LEGACY_DIR_PROFILES = {"gws": "work", "gws-personal": "personal"}
+
+_PROFILE_MATERIAL = ("credentials.json", "credentials.enc", "client_secret.json")
+
+
+def slugify_profile(name: str) -> str:
+    """Normalize a user-supplied account name into a profile slug."""
+    return re.sub(r"[^a-z0-9_-]+", "-", str(name).strip().lower()).strip("-")
+
+
+def profile_registry_path(config) -> Path:
+    return Path(config.state_path).parent / PROFILE_REGISTRY_NAME
+
+
+def load_profile_registry(config) -> list[dict[str, str]]:
+    """Accounts the user has added, in display order. Missing file → empty."""
+    try:
+        raw = json.loads(profile_registry_path(config).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = slugify_profile(item.get("name", ""))
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        entries.append({"name": name, "label": str(item.get("label", "")).strip()})
+    return entries
+
+
+def save_profile_registry(config, entries: Sequence[dict[str, str]]) -> None:
+    """Atomically persist the account registry."""
+    path = profile_registry_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = [
+        {"name": slugify_profile(entry.get("name", "")), "label": str(entry.get("label", "")).strip()}
+        for entry in entries
+        if slugify_profile(entry.get("name", ""))
+    ]
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def discover_profiles_on_disk(config) -> list[str]:
+    """Profiles that already have credential material under ``secrets/``.
+
+    This is what keeps an install that predates the registry whole: whatever
+    ``personal``/``work`` (or custom) account was connected before stays
+    listed without the user re-adding it.
+    """
+    secrets_dir = Path(config.workspace_root).resolve() / "secrets"
+    try:
+        entries = [p for p in secrets_dir.iterdir() if p.is_dir()]
+    except OSError:
+        return []
+    found: list[str] = []
+    for entry in entries:
+        if entry.name in _LEGACY_DIR_PROFILES:
+            profile = _LEGACY_DIR_PROFILES[entry.name]
+        elif entry.name.startswith("gws-"):
+            profile = entry.name[len("gws-") :]
+        else:
+            continue
+        if not profile or profile in found:
+            continue
+        if any((entry / name).is_file() for name in _PROFILE_MATERIAL):
+            found.append(profile)
+    return sorted(found)
+
+
+def known_profiles(config) -> list[str]:
+    """Every Google account this install should show, registry order first."""
+    names = [entry["name"] for entry in load_profile_registry(config)]
+    for profile in discover_profiles_on_disk(config):
+        if profile not in names:
+            names.append(profile)
+    return names
+
+
 def load_client_secret(config_dir: Path) -> dict[str, Any]:
     """Return the ``installed``/``web`` section of a profile's client secret.
 
@@ -518,7 +613,7 @@ class GwsHealthMonitor:
 
     def _configured_profiles(self) -> list[str]:
         out: list[str] = []
-        for profile in BUILTIN_PROFILES:
+        for profile in known_profiles(self._config):
             config_dir = profile_config_dir(self._config, profile)
             if config_dir is None:
                 continue
@@ -690,7 +785,7 @@ class GwsReloginManager:
         Raises :class:`ValueError` (secret-free) if the profile is unknown or
         has no ``client_secret.json``.
         """
-        if profile not in BUILTIN_PROFILES:
+        if profile not in known_profiles(self._config):
             raise ValueError(f"Invalid profile: {profile}")
         config_dir = profile_config_dir(self._config, profile)
         if config_dir is None:

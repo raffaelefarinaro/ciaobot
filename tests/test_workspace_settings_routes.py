@@ -16,6 +16,8 @@ from ciao.web.routes_api import (
     gws_auth_url,
     gws_exchange_code,
     gws_disconnect,
+    gws_add_profile,
+    gws_remove_profile,
     list_workspaces,
     provider_config_settings,
     upsert_workspace_setting,
@@ -87,6 +89,16 @@ def _client(tmp_path: Path, env_extra: dict[str, str] | None = None):
             Route(
                 "/api/integrations/gws/disconnect",
                 gws_disconnect,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/integrations/gws/profiles/add",
+                gws_add_profile,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/integrations/gws/profiles/remove",
+                gws_remove_profile,
                 methods=["POST"],
             ),
         ]
@@ -460,9 +472,88 @@ def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch)
     assert profiles["personal"]["workspaces"] == ["personal"]
     assert profiles["personal"]["setup_command"] == "scripts/gws-profile.sh personal auth login --full"
 
-    assert profiles["work"]["configured"] is False
-    assert profiles["work"]["workspaces"] == ["work"]
     assert str(personal_dir) in profiles["personal"]["config_dir"]
+    # Accounts are the user's: only the connected one is listed. "work" has no
+    # credentials on disk and was never added, so it is not invented here.
+    assert "work" not in profiles
+
+
+def test_gws_integration_starts_with_no_google_accounts(tmp_path, monkeypatch):
+    """A fresh install shows an empty account list, not a personal/work pair."""
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    client, _config, _pcm = _client(tmp_path)
+
+    data = client.get("/api/integrations/gws").json()
+
+    assert data["profiles"] == []
+    assert data["default_profile"] == ""
+
+
+def test_gws_profile_add_and_remove_round_trip(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    client, config, _pcm = _client(tmp_path)
+
+    added = client.post(
+        "/api/integrations/gws/profiles/add",
+        json={"name": "Acme Corp", "label": "Acme (work)"},
+    )
+    assert added.status_code == 200
+    profiles = {profile["name"]: profile for profile in added.json()["profiles"]}
+    assert list(profiles) == ["acme-corp"]
+    assert profiles["acme-corp"]["label"] == "Acme (work)"
+    assert profiles["acme-corp"]["configured"] is False
+    assert (
+        profiles["acme-corp"]["setup_command"]
+        == "scripts/gws-profile.sh acme-corp auth login --full"
+    )
+
+    # Adding the same account twice is a user error, not a silent duplicate.
+    duplicate = client.post("/api/integrations/gws/profiles/add", json={"name": "acme-corp"})
+    assert duplicate.status_code == 400
+
+    # Credentials written by the OAuth flow are deleted along with the account.
+    config_dir = tmp_path / "secrets" / "gws-acme-corp"
+    config_dir.mkdir(parents=True)
+    (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+
+    removed = client.post(
+        "/api/integrations/gws/profiles/remove", json={"profile": "acme-corp"}
+    )
+    assert removed.status_code == 200
+    assert removed.json()["profiles"] == []
+    assert not config_dir.exists()
+
+
+def test_gws_profile_remove_unlinks_workspaces(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    client, config, _pcm = _client(tmp_path)
+    client.post("/api/integrations/gws/profiles/add", json={"name": "acme"})
+    workspace = next(iter(config.workspaces.values()))
+    workspace.gws_profile = "acme"
+
+    body = client.post(
+        "/api/integrations/gws/profiles/remove", json={"profile": "acme"}
+    ).json()
+
+    assert body["profiles"] == []
+    assert config.workspaces[workspace.name].gws_profile == ""
+
+
+def test_gws_profile_add_rejects_an_unusable_name(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    client, _config, _pcm = _client(tmp_path)
+
+    resp = client.post("/api/integrations/gws/profiles/add", json={"name": "///"})
+
+    assert resp.status_code == 400
 
 
 def test_gws_install_when_already_present_is_noop(tmp_path, monkeypatch):
@@ -803,6 +894,7 @@ def test_gws_profile_payload_never_shows_a_raw_scope_url(tmp_path):
 
 def test_gws_profile_payload_falls_back_to_static_meta_when_no_scopes(tmp_path):
     client, config, _ = _client(tmp_path)
+    client.post("/api/integrations/gws/profiles/add", json={"name": "personal"})
     # No credentials.json on disk -> configured is false, but the static
     # purpose should still be sent so the user sees something before connecting.
     resp = client.get("/api/integrations/gws")
