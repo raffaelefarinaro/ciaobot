@@ -242,3 +242,58 @@ def test_apply_release_files_prepends_existing_changelog(tmp_path: Path) -> None
     changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
     assert changelog.startswith("# Changelog\n\n## v0.3.0 - 2026-07-05\n\n- New\n\n")
     assert "## v0.2.0 - 2026-07-01" in changelog
+
+
+def test_release_gate_blocks_on_types_like_ci_does(monkeypatch, tmp_path: Path) -> None:
+    """CI's `test` job blocks on `mypy ciao` and this suite did not, so a type
+    error passed every local gate and first surfaced as a red release PR - after
+    the branch was cut and pushed."""
+    ran: list[list[str]] = []
+    monkeypatch.setattr(release_mod, "_run", lambda cmd, cwd=None: ran.append(list(cmd)))
+
+    labels = release_mod._run_checks(tmp_path, skip_frontend=True)
+
+    assert ["mypy", "ciao"] == ran[0][-2:], "type check must run, and run first"
+    assert any("pytest" in c for c in ran)
+    assert "mypy ciao" in labels
+    # CI runs pip-audit, eslint and npm audit with `|| true`, so gating on them
+    # here would make a release stricter than the thing it predicts.
+    flat = " ".join(" ".join(c) for c in ran)
+    assert "pip-audit" not in flat
+    assert "audit" not in flat
+
+
+def test_built_pwa_check_requires_the_shell(tmp_path: Path) -> None:
+    static = tmp_path / "ciao" / "web" / "static"
+    static.mkdir(parents=True)
+
+    with pytest.raises(ReleaseError, match="is missing"):
+        release_mod._check_built_pwa(tmp_path)
+
+
+def test_built_pwa_check_rejects_a_shell_pointing_at_absent_bundles(
+    tmp_path: Path,
+) -> None:
+    """What a stale build looks like: the shell survives a branch switch, the
+    hashed bundle it names does not."""
+    static = tmp_path / "ciao" / "web" / "static"
+    static.mkdir(parents=True)
+    (static / "index.html").write_text(
+        '<script type="module" src="/assets/index-GONE.js"></script>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReleaseError, match="not on disk"):
+        release_mod._check_built_pwa(tmp_path)
+
+
+def test_built_pwa_check_accepts_a_coherent_build(tmp_path: Path) -> None:
+    static = tmp_path / "ciao" / "web" / "static"
+    (static / "assets").mkdir(parents=True)
+    (static / "assets" / "index-OK.js").write_text("//", encoding="utf-8")
+    (static / "index.html").write_text(
+        '<script type="module" src="/assets/index-OK.js"></script>',
+        encoding="utf-8",
+    )
+
+    release_mod._check_built_pwa(tmp_path)
