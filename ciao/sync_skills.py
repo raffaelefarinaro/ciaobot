@@ -716,11 +716,35 @@ def _without_managed_codex_mcp_config(text: str) -> tuple[str, bool, set[str]]:
     return (text[:start].rstrip() + "\n" + text[end:].lstrip()).strip() + "\n", False, names
 
 
-def _env_placeholder(value: object) -> str:
-    """Return a `${NAME}` reference, never a literal credential."""
+def _env_var_name(value: object) -> str:
+    """The variable name behind a `${NAME}` reference, else "".
+
+    A literal value yields "" so callers drop it rather than copy a credential
+    into a tracked config file.
+    """
     raw = str(value or "").strip()
     match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", raw)
-    return f"${{{match.group(1)}}}" if match else ""
+    return match.group(1) if match else ""
+
+
+def _env_placeholder(value: object) -> str:
+    """Return a `${NAME}` reference, never a literal credential."""
+    name = _env_var_name(value)
+    return f"${{{name}}}" if name else ""
+
+
+def _opencode_env_placeholder(value: object) -> str:
+    """Return an opencode `{env:NAME}` reference, never a literal credential.
+
+    opencode does not understand `${NAME}`. Its config interpolation is
+    `{env:VAR}` (plus `{file:path}`), and anything else is passed through
+    verbatim — a projected `${NOTION_TOKEN}` reached the Notion MCP server as
+    the literal bearer token and every call came back 401. The remote branch of
+    `_opencode_mcp_entry` already emitted the right shape; only local servers,
+    which carry credentials in `environment`, were wrong.
+    """
+    name = _env_var_name(value)
+    return f"{{env:{name}}}" if name else ""
 
 
 def _bearer_env_name(headers: object) -> str:
@@ -1094,9 +1118,9 @@ def _opencode_mcp_entry(meta: dict) -> dict | None:
     env = meta.get("env")
     if isinstance(env, dict):
         environment = {
-            str(key): _env_placeholder(value)
+            str(key): _opencode_env_placeholder(value)
             for key, value in sorted(env.items(), key=lambda item: str(item[0]))
-            if _env_placeholder(value)
+            if _opencode_env_placeholder(value)
         }
         if environment:
             entry["environment"] = environment

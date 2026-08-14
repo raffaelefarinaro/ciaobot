@@ -193,6 +193,89 @@ def missing_required_paths(spec: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(REQUIRED_PATHS - available))
 
 
+_ENV_PLACEHOLDER_RE = re.compile(r"\{env:([^}]+)\}")
+_SHELL_PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _config_strings(node: object) -> list[str]:
+    """Every string in a config tree, for placeholder scanning."""
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, Mapping):
+        return [s for value in node.values() for s in _config_strings(value)]
+    if isinstance(node, (list, tuple)):
+        return [s for value in node for s in _config_strings(value)]
+    return []
+
+
+def unresolved_placeholders(config: object) -> tuple[str, ...]:
+    """Every ``{env:VAR}`` or ``${VAR}`` placeholder in a config tree.
+
+    Used for configs registered through the API, where opencode performs no
+    interpolation at all, so any placeholder is a bug regardless of the
+    environment.
+    """
+    found: list[str] = []
+    for text in _config_strings(config):
+        found.extend(f"{{env:{name}}}" for name in _ENV_PLACEHOLDER_RE.findall(text))
+        found.extend(f"${{{name}}}" for name in _SHELL_PLACEHOLDER_RE.findall(text))
+    return tuple(dict.fromkeys(found))
+
+
+def config_placeholder_problems(
+    config: object, env: Mapping[str, str]
+) -> tuple[str, ...]:
+    """Placeholders in an ``opencode.json`` that will not resolve under ``env``.
+
+    opencode substitutes ``{env:VAR}`` and ``{file:path}`` when it reads a
+    config *file*, falling back to an empty string when ``VAR`` is absent from
+    the server process environment. A missing token therefore reaches the MCP
+    server as ``""`` and only surfaces much later as a 401 on the first tool
+    call, which is near-undebuggable from the chat. ``${VAR}`` is not opencode
+    syntax and is passed through verbatim, which fails the same way.
+
+    Both are reported here so the spawn logs say what is wrong while the
+    process is starting, rather than leaving a silent empty credential.
+    """
+    problems: list[str] = []
+    for text in _config_strings(config):
+        for name in _SHELL_PLACEHOLDER_RE.findall(text):
+            problems.append(
+                f"opencode.json uses ${{{name}}}, which opencode does not "
+                f"interpolate; use {{env:{name}}} instead"
+            )
+        for name in _ENV_PLACEHOLDER_RE.findall(text):
+            if not env.get(name.strip()):
+                problems.append(
+                    f"opencode.json references {{env:{name}}} but {name} is not "
+                    "set in the environment; it will resolve to an empty string"
+                )
+    return tuple(dict.fromkeys(problems))
+
+
+def workspace_config_placeholder_problems(
+    workspace_root: Path, env: Mapping[str, str]
+) -> tuple[str, ...]:
+    """Placeholder problems in the workspace's own ``opencode.json``.
+
+    opencode discovers config by walking up from its cwd, which is always the
+    workspace root, so this is the file the server will actually load.
+    """
+    for name in ("opencode.json", "opencode.jsonc"):
+        path = workspace_root / name
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            config = json.loads(raw)
+        except ValueError:
+            # jsonc comments, or a half-written file; not ours to diagnose.
+            continue
+        return config_placeholder_problems(config, env)
+    return ()
+
+
 def _sanitize_error(message: object) -> str:
     """First line only: opencode error payloads carry a bundler stack trace."""
     text = str(message or "").strip()
@@ -430,6 +513,12 @@ class OpencodeProvider(BaseSDKProvider):
             env["CIAO_MCP_SESSION_TOKEN"] = request.mcp_token
         self._mcp_token = request.mcp_token
 
+        # Say it now, while the environment we are about to hand over is in
+        # hand: an unresolved placeholder becomes an empty credential and only
+        # shows up as a 401 from some MCP server mid-turn.
+        for problem in workspace_config_placeholder_problems(self.workspace_root, env):
+            logger.warning("opencode: %s", problem)
+
         self._process = await asyncio.create_subprocess_exec(
             binary, "serve", "--port", str(port), "--hostname", "127.0.0.1",
             cwd=str(self.workspace_root),
@@ -518,6 +607,16 @@ class OpencodeProvider(BaseSDKProvider):
             "enabled": True,
             "headers": {"Authorization": f"Bearer {request.mcp_token}"},
         }
+        # Nothing here is interpolated (see above), so a placeholder that slipped
+        # in would be sent verbatim and rejected as a bad token. Fail with the
+        # cause rather than a downstream 401.
+        placeholders = unresolved_placeholders(config)
+        if placeholders:
+            raise RuntimeError(
+                "refusing to register the Ciaobot MCP server with unresolved "
+                f"placeholders {', '.join(placeholders)}: opencode does not "
+                "interpolate configs registered over the API"
+            )
         try:
             response = await client.post(
                 "/mcp", json={"name": MCP_SERVER_NAME, "config": config}
