@@ -232,9 +232,12 @@ def _ensure_tool_dirs_on_path() -> None:
     if os.environ.get("CIAO_BUNDLED_APP") == "1":
         # The bundled launcher puts its own bin first on purpose, so child
         # `ciao` commands resolve to the interpreter that owns the bundled
-        # site-packages. Prepending ahead of it would hand those children a
-        # Homebrew `ciao` running a different CPython against 3.12 extension
-        # modules. Appending still finds npm/node/git.
+        # site-packages, and stay on the same engine and version as the app.
+        # Appending still finds npm/node/git. This is no longer load-bearing
+        # for importability - the bundled interpreter attaches its own
+        # dependency tree via its ciao_bundled_site hook rather than through an
+        # exported PYTHONPATH, so a child on a different CPython is merely a
+        # different install now, not a crash.
         os.environ["PATH"] = os.pathsep.join([*parts, *missing])
     else:
         os.environ["PATH"] = os.pathsep.join([*missing, *parts])
@@ -300,6 +303,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     job_runs.configure(config.state_path.parent)
     tracker = StartupTracker(on_finish=job_runs.record_startup_phase)
+    # Live job events reach the PWA through the chat manager's event bus, so a
+    # surface can show background work as it happens rather than only after it
+    # lands in the run log. Attached once the manager exists (see below).
 
     # Start provider checks in the background
     tracker.start("connect_claude_code")
@@ -434,6 +440,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         transcript_store=transcripts,
         path=config.state_path.parent / "web_projects.json",
     )
+    # Now that a manager exists, let tracked background jobs announce themselves
+    # through its event bus (see job_runs.set_publisher).
+    pcm.attach_job_runs_publisher()
 
     # Schedule manager with web-only dispatch
     async def _dispatch_to_web(entry, model, mode, provider, *, target_chat_id=None):

@@ -9,7 +9,11 @@ from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream
-from ciao.web.project_chats import ProjectChatManager, _cap_reentry_summary
+from ciao.web.project_chats import (
+    ProjectChatManager,
+    _cap_reentry_summary,
+    _reentry_transcript_text,
+)
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
@@ -227,3 +231,89 @@ def test_reentry_summary_humanizes_fenced_json_and_repairs_cached_bullets() -> N
 
     cached = "\n".join(f"• {line}" for line in generated.splitlines())
     assert _cap_reentry_summary(cached) == normalized
+
+
+def test_reentry_summary_drops_unparseable_json_instead_of_bulleting_it() -> None:
+    # Apple mirrors the shape of what it is handed and answered with a JSON
+    # envelope of its own, cut off mid-object. Every line is structure, so the
+    # note has nothing to say and must not render.
+    truncated = """{
+  "type": "event",
+  "event_id": "e5a77d9b",
+  "description": {"""
+
+    assert _cap_reentry_summary(truncated) == ""
+    # And the same residue already cached from an earlier run stays gone.
+    assert _cap_reentry_summary("\n".join(f"• {line}" for line in truncated.splitlines())) == ""
+
+
+def test_reentry_summary_drops_metadata_only_json_envelope() -> None:
+    envelope = '{"type": "event", "event_id": "e5a77d9b", "session": "abc"}'
+
+    assert _cap_reentry_summary(envelope) == ""
+
+
+def test_reentry_summary_keeps_real_fields_beside_metadata_keys() -> None:
+    mixed = '{"type": "event", "next_step": "review the failing path"}'
+
+    assert _cap_reentry_summary(mixed) == "• Next step: review the failing path"
+
+
+def test_reentry_transcript_text_flattens_records_to_prose() -> None:
+    filtered = "\n".join(
+        [
+            json.dumps(
+                {"idx": 0, "type": "user", "content": [{"type": "text", "text": "fix the crash"}]}
+            ),
+            json.dumps(
+                {
+                    "idx": 1,
+                    "type": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Read", "input": {"file": "x.py"}},
+                        {"type": "text", "text": "Found it in insights.py"},
+                    ],
+                }
+            ),
+            "not json at all",
+        ]
+    )
+
+    assert _reentry_transcript_text(filtered) == (
+        "User: fix the crash\nAssistant: Found it in insights.py"
+    )
+    assert "tool_use" not in _reentry_transcript_text(filtered)
+
+
+def test_reentry_summary_regenerates_when_cached_value_is_residue(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Residue", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="Residue chat")
+    chat.reentry_summary = '• {\n• "type": "event",\n• "event_id": "e5a77d9b",'
+    manager._save()
+
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+    monkeypatch.setattr(
+        manager._transcripts,
+        "current_filtered_jsonl",
+        lambda *_args: json.dumps(
+            {"type": "user", "content": [{"type": "text", "text": "keep working"}]}
+        ),
+    )
+
+    seen: list[str] = []
+
+    async def fake_respond(prompt: str, **_kwargs) -> str:
+        seen.append(prompt)
+        return "Picked up the crash fix"
+
+    monkeypatch.setattr(native_sidecar, "respond", fake_respond)
+
+    assert asyncio.run(manager.generate_reentry_summary(chat.chat_id)) == (
+        "• Picked up the crash fix"
+    )
+    # The model is handed prose, not the JSON records that triggered the echo.
+    assert "User: keep working" in seen[0]
+    assert '"content"' not in seen[0]

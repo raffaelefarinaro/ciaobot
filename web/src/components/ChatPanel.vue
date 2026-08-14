@@ -1078,10 +1078,29 @@
     <div class="input-bar" :class="{ disabled: chat.archived }">
       <template v-if="chat.archived">
         <div class="archived-notice">
-          <span>This chat is archived.</span>
-          <button class="btn-sm primary continue-chat-btn" @click="continueChat" :disabled="isContinuing">
-            {{ isContinuing ? 'Continuing...' : 'Continue in new chat' }}
-          </button>
+          <div class="archived-notice-row">
+            <span>This chat is archived.</span>
+            <button class="btn-sm primary continue-chat-btn" @click="continueChat" :disabled="isContinuing">
+              {{ isContinuing ? 'Continuing...' : 'Continue in new chat' }}
+            </button>
+          </div>
+          <!-- What Ciaobot took from this conversation. Runs as a live line
+               while the pipeline works, then settles and stays: the archived
+               chat is the permanent record of what was learned from it, and
+               nothing else in the app ever reported this. -->
+          <p
+            v-if="archiveTidying"
+            class="archived-postprocess"
+            aria-live="polite"
+          >
+            <span class="archived-postprocess-dot" aria-hidden="true" />
+            {{ archiveTidyLabel }}…
+          </p>
+          <p
+            v-else-if="archiveTidySummary"
+            class="archived-postprocess"
+            :class="{ failed: archiveTidyFailed }"
+          >{{ archiveTidySummary }}</p>
         </div>
       </template>
       <template v-else>
@@ -1131,6 +1150,12 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage, apiErrorMessage } from '../lib/errorMessage'
+import {
+  isPostprocessing,
+  postprocessFailed,
+  postprocessLabel,
+  postprocessSummary,
+} from '../lib/postprocessView'
 import { useFileViewerStore } from '../stores/fileViewer'
 import VoiceRecorder from './VoiceRecorder.vue'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
@@ -1494,6 +1519,15 @@ const reentrySummary = computed(() => {
   if (!reentrySummaryEnabled.value) return ''
   return store.reentrySummaries[chat.value.chat_id] || ''
 })
+
+// Post-archive pipeline, reported in the archived-chat footer. Reads through the
+// chat record rather than a transient flag so the settled summary is still there
+// when this chat is reopened weeks later.
+const archivePostprocess = computed(() => store.chatPostprocess(chat.value.chat_id))
+const archiveTidying = computed(() => isPostprocessing(archivePostprocess.value))
+const archiveTidyLabel = computed(() => postprocessLabel(archivePostprocess.value))
+const archiveTidySummary = computed(() => postprocessSummary(archivePostprocess.value))
+const archiveTidyFailed = computed(() => postprocessFailed(archivePostprocess.value))
 watch(() => chat.value.provider, () => {
   void loadSlashCommands()
 })
@@ -6302,9 +6336,57 @@ details[open] > .activity-summary::before {
   text-align: center;
   padding: 10px 12px;
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.archived-notice-row {
+  display: flex;
   align-items: center;
   justify-content: center;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* A footnote, not a component: no card, no border, no background. It reports
+   work the user did not ask for and does not need to act on, so it stays in the
+   muted register even once it has something to say. */
+.archived-postprocess {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--fg3);
+  text-align: center;
+  flex-wrap: wrap;
+}
+
+/* The single exception to the muted rule: a failed step is only ever visible
+   here, so it is allowed to say so. */
+.archived-postprocess.failed { color: var(--warning); }
+
+.archived-postprocess-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg3);
+  flex: 0 0 auto;
+  animation: archived-postprocess-breathe 2.6s ease-in-out infinite;
+}
+
+@keyframes archived-postprocess-breathe {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .archived-postprocess-dot { animation: none; opacity: 0.75; }
 }
 
 .image-btn {

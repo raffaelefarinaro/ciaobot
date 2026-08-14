@@ -202,6 +202,31 @@ export interface ChatInfo {
   spawned_from_chat_id?: string
   // Shared tag across delegates dispatched as one batch.
   delegation_id?: string
+  // What the post-archive pipeline is doing, or did. Present only on archived
+  // chats that ran it. Drives the greyed activity signal and the settled
+  // "here is what was learned from this chat" line.
+  postprocess?: ChatPostprocess | null
+}
+
+/** One step of the post-archive pipeline, as reported by ciao/job_runs.py. */
+export interface ChatPostprocessStep {
+  status: 'ok' | 'error' | 'skipped'
+  extra?: Record<string, unknown>
+}
+
+export interface ChatPostprocess {
+  /** 'running' while the pipeline task is alive; 'done' once it settles. */
+  state: 'running' | 'done'
+  /** Job id of the step that is running, or the last one that ran. */
+  step?: string
+  /** Steps that can run for this chat, in execution order. */
+  expected?: string[]
+  /** Outcome per step, keyed by job id. Only finished steps appear. */
+  steps?: Record<string, ChatPostprocessStep>
+  started_at?: string
+  updated_at?: string
+  /** Set when a server restart killed the pipeline mid-flight. */
+  interrupted?: boolean
 }
 
 // One sidebar chat row. Delegates follow their supervisor and render indented,
@@ -356,7 +381,7 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; restarting?: boolean }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; postprocessing?: string[]; restarting?: boolean }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
@@ -366,6 +391,7 @@ export type EventsWsMessage =
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
   | { type: 'chat_moved'; chat_id: string; project_id: string; old_project_id: string }
   | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
+  | { type: 'chat_postprocess'; chat_id: string; project_id: string; postprocess: ChatPostprocess | null }
   | { type: 'chat_deleted'; chat_id: string; project_id: string; reason?: string }
   | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
   | { type: 'project_created'; project: ProjectInfo }
@@ -881,6 +907,19 @@ export interface AutomationProcess {
   // Bulk/manual variants of this job (Session insights carries the backfill),
   // reported nested so the page keeps one row per automation.
   sub_jobs?: AutomationProcess[]
+  // Steps that run inside this job's task, on this job's trigger, in execution
+  // order. A step is not an automation — it has no trigger of its own — so it is
+  // reported here rather than as a peer row. Session insights owns the four-step
+  // archive pipeline; everything else has none.
+  steps?: AutomationProcess[]
+  // Name of the whole pipeline, set only on the job that owns one
+  // ("When you archive a chat"). The job keeps `label` for its own step.
+  pipeline_label?: string
+  // Set on a step: when it is skipped, in the user's terms. A step answers this
+  // instead of "when does this run?", which its pipeline already answers.
+  step_condition?: string
+  // True while this job is inside a tracked run right now.
+  running?: boolean
   last_run: JobRun | null
   recent: JobRun[]
   stats: AutomationStats

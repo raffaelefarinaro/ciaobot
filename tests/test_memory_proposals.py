@@ -176,6 +176,29 @@ def test_proposals_from_archive_returns_none_when_no_insights(tmp_path: Path) ->
     assert out is None
 
 
+def test_proposals_from_archive_reports_a_count_via_stats(tmp_path: Path) -> None:
+    """The archived chat says "3 memory proposals"; a path cannot express that."""
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        f"# chat\n\nsome turns here.\n\n## Session insights\n{_SAMPLE_INSIGHTS}",
+        encoding="utf-8",
+    )
+    stats: dict[str, int] = {}
+    out = mp.proposals_from_archive(archive, vault, stats=stats)
+    assert out is not None
+    assert stats["proposed"] > 0
+
+
+def test_proposals_stats_stay_zero_when_nothing_is_filed(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text("# chat\n\nonly turns\n", encoding="utf-8")
+    stats: dict[str, int] = {}
+    assert mp.proposals_from_archive(archive, vault, stats=stats) is None
+    assert stats.get("proposed", 0) == 0
+
+
 # ── Auto-promotion of user corrections ────────────────────────────────────
 #
 # Promotion now writes straight into the fenced `ciao:memory` / `ciao:profile`
