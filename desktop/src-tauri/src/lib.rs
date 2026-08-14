@@ -85,13 +85,48 @@ const DROP_IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 // never close; a promise-backed drag of something else can be.
 const DROP_STAGING_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// True for a promise-backed drag the Python server will not be able to read.
+// `SF_DATALESS`, from `sys/stat.h`. macOS sets it on a cloud file whose bytes
+// live only in the provider: `stat` reports the real size, `st_blocks` is 0, and
+// a read has to materialise the file first.
+const SF_DATALESS: u32 = 0x4000_0000;
+
+/// True for `st_flags` marking a file the File Provider has not materialised.
 ///
-/// Dragging straight from the macOS screenshot thumbnail hands over a path in
-/// `.../TemporaryItems/NSIRD_screencaptureui_*/`. macOS grants that read to the
-/// app which received the drop, this process, and denies it to every other one,
-/// so the server's `read_bytes()` failed with `EPERM` and the screenshot was
-/// dropped on the floor (issue #238).
+/// Split out from the `stat` call so the bit test is unit-testable: a dataless
+/// file cannot be created in a temp dir.
+fn flags_are_dataless(flags: u32) -> bool {
+    flags & SF_DATALESS != 0
+}
+
+#[cfg(target_os = "macos")]
+fn is_dataless(metadata: &std::fs::Metadata) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    flags_are_dataless(metadata.st_flags())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_dataless(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// True for an image drop the Python server will not be able to read itself.
+///
+/// Two cases, both of which left the drop on the floor as a raw errno:
+///
+/// - Dragging straight from the macOS screenshot thumbnail hands over a path in
+///   `.../TemporaryItems/NSIRD_screencaptureui_*/`. macOS grants that read to
+///   the app which received the drop, this process, and denies it to every other
+///   one, so the server's `read_bytes()` failed with `EPERM` (issue #238).
+/// - Dragging a file out of iCloud Drive (or any other File Provider) hands over
+///   a path whose bytes are not on disk. Materialising it is refused for a
+///   process that may not talk to the provider, which the server is, so its
+///   `read_bytes()` failed with `EDEADLK` — "Resource deadlock avoided".
+///
+/// This app *is* allowed both reads, so staging a copy here is what makes the
+/// drop work at all. Gated rather than applied to every image so an ordinary
+/// local drag stays zero-copy, because staging a dataless file means waiting for
+/// iCloud to hand the bytes over. The caller keeps that wait off the window
+/// event thread.
 fn needs_drop_staging(path: &std::path::Path) -> bool {
     let is_image = path
         .extension()
@@ -99,13 +134,16 @@ fn needs_drop_staging(path: &std::path::Path) -> bool {
         .is_some_and(|extension| {
             DROP_IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
         });
-    is_image
-        && path.components().any(|component| {
-            component
-                .as_os_str()
-                .to_str()
-                .is_some_and(|name| name.starts_with("NSIRD_"))
-        })
+    if !is_image {
+        return false;
+    }
+    let is_promise_backed = path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| name.starts_with("NSIRD_"))
+    });
+    is_promise_backed || std::fs::metadata(path).is_ok_and(|metadata| is_dataless(&metadata))
 }
 
 /// Copy one dropped file into this grant's staging dir, returning the new path.
@@ -731,14 +769,30 @@ fn build_windows(
                     ));
                 }
                 WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) => {
-                    let detail = match create_desktop_drop_grant(&runtime_root, paths) {
-                        Ok((grant_id, paths)) => serde_json::json!({
-                            "grantId": grant_id,
-                            "paths": paths,
-                        }),
-                        Err(error) => serde_json::json!({ "error": error }),
-                    };
-                    let _ = window.eval(browser_event_script("ciao:native-file-drop", &detail));
+                    // Off the window event thread, because building the grant
+                    // stages files and staging a cloud placeholder has to
+                    // materialise it first — a download, not a copy (see
+                    // `needs_drop_staging`). Run inline, that is the whole window
+                    // frozen until iCloud answers. Clear the drag highlight now
+                    // rather than leaving it lit for that wait; the page clears it
+                    // again when the grant lands.
+                    let _ = window.eval(browser_event_script(
+                        "ciao:native-file-drag-leave",
+                        &serde_json::json!({}),
+                    ));
+                    let window = window.clone();
+                    let runtime_root = runtime_root.clone();
+                    let paths = paths.clone();
+                    thread::spawn(move || {
+                        let detail = match create_desktop_drop_grant(&runtime_root, &paths) {
+                            Ok((grant_id, paths)) => serde_json::json!({
+                                "grantId": grant_id,
+                                "paths": paths,
+                            }),
+                            Err(error) => serde_json::json!({ "error": error }),
+                        };
+                        let _ = window.eval(browser_event_script("ciao:native-file-drop", &detail));
+                    });
                 }
                 WindowEvent::CloseRequested { api, .. } => {
                     // Closing the window leaves Ciaobot running in the menu bar;
@@ -1471,8 +1525,8 @@ pub fn run() {
 mod tests {
     use super::{
         append_log, browser_event_script, create_desktop_drop_grant, engine_already_current,
-        engine_launch_action, is_external_link, is_trusted_main_navigation, needs_drop_staging,
-        requires_confirmation, should_show_main_window,
+        engine_launch_action, flags_are_dataless, is_external_link, is_trusted_main_navigation,
+        needs_drop_staging, requires_confirmation, should_show_main_window,
     };
     use crate::service::ServiceResult;
 
@@ -1564,11 +1618,12 @@ mod tests {
         }
     }
 
-    // Only a promise-backed image drop gets copied. A screenshot outside an
-    // NSIRD dir, and a non-image inside one, both stay pass-through: the server
-    // can read the first, and the agent needs to keep reading the second.
+    // Only an image drop the server cannot read itself gets copied. A readable
+    // local screenshot, and a non-image inside an NSIRD dir, both stay
+    // pass-through: the server can read the first, and the agent needs to keep
+    // reading the second.
     #[test]
-    fn only_a_promise_backed_image_drop_needs_staging() {
+    fn only_an_unreadable_image_drop_needs_staging() {
         let temporary =
             std::path::Path::new("/var/folders/zj/x/T/TemporaryItems/NSIRD_screencaptureui_1Pr326");
         assert!(needs_drop_staging(
@@ -1576,9 +1631,25 @@ mod tests {
         ));
         assert!(needs_drop_staging(&temporary.join("SHOT.JPEG")));
         assert!(!needs_drop_staging(&temporary.join("notes.pdf")));
-        assert!(!needs_drop_staging(std::path::Path::new(
-            "/Users/someone/Desktop/Screenshot.png"
-        )));
+
+        // An ordinary local image, on disk and materialised. Written for real
+        // rather than named: the dataless check stats the path, so a bare
+        // nonexistent path would pass this assertion without exercising it.
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("Screenshot.png");
+        std::fs::write(&local, b"\x89PNG\r\n\x1a\n").unwrap();
+        assert!(!needs_drop_staging(&local));
+    }
+
+    // The bit test behind the dataless check. macOS sets SF_DATALESS (0x40000000)
+    // on an iCloud file whose bytes are not on disk; the flags below are real
+    // values read off this machine, materialised and not.
+    #[test]
+    fn dataless_flags_are_recognised() {
+        assert!(flags_are_dataless(0x4000_0060));
+        assert!(flags_are_dataless(0x4000_0000));
+        assert!(!flags_are_dataless(0x0000_0060));
+        assert!(!flags_are_dataless(0));
     }
 
     #[test]

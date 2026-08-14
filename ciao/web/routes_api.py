@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import functools
 import json
 import logging
@@ -1988,16 +1989,33 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
     no staged copy, because the shell is older than that fix or the drop was not
     an image, the raw errno tells the user nothing they can act on.
 
-    Three tiers, narrowest first. An NSIRD path gets screenshot-specific advice.
-    Any other permission denial still gets actionable text, just without naming
-    a screenshot, so a plain unreadable drop is not mislabelled and does not
-    regress to a raw errno. Anything else falls through to the errno, which is
-    all we know about it.
+    Four tiers, narrowest first. An NSIRD path gets screenshot-specific advice.
+    ``EDEADLK`` means a cloud placeholder (see below). Any other permission
+    denial still gets actionable text, just without naming a screenshot, so a
+    plain unreadable drop is not mislabelled and does not regress to a raw
+    errno. Anything else falls through to the errno, which is all we know
+    about it.
     """
     if _looks_like_nsird_screenshot(path):
         return (
             "macOS won't let us read this screenshot directly. "
             "Save it to disk first, then drag it in."
+        )
+    if exc.errno == errno.EDEADLK:
+        # A file dragged out of iCloud Drive (or any other File Provider) whose
+        # bytes are not on disk: `stat` reports the real size, so the grant's
+        # existence check passes, and the read is then refused with EDEADLK
+        # ("Resource deadlock avoided") because this process may not ask the
+        # provider to materialise it. Unlike EPERM the errno is unambiguous
+        # here, so it needs no corroborating path check. The desktop shell
+        # stages images past this (`needs_drop_staging` in
+        # desktop/src-tauri/src/lib.rs); an image over the staging limit, an
+        # older shell, or a client node transferring a non-image still lands
+        # here. A non-image dropped on a host does not: the path is handed to
+        # the agent unread, so the agent hits the same errno on its own.
+        return (
+            f"{path.name} is not downloaded to this Mac yet. Right-click it in "
+            "Finder, choose Download Now, then drag it in again."
         )
     if isinstance(exc, PermissionError):
         return (
