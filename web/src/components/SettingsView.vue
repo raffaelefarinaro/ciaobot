@@ -4483,9 +4483,15 @@ async function fetchWorkspacesList() {
   }
 }
 
-async function fetchWorkspaceModels() {
+// `force` bypasses the provider catalog caches. Opening Settings is exactly the
+// moment a user has just connected a provider elsewhere, so the tab pays the
+// refresh; a save-triggered refetch does not, since it only needs the pins we
+// just wrote and a forced call re-spawns a provider process.
+async function fetchWorkspaceModels(force = false) {
   try {
-    workspaceModels.value = await api.get<ModelsResponse>('/api/models')
+    workspaceModels.value = await api.get<ModelsResponse>(
+      force ? '/api/models?refresh=1' : '/api/models',
+    )
   } catch {
     workspaceModels.value = null
   }
@@ -4586,7 +4592,7 @@ onMounted(async () => {
   fetchProviderKeys()
   fetchMcpStatus()
   fetchMcpUsage()
-  fetchWorkspaceModels()
+  fetchWorkspaceModels(true)
   fetchGwsIntegration()
   fetchWorkspacesList()
   pushSupportedFlag.value = pushSupported()

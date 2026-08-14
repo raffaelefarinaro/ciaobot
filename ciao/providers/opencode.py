@@ -1345,6 +1345,7 @@ class OpencodeProvider(BaseSDKProvider):
                 except (httpx.HTTPError, ValueError):
                     payload = None
         catalog = _catalog_from_providers(payload)
+        _log_catalog_change(key, cached[1] if cached else None, catalog)
         # Every outcome is cached, empties included — an empty result is the
         # expensive one to recompute (a server spawn, or the full health-poll
         # deadline when the binary exists but never answers), and /api/models is
@@ -1396,6 +1397,54 @@ class OpencodeProvider(BaseSDKProvider):
                 return response.status_code < 400
             except httpx.HTTPError:
                 return False
+
+
+def catalog_providers(catalog: Sequence[Mapping[str, Any]]) -> set[str]:
+    """The provider ids represented in a catalog, from its ``provider/model`` rows."""
+    return {
+        str(row.get("model", "")).split("/", 1)[0]
+        for row in catalog
+        if "/" in str(row.get("model", ""))
+    }
+
+
+def _log_catalog_change(
+    key: str,
+    previous: Sequence[Mapping[str, Any]] | None,
+    catalog: Sequence[Mapping[str, Any]],
+) -> None:
+    """Record which opencode providers came or went.
+
+    opencode is bring-your-own-provider and its catalog is read-through -- there
+    is no stored list to inspect after the fact -- so without this a user who
+    connects or loses a provider has nothing in the log explaining why their
+    model list changed. Logged only on a real change, so a healthy install is
+    quiet across the 5-minute refresh.
+    """
+    now = catalog_providers(catalog)
+    if previous is None:
+        if now:
+            logger.info(
+                "opencode catalog: %d model(s) from %s",
+                len(catalog),
+                ", ".join(sorted(now)),
+            )
+        return
+    before = catalog_providers(previous)
+    if now == before:
+        return
+    added = sorted(now - before)
+    removed = sorted(before - now)
+    parts = []
+    if added:
+        parts.append(f"connected {', '.join(added)}")
+    if removed:
+        parts.append(f"lost {', '.join(removed)}")
+    logger.info(
+        "opencode providers changed: %s (%d model(s) now reachable)",
+        "; ".join(parts),
+        len(catalog),
+    )
 
 
 def model_accepts_images(model: Mapping[str, Any]) -> bool | None:

@@ -25,6 +25,8 @@ from ciao.providers.opencode import (
     OpencodeProvider,
     OpencodeSettings,
     _catalog_from_providers,
+    _log_catalog_change,
+    catalog_providers,
     compose_system,
     config_placeholder_problems,
     error_text,
@@ -904,13 +906,14 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[
         {"model": "opencode/big-pickle", "label": "Big Pickle (opencode)"},
     ]))
-    request = Request({
-        "type": "http", "method": "GET", "path": "/api/models",
-        "headers": [], "app": SimpleNamespace(state=SimpleNamespace(config=config)),
-        "path_params": {},
-    })
+    def _request(query: bytes = b"") -> Request:
+        return Request({
+            "type": "http", "method": "GET", "path": "/api/models",
+            "headers": [], "app": SimpleNamespace(state=SimpleNamespace(config=config)),
+            "path_params": {}, "query_string": query,
+        })
 
-    payload = json.loads(asyncio.run(list_models(request)).body)
+    payload = json.loads(asyncio.run(list_models(_request())).body)
 
     by_id = {item["id"]: item for item in payload["providers"]}
     assert by_id["opencode"]["capabilities"]["steer"] is False
@@ -920,6 +923,13 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     assert by_id["opencode"]["short_label"] == "opencode"
     assert payload["opencode_models"] == ["opencode/big-pickle"]
     assert payload["backends"]["opencode"] is True
+
+    # `?refresh=1` bypasses the provider catalog caches, so a provider connected
+    # in another window shows up without waiting out the 5-minute TTL.
+    assert OpencodeProvider.model_catalog.await_args.kwargs["force"] is False
+    asyncio.run(list_models(_request(b"refresh=1")))
+    assert OpencodeProvider.model_catalog.await_args.kwargs["force"] is True
+    assert CodexProvider.model_catalog.await_args.kwargs["force"] is True
 
 
 # ── credential reporting ────────────────────────────────────────────────
@@ -1400,3 +1410,59 @@ def test_unparseable_config_is_left_alone(tmp_path):
     """jsonc comments are legal for opencode and are not ours to diagnose."""
     (tmp_path / "opencode.json").write_text("{ // comment\n}", encoding="utf-8")
     assert workspace_config_placeholder_problems(tmp_path, {}) == ()
+
+
+# ── catalog change logging ──────────────────────────────────────────────
+# The catalog is read-through: nothing persists it, so without a log line a
+# user whose model list changed has no record of which provider came or went.
+
+
+def _rows(*models: str) -> list[dict[str, object]]:
+    return [{"model": m, "label": m, "variants": []} for m in models]
+
+
+def test_catalog_providers_reads_the_provider_half_of_each_id():
+    assert catalog_providers(_rows("anthropic/sonnet", "openai/gpt", "anthropic/haiku")) == {
+        "anthropic",
+        "openai",
+    }
+    # A bare id names no provider and must not produce a phantom one.
+    assert catalog_providers(_rows("sonnet")) == set()
+
+
+def test_first_catalog_is_logged_once(caplog):
+    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
+        _log_catalog_change("ws", None, _rows("anthropic/sonnet", "openai/gpt"))
+    assert "opencode catalog: 2 model(s) from anthropic, openai" in caplog.text
+
+
+def test_an_empty_first_catalog_is_not_logged(caplog):
+    """A fresh install reports nothing connected; that is not an event."""
+    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
+        _log_catalog_change("ws", None, [])
+    assert caplog.text == ""
+
+
+def test_connecting_and_losing_providers_is_logged(caplog):
+    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
+        _log_catalog_change(
+            "ws", _rows("anthropic/sonnet"), _rows("anthropic/sonnet", "ollama/llama")
+        )
+    assert "connected ollama" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
+        _log_catalog_change(
+            "ws", _rows("anthropic/sonnet", "ollama/llama"), _rows("anthropic/sonnet")
+        )
+    assert "lost ollama" in caplog.text
+
+
+def test_an_unchanged_provider_set_stays_quiet(caplog):
+    """The catalog refreshes every 5 minutes; a healthy install must not spam."""
+    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
+        # Same providers, different models: still not a provider-set change.
+        _log_catalog_change(
+            "ws", _rows("anthropic/sonnet"), _rows("anthropic/sonnet", "anthropic/haiku")
+        )
+    assert caplog.text == ""

@@ -4865,7 +4865,16 @@ async def run_loop_now(request: Request) -> JSONResponse:
 
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
-    codex_catalog = await CodexProvider.model_catalog(config.workspace_root)
+    # `?refresh=1` bypasses the provider catalog caches. Each provider serves its
+    # own catalog on demand, so there is nothing to warm at startup; this is the
+    # on-demand equivalent, used by the Settings tab so a provider connected in
+    # another window shows up without waiting out the TTL.
+    refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    codex_catalog = await CodexProvider.model_catalog(
+        config.workspace_root, force=refresh
+    )
     visible_codex = [item for item in codex_catalog if not item.get("hidden")]
     codex_models = [
         str(item.get("model") or item.get("id") or "")
@@ -4885,7 +4894,9 @@ async def list_models(request: Request) -> JSONResponse:
     # from the former and shows the latter on the tier badges.
     # opencode is bring-your-own-provider: its catalog is whatever backends the
     # user has connected, so an empty list simply means "not signed in yet".
-    opencode_catalog = await OpencodeProvider.model_catalog(config.workspace_root)
+    opencode_catalog = await OpencodeProvider.model_catalog(
+        config.workspace_root, force=refresh
+    )
     opencode_models = [
         str(item.get("model") or "") for item in opencode_catalog if item.get("model")
     ]

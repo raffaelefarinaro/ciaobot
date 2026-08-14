@@ -417,7 +417,10 @@ vi.mock('../../lib/api', () => {
   }
   // Default to an empty array — most list endpoints return arrays and a
   // bare `{}` breaks `.reduce`/`.map` calls in stores during the smoke test.
-  const get = vi.fn((path: string) => {
+  const get = vi.fn((rawPath: string) => {
+    // Keyed by route, so a query string (e.g. `/api/models?refresh=1`) must not
+    // miss the fixture the way a real server would not serve a different route.
+    const path = rawPath.split('?')[0]
     if (path === '/api/settings/routines') return Promise.resolve(routineSettings)
     if (path in responses) return Promise.resolve(responses[path])
     if (path.startsWith('/api/chats/')) return Promise.resolve({})
