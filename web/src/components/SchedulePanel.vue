@@ -15,7 +15,7 @@
         </div>
       </template>
       <template #actions>
-        <template v-if="schedule && !editing">
+        <template v-if="schedule">
           <button
             class="btn-small desktop-only"
             :class="{ 'btn-running': showRunning }"
@@ -25,7 +25,6 @@
           <button class="btn-small desktop-only" @click="onToggleEnabled">
             {{ schedule.enabled ? 'Disable' : 'Enable' }}
           </button>
-          <button v-if="schedule.scope !== 'system'" class="btn-small desktop-only" @click="startEdit">Edit</button>
           <button v-if="schedule.scope !== 'system'" class="btn-small btn-danger desktop-only" @click="onDelete">Delete</button>
 
           <button
@@ -46,7 +45,6 @@
               <button role="menuitem" @click="runHeaderAction(onToggleEnabled)">
                 {{ schedule.enabled ? 'Disable' : 'Enable' }}
               </button>
-              <button v-if="schedule.scope !== 'system'" role="menuitem" @click="runHeaderAction(startEdit)">Edit</button>
               <button v-if="schedule.scope !== 'system'" class="danger" role="menuitem" @click="runHeaderAction(onDelete)">Delete</button>
             </div>
           </div>
@@ -168,154 +166,266 @@
       <div v-if="!schedule.enabled" class="disabled-banner">
         Disabled — won't run automatically. "Run now" still works.
       </div>
-      <div v-if="!editing" class="meta-grid">
-        <div v-if="schedule.frequency !== 'manual'">
-          <strong>Time</strong><br />{{ schedule.daily_time_utc }} ({{ schedule.timezone_name }})
-        </div>
-        <div><strong>Frequency</strong><br />{{ frequencyLabel(schedule) }}</div>
-        <div>
-          <strong>Context</strong><br />
-          <span :class="{ 'context-unavailable': contextUnavailable(schedule) }">{{ contextLabel(schedule) }}</span>
-          <span v-if="contextUnavailable(schedule)" class="context-help">Edit this automation to choose an available target.</span>
-        </div>
-        <div v-if="schedule.frequency !== 'manual'">
-          <strong>Next run</strong><br />{{ nextRunLabel(schedule) }}
-        </div>
-        <div>
-          <strong>Last run</strong><br />
-          <component
-            :is="schedule.last_run_chat_id ? 'router-link' : 'span'"
-            :to="schedule.last_run_chat_id ? `/chat/${schedule.last_run_chat_id}` : undefined"
-          >
-            {{ schedule.last_dispatched_at ? formatWhen(schedule.last_dispatched_at) : (schedule.last_triggered_on || 'never') }}
-            <span
-              v-if="showRunning && (schedule.last_dispatched_at || schedule.last_run_chat_id)"
-              class="spinner-dot"
-              title="Running now"
-            />
-          </component>
-        </div>
-        <div><strong>Workspace</strong><br />{{ workspaceDisplayName(schedule.workspace) }}</div>
-        <div><strong>Model</strong><br />{{ modelLabel(schedule) }}</div>
-        <div><strong>Provider</strong><br />{{ providerLabel(schedule) }}</div>
-        <div><strong>Archive</strong><br />{{ archiveLabel(schedule.archive_policy) }}</div>
+      <div class="prop-cards">
+        <!-- Schedule -->
+        <section class="prop-card prop-card-wide" :class="{ 'card-editing': editingCard === 'schedule' }">
+          <div class="prop-card-head">
+            <span class="prop-card-name">Schedule</span>
+            <span v-if="editingCard === 'schedule'" class="esc-hint"><kbd>Esc</kbd> cancels</span>
+            <button
+              v-else-if="canEditSchedule && !editingCard"
+              type="button"
+              class="card-edit"
+              :aria-label="'Edit schedule'"
+              @click="startCardEdit('schedule')"
+            >Edit</button>
+          </div>
+
+          <dl v-if="editingCard !== 'schedule'" class="prop-rows">
+            <div class="prop-row">
+              <dt>Repeats</dt><dd>{{ frequencyLabel(schedule) }}</dd>
+            </div>
+            <div v-if="schedule.frequency !== 'manual'" class="prop-row">
+              <dt>At</dt><dd>{{ schedule.daily_time_utc }} · {{ schedule.timezone_name }}</dd>
+            </div>
+            <div v-if="schedule.frequency !== 'manual'" class="prop-row">
+              <dt>Next run</dt><dd class="prop-highlight">{{ nextRunLabel(schedule) }}</dd>
+            </div>
+            <div class="prop-row">
+              <dt>Last run</dt>
+              <dd>
+                <component
+                  :is="schedule.last_run_chat_id ? 'router-link' : 'span'"
+                  :to="schedule.last_run_chat_id ? `/chat/${schedule.last_run_chat_id}` : undefined"
+                >
+                  {{ schedule.last_dispatched_at ? formatWhen(schedule.last_dispatched_at) : (schedule.last_triggered_on || 'never') }}
+                  <span
+                    v-if="showRunning && (schedule.last_dispatched_at || schedule.last_run_chat_id)"
+                    class="spinner-dot"
+                    title="Running now"
+                  />
+                </component>
+              </dd>
+            </div>
+          </dl>
+
+          <div v-else class="card-form">
+            <div class="form-grid">
+              <div class="form-group">
+                <label>Repeats</label>
+                <select v-model="editData.frequency">
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="manual">Manual (run on click only)</option>
+                </select>
+              </div>
+              <div v-if="editData.frequency !== 'manual'" class="form-group">
+                <label>Time</label>
+                <input v-model="editData.time" type="time" />
+              </div>
+              <div v-if="editData.frequency !== 'manual'" class="form-group">
+                <label>Timezone</label>
+                <select v-model="editData.timezone">
+                  <option value="Europe/Zurich">Europe/Zurich</option>
+                  <option value="Europe/Rome">Europe/Rome</option>
+                  <option value="UTC">UTC</option>
+                  <option value="America/New_York">US East</option>
+                  <option value="America/Los_Angeles">US West</option>
+                  <option value="Asia/Tokyo">Tokyo</option>
+                </select>
+              </div>
+            </div>
+            <div v-if="editData.frequency === 'weekly'" class="form-group">
+              <label>Days</label>
+              <div class="days-row">
+                <label v-for="d in allDays" :key="d" class="checkbox-pill" :class="{ active: editData.days_of_week.includes(d) }">
+                  <input type="checkbox" :value="d" v-model="editData.days_of_week" hidden />
+                  {{ d }}
+                </label>
+              </div>
+            </div>
+            <div v-if="editData.frequency === 'monthly'" class="form-group">
+              <label>Day of month</label>
+              <input v-model.number="editData.day_of_month" type="number" min="1" max="31" placeholder="1-31" />
+            </div>
+            <div class="card-actions">
+              <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
+              <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
+              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Delivery -->
+        <section class="prop-card" :class="{ 'card-editing': editingCard === 'delivery' }">
+          <div class="prop-card-head">
+            <span class="prop-card-name">Delivery</span>
+            <span v-if="editingCard === 'delivery'" class="esc-hint"><kbd>Esc</kbd> cancels</span>
+            <button
+              v-else-if="canEditSchedule && !editingCard"
+              type="button"
+              class="card-edit"
+              :aria-label="'Edit delivery'"
+              @click="startCardEdit('delivery')"
+            >Edit</button>
+          </div>
+
+          <template v-if="editingCard !== 'delivery'">
+            <dl class="prop-rows">
+              <div class="prop-row">
+                <dt>Workspace</dt><dd>{{ workspaceDisplayName(schedule.workspace) }}</dd>
+              </div>
+              <div class="prop-row">
+                <dt>Deliver to</dt>
+                <dd :class="{ 'context-unavailable': contextUnavailable(schedule) }">
+                  {{ contextLabel(schedule) }}
+                </dd>
+              </div>
+            </dl>
+            <p v-if="contextUnavailable(schedule)" class="context-help">
+              This target no longer exists — edit to choose an available one.
+            </p>
+            <div v-if="schedule.scope === 'system'" class="system-workspace-control">
+              <div class="form-group">
+                <label>Run this routine in</label>
+                <select :value="schedule.workspace" @change="onSystemWorkspaceChange">
+                  <option v-for="workspace in projectStore.workspaceOptions" :key="workspace.name" :value="workspace.name">
+                    {{ workspaceDisplayName(workspace.name) }}
+                  </option>
+                </select>
+              </div>
+              <p class="hint">The routine inherits this workspace's provider and default model.</p>
+            </div>
+            <details v-else class="prop-adv">
+              <summary>Advanced</summary>
+              <dl class="prop-rows">
+                <div class="prop-row">
+                  <dt>Archive</dt><dd>{{ archiveLabel(schedule.archive_policy) }}</dd>
+                </div>
+              </dl>
+            </details>
+          </template>
+
+          <div v-else class="card-form">
+            <div class="form-group">
+              <label>Workspace</label>
+              <select v-model="editData.workspace" @change="onEditWorkspaceChange">
+                <option v-for="workspace in projectStore.workspaceOptions" :key="workspace.name" :value="workspace.name">
+                  {{ workspaceDisplayName(workspace.name) }}
+                </option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Deliver to</label>
+              <select v-model="editData.contextKey">
+                <optgroup v-for="group in contextGroups" :key="group.label" :label="group.label">
+                  <option v-for="ctx in group.items" :key="ctx.key" :value="ctx.key">
+                    {{ ctx.label || ctx.key }}
+                  </option>
+                </optgroup>
+              </select>
+            </div>
+            <details class="prop-adv" open>
+              <summary>Advanced</summary>
+              <div class="form-group">
+                <label>Archive behavior</label>
+                <select v-model="editData.archive_policy">
+                  <option value="manual">Manual, keep as normal chat</option>
+                  <option value="auto">Automatically archive routine results</option>
+                </select>
+              </div>
+              <p class="hint">
+                Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or
+                anything useful for the user to judge, the chat stays visible.
+              </p>
+            </details>
+            <div class="card-actions">
+              <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
+              <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
+              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Engine -->
+        <section class="prop-card" :class="{ 'card-editing': editingCard === 'engine' }">
+          <div class="prop-card-head">
+            <span class="prop-card-name">Engine</span>
+            <span v-if="editingCard === 'engine'" class="esc-hint"><kbd>Esc</kbd> cancels</span>
+            <button
+              v-else-if="canEditSchedule && !editingCard"
+              type="button"
+              class="card-edit"
+              :aria-label="'Edit engine'"
+              @click="startCardEdit('engine')"
+            >Edit</button>
+          </div>
+
+          <dl v-if="editingCard !== 'engine'" class="prop-rows">
+            <div class="prop-row">
+              <dt>Model</dt><dd>{{ modelLabel(schedule) }}</dd>
+            </div>
+            <div class="prop-row">
+              <dt>Provider</dt><dd>{{ providerLabel(schedule) }}</dd>
+            </div>
+          </dl>
+
+          <div v-else class="card-form">
+            <div class="form-group">
+              <label>Model</label>
+              <ModelSelector
+                :model-value="editData.model"
+                :sections="scheduleModelSections"
+                :placeholder="editInheritedModelLabel"
+                :empty-placeholder="editInheritedModelLabel"
+                @select="selectScheduleModel"
+              />
+            </div>
+            <p class="hint">Leave empty to inherit the workspace default.</p>
+            <div class="card-actions">
+              <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
+              <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
+              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+            </div>
+          </div>
+        </section>
       </div>
 
-      <p v-if="schedule.description && !editing" class="schedule-description">{{ schedule.description }}</p>
-
-      <div v-if="schedule.scope === 'system'" class="system-workspace-control">
-        <div class="form-group">
-          <label>Run this routine in</label>
-          <select :value="schedule.workspace" @change="onSystemWorkspaceChange">
-            <option v-for="workspace in projectStore.workspaceOptions" :key="workspace.name" :value="workspace.name">
-              {{ workspaceDisplayName(workspace.name) }}
-            </option>
-          </select>
+      <!-- Name, description and prompt -->
+      <div v-if="editingCard === 'content'" class="card-form content-form">
+        <div class="prop-card-head">
+          <span class="prop-card-name">Prompt</span>
+          <span class="esc-hint"><kbd>Esc</kbd> cancels</span>
         </div>
-        <p class="hint">The routine automatically inherits this workspace's provider and default model.</p>
-      </div>
-
-      <div v-if="editing" class="edit-form">
         <div class="form-group">
           <label>Name</label>
           <input v-model="editData.title" type="text" placeholder="e.g. Weekly customer intel sweep" />
         </div>
         <div class="form-group">
-          <label>Description <span class="label-hint">(what this routine does, shown above the prompt)</span></label>
+          <label>Description <span class="label-hint">(shown above the prompt)</span></label>
           <textarea v-model="editData.description" rows="2" placeholder="Optional plain-language summary"></textarea>
         </div>
-        <div class="form-grid">
-          <div class="form-group">
-            <label>Workspace</label>
-            <select v-model="editData.workspace" @change="onEditWorkspaceChange">
-              <option v-for="workspace in projectStore.workspaceOptions" :key="workspace.name" :value="workspace.name">
-                {{ workspaceDisplayName(workspace.name) }}
-              </option>
-            </select>
-          </div>
-          <div v-if="editData.frequency !== 'manual'" class="form-group">
-            <label>Time</label>
-            <input v-model="editData.time" type="time" />
-          </div>
-          <div v-if="editData.frequency !== 'manual'" class="form-group">
-            <label>Timezone</label>
-            <select v-model="editData.timezone">
-              <option value="Europe/Zurich">Europe/Zurich</option>
-              <option value="Europe/Rome">Europe/Rome</option>
-              <option value="UTC">UTC</option>
-              <option value="America/New_York">US East</option>
-              <option value="America/Los_Angeles">US West</option>
-              <option value="Asia/Tokyo">Tokyo</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Deliver to</label>
-            <select v-model="editData.contextKey">
-              <optgroup v-for="group in contextGroups" :key="group.label" :label="group.label">
-                <option v-for="ctx in group.items" :key="ctx.key" :value="ctx.key">
-                  {{ ctx.label || ctx.key }}
-                </option>
-              </optgroup>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Model</label>
-            <ModelSelector
-              :model-value="editData.model"
-              :sections="scheduleModelSections"
-              :placeholder="editInheritedModelLabel"
-              :empty-placeholder="editInheritedModelLabel"
-              @select="selectScheduleModel"
-            />
-          </div>
-        </div>
-        <div class="form-group">
-          <label>Frequency</label>
-          <select v-model="editData.frequency">
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly</option>
-            <option value="monthly">Monthly</option>
-            <option value="manual">Manual (run on click only)</option>
-          </select>
-        </div>
-        <div v-if="editData.frequency === 'weekly'" class="form-group">
-          <label>Days</label>
-          <div class="days-row">
-            <label v-for="d in allDays" :key="d" class="checkbox-pill" :class="{ active: editData.days_of_week.includes(d) }">
-              <input type="checkbox" :value="d" v-model="editData.days_of_week" hidden />
-              {{ d }}
-            </label>
-          </div>
-        </div>
-        <div v-if="editData.frequency === 'monthly'" class="form-group">
-          <label>Day of month</label>
-          <input v-model.number="editData.day_of_month" type="number" min="1" max="31" placeholder="1-31" />
-        </div>
-        <div class="form-group">
-          <label>Archive behavior</label>
-          <select v-model="editData.archive_policy">
-            <option value="manual">Manual, keep as normal chat</option>
-            <option value="auto">Automatically archive routine results</option>
-          </select>
-        </div>
-        <p class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for the user to judge, the chat stays visible.</p>
         <div class="form-group">
           <label>Prompt</label>
           <textarea v-model="editData.prompt" rows="10"></textarea>
         </div>
-        <div class="form-actions">
-          <button class="btn-primary" @click="saveEdit">Save</button>
-          <button class="btn-chip" @click="editing = false">Cancel</button>
+        <div class="card-actions">
+          <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
+          <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
+          <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
         </div>
       </div>
 
       <div v-else class="prompt-display">
+        <p v-if="schedule.description" class="schedule-description">{{ schedule.description }}</p>
         <div class="prompt-heading">
           <span class="prompt-label">Prompt</span>
           <div class="prompt-actions">
             <button type="button" class="btn-small" @click="copyPrompt(schedule.prompt, schedule.schedule_id)">
               {{ promptCopyLabel(schedule.schedule_id) }}
             </button>
+            <button v-if="canEditSchedule && !editingCard" type="button" class="btn-small" @click="startCardEdit('content')">Edit</button>
           </div>
         </div>
         <pre class="full-prompt">{{ schedule.prompt }}</pre>
@@ -564,7 +674,12 @@ const store = useTaskStore()
 const projectStore = useProjectStore()
 
 const allDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
-const editing = ref(false)
+// Properties are edited one card at a time ('' = nothing being edited), so the
+// rest of the panel stays readable and the way out is always on screen.
+type EditCard = '' | 'schedule' | 'delivery' | 'engine' | 'content'
+const editingCard = ref<EditCard>('')
+// Serialised editData as it looked when the card opened, for the dirty check.
+const editBaseline = ref('')
 const actionsOpen = ref(false)
 const copiedPromptKey = ref('')
 const startingBySchedule = ref<Set<string>>(new Set())
@@ -603,16 +718,27 @@ function onVisibilityChange() {
   if (document.visibilityState === 'visible') refreshSchedulesAndLoops()
 }
 
+// Escape always leaves the open card. Stop it here so it doesn't also fall
+// through to whatever else listens for Escape and close the whole panel.
+function onEditKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !editingCard.value) return
+  event.stopPropagation()
+  event.preventDefault()
+  void cancelCardEdit()
+}
+
 onMounted(() => {
   if (!store.models) store.fetchModels()
   loopPollTimer = window.setInterval(refreshSchedulesAndLoops, 30_000)
   document.addEventListener('visibilitychange', onVisibilityChange)
+  document.addEventListener('keydown', onEditKeydown, true)
 })
 
 onUnmounted(() => {
   if (loopPollTimer !== undefined) window.clearInterval(loopPollTimer)
   if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  document.removeEventListener('keydown', onEditKeydown, true)
 })
 
 const scheduleId = computed(() => (route.params.scheduleId as string) || '')
@@ -643,7 +769,8 @@ const loopEditData = ref({
 })
 
 watch(scheduleId, () => {
-  editing.value = false
+  editingCard.value = ''
+  editBaseline.value = ''
   loopEditing.value = false
   actionsOpen.value = false
   copiedPromptKey.value = ''
@@ -1071,8 +1198,18 @@ async function onSystemWorkspaceChange(event: Event) {
   }
   await router.push(`/schedules/${scheduleId}`)
 }
-function startEdit() {
-  if (!schedule.value) return
+const canEditSchedule = computed(() => !!schedule.value && schedule.value.scope !== 'system')
+
+// Every card seeds the full editData from the schedule, so an unedited field
+// always round-trips its current value and saving one card can't clobber another.
+function editSnapshot(): string {
+  return JSON.stringify([editData.value, editModelProvider.value])
+}
+
+const cardDirty = computed(() => editingCard.value !== '' && editSnapshot() !== editBaseline.value)
+
+function startCardEdit(card: Exclude<EditCard, ''>) {
+  if (!schedule.value || !canEditSchedule.value) return
   editData.value = {
     workspace: schedule.value.workspace || projectStore.activeWorkspace,
     title: schedule.value.title || '',
@@ -1088,10 +1225,17 @@ function startEdit() {
     archive_policy: schedule.value.archive_policy || 'manual',
   }
   editModelProvider.value = schedule.value.provider || ''
-  editing.value = true
+  editBaseline.value = editSnapshot()
+  editingCard.value = card
 }
 
-async function saveEdit() {
+async function cancelCardEdit() {
+  if (cardDirty.value && !(await askConfirm('Discard your unsaved changes?'))) return
+  editingCard.value = ''
+  editBaseline.value = ''
+}
+
+async function saveCardEdit() {
   if (!schedule.value) return
   const d = editData.value
   const updates: ScheduleUpdate = {
@@ -1126,7 +1270,8 @@ async function saveEdit() {
     updates.thread_id = parts.length > 1 ? parseInt(parts[1], 10) : null
   }
   await store.updateSchedule(schedule.value.schedule_id, updates)
-  editing.value = false
+  editingCard.value = ''
+  editBaseline.value = ''
 }
 
 function openRunningChat() {
@@ -1368,6 +1513,147 @@ function closeSchedule() {
 .days-row { display: flex; flex-wrap: wrap; gap: 4px; }
 
 .form-actions { display: flex; gap: 8px; margin-top: 4px; }
+
+.label-hint { color: var(--fg3); font-weight: 400; }
+
+/* ── Routine property cards ────────────────────────────────────── */
+/* auto-fit rather than a viewport media query: the panel is often narrow while
+   the window is wide (sidebar open), so the cards must react to their own box. */
+.prop-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.prop-card-wide { grid-column: 1 / -1; }
+.prop-card {
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+.prop-card.card-editing {
+  border-color: var(--accent2);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent2) 28%, transparent);
+}
+.prop-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  min-height: 24px;
+}
+.prop-card-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  font-weight: 600;
+  color: var(--fg2);
+}
+.card-edit {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.card-edit:hover { color: var(--fg); border-color: var(--accent2); }
+.esc-hint { flex: none; font-size: var(--text-xs); color: var(--fg3); }
+.esc-hint kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  padding: 1px 4px;
+  margin-right: 4px;
+}
+
+.prop-rows { margin: 0; display: flex; flex-direction: column; gap: 2px; }
+.prop-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+}
+.prop-row dt { color: var(--fg3); flex: none; }
+.prop-row dd {
+  margin: 0;
+  min-width: 0;
+  text-align: right;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.prop-highlight { color: var(--success); font-weight: 600; }
+
+.prop-adv { margin-top: var(--space-2); border-top: 1px solid var(--border); padding-top: var(--space-2); }
+.prop-adv > summary {
+  cursor: pointer;
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  list-style: none;
+}
+.prop-adv > summary::marker, .prop-adv > summary::-webkit-details-marker { display: none; }
+.prop-adv > summary::before { content: '▸ '; }
+.prop-adv[open] > summary::before { content: '▾ '; }
+.prop-adv > summary:hover { color: var(--fg2); }
+.prop-adv > *:not(summary) { margin-top: var(--space-2); }
+
+/* System routines keep their inline workspace switcher, but inside a card it
+   drops the full-width divider and side-by-side layout it uses standalone. */
+.prop-card .system-workspace-control {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: var(--space-2);
+  padding: var(--space-2) 0 0;
+  margin: var(--space-2) 0 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+}
+
+.card-form { display: flex; flex-direction: column; gap: var(--space-3); }
+.card-form .form-group textarea { min-height: 64px; }
+.content-form {
+  padding: var(--space-3);
+  border: 1px solid var(--accent2);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+.content-form .form-group textarea:last-child { min-height: 200px; }
+.card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+.dirty-flag {
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--fg2);
+}
+.dirty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+.card-actions .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+@media (max-width: 640px) {
+  .card-edit { min-height: var(--touch); min-width: var(--touch); }
+}
 
 .empty-state {
   flex: 1;
