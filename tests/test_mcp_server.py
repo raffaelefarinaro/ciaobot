@@ -680,7 +680,7 @@ def test_adversarial_review_synthesizes_panel_results(monkeypatch) -> None:
     )
     principal = _chat_create_principal(project_id=None, chat_id=None)
 
-    async def fake_oneshot(prompt, *, system_prompt, model, env, timeout_s=120.0, provider="claude", cwd=None):
+    async def fake_oneshot(prompt, *, system_prompt, model, timeout_s=120.0, provider="claude", cwd=None):
         return json.dumps({"verdict": "revise", "confidence": 4, "summary": "solid but needs work", "issues": []})
 
     monkeypatch.setattr("ciao.critique.run_oneshot", fake_oneshot)

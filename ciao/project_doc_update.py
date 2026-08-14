@@ -111,7 +111,6 @@ async def update_project_doc(
     doc_path: Path,
     insights_md: str,
     model: str,
-    env: dict[str, str] | None = None,
     provider: str = "claude",
     cwd: Path | None = None,
     timeout_s: float = 300.0,
@@ -144,7 +143,6 @@ async def update_project_doc(
             kwargs: dict = {
                 "system_prompt": _DOC_UPDATE_SYSTEM_PROMPT,
                 "model": model,
-                "env": env or {},
                 "timeout_s": timeout_s,
             }
             if provider != "claude":

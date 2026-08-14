@@ -38,7 +38,6 @@ from ciao import job_runs, native_sidecar
 
 if TYPE_CHECKING:
     from ciao.config import CiaoConfig
-from ciao.providers.ollama import OllamaSettings
 from ciao.transcripts import _claude_projects_dir
 
 logger = logging.getLogger(__name__)
@@ -124,35 +123,24 @@ def _backfill_ceiling() -> int:
 
 def _resolve_insights_call(
     config, model: str, *, provider: str = "claude"
-) -> tuple[str, dict[str, str], str, str | None]:
-    """Resolve an insights model to (effective_model, env, provider, note).
+) -> tuple[str, str, str | None]:
+    """Resolve an insights model to (effective_model, provider, note).
 
-    Apple needs no special case here any more: `intended_backend` knows the
-    sentinel names an `apple` backend and `_backend_available` asks the sidecar,
-    so `resolve_with_fallback` substitutes the configured model and produces the
-    note when Apple Intelligence is off — the same path every other unavailable
-    backend takes. `run_oneshot` dispatches a surviving sentinel to the bundled
-    helper, so it never reaches an upstream either way.
+    The requested model is used as-is; the only substitution left is Apple's
+    on-device model when Apple Intelligence is unavailable, which
+    `resolve_model_or_fallback` reports as a note. `run_oneshot` dispatches a
+    surviving sentinel to the bundled helper, so it never reaches an upstream
+    either way.
     """
-    from ciao.custom_providers import env_for_model as custom_env_for_model
-    from ciao.custom_providers import provider_for_model, runtime_model
-    custom = provider_for_model(config, model)
-    if custom is not None:
-        return runtime_model(model), custom_env_for_model(config, model), custom.runner, None
     if provider == "codex" and not native_sidecar.is_apple_model(model):
-        return model, {}, provider, None
-
-    from ciao.providers.routing import resolve_with_fallback
+        return model, provider, None
 
     # An insights_model that is itself the sentinel cannot serve as the
     # fallback; sonnet is the tier the automatic setting resolves to.
-    default_model = (config.insights_model or "").strip()
-    if native_sidecar.is_apple_model(default_model):
-        default_model = "sonnet"
-    effective_model, env, note = resolve_with_fallback(
-        model, config, default_model=default_model
+    effective_model, note = native_sidecar.resolve_model_or_fallback(
+        model, default_model=(config.insights_model or "").strip()
     )
-    return effective_model, env, provider, note
+    return effective_model, provider, note
 
 
 def _fit_transcript(filtered_jsonl: str) -> tuple[str, int]:
@@ -416,9 +404,9 @@ async def extract_and_append(
     Always swallows exceptions — this runs as a fire-and-forget task and
     must never crash the route or leave the archive corrupted.
 
-    The model call goes through a one-shot ``claude_agent_sdk.query()``
-    call, routed to the configured upstream (Ollama / OpenRouter /
-    Anthropic) via the ``env`` dict.
+    The model call goes through ``run_oneshot``, which dispatches to the
+    runtime provider that owns the model (Claude Code, Codex, or opencode) or
+    to the bundled Apple helper.
 
     When ``trajectories_enabled" and ``session_id`` are set, a JSON
     trajectory is written to ``~/.ciao/trajectories/YYYY-MM/`` after the
@@ -451,7 +439,7 @@ async def extract_and_append(
             logger.info("Archive %s already has insights, skipping", archive_path)
             return
 
-        effective_model, env, provider, note = _resolve_insights_call(
+        effective_model, provider, note = _resolve_insights_call(
             config, model, provider=provider
         )
         async with job_runs.track(
@@ -468,7 +456,6 @@ async def extract_and_append(
             output, model_error = await _run_model_with_retry(
                 filtered_jsonl=filtered_jsonl,
                 model=effective_model,
-                env=env,
                 provider=provider,
                 cwd=workspace_root,
             )
@@ -490,12 +477,10 @@ async def extract_and_append(
             # configured model instead; the insights themselves are already
             # extracted at this point.
             doc_model = effective_model
-            doc_env = env
             if native_sidecar.is_apple_model(doc_model):
                 doc_model = (config.insights_model or "").strip() or "sonnet"
                 if native_sidecar.is_apple_model(doc_model):
                     doc_model = "sonnet"
-                doc_env = {}
             try:
                 from ciao.project_doc_update import update_project_doc
 
@@ -515,7 +500,6 @@ async def extract_and_append(
                         doc_path=doc,
                         insights_md=output,
                         model=doc_model,
-                        env=doc_env,
                         provider=provider,
                         cwd=workspace_root,
                     )
@@ -619,24 +603,10 @@ def _append_section(path: Path, body: str) -> None:
         f.write(f"\n\n{_INSIGHTS_HEADER}\n\n{text}\n")
 
 
-def _ollama_env(model: str, settings: OllamaSettings) -> dict[str, str]:
-    """Route the insights model to the right upstream.
-
-    Delegates to :func:`ciao.providers.ollama.routine_env_for_model`:
-    not gated on the per-chat ``models`` allowlist (the insights model is
-    fixed at the server level), local-daemon models go to ``local_url``,
-    Anthropic aliases stay on the subscription path with no overrides.
-    """
-    from ciao.providers.ollama import routine_env_for_model
-
-    return routine_env_for_model(model, settings)
-
-
 async def _run_model_with_retry(
     *,
     filtered_jsonl: str,
     model: str,
-    env: dict[str, str],
     provider: str = "claude",
     cwd: Path | None = None,
 ) -> tuple[str, str]:
@@ -661,8 +631,8 @@ async def _run_model_with_retry(
 
     async def call() -> str:
         if provider == "claude":
-            return await _call_model(payload, model, env)
-        return await _call_model(payload, model, env, provider=provider, cwd=cwd)
+            return await _call_model(payload, model)
+        return await _call_model(payload, model, provider=provider, cwd=cwd)
 
     try:
         return await call(), ""
@@ -695,7 +665,6 @@ async def _run_model_with_retry(
 async def _call_model(
     filtered_jsonl: str,
     model: str,
-    env: dict[str, str],
     *,
     provider: str = "claude",
     cwd: Path | None = None,
@@ -727,7 +696,6 @@ async def _call_model(
     kwargs: dict[str, Any] = {
         "system_prompt": _INSIGHTS_SYSTEM_PROMPT,
         "model": model,
-        "env": env,
         "timeout_s": _insights_timeout_s(),
     }
     if provider != "claude":
@@ -1075,7 +1043,7 @@ async def backfill_insights_task(
                         "Extract durable signal per the system prompt's section schema.\n\n"
                         f"{body}"
                     )
-                    effective_model, env, text_provider, note = _resolve_insights_call(
+                    effective_model, text_provider, note = _resolve_insights_call(
                         config, insights_model
                     )
 
@@ -1106,7 +1074,6 @@ async def backfill_insights_task(
                             user_prompt,
                             system_prompt=_TEXT_MODE_SYSTEM_PROMPT,
                             model=effective_model,
-                            env=env,
                             timeout_s=_insights_timeout_s(),
                             cwd=config.workspace_root,
                             provider=text_provider,

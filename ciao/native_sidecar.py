@@ -367,6 +367,37 @@ def apple_model_unavailable_reason() -> str:
     return unavailable_reason("model", subject="the on-device model")
 
 
+def resolve_model_or_fallback(
+    model: str, *, default_model: str = ""
+) -> tuple[str, str | None]:
+    """Substitute an unusable model, explaining the substitution.
+
+    Returns ``(effective_model, note)``. ``note`` is ``None`` when the requested
+    model is used as-is, and otherwise a human-readable sentence suitable for
+    logging into ``job_runs`` so the operator can see why they got a different
+    model than they asked for.
+
+    Apple's on-device model is the only one that can be unavailable: it depends
+    on the machine (macOS version, Apple Intelligence switched on, model
+    downloaded) rather than on configuration. Every other model belongs to a
+    runtime provider that owns its own auth, and a provider that is not signed
+    in fails at the turn with its own error rather than being substituted here.
+
+    Centralized so the four routine callers -- session insights, chat titles,
+    the schedule attention classifier, and skill evolution -- do not each
+    re-test the sentinel and hand-roll a substitution.
+    """
+    if not is_apple_model(model) or apple_model_available():
+        return model, None
+    # An Apple sentinel cannot serve as its own fallback.
+    fallback = (default_model or "").strip()
+    if not fallback or is_apple_model(fallback):
+        fallback = "sonnet"
+    return fallback, (
+        f"fell back to {fallback} because {apple_model_unavailable_reason()}"
+    )
+
+
 def _model_failure_reason() -> str:
     cached = _model_failure
     if cached is None:

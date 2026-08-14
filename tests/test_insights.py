@@ -190,7 +190,7 @@ def test_extract_appends_section_when_archive_exists(tmp_path: Path) -> None:
     archive = tmp_path / "archive.md"
     archive.write_text("# Existing\n\nbody\n", encoding="utf-8")
 
-    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def fake_call(filtered_jsonl: str, model: str) -> str:
         return "## Errors\n- something failed [idx=3]\n"
 
     with patch.object(insights, "_call_model", side_effect=fake_call):
@@ -215,14 +215,14 @@ def test_extract_is_idempotent_when_section_already_present(
         "# Existing\n\n## Session insights\n\nold body\n", encoding="utf-8"
     )
 
-    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def fake_call(filtered_jsonl: str, model: str) -> str:
         return "fresh content"
 
     called = {"count": 0}
 
-    async def counting_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def counting_call(filtered_jsonl: str, model: str) -> str:
         called["count"] += 1
-        return await fake_call(filtered_jsonl, model, env)
+        return await fake_call(filtered_jsonl, model)
 
     with patch.object(insights, "_call_model", side_effect=counting_call):
         asyncio.run(insights.extract_and_append(
@@ -261,7 +261,7 @@ def test_extract_retries_once_then_skips(
 
     calls = {"count": 0}
 
-    async def flaky_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def flaky_call(filtered_jsonl: str, model: str) -> str:
         calls["count"] += 1
         raise RuntimeError("boom")
 
@@ -293,7 +293,7 @@ def test_extract_succeeds_on_retry(
 
     calls = {"count": 0}
 
-    async def flaky_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def flaky_call(filtered_jsonl: str, model: str) -> str:
         calls["count"] += 1
         if calls["count"] == 1:
             raise RuntimeError("transient")
@@ -323,7 +323,7 @@ def test_extract_skips_silently_on_empty_model_output(
     archive = tmp_path / "archive.md"
     archive.write_text("# Existing\n", encoding="utf-8")
 
-    async def empty_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def empty_call(filtered_jsonl: str, model: str) -> str:
         return ""
 
     with patch.object(insights, "_call_model", side_effect=empty_call):
@@ -346,7 +346,7 @@ def test_call_model_uses_oneshot_runner(
 
     captured: dict = {}
 
-    async def fake_oneshot(prompt, *, system_prompt, model, env, timeout_s=120.0):
+    async def fake_oneshot(prompt, *, system_prompt, model, env=None, timeout_s=120.0):
         captured["model"] = model
         captured["timeout_s"] = timeout_s
         return "## Decisions\n- via oneshot [idx=1]\n"
@@ -382,7 +382,7 @@ def test_call_model_uses_apple_intelligence_for_the_local_sentinel(
         return "## Decisions\n- kept the local path"
 
     monkeypatch.setattr("ciao.native_sidecar.respond", fake_respond)
-    result = asyncio.run(insights._call_model('{"idx": 1}', "apple", {}))
+    result = asyncio.run(insights._call_model('{"idx": 1}', "apple"))
 
     assert '{"idx": 1}' in captured["prompt"]
     assert result.startswith("## Decisions")
@@ -534,7 +534,7 @@ def test_extract_updates_project_doc_when_insights_carry_decisions(
     doc = tmp_path / "doc.md"
     doc.write_text(_PROJECT_DOC, encoding="utf-8")
 
-    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def fake_call(filtered_jsonl: str, model: str) -> str:
         return "## Decisions\n- Chose sqlite over postgres because local-first. [idx=2]\n"
 
     updated_doc = _PROJECT_DOC.replace(
@@ -569,7 +569,7 @@ def test_extract_skips_project_doc_when_path_empty(
     doc = tmp_path / "doc.md"
     doc.write_text(_PROJECT_DOC, encoding="utf-8")
 
-    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def fake_call(filtered_jsonl: str, model: str) -> str:
         return "## Decisions\n- Chose sqlite over postgres because local-first. [idx=2]\n"
 
     async def fail_oneshot(prompt, **kwargs):
@@ -766,7 +766,7 @@ def test_oversized_input_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(insights.asyncio, "sleep", fake_sleep)
     out, err = asyncio.run(
         insights._run_model_with_retry(
-            filtered_jsonl='{"idx":0}', model="some-model", env={}
+            filtered_jsonl='{"idx":0}', model="some-model"
         )
     )
     assert out == ""
@@ -793,7 +793,7 @@ def test_transient_failure_still_retries_once(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(insights.asyncio, "sleep", fake_sleep)
     out, err = asyncio.run(
         insights._run_model_with_retry(
-            filtered_jsonl='{"idx":0}', model="some-model", env={}
+            filtered_jsonl='{"idx":0}', model="some-model"
         )
     )
     assert err == ""
