@@ -110,6 +110,15 @@
         placeholder="Describe what this project is about."
         rows="8"
       ></textarea>
+      <!-- Saving writes this into the canonical doc's `description:`
+           frontmatter, and a doc edit flows back here. Say so, or the write
+           into a vault file is invisible from the button that causes it. -->
+      <p class="context-hint">
+        sent with every message.
+        <template v-if="project.vault_doc_path">
+          saved to <button class="link-btn" @click="openContextDoc">{{ project.vault_doc_path }}</button>
+        </template>
+      </p>
     </section>
 
     <section class="card">
@@ -718,6 +727,11 @@ async function loadFiles(): Promise<void> {
   }
 }
 
+function openContextDoc(): void {
+  const path = project.value?.vault_doc_path
+  if (path) fileViewer.open(path)
+}
+
 function openFile(f: ProjectFile): void {
   const isDoc = f.kind === 'markdown' || f.kind === 'text' || /\.(pdf|pptx)$/i.test(f.vault_path)
   if (f.kind === 'image') {
@@ -1039,6 +1053,26 @@ watch(() => props.projectId, async () => {
   font-size: 13px;
   line-height: 1.5;
   padding: 10px 12px;
+}
+
+.context-hint {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  color: var(--fg3);
+}
+
+.context-hint .link-btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--fg2);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.context-hint .link-btn:hover {
+  color: var(--fg1);
 }
 
 .chat-list { display: flex; flex-direction: column; }
