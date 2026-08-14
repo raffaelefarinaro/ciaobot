@@ -4921,7 +4921,7 @@ async def list_models(request: Request) -> JSONResponse:
             "input_modalities": list(item.get("inputModalities") or []),
         }
     # Claude Code serves one upstream, so its models are a single list rather
-    # than the work/personal split the Ollama routing era needed.
+    # than the work/personal split the routing-backend era needed.
     claude_models = list(config.claude_models)
     claude_default = (
         config.claude_default_model

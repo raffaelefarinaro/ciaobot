@@ -109,7 +109,7 @@ class AgentRequest:
     # example Codex slash-command expansion) changes the model-facing prompt.
     display_prompt: str = ""
     # Routing key for ProviderService. Public builds currently accept
-    # "claude"; backend choice is handled by model/model_bucket routing.
+    # "claude". Which models are reachable is the provider's own business.
     provider: str = "claude"
     resume_session: str | None = None
     # Fork the resumed provider session into a new durable session before the

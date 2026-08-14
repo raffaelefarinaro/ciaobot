@@ -187,7 +187,6 @@ _BACKGROUND_WAKE_WINDOW_SECONDS = 5.0
 # always included, so this only has to be enough to decide whether to read it.
 _BACKGROUND_WAKE_TAIL_LINES = 50
 _ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
-_OLLAMA_MODEL_BUCKETS = {"personal", "ollama"}
 
 
 @contextmanager
@@ -665,7 +664,7 @@ def _is_contentless_prompt(text: str) -> bool:
 def _fallback_title(user_text: str) -> str | None:
     """Deterministic fallback title derived from the user's first message.
 
-    Used when the OpenRouter call fails or no API key is configured, so the
+    Used when the model call fails, so the
     sidebar never stays stuck on "New Chat" indefinitely.
     """
     snippet = (user_text or "").strip()
@@ -757,8 +756,8 @@ async def _generate_chat_title_with_engine(
 
     Prefers Apple's on-device model (FoundationModels, via the bundled
     sidecar) when it is the selected title model and actually available,
-    falling back to `run_oneshot` using the Claude SDK. The `env` dict
-    is forwarded to the SDK query so Ollama env-injection keeps working.
+    falling back to `run_oneshot`, which dispatches to the provider that
+    owns the model.
 
     No cost tracking: both paths run the same upstream model,
     so there's no separate bill to log.
@@ -823,7 +822,7 @@ async def _generate_chat_title_with_engine(
                 return title, engine, None
         except Exception as exc:
             # Surface the on-device failure into the same `detail` channel the
-            # Claude/Ollama path uses, so job_runs records *which* path
+            # the provider path uses, so job_runs records *which* path
             # failed instead of a generic "title engine failed" string
             # (#257). Truncate to keep the run record bounded.
             apple_detail = (str(exc) or "").strip()[:500] or None
@@ -832,7 +831,7 @@ async def _generate_chat_title_with_engine(
             )
 
     # "apple" (and the legacy "apfel") is a routing sentinel meaning "use the
-    # on-device model above", not a real Claude/Ollama model id. If it was
+    # on-device model above", not a real provider model id. If it was
     # unavailable or produced nothing, run_oneshot must never see it literally
     # — that always fails ("There's an issue with the selected model (apple)").
     # Substitute the standard fallback model instead.
@@ -1048,10 +1047,9 @@ class ChatInfo:
     # Routing key for ProviderService. Public builds currently accept
     # "claude"; backend choice is handled by model/model_bucket routing.
     provider: str = "claude"
-    # Claude routing bucket chosen in the picker: "work" pins the Anthropic
-    # subscription upstream (aliases stay aliases), "personal" pins Ollama
-    # routing (aliases resolve to tier models). Empty = legacy auto: the
-    # project's workspace decides. Only meaningful when provider == "claude".
+    # Vestigial. Named which upstream a tier alias resolved to, back when
+    # Ollama and OpenRouter ran through Claude Code by env injection. Still
+    # persisted on existing chats and accepted by the API, but never read.
     model_bucket: str = ""
     mode: BridgeMode = "auto"
     # Provider-native thinking/reasoning level (see ciao.models.THINKING_LEVELS).
@@ -3250,7 +3248,7 @@ class ProjectChatManager:
             raise ValueError(f"Unknown control surface '{control_surface}'")
         # Resolve the effective model/provider before any side effects, so a
         # rejected model can't leave unrelated empty chats deleted (#259).
-        # Per-workspace default: personal projects can default to Ollama
+        # Per-workspace default: one workspace can default to a cheaper tier
         # models, work to Anthropic, etc. Explicit ``model`` arg wins.
         project = self._projects.get(project_id)
         workspace = project.workspace if project else None
@@ -4657,7 +4655,7 @@ class ProjectChatManager:
 
         Mirrors ``create_chat``'s per-workspace default lookup so a
         schedule attached to a personal project can default to an
-        Ollama model, while a work schedule defaults to Anthropic.
+        tier, while another defaults to a more capable one.
         Falls back to the global ``claude_default_model`` when the
         project is unknown.
         """
@@ -4839,9 +4837,8 @@ class ProjectChatManager:
     def _build_extra_env(self, chat: ChatInfo) -> dict[str, str]:
         """Build extra environment variables for the provider.
 
-        For Ollama-routed models (allowlisted in ``CiaoConfig.ollama``),
-        also overrides ``ANTHROPIC_*`` so the spawned ``claude`` CLI hits
-        the local Ollama daemon instead of api.anthropic.com.
+        Workspace, project, chat, and provider markers for the spawned CLI.
+        No upstream overrides: each provider authenticates itself.
         """
         env: dict[str, str] = {}
         project = self._projects.get(chat.project_id)
@@ -6088,7 +6085,7 @@ class ProjectChatManager:
         # sidebar entry stops showing "New Chat" before the model has
         # even started typing. Tradeoff: a vague opener ("quick
         # question") yields a vaguer title than the full-exchange path
-        # would have, but the cheap Ollama free-tier title model
+        # would have, but the cheap title model
         # absorbs that cost easily and we can always rename manually.
         #
         # This includes question-shaped meta-inquiries ("why no recent sessions?").
@@ -7660,7 +7657,6 @@ class ProjectChatManager:
 
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
-        from ciao.providers.ollama import is_local_ollama_model
         requested = (
             chat.model if chat.provider == "codex"
             else resolve_title_model(self._config, workspace)
@@ -7703,7 +7699,7 @@ class ProjectChatManager:
                 "env": title_env,
                 "timeout_s": title_timeout,
             }
-            # Keep the established Claude/Ollama call signature intact for
+            # Keep the established Claude call signature intact for
             # integrations that wrap the title helper. Codex is the only
             # provider that needs an explicit dispatch hint here.
             if title_provider != "claude":

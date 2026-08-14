@@ -36,10 +36,9 @@ class OneShotError(RuntimeError):
     ``detail`` carries the composed upstream error (status / subtype /
     stop_reason / body) so callers -- the titler, ``job_runs`` -- can
     surface it instead of a bare "One-shot query failed". ``transient``
-    marks failures worth retrying: empty-body / gateway errors from an
-    Anthropic-compatible backend (e.g. Ollama Cloud intermittently
-    returns contentless ``is_error`` results) succeed on a second try,
-    whereas auth / subscription / bad-model errors will fail again.
+    marks failures worth retrying: empty-body / gateway errors succeed on a
+    second try, whereas auth / subscription / bad-model errors will fail
+    again.
     """
 
     def __init__(
@@ -80,9 +79,9 @@ _NON_TRANSIENT_MARKERS = (
 def _result_error_detail(msg: ResultMessage) -> tuple[str, int | None]:
     """Compose a human-readable detail string from an error ResultMessage.
 
-    Ollama Cloud's known failure mode is a contentless ``is_error`` result
-    (empty body, no status), so the parts are all best-effort and we fall
-    back to an explicit "empty error result" marker when nothing is set.
+    A gateway can return a contentless ``is_error`` result (empty body, no
+    status), so the parts are all best-effort and we fall back to an explicit
+    "empty error result" marker when nothing is set.
     """
     status = getattr(msg, "api_error_status", None)
     parts: list[str] = []
@@ -283,8 +282,8 @@ async def run_oneshot(
     caller decides how to handle it. ``timeout_s`` wraps each attempt via
     :func:`asyncio.wait_for`.
 
-    On a transient failure (an empty-body / ``is_error`` result, the known
-    Ollama Cloud gateway flake) the call is retried up to ``max_retries``
+    On a transient failure (an empty-body / ``is_error`` result) the call is
+    retried up to ``max_retries``
     times with exponential backoff; non-transient failures (auth /
     subscription / bad-model) and timeouts are raised immediately. On
     failure an :class:`OneShotError` carrying the upstream ``detail`` is

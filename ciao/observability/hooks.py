@@ -11,11 +11,7 @@ Three hooks are wired today:
       get surfaced as ``- [[People/Name]] (person)`` bullets so the model
       can load the right note without guessing who "Emma" or "Ciaobot-
       Improvements" refers to.
-2. ``PostToolUse`` on the ``WebSearch`` tool backfills results on
-   Ollama-cloud- and OpenRouter-routed chats, where the Anthropic-compat
-   layer doesn't execute the server-side ``web_search`` tool. See
-   :func:`build_web_search_post_tooluse_hook`.
-3. ``PreToolUse`` on ``Bash`` forces background shell commands to run in the
+2. ``PreToolUse`` on ``Bash`` forces background shell commands to run in the
    foreground. A background process belongs to the Claude SDK subprocess and
    is stopped when the turn ends, while its terminal notification is not
    emitted until a later turn resumes the session.

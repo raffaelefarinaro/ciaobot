@@ -146,7 +146,7 @@ def _is_connection_drop_text(text: str) -> bool:
 # A name-resolution / connect failure surfaces from the Claude CLI as a generic
 # "API Error: Unable to connect to API (ENOTFOUND)" with no host and no error
 # category, so an operator reading a failed schedule can't tell which endpoint
-# failed to resolve (the Anthropic API, an OpenRouter/Ollama gateway, a custom
+# failed to resolve (the Anthropic API, a custom
 # ANTHROPIC_BASE_URL...) or whether it was DNS, a refused connection, a timeout,
 # or auth. We know the endpoint the turn was pointed at, so annotate the error
 # with it and classify the failure. See issues #162 and #178. The annotation
@@ -160,7 +160,7 @@ from ciao.providers.connect_errors import (  # noqa: E402
 def _resolve_api_host(env: dict[str, str]) -> str:
     """Hostname the spawned CLI will talk to for this turn.
 
-    Prefers the per-turn ``ANTHROPIC_BASE_URL`` override (Ollama / OpenRouter
+    Prefers the per-turn ``ANTHROPIC_BASE_URL`` override (a self-hosted gateway
     routing) and falls back to the process env, then Anthropic's default.
     """
     base = (
