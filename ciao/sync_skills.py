@@ -1036,7 +1036,7 @@ def _install_opencode_mcps(workspace: Path) -> tuple[int, int]:
                 file=sys.stderr,
             )
             return 0, 0
-        servers = {}
+        servers: object = {}
         if isinstance(data, dict):
             servers = data.get("mcpServers") or data.get("mcp_servers") or {}
         if isinstance(servers, dict):
@@ -1066,10 +1066,16 @@ def _install_opencode_mcps(workspace: Path) -> tuple[int, int]:
     # Never clobber a server the user declared; only previously-managed names
     # are ours to rewrite or remove.
     installed = 0
+    managed: set[str] = set()
     for name, entry in desired.items():
         if name in servers_out and name not in previous:
             continue
         servers_out[name] = entry
+        # Only what we actually wrote goes in the sidecar. Recording every
+        # *desired* name would claim ownership of the user's colliding entry,
+        # and the very next sync would then overwrite it (and prune it once
+        # `.mcp.json` dropped the name) — the guard above would last one run.
+        managed.add(name)
         installed += 1
     pruned = 0
     for name in previous - set(desired):
@@ -1088,7 +1094,7 @@ def _install_opencode_mcps(workspace: Path) -> tuple[int, int]:
             config_path.write_text(rendered, encoding="utf-8")
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(
-            json.dumps(sorted(desired), indent=2) + "\n", encoding="utf-8"
+            json.dumps(sorted(managed), indent=2) + "\n", encoding="utf-8"
         )
     except OSError:
         return 0, 0

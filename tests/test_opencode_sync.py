@@ -283,6 +283,35 @@ def test_a_user_name_collision_is_not_overwritten(tmp_path):
     assert config["mcp"]["thing"]["command"] == ["mine"]
 
 
+def test_a_user_name_collision_survives_repeated_syncs(tmp_path):
+    """The collision guard must not expire after one run.
+
+    The sidecar records what Ciaobot *owns*, and a skipped collision is not
+    owned. Recording every desired name instead made the second sync treat the
+    user's entry as previously-managed: it was overwritten, and pruned outright
+    once `.mcp.json` dropped the name.
+    """
+    root = _workspace(tmp_path)
+    (root / "opencode.json").write_text(
+        json.dumps({"mcp": {"thing": {"type": "local", "command": ["mine"]}}}), encoding="utf-8"
+    )
+    _write_mcp(root, {"thing": {"command": "theirs"}})
+
+    _install_opencode_mcps(root)
+    _install_opencode_mcps(root)
+
+    config = json.loads((root / "opencode.json").read_text(encoding="utf-8"))
+    assert config["mcp"]["thing"]["command"] == ["mine"]
+    sidecar = root / ".opencode" / OPENCODE_MANAGED_MCPS_FILE
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == []
+
+    # And dropping it upstream must not prune the user's own entry.
+    _write_mcp(root, {})
+    _install_opencode_mcps(root)
+    config = json.loads((root / "opencode.json").read_text(encoding="utf-8"))
+    assert config["mcp"]["thing"]["command"] == ["mine"]
+
+
 def test_removing_a_server_prunes_only_the_managed_one(tmp_path):
     root = _workspace(tmp_path)
     (root / ".opencode").mkdir(parents=True, exist_ok=True)

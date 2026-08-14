@@ -31,6 +31,7 @@ import re
 import secrets
 import socket
 import time
+from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,11 +86,23 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
 # hit on every model-picker open. Cache it like Codex does rather than paying
 # a server spawn per request.
 _MODEL_CACHE_TTL = 300.0
+# An empty catalog is cached far more briefly: it usually means "nothing
+# authenticated yet" or "the server did not come up", and holding that for five
+# minutes would hide the models for five minutes after opencode starts working.
+# It is still cached, because /api/models is on the PWA's load path and an
+# uncached empty result means a throwaway server spawn — up to
+# `_SERVER_START_TIMEOUT` of it when the binary exists but never gets healthy —
+# on every single request.
+_EMPTY_MODEL_CACHE_TTL = 20.0
 _MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 _SERVER_START_TIMEOUT = 30.0
 _REQUEST_TIMEOUT = 30.0
 _SHUTDOWN_TIMEOUT = 5.0
+# Lines of the server's stderr kept for error messages. The pipe must be read
+# continuously (a full 64K pipe buffer blocks the child's next write and wedges
+# the server mid-turn), so the reader keeps a bounded tail rather than the lot.
+_STDERR_TAIL_LINES = 20
 
 # opencode's built-in primary agents, keyed by Ciaobot's BridgeMode. `plan` is
 # opencode's own read-only agent; everything else runs `build` and differs only
@@ -317,21 +330,33 @@ def _file_touches(tool: str, raw: object) -> list[dict[str, str]] | None:
     return [{"file_path": path.strip(), "action": action}]
 
 
+def _token_count(raw: object) -> int:
+    """A wire token count as an int, or 0 for anything that is not a number.
+
+    Coercing with a bare ``int()`` would raise on a string or an object, and
+    this runs inside the SSE loop where only ``httpx`` errors are handled — a
+    surprising payload would kill the turn with a traceback.
+    """
+    return int(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else 0
+
+
 def usage_payload(tokens: Mapping[str, Any] | None) -> dict[str, str]:
     """Normalize opencode token counts into Ciaobot's usage fields."""
     if not isinstance(tokens, Mapping):
         return {}
-    cache = tokens.get("cache") if isinstance(tokens.get("cache"), Mapping) else {}
+    raw_cache = tokens.get("cache")
+    cache: Mapping[str, Any] = raw_cache if isinstance(raw_cache, Mapping) else {}
     usage: dict[str, str] = {}
     for key, source in (
         ("inputTokens", tokens.get("input")),
         ("outputTokens", tokens.get("output")),
         ("reasoningTokens", tokens.get("reasoning")),
-        ("cacheReadTokens", (cache or {}).get("read")),
-        ("cacheWriteTokens", (cache or {}).get("write")),
+        ("cacheReadTokens", cache.get("read")),
+        ("cacheWriteTokens", cache.get("write")),
     ):
-        if isinstance(source, (int, float)) and source:
-            usage[key] = str(int(source))
+        count = _token_count(source)
+        if count:
+            usage[key] = str(count)
     return usage
 
 
@@ -339,8 +364,8 @@ def _token_usage_events(tokens: object) -> list[StreamEvent]:
     """A live token-count event, when the payload carries real counts."""
     if not isinstance(tokens, Mapping):
         return []
-    read_in = int(tokens.get("input") or 0)
-    read_out = int(tokens.get("output") or 0)
+    read_in = _token_count(tokens.get("input"))
+    read_out = _token_count(tokens.get("output"))
     if not read_in and not read_out:
         return []
     return [TokenUsageEvent(type="token_usage", input_tokens=read_in, output_tokens=read_out)]
@@ -445,6 +470,10 @@ class OpencodeProvider(BaseSDKProvider):
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         super().__init__(workspace_root, config=config)
         self._process: asyncio.subprocess.Process | None = None
+        # Reads the server's stderr for its whole life; see
+        # `_start_stderr_reader` for why leaving the pipe unread is not an option.
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
         self._client: httpx.AsyncClient | None = None
         self._base_url: str = ""
         self._password: str = ""
@@ -464,6 +493,10 @@ class OpencodeProvider(BaseSDKProvider):
         self._user_message_id: str = ""
         self._usage: dict[str, str] = {}
         self._cost: float | None = None
+        # What opencode actually ran, as `providerID/modelID`. A workspace may
+        # pin opencode without naming a model, in which case the request carries
+        # none and only the assistant message says what was used.
+        self._effective_model: str = ""
 
     def _reset_turn_state(self) -> None:
         self._emitted.clear()
@@ -472,6 +505,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._user_message_id = ""
         self._usage = {}
         self._cost = None
+        self._effective_model = ""
 
     # ---------------------------------------------------------------- server
 
@@ -523,9 +557,13 @@ class OpencodeProvider(BaseSDKProvider):
             binary, "serve", "--port", str(port), "--hostname", "127.0.0.1",
             cwd=str(self.workspace_root),
             env=env,
-            stdout=asyncio.subprocess.PIPE,
+            # stdout is discarded rather than piped: nothing consumes it, and an
+            # unread pipe blocks the child once the OS buffer fills. stderr is
+            # kept for diagnostics but drained continuously for the same reason.
+            stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._start_stderr_reader()
         self._base_url = f"http://127.0.0.1:{port}"
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
@@ -546,6 +584,49 @@ class OpencodeProvider(BaseSDKProvider):
             raise
         return self._client
 
+    def _start_stderr_reader(self) -> None:
+        """Drain the server's stderr into a bounded tail.
+
+        Not optional bookkeeping: a piped stream nobody reads fills its 64K OS
+        buffer and then blocks the child's next write, which wedges the server
+        mid-turn. Keeping a tail also gives startup failures a readable cause.
+        """
+        stream = getattr(self._process, "stderr", None)
+        self._stderr_tail.clear()
+        if stream is None:
+            return
+
+        async def drain() -> None:
+            try:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        return
+                    text = line.decode("utf-8", "replace").rstrip()
+                    if text:
+                        self._stderr_tail.append(text)
+                        logger.debug("opencode serve: %s", text)
+            except (asyncio.CancelledError, OSError, ValueError):
+                return
+
+        self._stderr_task = asyncio.create_task(drain())
+
+    async def _stderr_detail(self) -> str:
+        """Last line of the server's stderr, for an error message.
+
+        Waits briefly for the reader first: a server that dies immediately does
+        so before the drain task has had a turn, and the reason it printed is
+        exactly what the caller needs. The pipe is at EOF once the process is
+        gone, so the task finishes on its own.
+        """
+        reader = self._stderr_task
+        if reader is not None and not reader.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(reader), timeout=1.0)
+            except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+        return self._stderr_tail[-1] if self._stderr_tail else ""
+
     async def _await_health(self) -> None:
         """Poll ``/global/health`` until the server answers or we give up."""
         assert self._client is not None
@@ -553,8 +634,10 @@ class OpencodeProvider(BaseSDKProvider):
         last_error: Exception | None = None
         while asyncio.get_running_loop().time() < deadline:
             if self._process is not None and self._process.returncode is not None:
+                detail = await self._stderr_detail()
                 raise RuntimeError(
                     f"opencode serve exited with code {self._process.returncode}"
+                    + (f": {detail}" if detail else "")
                 )
             try:
                 response = await self._client.get("/global/health", timeout=2.0)
@@ -654,6 +737,11 @@ class OpencodeProvider(BaseSDKProvider):
             except (TimeoutError, asyncio.TimeoutError):
                 process.kill()
                 await process.wait()
+        # After the process is gone, so the tail still explains a crash above.
+        reader = self._stderr_task
+        self._stderr_task = None
+        if reader is not None:
+            reader.cancel()
         self._base_url = ""
         self._mcp_token = ""
         self._reset_settings()
@@ -661,7 +749,18 @@ class OpencodeProvider(BaseSDKProvider):
     # --------------------------------------------------------------- session
 
     async def _ensure_session(self, request: AgentRequest) -> str:
-        """Resume, fork, or create the session this turn runs in."""
+        """Resume, fork, or create the session this turn runs in.
+
+        Known limitation: the permission ruleset is fixed at creation. `agent`
+        is re-sent on every prompt, so a mode switch changes plan-vs-build, but
+        the rules do not follow it — a chat created in `normal` keeps asking
+        even after being switched to `bypass`, and one switched to `plan` keeps
+        its write grants. `PATCH /session/{id}` accepts `permission` and returns
+        200, but verified against opencode 1.18 it does not apply: the wildcard
+        read back unchanged after patching `ask` to `allow`. Re-creating the
+        session would apply the rules at the cost of the conversation, so the
+        mismatch is left visible rather than papered over.
+        """
         client = self._client
         assert client is not None
         agent, permission = mode_settings(request.mode)
@@ -986,6 +1085,13 @@ class OpencodeProvider(BaseSDKProvider):
             return []
         if info.get("role") != "assistant":
             return []
+        # The only place the resolved model is reported. Without this a chat
+        # that let opencode pick (no model on the request) records an empty
+        # model forever, and the header has nothing to show.
+        model_id = str(info.get("modelID") or "")
+        if model_id:
+            provider_id = str(info.get("providerID") or "")
+            self._effective_model = f"{provider_id}/{model_id}" if provider_id else model_id
         cost = info.get("cost")
         if isinstance(cost, (int, float)):
             self._cost = float(cost)
@@ -1175,7 +1281,7 @@ class OpencodeProvider(BaseSDKProvider):
             result=error or "",
             session_id=session_id,
             is_error=bool(error),
-            effective_model=request.model,
+            effective_model=self._effective_model or request.model,
             # Accumulated from the assistant message's own totals rather than
             # summed per step, so a retried step cannot double-count.
             usage=self._usage,
@@ -1196,23 +1302,26 @@ class OpencodeProvider(BaseSDKProvider):
         """
         key = str(workspace_root)
         cached = _MODEL_CACHE.get(key)
-        if cached and not force and time.monotonic() - cached[0] < _MODEL_CACHE_TTL:
-            return [dict(item) for item in cached[1]]
+        if cached and not force:
+            ttl = _MODEL_CACHE_TTL if cached[1] else _EMPTY_MODEL_CACHE_TTL
+            if time.monotonic() - cached[0] < ttl:
+                return [dict(item) for item in cached[1]]
+        payload: object = None
         async with _EphemeralServer(workspace_root) as client:
-            if client is None:
-                return []
-            try:
-                response = await client.get("/provider")
-                response.raise_for_status()
-                payload = response.json()
-            except (httpx.HTTPError, ValueError):
-                return []
+            if client is not None:
+                try:
+                    response = await client.get("/provider")
+                    response.raise_for_status()
+                    payload = response.json()
+                except (httpx.HTTPError, ValueError):
+                    payload = None
         catalog = _catalog_from_providers(payload)
-        # Only a non-empty catalog is cached: an empty one usually means the
-        # server failed to start, and caching that would hide the models for
-        # the next five minutes after opencode starts working.
-        if catalog:
-            _MODEL_CACHE[key] = (time.monotonic(), catalog)
+        # Every outcome is cached, empties included — an empty result is the
+        # expensive one to recompute (a server spawn, or the full health-poll
+        # deadline when the binary exists but never answers), and /api/models is
+        # on the PWA's load path. `_EMPTY_MODEL_CACHE_TTL` keeps that short so
+        # models appear seconds after opencode starts working, not minutes.
+        _MODEL_CACHE[key] = (time.monotonic(), catalog)
         return catalog
 
     @classmethod
@@ -1275,7 +1384,7 @@ def _catalog_from_providers(payload: object) -> list[dict[str, Any]]:
     # models. Only a *missing* key means the build does not report the
     # distinction, in which case fall back to listing everything.
     filter_connected = isinstance(connected, list)
-    connected_ids = {str(item) for item in connected} if filter_connected else set()
+    connected_ids = {str(item) for item in connected} if isinstance(connected, list) else set()
     rows: list[dict[str, Any]] = []
     for provider in payload.get("all") or []:
         if not isinstance(provider, Mapping):

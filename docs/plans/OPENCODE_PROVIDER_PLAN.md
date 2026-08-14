@@ -69,6 +69,7 @@ snapshot because opencode is bring-your-own-provider.
 | Tool approval | `permission.v2.asked` + `POST /permission/:id/reply` | Supported. Reply is `once`/`always`/`reject`. |
 | Structured question | `POST /question/:id/reply` and `/reject` | Supported. |
 | Modes | per-session `agent` + `permission` rule list | Supported. Map by advertised agent ids, not position. |
+| Mode switch mid-chat | `agent` re-sent per prompt; `permission` fixed at create | **Partial.** `PATCH /session/{id}` takes `permission` and returns 200 but does not apply it (verified: wildcard read back unchanged). A chat keeps the ruleset it was created with. |
 | Reasoning effort | per-model `variants` (`low`/`medium`/`high`/`max`), sent as `variant` | Supported. Narrowed per model from the catalog. |
 | Models | `GET /provider`, `opencode models` | Supported, dynamic. Do not hard-code model ids. |
 | Usage | token/cost on assistant message info | Supported. |

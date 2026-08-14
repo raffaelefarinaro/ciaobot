@@ -4537,9 +4537,9 @@ async def create_schedule(request: Request) -> JSONResponse:
     # stale; workspace survives). Explicit body override wins.
     workspace = (body.get("workspace") or "").strip().lower()
     known_workspaces = _known_workspace_names(pcm)
+    target_project = pcm.get_project(web_project_id) if web_project_id else None
     if workspace not in known_workspaces and web_project_id:
-        project = pcm.get_project(web_project_id)
-        workspace = project.workspace if project else ""
+        workspace = target_project.workspace if target_project else ""
     entry = sm.create(
         daily_time_utc=body.get("time") or "",
         prompt=body["prompt"],
@@ -4555,10 +4555,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         run_at_date=run_at_date,
         web_chat_id=web_chat_id,
         web_project_id=web_project_id,
-        web_project_name=(
-            (pcm.get_project(web_project_id).name if pcm.get_project(web_project_id) else "")
-            if web_project_id else ""
-        ),
+        web_project_name=target_project.name if target_project else "",
         archive_policy=archive_policy,
         workspace=workspace if workspace in known_workspaces else "",
         title=str(body.get("title", "")).strip(),

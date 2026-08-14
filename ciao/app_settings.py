@@ -15,6 +15,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
+from typing import Any
 
 from ciao import provider_registry
 
@@ -38,7 +39,7 @@ def _clean_tier_routes(raw: object) -> dict[str, dict[str, str]]:
     }
 
 
-def _tier_settings(config: object, descriptor: object) -> object | None:
+def _tier_settings(config: object, descriptor: object) -> Any:
     """This provider's per-tier settings dataclass on ``config``, if present.
 
     Returns ``None`` when the provider declares no tier pins, or when the

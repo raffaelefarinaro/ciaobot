@@ -8,6 +8,7 @@ account identifiers are recorded.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -632,6 +633,18 @@ def test_real_turn_records_usage_and_cost(tmp_path):
     assert provider._cost is not None
 
 
+def test_real_turn_records_the_model_opencode_actually_ran(tmp_path):
+    """A chat may let opencode choose, so the request carries no model.
+
+    Echoing `request.model` back as the effective model then recorded an empty
+    string forever and the chat header had nothing to show; the assistant
+    message is the only place the resolved `providerID/modelID` appears.
+    """
+    provider = _provider(tmp_path)
+    _replay(provider)
+    assert provider._effective_model == "opencode/big-pickle"
+
+
 def test_replaying_a_turn_twice_is_clean_after_reset(tmp_path):
     """Per-turn state must not leak between turns on a reused provider."""
     provider = _provider(tmp_path)
@@ -708,6 +721,55 @@ async def test_missing_binary_names_the_override_env_var(tmp_path, monkeypatch):
 
     with pytest.raises(FileNotFoundError, match="CIAO_OPENCODE_BIN"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monkeypatch):
+    """An unread pipe blocks the child once the OS buffer fills.
+
+    `opencode serve` logs for the whole life of a chat, so a piped stream nobody
+    reads eventually wedges the server mid-turn. stdout is discarded outright
+    and stderr is drained into a bounded tail, which also gives a failed startup
+    a readable cause instead of a bare exit code.
+    """
+    provider = _provider(tmp_path)
+    spawn_kwargs: dict = {}
+
+    class FakeStderr:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        async def readline(self):
+            return self._lines.pop(0) if self._lines else b""
+
+    class FakeProcess:
+        returncode = 3
+        stderr = FakeStderr([b"listening\n", b"port already in use\n"])
+
+        def terminate(self):  # pragma: no cover - process already exited
+            pass
+
+        async def wait(self):
+            return 3
+
+    async def fake_exec(*_args, **kwargs):
+        spawn_kwargs.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
+    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+
+    with pytest.raises(RuntimeError, match="port already in use"):
+        await provider._ensure_server(Request())  # type: ignore[arg-type]
+
+    assert spawn_kwargs["stdout"] is asyncio.subprocess.DEVNULL, "nothing reads stdout"
+    assert spawn_kwargs["stderr"] is asyncio.subprocess.PIPE
 
 
 @pytest.mark.asyncio
@@ -940,15 +1002,23 @@ async def test_model_catalog_is_cached_between_calls(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_empty_catalog_is_not_cached(tmp_path, monkeypatch):
-    """Caching 'no models' would hide them for 5 minutes once opencode works."""
+async def test_an_empty_catalog_is_cached_only_briefly(tmp_path, monkeypatch):
+    """An empty result must be cached, but must not hide models for long.
+
+    Not caching it at all meant every /api/models request — which is on the
+    PWA's load path — paid another server spawn, and the full health-poll
+    deadline when the binary exists but never answers. Caching it for the full
+    TTL would hide the models for five minutes once opencode starts working, so
+    the empty result gets its own much shorter TTL.
+    """
     import ciao.providers.opencode as mod
 
     mod._MODEL_CACHE.clear()
+    starts = {"n": 0}
 
     class FakeServer:
         def __init__(self, _root):
-            pass
+            starts["n"] += 1
 
         async def __aenter__(self):
             return None  # opencode not installed / server failed to start
@@ -959,7 +1029,16 @@ async def test_an_empty_catalog_is_not_cached(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_EphemeralServer", FakeServer)
 
     assert await mod.OpencodeProvider.model_catalog(tmp_path) == []
-    assert str(tmp_path) not in mod._MODEL_CACHE
+    assert await mod.OpencodeProvider.model_catalog(tmp_path) == []
+    assert starts["n"] == 1, "a repeat call must not spawn another server"
+
+    assert mod._EMPTY_MODEL_CACHE_TTL < mod._MODEL_CACHE_TTL
+    # Age the entry past the empty TTL: the next call must look again.
+    stamp, catalog = mod._MODEL_CACHE[str(tmp_path)]
+    mod._MODEL_CACHE[str(tmp_path)] = (stamp - mod._EMPTY_MODEL_CACHE_TTL - 1, catalog)
+    assert await mod.OpencodeProvider.model_catalog(tmp_path) == []
+    assert starts["n"] == 2
+    mod._MODEL_CACHE.clear()
 
 
 # ── Ciaobot control-plane MCP ───────────────────────────────────────────
