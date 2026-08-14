@@ -487,6 +487,29 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         is_node_active=node_state_manager.is_active,
     )
 
+    # Background command runs (issue #282): a subprocess-only sibling of
+    # delegates. Completions wake the chat that started the run through the
+    # same coalescing path delegates use.
+    from ciao.background import BackgroundRun, BackgroundRunner, BackgroundRunStore
+
+    def _background_finished(run: BackgroundRun, tail: list[str]) -> None:
+        pcm.queue_background_wake(
+            run.parent_chat_id,
+            run_id=run.run_id,
+            label=run.label,
+            status=run.status,
+            exit_code=run.exit_code,
+            last_lines=tail,
+            log_path=str(background_runner.log_path(run.run_id)),
+            error=run.error,
+        )
+
+    background_runner = BackgroundRunner(
+        BackgroundRunStore(config.state_path.parent),
+        workspace_root=config.workspace_root,
+        on_finish=_background_finished,
+    )
+
     # Create and wire up web app. MCP stays available while legacy remains
     # the default so controlled A/B runs can select a surface per chat.
     from ciao.mcp_server import CiaoMcpService
@@ -500,6 +523,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app.state.node_state_manager = node_state_manager
     app.state.schedule_manager = schedule_manager
     app.state.loop_manager = loop_manager
+    app.state.background_runner = background_runner
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
@@ -535,6 +559,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             app_settings=app_settings,
             startup_tracker=tracker,
             connection_tracker=connection_tracker,
+            background_runner=background_runner,
         )
         mcp_service.bind(control_plane)
         pcm._mcp_service = mcp_service
@@ -693,6 +718,17 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         # stopped until started from the Automations page. No catch-up pass:
         # missed poll iterations from downtime are worthless, cadence just resumes.
         loop_manager.start()
+
+        # Resolve any background run left non-terminal by a crash (the
+        # graceful path terminates them on shutdown, so this normally finds
+        # nothing), prune expired ones, and arm the janitor. Orphans are woken
+        # here rather than left sitting in `running` forever.
+        orphaned = background_runner.start()
+        if orphaned:
+            logger.warning(
+                "Resolved %d orphaned background run(s) after restart: %s",
+                len(orphaned), ", ".join(run.run_id for run in orphaned),
+            )
 
         # Fire each schedule once when its latest expected occurrence was missed
         # (for example while the server was down). This does not replay every
@@ -1026,6 +1062,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             await asyncio.gather(*(_one(s) for s in services), return_exceptions=True)
 
     app.add_event_handler("shutdown", _shutdown_providers)
+
+    async def _shutdown_background_runs() -> None:
+        # Terminate every live background command before the loop closes. This
+        # is what makes "a restart does not leak orphan processes" true on the
+        # graceful path: without it, a detached child (own session, by design,
+        # so cancel can reach its whole tree) would survive the engine and the
+        # next boot could only report it, never reclaim it.
+        try:
+            await background_runner.stop()
+        except Exception:
+            logger.exception("Background runner shutdown failed")
+
+    app.add_event_handler("shutdown", _shutdown_background_runs)
 
     try:
         await server.serve()

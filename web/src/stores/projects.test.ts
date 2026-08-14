@@ -804,6 +804,9 @@ describe('re-entry summary invalidation', () => {
     const chatId = 'chat-summary-result'
     store.reentrySummaries[chatId] = 'Old orientation'
     store.connectWs(chatId)
+    // Mark the chat as streaming so the result is treated as a real turn
+    // completion rather than a broker replay on WS resume.
+    store.streaming[chatId] = true
 
     fakeSockets[0].onmessage?.({
       data: JSON.stringify({
@@ -817,6 +820,58 @@ describe('re-entry summary invalidation', () => {
     })
 
     expect(store.reentrySummaries[chatId]).toBeUndefined()
+  })
+
+  test('keeps the summary when a result is replayed after the turn has already settled', () => {
+    // A WS reconnect replays the broker's buffered events. A result for a
+    // turn that already settled on this client must NOT clear the re-entry
+    // summary — otherwise scrolling after a resume would dismiss the
+    // orientation note.
+    const store = useProjectStore()
+    const chatId = 'chat-summary-result-replay'
+    store.reentrySummaries[chatId] = 'Old orientation'
+    store.connectWs(chatId)
+    // streaming stays false (default) — the turn already settled.
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'The new answer',
+        is_error: false,
+        effective_model: 'claude-test',
+        usage: {},
+        session_id: 'session-1',
+      }),
+    })
+
+    expect(store.reentrySummaries[chatId]).toBe('Old orientation')
+  })
+
+  test('keeps the summary when a user_echo is replayed for an already-rendered turn', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-echo-replay'
+    store.reentrySummaries[chatId] = 'Old orientation'
+    store.connectWs(chatId)
+    // The transcript already has a user message with the same turn_index
+    // that the echo is replaying. The summary must survive this echo so
+    // that scrolling (which can trigger a WS resume and a buffered echo
+    // replay) doesn't dismiss the orientation note.
+    store.messages[chatId] = [{
+      role: 'user',
+      content: 'Earlier prompt',
+      timestamp: '2026-08-13T10:00:00Z',
+      turn_index: 4,
+    }]
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'Earlier prompt',
+        turn_index: 4,
+      }),
+    })
+
+    expect(store.reentrySummaries[chatId]).toBe('Old orientation')
   })
 
   test('does not restore a stale summary after a new message arrives', async () => {
@@ -850,6 +905,47 @@ describe('re-entry summary invalidation', () => {
     await request
 
     expect(store.reentrySummaries[chatId]).toBeUndefined()
+  })
+
+  test('does not request a summary when the user has disabled the preference', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-disabled'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Disabled',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+    localStorageData['ciao-reentry-summary-enabled'] = 'false'
+
+    store.requestReentrySummaryIfUseful(chatId)
+
+    const calls = apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary'))
+    expect(calls).toHaveLength(0)
+  })
+
+  test('disabling the preference evicts any cached summaries', () => {
+    const store = useProjectStore()
+    store.reentrySummaries['a'] = 'First'
+    store.reentrySummaries['b'] = 'Second'
+
+    store.setReentrySummaryEnabled(false)
+
+    expect(store.reentrySummaries).toEqual({})
+  })
+
+  test('enabling the preference leaves cached summaries alone', () => {
+    const store = useProjectStore()
+    store.reentrySummaries['a'] = 'First'
+
+    store.setReentrySummaryEnabled(true)
+
+    expect(store.reentrySummaries['a']).toBe('First')
   })
 })
 

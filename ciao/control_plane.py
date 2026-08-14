@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ciao import vault_index
+from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
 from ciao.loops import publish_loops_changed
 from ciao.memory_tool import resolve_region
@@ -115,6 +116,7 @@ class CiaoControlPlane:
         startup_tracker: Any | None = None,
         lifecycle_callback: Callable[[int], Any] | None = None,
         connection_tracker: Any | None = None,
+        background_runner: Any | None = None,
     ) -> None:
         self.config = config
         self.pcm = project_chat_manager
@@ -128,6 +130,9 @@ class CiaoControlPlane:
         # Optional: the app-wide ConnectionTracker, used by file_surface to
         # report real connected clients instead of a per-turn stream proxy.
         self.connection_tracker = connection_tracker
+        # Optional: the BackgroundRunner backing the background_run_* tools.
+        # Unset on legacy-only instances and in most tests.
+        self.background = background_runner
 
     def set_lifecycle_callback(self, callback: Callable[[int], Any]) -> None:
         """Attach the server restart callback after uvicorn is constructed."""
@@ -839,6 +844,114 @@ class CiaoControlPlane:
             "active": sum(1 for r in rows if r["running"] and not r["archived"]),
             "limit": _MAX_ACTIVE_DELEGATES,
         })
+
+    # ---- background command runs ----------------------------------------
+
+    def _background_runner(self) -> Any:
+        if self.background is None:
+            raise ControlPlaneError(
+                "unavailable",
+                "Background command runs are not available on this server.",
+                retryable=True,
+            )
+        return self.background
+
+    def _background_payload(
+        self, run: BackgroundRun, *, tail: list[str] | None = None
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "run_id": run.run_id,
+            "label": run.label,
+            "status": run.status,
+            "exit_code": run.exit_code,
+            "pid": run.pid,
+            "cmd": list(run.cmd),
+            "cwd": run.cwd,
+            "timeout_s": run.timeout_s,
+            "started_at": run.started_at,
+            "ended_at": run.ended_at,
+            "error": run.error,
+            "log_path": str(self._background_runner().log_path(run.run_id)),
+        }
+        if tail is not None:
+            payload["last_lines"] = tail
+        return payload
+
+    def _owned_run(self, principal: McpPrincipal, run_id: str) -> BackgroundRun:
+        """Resolve a run the calling chat owns, or raise ``run_not_found``.
+
+        A run belongs to exactly the chat that started it. A run owned by
+        another chat reports as *not found* rather than *forbidden*: the run id
+        is otherwise an existence oracle for work in chats the caller cannot
+        see. The workspace check is defence in depth for a stale record whose
+        chat has since moved.
+        """
+        value = (run_id or "").strip()
+        if not value:
+            raise ControlPlaneError("run_required", "run_id is required.")
+        run: BackgroundRun | None = self._background_runner().get(value)
+        if (
+            run is None
+            or run.parent_chat_id != principal.chat_id
+            or (run.workspace and run.workspace != principal.workspace)
+        ):
+            raise ControlPlaneError("run_not_found", f"Run '{value}' was not found.")
+        return run
+
+    async def background_run_start(
+        self,
+        principal: McpPrincipal,
+        *,
+        cmd: Any,
+        cwd: str = "",
+        env: dict[str, Any] | None = None,
+        timeout_s: int = 1800,
+        label: str = "",
+    ) -> dict[str, Any]:
+        """Start a command in a tracked background subprocess.
+
+        The run is attributed to the calling chat and inherits its workspace,
+        so ``background_run_status``/``_cancel`` from any other chat cannot see
+        or touch it. Nothing here builds a shell command line: ``cmd`` is an
+        argv list handed to ``create_subprocess_exec``.
+        """
+        chat, project = self._chat_scope(principal, "")
+        workspace = self._workspace(principal, project.workspace)
+        try:
+            run: BackgroundRun = await self._background_runner().start_run(
+                parent_chat_id=chat.chat_id,
+                project_id=project.project_id,
+                workspace=workspace,
+                cmd=cmd,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                label=label,
+            )
+        except BackgroundRunError as exc:
+            raise ControlPlaneError(exc.code, str(exc)) from exc
+        return _ok(self._background_payload(run))
+
+    def background_run_status(
+        self, principal: McpPrincipal, run_id: str, lines: int = TAIL_LINES
+    ) -> dict[str, Any]:
+        run = self._owned_run(principal, run_id)
+        tail = self._background_runner().tail(run.run_id, max(1, min(int(lines), 500)))
+        return _ok(self._background_payload(run, tail=tail))
+
+    async def background_run_cancel(
+        self, principal: McpPrincipal, run_id: str
+    ) -> dict[str, Any]:
+        run = self._owned_run(principal, run_id)
+        try:
+            updated: BackgroundRun = await self._background_runner().cancel(run.run_id)
+        except BackgroundRunError as exc:
+            raise ControlPlaneError(exc.code, str(exc)) from exc
+        return _ok(
+            self._background_payload(
+                updated, tail=self._background_runner().tail(updated.run_id)
+            )
+        )
 
     # ---- schedules/loops ----------------------------------------------
 

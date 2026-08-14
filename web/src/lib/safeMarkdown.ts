@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify'
 import { Marked, Renderer, type Tokens } from 'marked'
 
+import { CODE_BLOCK_CLASS, codeCopyButtonHtml } from './codeCopy'
 import { COMMENT_TAGS } from './commentContext'
 import { linkifyHtml } from './filePaths'
 import { linkifyWikilinksInMarkdown } from './wikilinks'
@@ -18,6 +19,18 @@ chatMarkdownRenderer.table = function table(token: Tokens.Table): string {
   return [
     '<div class="markdown-table-scroll" role="region" aria-label="Scrollable table" tabindex="0">',
     Renderer.prototype.table.call(this, token),
+    '</div>',
+  ].join('')
+}
+
+// Fenced blocks get a wrapper plus a copy button in the markup itself: chat
+// markdown is injected with v-html, so the affordance has to come from the
+// renderer and be driven by delegation (see lib/codeCopy.ts).
+chatMarkdownRenderer.code = function code(token: Tokens.Code): string {
+  return [
+    `<div class="${CODE_BLOCK_CLASS}">`,
+    codeCopyButtonHtml(),
+    Renderer.prototype.code.call(this, token),
     '</div>',
   ].join('')
 }

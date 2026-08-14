@@ -1021,9 +1021,25 @@ def _setup_command(args: argparse.Namespace) -> int:
     if args.load_launchd:
         rc = 0
         for plist in plists:
-            subprocess.run(["launchctl", "unload", str(plist)], check=False)
+            # The unload is a probe: during an install the agent is normally
+            # not loaded, and launchctl says so on stderr ("Unload failed: 5:
+            # Input/output error"). check=False swallows the status but not the
+            # output, and install.sh redirects only stdout - so that expected
+            # non-event was the first line a user saw when re-running the
+            # installer over a configured workspace, ahead of the success lines.
+            subprocess.run(
+                ["launchctl", "unload", str(plist)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            # The load's status is what matters and is returned below; its raw
+            # stderr only duplicates that in a less actionable form.
             rc = subprocess.run(
-                ["launchctl", "load", "-w", str(plist)], check=False
+                ["launchctl", "load", "-w", str(plist)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             ).returncode or rc
         _print_setup_summary(root, args.port)
         return rc

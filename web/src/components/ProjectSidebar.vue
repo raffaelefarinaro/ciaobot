@@ -1466,7 +1466,13 @@ async function confirmDeleteChat(chatId: string) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-1);
+  /* No gap: the label carries its own leading space instead. A collapsed label
+     is max-width:0, but a flex gap is reserved whether or not the item beside
+     it has width - so on an icons-only row the 4px still counted, pushing the
+     glyph 2px left of the pill's centre and leaving twice as much air on its
+     right. As padding on the label it disappears with the label, because
+     border-box folds it into that max-width:0. */
+  gap: 0;
   /* min-width, not width: the active item grows to fit its label. */
   min-width: 30px;
   height: 30px;
@@ -1494,6 +1500,8 @@ async function confirmDeleteChat(chatId: string) {
 .nav-item-label {
   max-width: 0;
   overflow: hidden;
+  /* The gap that used to live on .nav-item; see the note there. */
+  padding-inline-start: var(--space-1);
   color: inherit;
   font-family: var(--font-mono);
   font-size: var(--text-xs);

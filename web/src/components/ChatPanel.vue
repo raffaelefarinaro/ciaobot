@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handleFileLinkClick">
+  <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header. No page tag: the breadcrumb below already reads
@@ -751,7 +751,7 @@
          a structured question; we render an interactive option list so the
          answer flows back as the next user message. The SDK's built-in CLI
          picker can't run headless, so this is the only path. -->
-    <div v-if="activeQuestions.length && (dockPrimary === 'question' || dockExpanded)" class="question-card">
+    <div v-if="questionCardVisible" class="question-card">
       <div class="question-card-header">
         <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
@@ -771,15 +771,27 @@
         </div>
         <div class="question-options">
           <button
-            v-for="opt in q.options"
+            v-for="(opt, oi) in q.options"
             :key="opt.label"
             type="button"
             class="question-option"
             :class="{ selected: isQuestionOptionSelected(qi, opt.label) }"
+            :aria-keyshortcuts="questionOptionShortcut(qi, oi) || undefined"
             @click="toggleQuestionOption(qi, opt.label, q.multiSelect)"
           >
-            <span class="question-option-label">{{ opt.label }}</span>
-            <span v-if="opt.description" class="question-option-desc">{{ opt.description }}</span>
+            <span class="question-option-main">
+              <!-- Keyboard hint, not part of the label: only rendered where the
+                   digit actually works (first question, first nine options). -->
+              <span
+                v-if="questionOptionShortcut(qi, oi)"
+                class="question-option-key"
+                aria-hidden="true"
+              >{{ questionOptionShortcut(qi, oi) }}</span>
+              <span class="question-option-text">
+                <span class="question-option-label">{{ opt.label }}</span>
+                <span v-if="opt.description" class="question-option-desc">{{ opt.description }}</span>
+              </span>
+            </span>
           </button>
         </div>
         <input
@@ -1173,6 +1185,7 @@ import {
   selectedModelEntry,
 } from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
+import { handleCodeCopyClick } from '../lib/codeCopy'
 import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
@@ -1193,6 +1206,7 @@ import {
   type MentionProject,
 } from '../composables/useMentionPicker'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
+import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 import {
   clearPlanReturnMode,
   includeBuiltinPlanCommand,
@@ -1264,6 +1278,7 @@ const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 const { thinkingExpanded, toggleThinking } = useThinkingPreference()
+const { reentrySummaryEnabled } = useReentrySummaryPreference()
 const draftChatId = store.activeChatId
 const inputText = ref(readChatDraft(draftChatId))
 const inputRevision = ref(0)
@@ -1500,7 +1515,10 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
-const reentrySummary = computed(() => store.reentrySummaries[chat.value.chat_id] || '')
+const reentrySummary = computed(() => {
+  if (!reentrySummaryEnabled.value) return ''
+  return store.reentrySummaries[chat.value.chat_id] || ''
+})
 
 // Post-archive pipeline, reported in the archived-chat footer. Reads through the
 // chat record rather than a transient flag so the settled summary is still there
@@ -2186,6 +2204,13 @@ const activeQuestions = computed(() => {
   return store.activeQuestions[id] || []
 })
 
+// The card is only on screen when it wins the dock, or when the dock strip is
+// expanded behind a permission. Named because the keyboard shortcuts below key
+// off the same condition as the template: a hidden card must not eat digits.
+const questionCardVisible = computed(() =>
+  activeQuestions.value.length > 0 && (dockPrimary.value === 'question' || dockExpanded.value),
+)
+
 type QuestionAnswer = { selected: Set<string>; other: string }
 const questionAnswers = ref<Record<number, QuestionAnswer>>({})
 
@@ -2219,6 +2244,53 @@ function toggleQuestionOption(i: number, label: string, multi: boolean) {
 
 function isQuestionOptionSelected(i: number, label: string): boolean {
   return questionAnswers.value[i]?.selected.has(label) ?? false
+}
+
+// Digit shortcuts cover the first question only -- the picker almost always
+// carries one, and a second block would need a second digit row with no way to
+// tell them apart. The badge is rendered from the same function so the hint can
+// never claim a key that does nothing.
+const MAX_QUESTION_SHORTCUTS = 9
+
+function questionOptionShortcut(qi: number, oi: number): string {
+  if (qi !== 0 || oi >= MAX_QUESTION_SHORTCUTS) return ''
+  return String(oi + 1)
+}
+
+// Keyboard handling for the open question card. ChatLayout owns the single
+// window keydown listener (onUnreservedKeydown) and offers the key here first,
+// the same way it offers arrows to the home grid; returning true means "eaten",
+// and the layout then preventDefaults instead of running its own binding. That
+// is what lets an open card outrank the 1-9 workspace switcher without either
+// side growing a second listener.
+//
+// The caller has already screened out modifiers and text fields (composer and
+// the card's own "Other" input both count as typing targets), so this only
+// decides whether the card has a use for the key.
+function handleQuestionShortcut(e: KeyboardEvent): boolean {
+  if (!questionCardVisible.value) return false
+  const q = activeQuestions.value[0]
+  if (!q) return false
+
+  if (e.key === 'Enter') {
+    // Never steal Enter from a focused control: on Cancel/Send answer, or on
+    // an option button reached by Tab, the native activation is what the user
+    // is asking for. Enter only submits from "nowhere in particular", which is
+    // where focus sits after picking with a digit.
+    if (e.target instanceof HTMLElement && e.target.closest('button, a, [role="button"]')) return false
+    // Multi-select is a collection, not a choice: digits toggle and the
+    // explicit Send answer ends it, so Enter stays a no-op there.
+    if (activeQuestions.value.some(other => other.multiSelect)) return false
+    if (!allQuestionsAnswered.value) return false
+    submitQuestionAnswers()
+    return true
+  }
+
+  if (!/^[1-9]$/.test(e.key)) return false
+  const opt = q.options[Number(e.key) - 1]
+  if (!opt) return false
+  toggleQuestionOption(0, opt.label, q.multiSelect)
+  return true
 }
 
 // Block Send answer until every question has at least one option picked
@@ -3202,6 +3274,15 @@ function handleFileLinkClick(e: MouseEvent): void {
   } else {
     fileViewer.open(path, Number.isFinite(line as number) ? line : null, cid)
   }
+}
+
+// One delegated listener at the panel root serves every clickable thing the
+// markdown renderer emits. Code-block copy buttons live inside `v-html`
+// output that is rebuilt on each streamed token, so they can only be reached
+// by delegation — a per-button listener would be dropped on every re-render.
+function handlePanelClick(e: MouseEvent): void {
+  if (handleCodeCopyClick(e)) return
+  handleFileLinkClick(e)
 }
 
 const liveTraceMetaParts = computed(() => {
@@ -4383,7 +4464,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
+defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut })
 </script>
 
 <style scoped>
@@ -5569,6 +5650,83 @@ details[open] > .activity-summary::before {
   font-size: var(--text-sm);
 }
 
+/* Fenced code blocks (lib/codeCopy.ts emits the wrapper + button). The rule is
+   anchored on .chat-panel rather than .message-content so it also covers the
+   code blocks inside activity traces and the streaming bubble. */
+/* The button sits in its own row above the block rather than floating over it:
+   on a phone-width block an overlay would cover the start of the code. */
+.chat-panel :deep(.code-block) {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 0;
+  margin: 6px 0;
+}
+
+.chat-panel :deep(.code-block pre) {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+}
+
+.chat-panel :deep(.code-copy-btn) {
+  position: relative;
+  margin-bottom: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+  /* Dimmed but always present: this PWA runs on phones, where :hover never
+     fires and a hover-only control would be unreachable. */
+  opacity: 0.6;
+  transition: opacity 120ms var(--ease), background 120ms var(--ease), color 120ms var(--ease);
+}
+
+/* Touch: grow the chip and expand its hit area to a full touch target without
+   moving anything around it. The expander is dropped for fine pointers, where
+   it would only steal clicks from the text next to the chip. */
+@media (hover: none) {
+  .chat-panel :deep(.code-copy-btn) {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .chat-panel :deep(.code-copy-btn::after) {
+    content: '';
+    position: absolute;
+    inset: calc(-1 * var(--space-2));
+    min-width: var(--touch);
+  }
+}
+
+.chat-panel :deep(.code-copy-btn:hover),
+.chat-panel :deep(.code-copy-btn:focus-visible) {
+  opacity: 1;
+  background: var(--bg3);
+  color: var(--fg);
+}
+
+.chat-panel :deep(.code-copy-btn:active) {
+  transform: scale(0.96);
+}
+
+.chat-panel :deep(.code-copy-btn[data-copy-state="copied"]) {
+  opacity: 1;
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+}
+
+.chat-panel :deep(.code-copy-btn[data-copy-state="failed"]) {
+  opacity: 1;
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, var(--border));
+}
+
 .message-content :deep(:is(h1, h2, h3, h4)) {
   margin-top: 1.2em;
   margin-bottom: 0.4em;
@@ -6463,6 +6621,38 @@ details[open] > .activity-summary::before {
   background: var(--bg2);
   border-color: var(--accent);
   box-shadow: inset 2px 0 0 var(--accent);
+}
+.question-option-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+/* Keeps a wrapped description aligned under its label rather than under the
+   badge. */
+.question-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* Keyboard chip: low-emphasis on purpose so it reads as a hint next to the
+   label rather than as numbering the model wrote. */
+.question-option-key {
+  flex: none;
+  min-width: 18px;
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  color: var(--fg2);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.question-option.selected .question-option-key {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 .question-option-label { font-weight: 600; }
 .question-option-desc { font-size: 12px; color: var(--fg2); line-height: 1.3; }
