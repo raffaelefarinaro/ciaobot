@@ -937,6 +937,76 @@ def _titled(raw: str, user_snippet: str, engine: str) -> tuple[str | None, str]:
     return title, engine
 
 
+_FRONTMATTER_DELIM = "---"
+_DESCRIPTION_KEY_RE = re.compile(r"^description\s*:")
+
+
+def _yaml_quote(value: str) -> str:
+    """Encode *value* as a YAML double-quoted scalar.
+
+    JSON string syntax is a subset of YAML's double-quoted style, so
+    ``json.dumps`` already escapes the characters that break an unquoted
+    scalar - colons, quotes, leading ``#``, newlines - without hand-rolling an
+    encoder. ``ensure_ascii=False`` keeps accented descriptions readable in the
+    file rather than exploding them into ``\\uXXXX``.
+    """
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _set_frontmatter_description(text: str, description: str) -> str | None:
+    """Return *text* with its YAML frontmatter ``description:`` set.
+
+    Surgical by design: every other line of the document, frontmatter included,
+    survives byte-for-byte. Round-tripping the block through ``yaml.safe_dump``
+    would reorder keys and strip the comments out of docs people hand-write.
+
+    Creates the frontmatter block when the document has none - that block is
+    what auto-discovery reads, so a doc without one cannot carry a description
+    at all. Returns ``None`` when the frontmatter is open but never closed:
+    that document is malformed, and guessing where the block ends risks
+    rewriting prose.
+    """
+    quoted = f"description: {_yaml_quote(description)}"
+    lines = text.split("\n")
+
+    # The delimiter only opens frontmatter on line 1. Anywhere else it is a
+    # horizontal rule in the body.
+    if not lines or lines[0].strip() != _FRONTMATTER_DELIM:
+        block = f"{_FRONTMATTER_DELIM}\n{quoted}\n{_FRONTMATTER_DELIM}\n"
+        return f"{block}\n{text}" if text.strip() else block
+
+    close = next(
+        (i for i in range(1, len(lines)) if lines[i].strip() == _FRONTMATTER_DELIM),
+        None,
+    )
+    if close is None:
+        return None
+
+    start = next(
+        (i for i in range(1, close) if _DESCRIPTION_KEY_RE.match(lines[i])),
+        None,
+    )
+    if start is None:
+        # Append rather than prepend: `name:`/`status:` conventionally lead the
+        # block, and a new key at the bottom reads as the addition it is.
+        return "\n".join(lines[:close] + [quoted] + lines[close:])
+
+    # Consume the value's continuation lines. Block scalars (`description: |`)
+    # and wrapped flow scalars both continue on more-indented lines, and a
+    # blank line inside a block scalar is still part of the value.
+    end = start + 1
+    while end < close:
+        line = lines[end]
+        if line.strip() and not line[:1].isspace():
+            break
+        end += 1
+    # A trailing run of blank lines separates keys; it belongs to whatever
+    # comes next, not to the value we are replacing.
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[:start] + [quoted] + lines[end:])
+
+
 def _fallback_error_message(detail: str | None, chat_id: str) -> str:
     """Compose the job error for a deterministic-fallback title.
 
@@ -1352,6 +1422,11 @@ class ProjectChatManager:
         self._path = path
         self._projects: dict[str, ProjectInfo] = {}
         self._chats: dict[str, ChatInfo] = {}
+        # Canonical-doc frontmatter memo, keyed by path -> ((mtime_ns, size),
+        # (name, context)). Vault discovery re-reads every project doc on each
+        # list_projects() call, so without this the sidebar would parse the
+        # whole active tree's YAML on every refresh.
+        self._doc_meta_cache: dict[str, tuple[tuple[int, int], tuple[str, str]]] = {}
         # Snapshot of this manager's own last-seen state.  It intentionally
         # excludes records written by another process after this manager was
         # created: _save() diffs against this snapshot and applies only local
@@ -2239,6 +2314,80 @@ class ProjectChatManager:
         context = fm.get("description", "") or ""
         return str(name), str(context)
 
+    def _read_project_metadata_cached(
+        self, readme: Path | None, fallback_name: str
+    ) -> tuple[str, str]:
+        """``_read_project_metadata`` memoised on the readme's (mtime, size).
+
+        Discovery runs on every ``list_projects`` call, and the sidebar calls
+        that often. Keying on the stat stamp means a doc edited by hand, by an
+        agent, or by ``_write_project_context`` is still picked up on the next
+        pass - the write changes the stamp, which invalidates the entry.
+        """
+        if readme is None:
+            return fallback_name, ""
+        try:
+            stat = readme.stat()
+        except OSError:
+            return fallback_name, ""
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        cached = self._doc_meta_cache.get(str(readme))
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        result = self._read_project_metadata(readme, fallback_name)
+        self._doc_meta_cache[str(readme)] = (stamp, result)
+        return result
+
+    def _project_doc_file(self, project: ProjectInfo) -> Path | None:
+        """Absolute path to *project*'s canonical doc, or ``None``.
+
+        Re-derives the path from ``vault_folder`` using the same convention as
+        ``_iter_vault_entries`` (README.md first, then ``<stem>/<stem>.md``)
+        rather than resolving ``vault_doc_path``, which is a display string
+        that may be absolute for vaults outside the workspace root.
+        """
+        folder_name = project.vault_folder
+        if not folder_name or not _VAULT_FOLDER_RE.fullmatch(folder_name):
+            return None
+        try:
+            active_root = self._vault_active_root(project.workspace).resolve()
+            folder = (active_root / folder_name).resolve()
+        except OSError:
+            return None
+        # A symlinked project folder could otherwise point the write anywhere.
+        if not folder.is_relative_to(active_root) or not folder.is_dir():
+            return None
+        for candidate in (folder / "README.md", folder / f"{folder_name}.md"):
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _write_project_context(self, project: ProjectInfo) -> bool:
+        """Push ``project.context`` into the canonical doc's ``description:``.
+
+        The doc is the source of truth for context - it is what the archive
+        time fold in ``project_doc_update`` and hand edits write to - so an
+        edit made in the PWA has to land there or the two silently diverge,
+        which is exactly what this pairs with the discovery-side sync to stop.
+
+        Best effort: a project with no vault folder (or no doc inside it)
+        keeps its context in the projects registry alone, as before.
+        """
+        doc = self._project_doc_file(project)
+        if doc is None:
+            return False
+        try:
+            current = doc.read_text(encoding="utf-8")
+            updated = _set_frontmatter_description(current, project.context)
+            if updated is None or updated == current:
+                return False
+            doc.write_text(updated, encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Failed to sync context into %s: %s", doc, exc)
+            return False
+        logger.info("Synced project context into %s", doc)
+        return True
+
     def _parse_transcript_file(self, path: Path) -> dict | None:
         """Parse frontmatter and first prompt context from a transcript markdown file."""
         try:
@@ -2715,23 +2864,54 @@ class ProjectChatManager:
                 if stem in existing_stems_by_ws[ws]:
                     # Already in our index — refresh the vault doc path so the
                     # Files section and canonical-doc link stay accurate even
-                    # if the readme moved.
+                    # if the readme moved, and re-read the doc's description so
+                    # a context edited in the file (by hand, or by the archive
+                    # time insights fold) reaches the injected preamble. This
+                    # branch used to skip the readme entirely, which is how the
+                    # two drifted apart with nothing to pull them back.
                     existing = next(
                         (p for p in self._projects.values()
                          if p.vault_folder == stem and p.workspace == ws),
                         None,
                     )
-                    if existing is not None and readme is not None:
-                        existing.vault_doc_path = self._display_path(readme)
+                    if existing is None or readme is None:
+                        continue
+                    changed = False
+                    doc_path = self._display_path(readme)
+                    if existing.vault_doc_path != doc_path:
+                        existing.vault_doc_path = doc_path
+                        changed = True
+                    _, context = self._read_project_metadata_cached(readme, stem)
+                    # An empty description never clears a context typed before
+                    # the doc grew one; the next save pushes it into the file.
+                    if context and context != existing.context:
+                        existing.context = context
+                        changed = True
+                    # Only publish on a real change: this runs on every
+                    # list_projects() call, and an unconditional event would
+                    # have every sidebar refresh look like a project edit.
+                    if changed:
+                        self._events.publish({
+                            "type": "project_updated",
+                            "project": existing.to_dict(),
+                        })
                     continue
-                name, context = self._read_project_metadata(readme, stem)
+                name, context = self._read_project_metadata_cached(readme, stem)
 
                 existing = unbound_by_name[ws].get(name) or unbound_by_name[ws].get(stem)
                 if existing:
                     existing.vault_folder = stem
                     if readme is not None:
                         existing.vault_doc_path = self._display_path(readme)
-                    if not existing.context and context:
+                    # First bind is the one moment the registry wins: a context
+                    # typed in the PWA before the folder existed is deliberate,
+                    # and the doc it's adopting was most likely scaffolded. Push
+                    # it into the doc rather than dropping it, so the two are
+                    # already in agreement by the time the doc-wins rule above
+                    # takes over on every later pass.
+                    if existing.context:
+                        self._write_project_context(existing)
+                    elif context:
                         existing.context = context
                     logger.info(
                         "Linked vault entry '%s' to existing %s project %s (%s)",
@@ -2821,6 +3001,7 @@ class ProjectChatManager:
             return None
         if name is not None:
             project.name = name
+        context_changed = context is not None and context != project.context
         if context is not None:
             project.context = context
         if vault_folder is not None:
@@ -2833,6 +3014,11 @@ class ProjectChatManager:
                     "must match [A-Za-z0-9._-]+ with no path separators."
                 )
             project.vault_folder = vault_folder
+        # Mirror the context into the canonical doc's frontmatter so the two
+        # can't drift. Deliberately after the vault_folder branch, so a call
+        # that rebinds and re-describes in one go writes to the new doc.
+        if context_changed:
+            self._write_project_context(project)
         self._save()
         self._events.publish({
             "type": "project_updated",
