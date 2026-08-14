@@ -228,20 +228,6 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record"
 ```
 
-**Custom compatible provider**
-
-```bash
-# Probe an unsaved compatible endpoint for model ids.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/settings/providers/custom/probe" \
-  -H 'content-type: application/json' \
-  -d '{"id":"lm-studio","name":"LM Studio","url":"http://localhost:1234/v1","runner":"claude","token":""}'
-
-# Save one or more endpoints. Omit `token` on an existing id to retain its stored token.
-curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/providers" \
-  -H 'content-type: application/json' \
-  -d '{"custom_providers":[{"id":"lm-studio","name":"LM Studio","url":"http://localhost:1234/v1","runner":"claude","models":"qwen2.5-coder"}]}'
-```
-
 **Projects**
 
 ```bash
@@ -296,7 +282,7 @@ downloads rather than executable inline content.
 # GET /api/models -> providers[] for the live list and per-provider
 # capabilities. model_bucket only controls Claude backends:
 # '' = auto from the project's configured workspace bucket. Legacy
-# work/personal buckets still work; anthropic/ollama are the clearer
+# model_bucket is accepted but no longer read; any value is preserved
 # configured names. Unknown buckets are rejected unless a workspace config
 # defines them.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/$PID/chats" \
@@ -609,7 +595,7 @@ Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (w
 
 **Queue management**: while the assistant is streaming, the client can queue follow-up messages (mode `queue`). Each queued item gets an `id` and is flushed as its own user turn once the prior turn finishes. When that turn starts, its `user_echo` includes `entry_id` so the client removes only the flushed item and keeps later queue entries visible. The client can also send `queue_reorder {entry_id, before_id}` (move `entry_id` before `before_id`, or to the end when `before_id` is null), `queue_edit {entry_id, text, images?}`, and `queue_remove {entry_id}`. The server confirms with `queue_state {queue: [{id, text, images?}]}` so connected clients stay in sync.
 
-**Auto tier-fallback status events**: when the primary model returns a capability error (image input, tool use, context length, etc.), the server emits a `status` event with a "retrying on &lt;model&gt;" message, then runs the retry and emits the normal `result` for the new model. The terminal `result.effective_model` is the retry target's id. Rate limits, auth errors, content filters, and 5xx do NOT trigger this path; only Claude, Ollama, and OpenRouter backends participate.
+**Auto tier-fallback status events**: when the primary model returns a capability error (image input, tool use, context length, etc.), the server emits a `status` event with a "retrying on &lt;model&gt;" message, then runs the retry and emits the normal `result` for the new model. The terminal `result.effective_model` is the retry target's id. Rate limits, auth errors, content filters, and 5xx do NOT trigger this path; only Claude chats pinned to a bare tier alias participate.
 
 **Message timings**
 

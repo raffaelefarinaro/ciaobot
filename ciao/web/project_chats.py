@@ -4888,23 +4888,11 @@ class ProjectChatManager:
         harness tools) is not weakened by this.
 
         Auto mode relies on Anthropic's server-side classifier to decide
-        which tool calls run silently and which escalate. Ollama-routed
-        chats hit ollama.com / the local daemon, neither of which expose
-        that classifier, so the SDK falls back to prompting via
-        ``can_use_tool`` for *every* tool call. The PWA shows that as a
-        wall of "Approve use of Bash?" cards which is the opposite of
-        what auto mode is for.
-
-        With the tier-remap env now pointing the classifier
-        (``CLAUDE_CODE_AUTO_MODE_MODEL`` / ``_BG_CLASSIFIER_MODEL``) at an
-        Ollama-served haiku-tier model, auto mode works on Ollama-routed
-        chats. Other modes (``plan``, ``bypass``, ``normal``) pass through
-        unchanged: ``plan`` still works (no classifier needed), ``bypass``
-        is already what we want, and ``normal`` is an explicit user opt-in
-        to be asked every time.
-
-        Legacy: ``CIAO_OLLAMA_AUTO_CLASSIFIER`` is no longer read; auto mode
-        is always live for Ollama-routed chats. Remove it from your ``.env``.
+        which tool calls run silently and which escalate, which the Claude
+        Code path reaches directly. Other modes (``plan``, ``bypass``,
+        ``normal``) pass through unchanged: ``plan`` needs no classifier,
+        ``bypass`` is already what we want, and ``normal`` is an explicit
+        user opt-in to be asked every time.
         """
         if unattended and chat.mode != "plan":
             # `plan` is exempt: it cannot escalate (it only proposes), so

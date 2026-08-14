@@ -56,25 +56,23 @@ Example `.runtime/workspaces.json`:
 
 ## Providers and Models
 
-Ciaobot supports two native subscription-backed chat providers:
+Ciaobot supports three chat providers, each authenticating through its own CLI:
 
-- `claude`: Claude Code / Claude Agent SDK. It can use Anthropic models directly or route selected models through Ollama-compatible or OpenRouter settings.
+- `claude`: Claude Code / Claude Agent SDK, against Anthropic.
 - `codex`: OpenAI Codex CLI app-server. It uses the account authenticated by `codex login` (including ChatGPT subscription login) and discovers that account's models and reasoning levels dynamically.
+- `opencode`: the open-source agent CLI, bring-your-own model provider. This is how you reach anything else — Ollama, OpenRouter, or any OpenAI-compatible endpoint. Configure it in opencode and its models appear in Ciaobot's pickers automatically; Ciaobot lists whatever opencode reports as connected.
 
 Useful `.env` settings:
 
 - `CLAUDE_MODELS`: Anthropic model aliases shown in the picker. Default: `opus,sonnet,haiku`.
-- `CIAO_OLLAMA_MODELS`: Ollama cloud or compatible model IDs shown in the picker.
-- `CIAO_OLLAMA_LOCAL_MODELS`: local Ollama daemon model IDs to pin into the picker.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` and `CLAUDE_DEFAULT_MODEL_WORK`: legacy defaults for the built-in personal/work workspaces.
 - `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_model` and `model_bucket` per workspace.
 - `CIAO_CODEX_BIN`: optional absolute override when `codex` is not discoverable on the service PATH.
 
-`model_bucket` controls how Claude aliases route:
-
-- `anthropic` or `work`: keep aliases such as `opus`, `sonnet`, and `haiku` on Anthropic.
-- `ollama` or `personal`: allow aliases to resolve to configured Ollama tier models.
-- OpenRouter IDs such as `anthropic/claude-sonnet-4.5` route through OpenRouter when `OPENROUTER_API_KEY` is set.
+`model_bucket` is vestigial. It used to name which upstream a tier alias resolved
+to, back when Ollama and OpenRouter ran through the Claude Code CLI. It is still
+accepted and preserved so existing registries keep loading, but nothing reads it:
+a tier alias resolves against whichever provider runs the chat.
 
 The chat picker can still override the workspace default for a specific chat.
 
@@ -86,8 +84,7 @@ Common keys:
 
 - Claude Code authentication is owned by the Claude CLI; use Settings → Providers to connect or verify it.
 - Voice transcription and read-aloud use the host Mac's on-device Apple frameworks; no voice API key is required.
-- `CIAO_OLLAMA_API_KEY`: Ollama cloud API key.
-- `OPENROUTER_API_KEY`: optional critique/review model routing.
+- Codex and opencode authentication is owned by their own CLIs; use `ciao auth <provider>` or Settings → Providers. There are no model API keys to set.
 
 Agents may check whether a key is set, but must not print the value.
 
