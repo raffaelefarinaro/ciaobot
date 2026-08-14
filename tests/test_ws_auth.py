@@ -27,6 +27,7 @@ def _events_app(*, auth_required: bool) -> Starlette:
         active_stream_chat_ids=lambda: [],
         get_chat=lambda _cid: None,
         background_agent_counts={},
+        postprocessing_chat_ids=lambda: [],
         events=SimpleNamespace(subscribe=_never_yield),
     )
     return app

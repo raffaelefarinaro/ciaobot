@@ -274,6 +274,7 @@ def proposals_from_archive(
     *,
     auto_promote_memory: bool = False,
     guide_path: Path | None = None,
+    stats: dict[str, int] | None = None,
 ) -> Path | None:
     """Read an archived chat, extract insights, propose, optionally promote.
 
@@ -284,6 +285,12 @@ def proposals_from_archive(
 
     Returns the proposals file path when something was written, else None.
     Swallows all exceptions; this runs as a fire-and-forget step.
+
+    ``stats``, when given, is filled with ``proposed`` (how many proposals were
+    written to the file) and ``promoted`` (how many corrections went straight
+    into CLAUDE.md). The archived chat reports these counts back to the user,
+    which the returned path alone cannot express. It stays an out-parameter so
+    the return contract every existing caller relies on is unchanged.
     """
     try:
         if not archive_path.exists():
@@ -298,16 +305,23 @@ def proposals_from_archive(
                 proposals, guide_path=guide_path
             )
             if promoted:
+                if stats is not None:
+                    stats["promoted"] = len(promoted)
                 logger.info(
                     "memory proposals: auto-promoted %d user correction(s) from %s",
                     len(promoted),
                     archive_path.name,
                 )
-        return append_proposals(
+        written = append_proposals(
             proposals,
             workspace_vault_root,
             source_path=archive_path,
         )
+        if stats is not None:
+            # Counted from what was actually filed, not from what was parsed:
+            # promotion removes corrections from the list above.
+            stats["proposed"] = len(proposals) if written else 0
+        return written
     except Exception:  # noqa: BLE001 — never crash the pipeline
         logger.exception("memory proposals failed for %s", archive_path)
         return None

@@ -5,8 +5,10 @@ import {
   automationHeadline,
   automationHealth,
   groupAutomations,
+  isRunningNow,
   lastRunSentence,
   overallHealth,
+  pipelineSteps,
   retryModelOptions,
   runOutcome,
 } from './automationView'
@@ -184,5 +186,89 @@ describe('retryModelOptions', () => {
 
     expect(options).toHaveLength(1)
     expect(retryModelOptions(undefined)).toEqual([])
+  })
+})
+
+describe('pipelineSteps', () => {
+  const pipeline = () => job({
+    pipeline_label: 'When you archive a chat',
+    steps: [
+      job({
+        job: 'project_doc_update',
+        label: 'Project doc update',
+        step_condition: 'if the chat belongs to a real project',
+      }),
+      job({
+        job: 'trajectory',
+        label: 'Trajectory capture',
+        step_condition: 'always — also runs standalone',
+      }),
+      job({
+        job: 'memory_proposals',
+        label: 'Memory proposals',
+        step_condition: 'if insights produced output',
+      }),
+    ],
+  })
+
+  it('lists the owning job first: it is the first step, not just the heading', () => {
+    expect(pipelineSteps(pipeline()).map(step => step.job)).toEqual([
+      'insights',
+      'project_doc_update',
+      'trajectory',
+      'memory_proposals',
+    ])
+  })
+
+  it('carries each step condition, and none for the owning job', () => {
+    const steps = pipelineSteps(pipeline())
+    expect(steps[0].condition).toBe('')
+    expect(steps[1].condition).toBe('if the chat belongs to a real project')
+  })
+
+  it('is empty for a job that is not a pipeline, so callers render no list', () => {
+    expect(pipelineSteps(job({ job: 'title', label: 'Title generation' }))).toEqual([])
+  })
+})
+
+describe('health with pipeline steps', () => {
+  it('reports a failed step as a failure of the pipeline', () => {
+    // A failed memory-proposals step must not hide inside a row badged healthy.
+    const item = job({
+      steps: [job({
+        job: 'memory_proposals',
+        label: 'Memory proposals',
+        last_run: run({ status: 'error', error: 'boom' }),
+      })],
+    })
+    expect(overallHealth(item)).toBe('error')
+    expect(attentionSource(item).job).toBe('memory_proposals')
+  })
+
+  it('stays healthy when every step is healthy', () => {
+    const item = job({ steps: [job({ job: 'trajectory', label: 'Trajectory capture' })] })
+    expect(overallHealth(item)).toBe('ok')
+    expect(attentionSource(item).job).toBe('insights')
+  })
+
+  it('names the failing step instead of blaming the pipeline', () => {
+    const item = job({
+      steps: [job({
+        job: 'trajectory',
+        label: 'Trajectory capture',
+        last_run: run({ status: 'error' }),
+      })],
+    })
+    expect(lastRunSentence(item, () => '2 hours ago')).toBe(
+      'Trajectory capture: failed 2 hours ago',
+    )
+  })
+})
+
+describe('isRunningNow', () => {
+  it('is true when the job or any nested step is running', () => {
+    expect(isRunningNow(job({ running: true }))).toBe(true)
+    expect(isRunningNow(job({ steps: [job({ job: 'trajectory', running: true })] }))).toBe(true)
+    expect(isRunningNow(job())).toBe(false)
   })
 })

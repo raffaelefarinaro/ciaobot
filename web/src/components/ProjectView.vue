@@ -235,11 +235,26 @@
           v-for="chat in pagedArchivedChats"
           :key="chat.chat_id"
           class="chat-row archived"
-          :class="{ clickable: chat.archive_path }"
+          :class="{ clickable: chat.archive_path, tidying: store.chatIsPostprocessing(chat.chat_id) }"
           @click="chat.archive_path && openArchive(chat)"
         >
           <div class="chat-row-main">
             <span class="chat-name">{{ chat.title }}</span>
+            <!-- What Ciaobot is taking from this chat, or took. Doubles as an
+                 index: it separates archives that produced durable knowledge
+                 from the ones that were dead ends. -->
+            <span
+              v-if="store.chatIsPostprocessing(chat.chat_id)"
+              class="chat-archive-note"
+            >
+              <span class="chat-archive-dot" aria-hidden="true" />
+              {{ postprocessLabel(store.chatPostprocess(chat.chat_id)) }}…
+            </span>
+            <span
+              v-else-if="archiveSummary(chat.chat_id)"
+              class="chat-archive-note"
+              :class="{ failed: postprocessFailed(store.chatPostprocess(chat.chat_id)) }"
+            >{{ archiveSummary(chat.chat_id) }}</span>
           </div>
           <div class="chat-row-meta">
             <span>{{ chat.model }}</span>
@@ -362,6 +377,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { askConfirm } from '../lib/confirm'
 import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
+import { postprocessFailed, postprocessLabel, postprocessSummary } from '../lib/postprocessView'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
 import ChatSignals from './ChatSignals.vue'
@@ -569,6 +585,13 @@ const pagedArchivedChats = computed(() => {
   return archivedChats.value.slice(start, start + ARCHIVED_PER_PAGE)
 })
 const totalArchivedPages = computed(() => Math.ceil(archivedChats.value.length / ARCHIVED_PER_PAGE) || 1)
+
+// What the post-archive pipeline produced for an archived chat, once it has
+// settled. Empty for chats archived before this existed, so old rows stay clean
+// rather than claiming "nothing durable to save".
+function archiveSummary(chatId: string): string {
+  return postprocessSummary(store.chatPostprocess(chatId))
+}
 
 // ── Name edit ──────────────────────────────────────────────────────────
 const editingName = ref(false)
@@ -1058,6 +1081,50 @@ watch(() => props.projectId, async () => {
 .chat-row.archived:hover { background: transparent; }
 .chat-row.archived.clickable { cursor: pointer; }
 .chat-row.archived.clickable:hover { background: var(--bg3); }
+/* Archived rows are dimmed as a class, but a row with work actually happening
+   in it is not "past" yet — it earns full strength back until it settles. */
+.chat-row.archived.tidying { opacity: 1; }
+
+/* Archived rows stack title over note. Active rows keep the single-line flex
+   layout, where the title sits beside its signals. */
+.chat-row.archived .chat-row-main {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+}
+
+.chat-archive-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  min-width: 0;
+}
+
+/* The one case that is not ambient: a failed step is the only place a user
+   would ever see this, so it is allowed to carry the warning colour. */
+.chat-archive-note.failed { color: var(--warning); }
+
+.chat-archive-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg3);
+  flex: 0 0 auto;
+  animation: chat-archive-breathe 2.6s ease-in-out infinite;
+}
+
+@keyframes chat-archive-breathe {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-archive-dot { animation: none; opacity: 0.75; }
+}
 .chat-row.remote { opacity: 0.5; cursor: default; }
 .chat-row.remote:hover { background: transparent; }
 

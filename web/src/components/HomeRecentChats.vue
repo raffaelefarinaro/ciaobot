@@ -20,6 +20,9 @@
             <span class="home-lane-summary" aria-live="polite">
               <template v-if="laneNeedsCount(lane)"><b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you</template>
               <template v-if="laneSummaryRest(lane)"><span v-if="laneNeedsCount(lane)"> · </span>{{ laneSummaryRest(lane) }}</template>
+              <!-- Third fragment, in the muted register: background tidy-up
+                   never needs the user, so it must not read as a demand. -->
+              <span v-if="laneTidyCount(lane)" class="home-lane-tidy"> · <span class="home-lane-tidy-dot" aria-hidden="true" />{{ laneTidyLabel(lane) }}</span>
             </span>
           </div>
           <div v-if="lane.newAction" class="home-lane-new-split">
@@ -139,8 +142,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
-import type { ChatInfo, ProjectInfo } from '../lib/types'
+import type { ChatInfo, ProjectInfo, WorkspaceName } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
+import { tidyingSummary } from '../lib/postprocessView'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import ChatSignals from './ChatSignals.vue'
@@ -297,6 +301,20 @@ function laneSummaryRest(lane: HomeLane): string {
   if (laneQuietCount(lane)) parts.push(`${laneQuietCount(lane)} quiet`)
   if (!parts.length && !laneNeedsCount(lane)) return 'all quiet'
   return parts.join(' · ')
+}
+
+// Chats this workspace is still tidying up after archiving them. Deliberately
+// only a count: the chats themselves are archived and must not reappear in
+// "jump back in", or archiving would stop meaning anything. Counted from the
+// store rather than the lane's tiers for exactly that reason — the lane holds
+// active chats only.
+function laneTidyCount(lane: HomeLane): number {
+  if (!lane.workspace || lane.workspace === 'unknown') return 0
+  return store.workspacePostprocessingCount(lane.workspace as WorkspaceName)
+}
+
+function laneTidyLabel(lane: HomeLane): string {
+  return tidyingSummary(laneTidyCount(lane))
 }
 
 function newActionFor(workspace: string | null): NewWorkspaceChatAction | null {
@@ -624,6 +642,31 @@ watch(() => store.activeWorkspace, async () => {
 .home-lane-summary b {
   color: var(--accent);
   font-weight: 700;
+}
+
+/* Muted, never accent: the count is information, not a call to act. */
+.home-lane-tidy {
+  color: var(--fg3);
+}
+
+.home-lane-tidy-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--fg3);
+  vertical-align: middle;
+  animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
+}
+
+@keyframes home-lane-tidy-breathe {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-lane-tidy-dot { animation: none; opacity: 0.75; }
 }
 
 .home-lane-new {
