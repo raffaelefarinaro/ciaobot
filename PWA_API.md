@@ -90,7 +90,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror |
 | PATCH, DELETE | `/api/agent-assets/commands/{name}` | Update or delete a custom workspace-owned slash command |
 | GET | `/api/rate-limits` | Read Claude rate-limit snapshots |
-| GET | `/api/models` | List configured models, plus `providers[]` (id, labels, model_bucket, capabilities) from the runtime-provider registry |
+| GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, project MCP servers (env-key status + observed tools), and active-session counts (no credentials) |
 | GET | `/api/mcp/usage` | Embedded Ciaobot MCP per-tool call/error counters (no credentials) |
@@ -277,23 +277,21 @@ downloads rather than executable inline content.
 **Chats**
 
 ```bash
-# Create — title/model/mode/provider/model_bucket all optional.
+# Create — title/model/mode/provider all optional.
 # provider is any id from the registry (`claude`, `codex`, `opencode`); see
 # GET /api/models -> providers[] for the live list and per-provider
-# capabilities. model_bucket only controls Claude backends:
 # '' = auto from the project's configured workspace bucket. Legacy
-# model_bucket is accepted but no longer read; any value is preserved
 # configured names. Unknown buckets are rejected unless a workspace config
 # defines them.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/$PID/chats" \
   -H 'content-type: application/json' \
   -d '{"title":"Tile layout"}'
 
-# Update — title, model, provider, model_bucket, mode, project_id (to move
+# Update — title, model, provider, mode, project_id (to move
 # between projects), thinking_level. thinking_level is provider-native
 # ('' = provider default, allowed values per provider in GET /api/models →
 # thinking_levels) and is safe to change mid-chat; it resets to '' on
-# handover. Changing model/provider/model_bucket across a routing boundary
+# handover. Changing provider
 # on a started chat returns 400; use handover instead.
 # control_surface (legacy|mcp|auto|'') is still accepted here as an escape
 # hatch, but it is engine-controlled now (MCP by default, legacy fallback);
@@ -302,12 +300,12 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
 
 # Handover — switch model/backend inside the same visible chat.
-# Body keys: provider = claude|codex, model, model_bucket (Claude only), messages
+# Body keys: provider = claude|codex|opencode, model, messages
 # (visible rows). Starts the next provider turn as a fresh session seeded
 # with those messages.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/handover" \
   -H 'content-type: application/json' \
-  -d '{"provider":"claude","model":"sonnet","model_bucket":"anthropic","messages":[{"role":"user","content":"continue this task"},{"role":"assistant","content":"current state"}]}'
+  -d '{"provider":"claude","model":"sonnet","messages":[{"role":"user","content":"continue this task"},{"role":"assistant","content":"current state"}]}'
 
 # Fork — create a new independent chat in the same project continuing from a completed turn.
 # Body keys: messages (visible rows up to and including the target assistant answer),
@@ -396,7 +394,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider, default_model,
-# gws_profile, model_bucket, color (pink|cyan|amber|emerald|violet; default
+# gws_profile, color (pink|cyan|amber|emerald|violet; default
 # pink — PWA accent only), disallowed_tools (extra non-connector tools,
 # CSV or list, null = defaults), claude_ai_mcps (true|false|null where null
 # = per-workspace default: personal off, else on). The effective denylist is

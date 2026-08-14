@@ -187,9 +187,9 @@ describe('ChatLayout', () => {
 
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
-      { name: 'client', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
+      { name: 'client', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
     ]
     store.activeWorkspace = 'personal'
     store.bootstrapped = true
@@ -242,8 +242,8 @@ describe('ChatLayout', () => {
 
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
     ]
     store.activeWorkspace = 'personal'
     store.bootstrapped = true
@@ -776,8 +776,8 @@ describe('ChatLayout home arrow navigation', () => {
 
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
     ]
     store.projects = [
       { project_id: 'personal-project', name: 'General', workspace: 'personal' },

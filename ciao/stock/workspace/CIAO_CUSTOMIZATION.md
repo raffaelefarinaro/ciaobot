@@ -34,7 +34,6 @@ Example `.runtime/workspaces.json`:
     "vault_root": "memory-vault",
     "default_model": "opus",
     "gws_profile": "personal",
-    "model_bucket": "anthropic",
     "color": "pink",
     "disallowed_tools": []
   },
@@ -43,7 +42,6 @@ Example `.runtime/workspaces.json`:
     "vault_root": "vaults/client-a",
     "default_model": "sonnet",
     "gws_profile": "work",
-    "model_bucket": "anthropic",
     "color": "cyan",
     "disallowed_tools": ["mcp__claude_ai_Slack", "mcp__claude_ai_Salesforce"]
   }
@@ -66,13 +64,12 @@ Useful `.env` settings:
 
 - `CLAUDE_MODELS`: Anthropic model aliases shown in the picker. Default: `opus,sonnet,haiku`.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` and `CLAUDE_DEFAULT_MODEL_WORK`: legacy defaults for the built-in personal/work workspaces.
-- `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_model` and `model_bucket` per workspace.
+- `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_provider` and `default_model` per workspace.
 - `CIAO_CODEX_BIN`: optional absolute override when `codex` is not discoverable on the service PATH.
 
-`model_bucket` is vestigial. It used to name which upstream a tier alias resolved
-to, back when Ollama and OpenRouter ran through the Claude Code CLI. It is still
-accepted and preserved so existing registries keep loading, but nothing reads it:
-a tier alias resolves against whichever provider runs the chat.
+A tier alias (`haiku`, `sonnet`, `opus`, `fable`) resolves against whichever
+provider runs the chat. Pin what each tier means per provider in
+Settings → Models → model routing.
 
 The chat picker can still override the workspace default for a specific chat.
 
@@ -98,7 +95,6 @@ Use this when a workspace should not see certain MCPs, connectors, or high-risk 
 {
   "name": "client-a",
   "vault_root": "vaults/client-a",
-  "model_bucket": "anthropic",
   "disallowed_tools": [
     "mcp__claude_ai_Slack",
     "mcp__claude_ai_Airtable",
@@ -141,7 +137,7 @@ Important fields:
 
 - `workspace`: logical workspace name.
 - `web_project_id`: target PWA project.
-- `model`, `provider`, `model_bucket`: optional overrides. Empty means inherit/default.
+- `model`, `provider`: optional overrides. Empty means inherit/default.
 - `archive_policy`: `manual` or `auto`.
 
 ## Safe Change Rules

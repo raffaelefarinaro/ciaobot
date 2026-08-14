@@ -448,7 +448,6 @@ def test_setup_finish_persists_codex_as_first_workspace_provider(tmp_path) -> No
         (ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
     )
     assert registry[0]["default_provider"] == "codex"
-    assert registry[0]["model_bucket"] == ""
     assert (ws / "AGENTS.md").is_symlink()
     assert (ws / "AGENTS.md").resolve() == (ws / "CLAUDE.md").resolve()
 

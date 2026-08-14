@@ -78,7 +78,6 @@ def _client(*, pcm=None, tmp_path: Path | None = None):
                 default_model="",
                 disallowed_tools=None,
                 gws_profile="personal",
-                model_bucket="personal",
             ),
             "work": SimpleNamespace(
                 name="work",
@@ -86,7 +85,6 @@ def _client(*, pcm=None, tmp_path: Path | None = None):
                 default_model="opus",
                 disallowed_tools=[],
                 gws_profile="work",
-                model_bucket="work",
             ),
         },
     )
@@ -161,7 +159,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "default_provider": "claude",
                 "default_model": "",
                 "gws_profile": "personal",
-                "model_bucket": "personal",
                 "disallowed_tools": None,
                 "claude_ai_mcps": None,
                 "color": "pink",
@@ -172,7 +169,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "default_provider": "claude",
                 "default_model": "opus",
                 "gws_profile": "work",
-                "model_bucket": "work",
                 "disallowed_tools": [],
                 "claude_ai_mcps": None,
                 "color": "pink",

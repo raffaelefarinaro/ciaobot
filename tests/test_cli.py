@@ -834,27 +834,21 @@ def test_vault_index_accepts_arbitrary_workspace_name(monkeypatch) -> None:
     assert called[0].workspace == "client"
 
 
-def test_create_chat_accepts_configured_workspace_and_bucket(monkeypatch) -> None:
+def test_create_chat_accepts_a_configured_workspace(monkeypatch) -> None:
     called = []
     monkeypatch.setattr(cli, "_create_chat_command", lambda args: called.append(args) or 0)
 
-    assert (
-        cli.main(
-            [
-                "create-chat",
-                "--prompt",
-                "hello",
-                "--workspace",
-                "client",
-                "--model-bucket",
-                "anthropic",
-            ]
-        )
-        == 0
-    )
+    assert cli.main(["create-chat", "--prompt", "hello", "--workspace", "client"]) == 0
 
     assert called[0].workspace == "client"
-    assert called[0].model_bucket == "anthropic"
+
+
+def test_create_chat_rejects_the_removed_model_bucket_flag(monkeypatch) -> None:
+    """The bucket named which upstream a tier alias resolved to; nothing reads it."""
+    monkeypatch.setattr(cli, "_create_chat_command", lambda args: 0)
+
+    with pytest.raises(SystemExit):
+        cli.main(["create-chat", "--prompt", "hi", "--model-bucket", "anthropic"])
 
 
 def test_create_chat_command_uses_active_workspace_without_name_clamp(

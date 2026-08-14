@@ -825,7 +825,6 @@ def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
         # ``CiaoConfig.disallowed_tools_for_workspace``.
         "claude_ai_mcps": getattr(workspace, "claude_ai_mcps", None),
         "gws_profile": getattr(workspace, "gws_profile", ""),
-        "model_bucket": getattr(workspace, "model_bucket", ""),
         "color": color,
     }
 
@@ -937,11 +936,6 @@ def _workspace_from_request(
         disallowed_tools=disallowed_tools,
         claude_ai_mcps=claude_ai_mcps,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
-        # Accepted and preserved, but no longer read: see
-        # ProjectChatManager._model_bucket_allowed.
-        model_bucket=str(
-            data.get("model_bucket", existing.model_bucket if existing else "")
-        ).strip(),
         color=color,
     )
 
@@ -2322,7 +2316,6 @@ async def create_project_chat(request: Request) -> JSONResponse:
             model=body.get("model"),
             mode=body.get("mode"),
             provider=body.get("provider"),
-            model_bucket=body.get("model_bucket"),
             control_surface=body.get("control_surface"),
         )
     except ValueError as exc:
@@ -2435,7 +2428,6 @@ async def chat_detail(request: Request) -> JSONResponse:
             mode=body.get("mode"),
             project_id=body.get("project_id"),
             thinking_level=body.get("thinking_level"),
-            model_bucket=body.get("model_bucket"),
         )
         if chat is not None and "control_surface" in body:
             changed = chat.control_surface != surface
@@ -2480,7 +2472,6 @@ async def chat_handover(request: Request) -> JSONResponse:
             provider=provider,
             model=model,
             messages=[m for m in messages if isinstance(m, dict)],
-            model_bucket=str(body.get("model_bucket", "")).strip(),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -4979,7 +4970,6 @@ async def list_models(request: Request) -> JSONResponse:
                 "id": item.id,
                 "label": item.label,
                 "short_label": item.short_label,
-                "model_bucket": item.model_bucket,
                 "capabilities": asdict(capabilities_for(item.id)),
             }
             for item in provider_registry.descriptors()

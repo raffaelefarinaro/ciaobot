@@ -1032,7 +1032,6 @@ class CiaoMcpService:
             mode: str | None = None,
             thinking_level: str | None = None,
             project_id: str | None = None,
-            model_bucket: str | None = None,
             control_surface: str | None = None,
         ) -> dict[str, Any]:
             """Update chat metadata and same-backend model settings. Omit chat_id for calling chat."""
@@ -1047,7 +1046,6 @@ class CiaoMcpService:
                     mode=mode,
                     thinking_level=thinking_level,
                     project_id=project_id,
-                    model_bucket=model_bucket,
                     control_surface=control_surface,
                 ),
                 mutating=True,
@@ -1085,7 +1083,6 @@ class CiaoMcpService:
             provider: str = "",
             model: str = "",
             messages: list[dict[str, Any]] | None = None,
-            model_bucket: str = "",
         ) -> dict[str, Any]:
             """Continue a chat on a fresh provider session with optional visible
             history. With provider and model both empty, this just clears the
@@ -1100,7 +1097,6 @@ class CiaoMcpService:
                     provider=provider,
                     model=model,
                     messages=messages,
-                    model_bucket=model_bucket,
                 )
 
             return await self._invoke("chat_handover", _op, mutating=True)
@@ -1152,7 +1148,6 @@ class CiaoMcpService:
             title: str = "",
             provider: str | None = None,
             model: str | None = None,
-            model_bucket: str | None = None,
             mode: str | None = None,
             delegation_id: str = "",
             project_id: str | None = None,
@@ -1197,7 +1192,6 @@ class CiaoMcpService:
                     title=title,
                     provider=provider,
                     model=model,
-                    model_bucket=model_bucket,
                     mode=mode,
                     delegation_id=delegation_id,
                     project_id=project_id,

@@ -273,8 +273,6 @@ class IsolatedChatServer:
             "mode": "bypass",
             "control_surface": surface,
         }
-        if provider == "claude":
-            payload["model_bucket"] = "work"
         result: dict[str, Any] = _json_request(
             self.base_url,
             f"/api/projects/{project_id}/chats",

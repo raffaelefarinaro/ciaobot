@@ -70,10 +70,6 @@ class ProviderDescriptor:
     # default model for this provider, when it has one. Takes precedence over
     # ``default_model``; empty means the provider has no such setting.
     default_model_config_key: str = ""
-    # Vestigial: the model-routing bucket vocabulary is retired. Still emitted
-    # on ``/api/models`` because the PWA reads its emptiness to mean "this
-    # provider serves its own catalog".
-    model_bucket: str = ""
 
     def factory(self) -> type["BaseProvider"]:
         """Import and return the provider class."""
@@ -128,7 +124,6 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         upgrade_path="ciao.upgrade:upgrade_claude_code",
         thinking_levels=("low", "medium", "high", "xhigh", "max"),
         default_model_config_key="claude_default_model",
-        model_bucket="work",
     ),
     ProviderDescriptor(
         id="codex",

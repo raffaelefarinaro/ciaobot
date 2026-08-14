@@ -21,7 +21,6 @@ describe('ProjectSidebar chat actions', () => {
       default_provider: 'claude',
       default_model: 'sonnet',
       gws_profile: '',
-      model_bucket: '',
     }]
     store.projects = [{
       project_id: 'project-1',

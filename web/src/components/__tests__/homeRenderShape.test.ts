@@ -27,7 +27,7 @@ function timestamp(secondsAgo: number): string {
 function seed(withNeedsYou: boolean) {
   const store = useProjectStore()
   store.workspaces = [
-    { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '', color: 'emerald' },
+    { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', color: 'emerald' },
   ] as unknown as typeof store.workspaces
   store.projects = [
     { project_id: 'p1', name: 'Wedding', workspace: 'personal' },

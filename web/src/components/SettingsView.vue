@@ -4271,7 +4271,6 @@ type WorkspaceForm = {
   default_provider: WorkspaceProvider
   default_model: string
   gws_profile: string
-  model_bucket: string
   disallowed_tools: string
   claude_ai_mcps: 'on' | 'off'
   color: WorkspaceColorId
@@ -4288,7 +4287,6 @@ function blankWorkspaceForm(): WorkspaceForm {
     default_provider: defaultWorkspaceProvider(),
     default_model: '',
     gws_profile: '',
-    model_bucket: '',
     disallowed_tools: '',
     claude_ai_mcps: 'on',
     color: DEFAULT_WORKSPACE_COLOR,
@@ -4303,7 +4301,6 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     default_provider: ws.default_provider || 'claude',
     default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
-    model_bucket: ws.model_bucket || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
     claude_ai_mcps: mcps === false ? 'off' : 'on',
     color: normalizeWorkspaceColor(ws.color),
@@ -4511,7 +4508,6 @@ async function saveWorkspace(name: string) {
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
-      model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
       color: form.color,
@@ -4541,7 +4537,6 @@ async function createNewWorkspace() {
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
-      model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
       color: form.color,

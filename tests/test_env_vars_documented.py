@@ -19,7 +19,6 @@ INTERNAL_VARS: dict[str, str] = {
     "CIAO_CHAT_ID": "subprocess IPC marker for the chat the spawned CLI belongs to",
     "CIAO_MODEL": "subprocess IPC marker for the model selected for the spawned chat",
     "CIAO_PROVIDER": "subprocess IPC marker for the provider selected for the spawned chat",
-    "CIAO_MODEL_BUCKET": "subprocess IPC marker for the model bucket selected for the spawned chat",
     "CIAO_CONTEXT_BEGIN": "subprocess IPC delimiter wrapping injected context",
     "CIAO_CONTEXT_END": "subprocess IPC delimiter wrapping injected context",
     "CIAO_RESTART_EXIT_CODE": "internal exit-code convention for restart-requesting handlers",

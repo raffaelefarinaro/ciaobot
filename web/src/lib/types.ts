@@ -38,7 +38,6 @@ export interface ProviderDescriptor {
   id: RuntimeProvider
   label: string
   short_label: string
-  model_bucket: string
   capabilities: ProviderCapabilities
 }
 
@@ -64,7 +63,6 @@ export interface WorkspaceInfo {
   // effective denylist; disallowed_tools covers the extra tools.
   claude_ai_mcps?: boolean | null
   gws_profile: string
-  model_bucket: string
   // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
   color?: string
 }
@@ -156,7 +154,6 @@ export interface ChatInfo {
   // Vestigial. Named which upstream a tier alias resolved to, back when
   // Ollama/OpenRouter ran through Claude Code by env injection. Still carried
   // on existing chats and accepted by the API, but nothing reads it.
-  model_bucket?: string
   mode: string
   // Provider-native thinking/reasoning level ('' = provider default).
   // Allowed values per provider come from ModelsResponse.thinking_levels.

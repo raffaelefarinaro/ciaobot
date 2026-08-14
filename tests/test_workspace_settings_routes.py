@@ -118,7 +118,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
             "default_provider": "claude",
             "default_model": "kimi-k2.7-code:cloud",
             "gws_profile": "work",
-            "model_bucket": "anthropic",
             "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         },
     )
@@ -150,7 +149,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         "claude_ai_mcps": None,
         "gws_profile": "work",
-        "model_bucket": "anthropic",
         "color": "pink",
     }
 
@@ -182,7 +180,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "disallowed_tools": None,
             "claude_ai_mcps": None,
             "gws_profile": "personal",
-            "model_bucket": "personal",
             "color": "pink",
         },
         {
@@ -193,7 +190,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "disallowed_tools": None,
             "claude_ai_mcps": None,
             "gws_profile": "work",
-            "model_bucket": "work",
             "color": "pink",
         },
     ]

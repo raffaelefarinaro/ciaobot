@@ -33,6 +33,7 @@ from ciao.providers.opencode import (
     model_accepts_images,
     missing_required_paths,
     mode_settings,
+    opencode_tier_models,
     opencode_tier_overrides,
     split_model,
     unresolved_placeholders,
@@ -1466,3 +1467,95 @@ def test_an_unchanged_provider_set_stays_quiet(caplog):
             "ws", _rows("anthropic/sonnet"), _rows("anthropic/sonnet", "anthropic/haiku")
         )
     assert caplog.text == ""
+
+
+# ── tier aliases ────────────────────────────────────────────────────────
+# opencode addresses models as providerID/modelID, so a bare tier alias is not
+# an id it can serve. Schedules, routines and the critique panel all speak tier
+# aliases, so they have to be resolved before dispatch.
+
+
+def _catalog(*models: str) -> list[dict[str, object]]:
+    return [{"model": m, "label": m, "variants": []} for m in models]
+
+
+def test_tier_models_match_the_tier_name_inside_a_vendor_model_id():
+    resolved = opencode_tier_models(
+        _catalog(
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-haiku-4-5",
+            "openai/gpt-5.6-terra",
+        )
+    )
+    assert resolved["sonnet"] == "anthropic/claude-sonnet-4-6"
+    assert resolved["haiku"] == "anthropic/claude-haiku-4-5"
+
+
+def test_an_operator_pin_wins_over_the_name_match():
+    resolved = opencode_tier_models(
+        _catalog("anthropic/claude-sonnet-4-6", "openai/gpt-5.6-terra"),
+        {"sonnet": "openai/gpt-5.6-terra"},
+    )
+    assert resolved["sonnet"] == "openai/gpt-5.6-terra"
+
+
+def test_a_pin_for_a_disconnected_provider_does_not_outvote_the_catalog():
+    """A pin left behind by a provider the user signed out of is not runnable."""
+    resolved = opencode_tier_models(
+        _catalog("anthropic/claude-sonnet-4-6"),
+        {"sonnet": "ollama/gone"},
+    )
+    assert resolved["sonnet"] == "anthropic/claude-sonnet-4-6"
+
+
+def test_a_tier_with_no_equivalent_is_absent_rather_than_guessed():
+    """A Llama/Qwen catalog has no "opus"; guessing would silently swap models.
+
+    The caller omits the model entirely and lets opencode apply its own
+    default, which is what keeps a bring-your-own-provider install working.
+    """
+    resolved = opencode_tier_models(_catalog("ollama/llama3.1", "ollama/qwen3"))
+    assert resolved == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        # Already qualified: passes straight through.
+        ("anthropic/claude-sonnet-4-6", ("anthropic", "claude-sonnet-4-6")),
+        # A tier alias resolves against the catalog...
+        ("sonnet", ("anthropic", "claude-sonnet-4-6")),
+        ("  Sonnet  ", ("anthropic", "claude-sonnet-4-6")),
+        # ...and an unmatchable one yields "let opencode decide", never a
+        # bogus {"providerID": "", "modelID": "fable"}.
+        ("fable", ("", "")),
+        ("", ("", "")),
+    ],
+)
+async def test_resolve_model_never_sends_an_unqualified_id(
+    tmp_path, requested, expected
+):
+    class _Response:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "connected": ["anthropic"],
+                "all": [{
+                    "id": "anthropic",
+                    "models": {"claude-sonnet-4-6": {"id": "claude-sonnet-4-6"}},
+                }],
+            }
+
+    class _Client:
+        @staticmethod
+        async def get(path: str) -> _Response:
+            assert path == "/provider"
+            return _Response()
+
+    provider = _provider(tmp_path)
+    assert await provider._resolve_model(_Client(), requested) == expected

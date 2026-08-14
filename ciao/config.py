@@ -192,7 +192,6 @@ class WorkspaceConfig:
     # effective denylist in ``disallowed_tools_for_workspace``.
     claude_ai_mcps: bool | None = None
     gws_profile: str = ""
-    model_bucket: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
 
@@ -224,7 +223,6 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
         claude_ai_mcps=coerce_claude_ai_mcps(data.get("claude_ai_mcps")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
-        model_bucket=str(data.get("model_bucket", "")).strip(),
         color=color,
     )
 
@@ -276,7 +274,6 @@ def _legacy_workspaces(
             disallowed_tools=disallowed_tools_personal,
             claude_ai_mcps=claude_ai_mcps_personal,
             gws_profile=gws_default_profile or "personal",
-            model_bucket="personal",
         ),
         "work": WorkspaceConfig(
             name="work",
@@ -286,7 +283,6 @@ def _legacy_workspaces(
             disallowed_tools=disallowed_tools_work,
             claude_ai_mcps=claude_ai_mcps_work,
             gws_profile="work",
-            model_bucket="work",
         ),
     }
 
@@ -764,7 +760,6 @@ class CiaoConfig:
                 "disallowed_tools": workspace.disallowed_tools,
                 "claude_ai_mcps": workspace.claude_ai_mcps,
                 "gws_profile": workspace.gws_profile,
-                "model_bucket": workspace.model_bucket,
                 "color": workspace.color,
             }
             for workspace in self.workspaces.values()

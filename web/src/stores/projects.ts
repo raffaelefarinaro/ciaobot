@@ -446,12 +446,11 @@ export const useProjectStore = defineStore('projects', () => {
         default_provider: 'claude',
         default_model: '',
         gws_profile: '',
-        model_bucket: '',
       }))
     }
     return [
-      { name: 'personal', vault_root: 'personal', default_provider: 'claude', default_model: '', gws_profile: 'personal', model_bucket: 'personal' },
-      { name: 'work', vault_root: 'work', default_provider: 'claude', default_model: '', gws_profile: 'work', model_bucket: 'work' },
+      { name: 'personal', vault_root: 'personal', default_provider: 'claude', default_model: '', gws_profile: 'personal' },
+      { name: 'work', vault_root: 'work', default_provider: 'claude', default_model: '', gws_profile: 'work' },
     ]
   })
 
@@ -1662,7 +1661,6 @@ export const useProjectStore = defineStore('projects', () => {
       mode?: string
       provider?: RuntimeProvider
       thinking_level?: string
-      model_bucket?: string
     },
   ) {
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, updates)
@@ -1672,7 +1670,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function handoverChat(
     chatId: string,
-    updates: { model: string; provider: RuntimeProvider; model_bucket?: string },
+    updates: { model: string; provider: RuntimeProvider },
   ) {
     const visibleMessages = normalizeMessages(messages.value[chatId] || [])
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/handover`, {

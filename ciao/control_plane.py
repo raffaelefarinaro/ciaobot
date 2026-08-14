@@ -550,7 +550,6 @@ class CiaoControlPlane:
         mode: str | None = None,
         thinking_level: str | None = None,
         project_id: str | None = None,
-        model_bucket: str | None = None,
         control_surface: str | None = None,
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
@@ -564,7 +563,6 @@ class CiaoControlPlane:
             mode=mode,
             thinking_level=thinking_level,
             project_id=project_id,
-            model_bucket=model_bucket,
         )
         if updated is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
@@ -656,7 +654,6 @@ class CiaoControlPlane:
         provider: str,
         model: str,
         messages: list[dict[str, Any]] | None = None,
-        model_bucket: str = "",
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if chat_id == principal.chat_id:
@@ -668,7 +665,6 @@ class CiaoControlPlane:
                     provider=provider.strip(),
                     model=model.strip(),
                     messages=[row for row in (messages or []) if isinstance(row, dict)],
-                    model_bucket=model_bucket.strip(),
                 ),
             )
         chat = self.pcm.handover_chat(
@@ -676,7 +672,6 @@ class CiaoControlPlane:
             provider=provider.strip(),
             model=model.strip(),
             messages=[row for row in (messages or []) if isinstance(row, dict)],
-            model_bucket=model_bucket.strip(),
         )
         if chat is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
@@ -774,7 +769,6 @@ class CiaoControlPlane:
         title: str = "",
         provider: str | None = None,
         model: str | None = None,
-        model_bucket: str | None = None,
         mode: str | None = None,
         delegation_id: str = "",
         project_id: str | None = None,
@@ -807,7 +801,6 @@ class CiaoControlPlane:
                 title=title.strip() or "Delegate",
                 provider=provider,
                 model=model,
-                model_bucket=model_bucket,
                 mode=mode,
                 spawned_from_chat_id=parent.chat_id,
                 delegation_id=delegation_id.strip(),

@@ -1044,13 +1044,8 @@ class ChatInfo:
     project_id: str
     title: str = "New Chat"
     model: str = "opus"
-    # Routing key for ProviderService. Public builds currently accept
-    # "claude"; backend choice is handled by model/model_bucket routing.
+    # Routing key for ProviderService: which CLI runs the turn.
     provider: str = "claude"
-    # Vestigial. Named which upstream a tier alias resolved to, back when
-    # Ollama and OpenRouter ran through Claude Code by env injection. Still
-    # persisted on existing chats and accepted by the API, but never read.
-    model_bucket: str = ""
     mode: BridgeMode = "auto"
     # Provider-native thinking/reasoning level (see ciao.models.THINKING_LEVELS).
     # Empty = provider default. Reset on handover: levels aren't portable
@@ -1182,7 +1177,6 @@ class ChatInfo:
             "title": self.title,
             "model": self.model,
             "provider": self.provider,
-            "model_bucket": self.model_bucket,
             "mode": self.mode,
             "thinking_level": self.thinking_level,
             "control_surface": self.control_surface,
@@ -1546,7 +1540,6 @@ class ProjectChatManager:
                 provider=cd.get("provider") or "claude",
                 # Migration: legacy chats without a bucket stay "" (auto:
                 # project workspace decides routing).
-                model_bucket=cd.get("model_bucket", ""),
                 mode=cd.get("mode", self._config.claude_mode),
                 thinking_level=cd.get("thinking_level", ""),
                 control_surface=cd.get("control_surface", ""),
@@ -1649,7 +1642,6 @@ class ProjectChatManager:
                     "title": c.title,
                     "model": c.model,
                     "provider": c.provider,
-                    "model_bucket": c.model_bucket,
                     "mode": c.mode,
                     "thinking_level": c.thinking_level,
                     "control_surface": c.control_surface,
@@ -3233,7 +3225,6 @@ class ProjectChatManager:
         model: str | None = None,
         mode: str | None = None,
         provider: str | None = None,
-        model_bucket: str | None = None,
         control_surface: str | None = None,
         spawned_from_chat_id: str = "",
         delegation_id: str = "",
@@ -3242,8 +3233,6 @@ class ProjectChatManager:
             raise ValueError(f"Project '{project_id}' not found")
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
-        if not self._model_bucket_allowed(model_bucket):
-            raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if control_surface not in {None, "", "legacy", "mcp", "auto"}:
             raise ValueError(f"Unknown control surface '{control_surface}'")
         # Resolve the effective model/provider before any side effects, so a
@@ -3257,11 +3246,8 @@ class ProjectChatManager:
         chat_provider = provider
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
-        chat_model, chat_bucket = self._resolve_and_validate_chat_model(
-            chat_model,
-            chat_provider,
-            model_bucket,
-            project_id,
+        chat_model = self._resolve_and_validate_chat_model(
+            chat_model, chat_provider, project_id
         )
         # Sweep any other empty chats only after all model and routing-bucket
         # validation has succeeded. Opening a fresh "New Chat" signals the
@@ -3276,7 +3262,6 @@ class ProjectChatManager:
             title=title,
             model=chat_model,
             provider=chat_provider,
-            model_bucket=chat_bucket,
             mode=cast(BridgeMode, mode or self._config.claude_mode),
             control_surface=control_surface or "",
             created_at=_now_iso(),
@@ -3375,7 +3360,6 @@ class ProjectChatManager:
         mode: str | None = None,
         project_id: str | None = None,
         thinking_level: str | None = None,
-        model_bucket: str | None = None,
     ) -> ChatInfo | None:
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -3394,8 +3378,6 @@ class ProjectChatManager:
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
         target_provider = provider or chat.provider
-        if not self._model_bucket_allowed(model_bucket):
-            raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if thinking_level is not None:
             # Validate against the provider the chat will end up on, so a
             # combined provider+thinking PATCH checks the right level set.
@@ -3421,22 +3403,11 @@ class ProjectChatManager:
                     f"({current.workspace} → {target.workspace})"
                 )
 
-        changes_model = (
-            model is not None
-            or provider is not None
-            or model_bucket is not None
-        )
+        changes_model = model is not None or provider is not None
         new_model = model if model is not None else chat.model
-        requested_bucket = (
-            model_bucket if model_bucket is not None else chat.model_bucket
-        )
-        effective_bucket = ""
         if changes_model:
-            new_model, effective_bucket = self._resolve_and_validate_chat_model(
-                new_model,
-                target_provider,
-                requested_bucket,
-                target_project_id,
+            new_model = self._resolve_and_validate_chat_model(
+                new_model, target_provider, target_project_id
             )
 
         moved_from: str | None = None
@@ -3447,7 +3418,6 @@ class ProjectChatManager:
             chat.title = title
         if changes_model:
             new_provider = provider if provider is not None else chat.provider
-            new_bucket = model_bucket if model_bucket is not None else chat.model_bucket
             # Cross-provider switches mid-chat would silently break: the
             # each provider runs its own CLI with its own auth and its own
             # session, so swapping providers mid-chat would continue the
@@ -3469,7 +3439,6 @@ class ProjectChatManager:
                 )
             chat.model = new_model
             chat.provider = new_provider
-            chat.model_bucket = new_bucket if new_provider == "claude" else ""
         if mode is not None:
             chat.mode = mode  # type: ignore[assignment]
         is_codex_fable = (
@@ -3560,7 +3529,6 @@ class ProjectChatManager:
             model=chat.model,
             mode=chat.mode,
             provider=chat.provider,
-            model_bucket=chat.model_bucket,
         )
         new_chat.thinking_level = chat.thinking_level
         
@@ -3650,7 +3618,6 @@ class ProjectChatManager:
             model=source.model,
             mode=source.mode,
             provider=source.provider,
-            model_bucket=source.model_bucket,
             thinking_level=source.thinking_level,
             created_at=_now_iso(),
             handover_messages=rows,
@@ -3703,7 +3670,6 @@ class ProjectChatManager:
         provider: str,
         model: str,
         messages: list[dict] | None = None,
-        model_bucket: str = "",
     ) -> ChatInfo | None:
         """Switch a started chat to a new provider via explicit handover.
 
@@ -3721,17 +3687,11 @@ class ProjectChatManager:
         clean_model = (model or "").strip()
         if not clean_model:
             raise ValueError("Model is required")
-        if not self._model_bucket_allowed(model_bucket):
-            raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if self._broker.get(chat_id) is not None:
             raise ValueError("Cannot hand over while a turn is running")
 
-        target_bucket = model_bucket if provider == "claude" else ""
-        resolved_model, effective_bucket = self._resolve_and_validate_chat_model(
-            clean_model,
-            provider,
-            target_bucket,
-            chat.project_id,
+        resolved_model = self._resolve_and_validate_chat_model(
+            clean_model, provider, chat.project_id
         )
 
         self._revoke_mcp_chat(chat_id)
@@ -3751,7 +3711,6 @@ class ProjectChatManager:
         chat.handover_context_pending = True
         chat.provider = provider
         chat.model = resolved_model
-        chat.model_bucket = effective_bucket
         # Thinking levels are provider-native and don't carry across, except
         # that the Codex Fable preset is defined as Sol with Ultra effort.
         chat.thinking_level = (
@@ -4752,38 +4711,15 @@ class ProjectChatManager:
         except Exception:
             return default
 
-    def _model_bucket_allowed(self, bucket: str | None) -> bool:
-        """Accept any ``model_bucket`` value without acting on it.
-
-        The bucket used to name which upstream a tier alias resolved to, back
-        when Ollama, OpenRouter and user-defined endpoints ran *through* Claude
-        Code by env injection. Each provider now owns its own models, so the
-        value selects nothing. It is still accepted -- on the MCP tools, the
-        chat routes and existing on-disk chats -- so an upgrade does not reject
-        calls or stored state that still carry it.
-        """
-        return True
-
     def _resolve_and_validate_chat_model(
-        self,
-        model: str,
-        provider: str,
-        model_bucket: str | None,
-        project_id: str,
-        *,
-        resolve_model: bool = True,
-    ) -> tuple[str, str]:
-        """Normalize a chat model to its canonical form, then validate it.
-
-        Returns ``(resolved_model, "")``. The second element is the vestigial
-        model bucket, kept in the signature so callers keep compiling while the
-        field is retired; it is always empty.
-        """
+        self, model: str, provider: str, project_id: str
+    ) -> str:
+        """Normalize a chat model to its canonical form, then validate it."""
         resolved_model = (model or "").strip()
         if is_tier(resolved_model):
             resolved_model = canonical_tier(resolved_model)
         self._validate_configured_model(resolved_model, provider)
-        return resolved_model, ""
+        return resolved_model
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""

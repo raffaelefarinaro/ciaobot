@@ -39,7 +39,7 @@ from typing import Any
 
 import httpx
 
-from ciao.model_tiers import MODEL_TIERS
+from ciao.model_tiers import MODEL_TIERS, canonical_tier
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -1215,6 +1215,44 @@ class OpencodeProvider(BaseSDKProvider):
             request_id=request_id,
         )]
 
+    async def _resolve_model(
+        self, client: httpx.AsyncClient, model: str
+    ) -> tuple[str, str]:
+        """Resolve a requested model to ``(providerID, modelID)`` for the prompt.
+
+        A qualified ``provider/model`` id passes through. An unqualified one --
+        in practice a tier alias like ``sonnet``, which is what schedules,
+        routines and the critique panel speak -- is not something opencode can
+        serve: sending it verbatim asks for modelID ``sonnet`` under an empty
+        provider, which opencode rejects. Resolve it against the live catalog
+        instead.
+
+        Returns ``("", "")`` when nothing matches, which makes the caller omit
+        the model and let opencode apply its own default. That is the honest
+        outcome for a catalog with no equivalent of the requested tier, and it
+        keeps a bring-your-own-provider install working out of the box.
+        """
+        provider_id, model_id = split_model(model)
+        if provider_id or not model_id:
+            return provider_id, model_id
+        try:
+            response = await client.get("/provider")
+            response.raise_for_status()
+            catalog = _catalog_from_providers(response.json())
+        except (httpx.HTTPError, ValueError):
+            logger.info("opencode catalog unavailable; letting it pick a model")
+            return "", ""
+        resolved = opencode_tier_models(
+            catalog, opencode_tier_overrides(self.config)
+        ).get(canonical_tier(model_id), "")
+        if not resolved:
+            logger.info(
+                "opencode has no model for tier %r; using its configured default",
+                model_id,
+            )
+            return "", ""
+        return split_model(resolved)
+
     async def run_streaming(
         self,
         request: AgentRequest,
@@ -1227,7 +1265,7 @@ class OpencodeProvider(BaseSDKProvider):
         register_handle(OpencodeActiveHandle(self, session_id))
 
         agent, _permission = mode_settings(request.mode)
-        provider_id, model_id = split_model(request.model)
+        provider_id, model_id = await self._resolve_model(client, request.model)
         body: dict[str, Any] = {"agent": agent, "parts": self._prompt_parts(request)}
         if model_id:
             body["model"] = {"providerID": provider_id, "modelID": model_id}
@@ -1397,6 +1435,43 @@ class OpencodeProvider(BaseSDKProvider):
                 return response.status_code < 400
             except httpx.HTTPError:
                 return False
+
+
+def opencode_tier_models(
+    catalog: Sequence[Mapping[str, Any]],
+    overrides: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Map tier aliases onto concrete ``providerID/modelID`` ids from the catalog.
+
+    opencode addresses every model as ``providerID/modelID``, so a bare tier
+    alias is not a model id it can serve -- it would be sent as modelID
+    ``sonnet`` under an empty provider. This is what turns the alias into
+    something opencode recognises.
+
+    An operator pin (Settings -> Models -> model routing) wins, but only while
+    that model is still in the catalog: a pin left behind by a disconnected
+    provider must not outvote a model the user can actually run. Otherwise the
+    tier name is matched inside the model id, which works because opencode's
+    catalog is mostly vendor-named models (``anthropic/claude-sonnet-4-6``).
+
+    A tier with no pin and no match is **absent from the result**, deliberately.
+    opencode is bring-your-own-provider and a catalog of Llama or Qwen models
+    has no "opus"; guessing one would silently run a model the user did not ask
+    for, so the caller omits the model instead and lets opencode pick its own
+    default.
+    """
+    available = [str(row.get("model") or "") for row in catalog]
+    in_catalog = set(available)
+    resolved: dict[str, str] = {}
+    for tier in MODEL_TIERS:
+        pinned = (overrides or {}).get(tier, "")
+        if pinned and pinned in in_catalog:
+            resolved[tier] = pinned
+            continue
+        match = next((m for m in available if tier in m.lower()), "")
+        if match:
+            resolved[tier] = match
+    return resolved
 
 
 def catalog_providers(catalog: Sequence[Mapping[str, Any]]) -> set[str]:

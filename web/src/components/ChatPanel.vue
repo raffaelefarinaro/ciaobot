@@ -4027,10 +4027,7 @@ function routingBucketLabel(bucket: string | undefined, provider: string): strin
   return bucket
 }
 
-// Vendor name for the header chip. Takes a NORMALISED bucket (activeBucket),
-// not the raw ChatInfo.model_bucket: that field is vestigial and still carries
-// legacy values like 'work' / 'personal' which would print the workspace name
-// where the vendor belongs.
+// Vendor name for the header chip, from the chat's provider.
 function routingProviderLabel(bucket: string | undefined, provider: string): string {
   const lower = routingBucketLabel(bucket, provider)
   if (!lower) return ''

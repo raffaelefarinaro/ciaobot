@@ -793,9 +793,6 @@ def setup_workspace(
     # workspace registry instead of creating one synthetic workspace that points
     # at the whole vault.
     provider = (default_provider or "claude").strip().lower()
-    model_bucket = {
-        "codex": "",
-    }.get(provider, "anthropic")
     scaffold_vaults: list[tuple[str, Path]]
     if registered_vaults is not None:
         # The registry, not today's CLI defaults or filesystem discovery, is
@@ -823,7 +820,6 @@ def setup_workspace(
                     # accounts exist is the user's choice, made in Settings →
                     # Workspaces after setup.
                     "gws_profile": "",
-                    "model_bucket": model_bucket,
                 }
             )
             _write_if_missing(
@@ -857,7 +853,6 @@ def setup_workspace(
                         "vault_root": stored_root,
                         "default_provider": provider,
                         "gws_profile": "",
-                        "model_bucket": model_bucket,
                     }
                 ],
                 indent=2,
@@ -1592,7 +1587,6 @@ def _create_chat_command(args: argparse.Namespace) -> int:
         "title": args.title or "New Chat",
         "model": args.model or os.environ.get("CIAO_MODEL") or None,
         "provider": args.provider or os.environ.get("CIAO_PROVIDER") or None,
-        "model_bucket": args.model_bucket or os.environ.get("CIAO_MODEL_BUCKET") or None,
     }
     chat_info = _make_json_request(
         opener,
@@ -2074,10 +2068,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider",
         choices=list(_runtime_provider_choices()),
         help="Provider override. Inherits CIAO_PROVIDER.",
-    )
-    chat_parser.add_argument(
-        "--model-bucket",
-        help="Model bucket override. Inherits CIAO_MODEL_BUCKET.",
     )
     chat_parser.add_argument(
         "--base-url",

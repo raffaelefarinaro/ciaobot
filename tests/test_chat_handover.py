@@ -92,7 +92,6 @@ def test_handover_chat_switches_between_claude_and_codex(tmp_path: Path) -> None
     assert updated is not None
     assert updated.provider == "codex"
     assert updated.model == "gpt-test"
-    assert updated.model_bucket == ""
     assert updated.thinking_level == ""
     assert updated.session_id == ""
     assert "Claude / opus to Codex / gpt-test" in updated.handover_messages[-1]["content"]
@@ -130,13 +129,12 @@ def test_handover_messages_are_injected_into_next_prompt_once(tmp_path: Path) ->
 def test_handover_chat_validates_and_canonicalizes_model(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("handover", workspace="personal")
-    chat = pcm.create_chat(project.project_id, model="opus", provider="claude", model_bucket="work")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
 
     updated = pcm.handover_chat(
         chat.chat_id,
         provider="claude",
         model=" Sonnet ",
-        model_bucket="work",
     )
     assert updated is not None
     assert updated.model == "sonnet"
