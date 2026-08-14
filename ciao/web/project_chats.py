@@ -3249,7 +3249,7 @@ class ProjectChatManager:
         # Resolve the effective model/provider before any side effects, so a
         # rejected model can't leave unrelated empty chats deleted (#259).
         # Per-workspace default: one workspace can default to a cheaper tier
-        # models, work to Anthropic, etc. Explicit ``model`` arg wins.
+        # than another. An explicit ``model`` arg wins.
         project = self._projects.get(project_id)
         workspace = project.workspace if project else None
         default_model = self._config.default_model_for_workspace(workspace)
