@@ -57,7 +57,7 @@ from ciao.providers.base import (
     build_prompt,
     build_runtime_context,
 )
-from ciao.execution_modes import MCP_SERVER_NAME
+from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
 from ciao.tool_path import resolve_tool
 
 logger = logging.getLogger(__name__)
@@ -216,7 +216,9 @@ def _summarize_tool_input(tool: str, raw: object) -> str:
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()[:400]
-    return json.dumps(raw, ensure_ascii=False)[:200]
+    # An empty map has no summary; returning its json printed a literal "{}"
+    # next to the tool name in the activity row.
+    return json.dumps(raw, ensure_ascii=False)[:200] if raw else ""
 
 
 def _file_touches(tool: str, raw: object) -> list[dict[str, str]] | None:
@@ -261,10 +263,35 @@ def _token_usage_events(tokens: object) -> list[StreamEvent]:
     return [TokenUsageEvent(type="token_usage", input_tokens=read_in, output_tokens=read_out)]
 
 
+def control_plane_permission_rules() -> list[dict[str, str]]:
+    """Allow rules for the auto-approved half of Ciaobot's own MCP tools.
+
+    Ciaobot's control plane is not a third-party tool the operator should have
+    to approve call by call: reading a project's files or listing chats is the
+    app doing its own bookkeeping. Claude gets this through
+    ``options.allowed_tools``; opencode needs it as session permission rules,
+    or every ``ciaobot_*`` call raises a card even in auto mode.
+
+    Enumerated rather than globbed on purpose. ``ciaobot_*`` would also allow
+    the destructive tools deliberately kept out of AUTO_APPROVED_MCP_TOOLS —
+    chat_delete, project_delete, chat_stop, background_run_start — which must
+    keep prompting. opencode names an MCP tool ``<server>_<tool>``.
+    """
+    return [
+        {"permission": f"{MCP_SERVER_NAME}_{tool}", "pattern": "*", "action": "allow"}
+        for tool in AUTO_APPROVED_MCP_TOOLS
+    ]
+
+
 def mode_settings(mode: BridgeMode) -> tuple[str, list[dict[str, str]]]:
     """Map a Ciaobot mode onto an opencode (agent, permission ruleset)."""
     key = mode if mode in _MODE_AGENTS else "normal"
-    return _MODE_AGENTS[key], [dict(rule) for rule in _MODE_PERMISSIONS[key]]
+    rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
+    # Plan mode is excluded: its contract is "propose, don't act", and an allow
+    # rule would punch a hole in it — same carve-out as the Claude provider.
+    if key != "plan":
+        rules.extend(control_plane_permission_rules())
+    return _MODE_AGENTS[key], rules
 
 
 def split_model(model: str) -> tuple[str, str]:
@@ -812,6 +839,11 @@ class OpencodeProvider(BaseSDKProvider):
         if status in {"pending", "running"}:
             if call_id in self._tool_calls:
                 return []  # already announced; a running update is not news
+            # A `pending` part carries `input={}` — the arguments stream in and
+            # only land by `running`. Announcing at pending showed the tool
+            # with no detail at all ("bash" with an empty argument line).
+            if status == "pending" and not raw_input:
+                return []
             self._tool_calls[call_id] = tool
             return [ToolUseEvent(
                 type="tool_use",
@@ -901,10 +933,13 @@ class OpencodeProvider(BaseSDKProvider):
             session_id=str(props.get("sessionID") or ""),
             tool_use_id=call_id,
         )
-        label = tool_name or "run a tool"
+        label = tool_name or "a tool"
         return [PermissionRequestEvent(
-            type="permission_request",
-            message=f"opencode wants to use {label}" if tool_name else "opencode needs approval",
+            # `system`, and "Approve use of X?", to match the Claude and Codex
+            # providers. A different type and a restated "opencode wants to
+            # use bash" rendered as an extra transcript line beside the card.
+            type="system",
+            message=f"Approve use of {label}?",
             tool_name=label,
             tool_input=detail[:400],
             request_id=request_id,

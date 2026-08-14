@@ -145,8 +145,11 @@ def test_the_wildcard_rule_comes_first():
 
 
 def test_bypass_allows_everything_and_normal_asks():
-    assert _actions("bypass") == {"*": "allow"}
-    assert _actions("normal") == {"*": "ask"}
+    # The wildcard is what defines the mode; the control-plane allow rules ride
+    # alongside it in every non-plan mode.
+    assert _actions("bypass")["*"] == "allow"
+    assert _actions("normal")["*"] == "ask"
+    assert "edit" not in _actions("normal")
 
 
 def test_auto_allows_edits_but_still_gates_shell():
@@ -1043,3 +1046,118 @@ async def test_no_control_plane_registration_without_a_token(tmp_path):
         AgentRequest(prompt="hi", model="m", mode="bypass", provider="opencode")
     )
     assert calls == []
+
+
+# ── control-plane auto-approval ─────────────────────────────────────────
+
+
+def test_control_plane_tools_do_not_prompt_outside_plan_mode():
+    """Regression: `ciaobot_project_files_list` raised an Approve/Deny card in
+    auto mode. Ciaobot's own bookkeeping is not a third-party tool the operator
+    should confirm call by call — Claude allows these via allowed_tools, and
+    opencode needs them as session permission rules."""
+    from ciao.execution_modes import MCP_SERVER_NAME
+
+    for mode in ("normal", "auto", "bypass"):
+        allowed = {
+            rule["permission"]
+            for rule in mode_settings(mode)[1]
+            if rule["action"] == "allow"
+        }
+        assert f"{MCP_SERVER_NAME}_project_files_list" in allowed, mode
+        assert f"{MCP_SERVER_NAME}_chat_send" in allowed, mode
+
+
+def test_destructive_control_plane_tools_still_prompt():
+    """The allow list is enumerated, not globbed. A `ciaobot_*` rule would also
+    wave through the deletes and lifecycle actions deliberately kept out of
+    AUTO_APPROVED_MCP_TOOLS."""
+    from ciao.execution_modes import MCP_SERVER_NAME
+
+    allowed = {
+        rule["permission"]
+        for rule in mode_settings("auto")[1]
+        if rule["action"] == "allow"
+    }
+    for destructive in (
+        "chat_delete", "project_delete", "chat_stop",
+        "schedule_action", "loop_action", "project_complete",
+        "background_run_start", "background_run_cancel",
+    ):
+        assert f"{MCP_SERVER_NAME}_{destructive}" not in allowed, destructive
+    # And no wildcard snuck in that would cover them.
+    assert not any(r["permission"].endswith("*") and r["action"] == "allow"
+                   for r in mode_settings("auto")[1])
+
+
+def test_plan_mode_grants_no_control_plane_allowance():
+    """Plan's contract is propose-don't-act; an allow rule would hole it."""
+    from ciao.execution_modes import MCP_SERVER_NAME
+
+    assert not any(
+        rule["permission"].startswith(f"{MCP_SERVER_NAME}_")
+        for rule in mode_settings("plan")[1]
+    )
+
+
+def test_the_allow_list_tracks_the_shared_auto_approved_tuple():
+    """So a tool added to AUTO_APPROVED_MCP_TOOLS reaches opencode too, instead
+    of silently prompting only on this provider."""
+    from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
+    from ciao.providers.opencode import control_plane_permission_rules
+
+    got = {rule["permission"] for rule in control_plane_permission_rules()}
+    assert got == {f"{MCP_SERVER_NAME}_{tool}" for tool in AUTO_APPROVED_MCP_TOOLS}
+
+
+# ── activity-row rendering ──────────────────────────────────────────────
+
+
+def test_a_pending_tool_is_not_announced_before_its_arguments_arrive(tmp_path):
+    """Captured live: a `pending` tool part carries `input={}` and the real
+    arguments only land at `running`. Announcing at pending rendered the tool
+    with no detail beside it."""
+    provider = _provider(tmp_path)
+    pending = {"part": {
+        "type": "tool", "id": "prt_1", "callID": "c1", "tool": "bash",
+        "state": {"status": "pending", "input": {}},
+    }}
+    assert provider._part_updated(pending) == []
+
+    running = {"part": {
+        "type": "tool", "id": "prt_1", "callID": "c1", "tool": "bash",
+        "state": {"status": "running", "input": {"command": "echo hi"}},
+    }}
+    events = provider._part_updated(running)
+    assert len(events) == 1
+    assert events[0].tool_name == "bash"
+    assert events[0].tool_input == "echo hi"
+
+
+def test_a_tool_with_genuinely_empty_input_is_still_announced(tmp_path):
+    """Skipping pending must not swallow a tool that takes no arguments."""
+    provider = _provider(tmp_path)
+    events = provider._part_updated({"part": {
+        "type": "tool", "id": "prt_2", "callID": "c2", "tool": "list",
+        "state": {"status": "running", "input": {}},
+    }})
+    assert len(events) == 1
+    assert events[0].tool_name == "list"
+    assert events[0].tool_input == ""
+
+
+def test_an_empty_argument_map_summarizes_to_nothing():
+    """It used to print a literal "{}" next to the tool name."""
+    from ciao.providers.opencode import _summarize_tool_input
+
+    assert _summarize_tool_input("bash", {}) == ""
+    assert _summarize_tool_input("bash", {"command": "ls"}) == "ls"
+
+
+def test_permission_events_match_the_house_convention(tmp_path):
+    """Claude and Codex both emit `system` with "Approve use of X?". A different
+    type plus a restated "opencode wants to use bash" rendered as an extra
+    transcript line beside the approval card."""
+    events = _convert(_provider(tmp_path), "permission.asked", LIVE_PERMISSION)
+    assert events[0].type == "system"
+    assert events[0].message == "Approve use of bash?"

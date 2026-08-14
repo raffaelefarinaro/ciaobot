@@ -901,18 +901,11 @@
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="store.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
-      <!-- Capability disclosure: providers that can steer inject a mid-turn
-           message into the running turn; ones that cannot only queue it. -->
-      <p v-if="!providerCanSteer" class="queued-note">
-        {{ providerLabelForChat }} can't take a message mid-turn — this is sent when the current response finishes.
-      </p>
       <div
         v-for="(q, i) in store.currentQueued"
         :key="q.id || i"
         class="queued-chip"
-        :title="providerCanSteer
-          ? 'Will be sent when current response finishes'
-          : `${providerLabelForChat} cannot be steered mid-turn; sent when the current response finishes`"
+        title="Will be sent when current response finishes"
       >
         <span class="queued-label">Queued</span>
         <div class="queued-body">
@@ -1824,24 +1817,6 @@ const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
 const modelsResponse = ref<ModelsResponse | null>(null)
 
-/** The backend descriptor for this chat's runtime provider, if known. */
-const providerDescriptor = computed(() => {
-  const id = chat.value?.provider || ''
-  return modelsResponse.value?.providers?.find((item) => item.id === id) || null
-})
-
-/**
- * Whether this provider can take a message mid-turn.
- *
- * Defaults to true so the extra note only ever appears once the backend has
- * actually said the provider cannot steer — an unknown provider should not be
- * described as limited.
- */
-const providerCanSteer = computed(() => providerDescriptor.value?.capabilities?.steer ?? true)
-
-const providerLabelForChat = computed(
-  () => providerDescriptor.value?.short_label || chat.value?.provider || 'This provider',
-)
 const thinkingLevels = ref<Record<string, string[]>>({})
 
 const openTraces = ref<Record<number, boolean>>({})
@@ -6406,12 +6381,6 @@ details[open] > .activity-summary::before {
   border-radius: var(--radius);
   font-size: 13px;
   color: var(--fg2);
-}
-.queued-note {
-  margin: 0 0 6px;
-  font-size: 12px;
-  color: var(--fg3, var(--fg2));
-  line-height: 1.4;
 }
 .queued-label {
   font-size: 10px;
