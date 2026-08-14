@@ -60,7 +60,7 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
             "source_type": "custom",
             "description": "Create Airtable projects",
             "content": "---\nname: airtable-projects\ndescription: Create Airtable projects\n---\n\n# airtable-projects\n",
-            "installed_targets": ["claude"],
+            "installed_targets": ["claude", "opencode"],
         },
         {
             "name": "brainstorming",
@@ -69,7 +69,7 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
             "source_type": "github",
             "description": "Installed GitHub",
             "content": "---\nname: brainstorming\ndescription: Installed GitHub\n---\n\n# brainstorming\n",
-            "installed_targets": ["claude"],
+            "installed_targets": ["claude", "opencode"],
         },
     ]
 
@@ -95,7 +95,7 @@ def test_build_skill_inventory_reports_codex_install_target(tmp_path: Path) -> N
 
     inventory = build_skill_inventory(tmp_path)
 
-    assert inventory["skills"][0]["installed_targets"] == ["claude", "codex"]
+    assert inventory["skills"][0]["installed_targets"] == ["claude", "codex", "opencode"]
 
 
 def test_build_skill_inventory_can_omit_skill_content(tmp_path: Path) -> None:
@@ -130,7 +130,8 @@ def test_build_skill_inventory_reads_agents_canonical_github_skill(tmp_path: Pat
     skill = inventory["skills"][0]
     assert skill["description"] == "Installed for Codex"
     assert "# brainstorming" in skill["content"]
-    assert skill["installed_targets"] == ["codex"]
+    # opencode discovers .agents/skills natively, so it needs no projection.
+    assert skill["installed_targets"] == ["codex", "opencode"]
 
 
 def test_build_skill_inventory_dedupes_custom_over_lock_entry(tmp_path: Path) -> None:

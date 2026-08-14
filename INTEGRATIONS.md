@@ -19,6 +19,35 @@ codex login status           # credential-free readiness check
 
 The bundled CLI inside the ChatGPT desktop app is detected on macOS as well. Its updates follow the desktop app; standalone installs use `codex update`. `CIAO_CODEX_BIN` can point at an absolute Codex binary when launchd cannot discover it. Readiness also generates the installed app-server schema in a temporary directory and verifies the protocol methods Ciaobot needs, so a logged-in but incompatible CLI is reported as needing an update. Ciaobot gets the account-specific model catalog and reasoning efforts from `model/list`; no OpenAI API key is required for Codex subscription chats. The Ciaobot `fable` preset selects the discovered Sol-family Codex model with Ultra reasoning effort. Ciaobot itself no longer uses an OpenAI API key at all — voice moved on-device and nothing else read it.
 
+## opencode
+
+```bash
+npm install -g opencode-ai@latest   # or: brew install sst/tap/opencode
+ciao auth opencode                  # opens `opencode auth login`
+```
+
+opencode is bring-your-own-provider: it authenticates against whichever model
+backends you connect (`opencode auth login`), and Ciaobot lists the models of
+the connected ones. Ciaobot runs one `opencode serve` process per active chat
+on an ephemeral loopback port protected by a per-process
+`OPENCODE_SERVER_PASSWORD`, and drives it over HTTP plus the `/event` SSE
+stream. Readiness verifies the operations Ciaobot needs against the server's
+own OpenAPI document at `/doc`, so a logged-in but incompatible build is
+reported as needing an update rather than half-working.
+
+Workspace assets need almost no projection: opencode discovers
+`.claude/skills/`, `.agents/skills/`, `AGENTS.md`, and `CLAUDE.md` natively, so
+`ciao sync-skills` only generates `.opencode/agents/` (canonical subagents),
+`.opencode/commands/` (canonical commands), and the `mcp` object in
+`opencode.json`. Generated files carry a Ciaobot marker and only marked files
+are pruned; `opencode.json` tracks Ciaobot-owned server names in
+`.opencode/.ciao-managed-mcps.json` because JSON has no comment syntax.
+
+opencode has no API for injecting a message into a running turn, so Ciaobot
+declares `steer=false` for it: a message sent mid-turn queues for the next turn
+instead of interrupting. Fork, abort, tool approvals, structured questions, and
+background subagents (real child sessions) are all native.
+
 ### Live eval provider access
 
 `ciao eval` uses the selected provider's existing CLI authentication and the
@@ -255,6 +284,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
 - `CIAO_WORKSPACE`: filesystem workspace root for operational state, `.runtime/`, `.env`, `.claude/`, `.agents/skills/`, `CLAUDE.md`, and `AGENTS.md`. Default `.`.
 - `CIAO_CODEX_BIN`: optional absolute path to the Codex CLI. Normally unnecessary because Ciaobot checks the login-shell PATH and the macOS ChatGPT app bundle.
+- `CIAO_OPENCODE_BIN`: optional absolute path to the opencode CLI. Normally unnecessary because Ciaobot checks the login-shell PATH.
 - `CIAO_VAULT_ROOT`: durable memory/vault root. Default `<CIAO_WORKSPACE>/memory-vault`. Set this to an external notes folder when operational state should stay out of synced notes.
 - `CIAO_WORKSPACES`: JSON workspace registry. Preferred shape is a list of objects with `name`, `vault_root`, `default_provider`, `default_model`, `disallowed_tools`, `claude_ai_mcps`, `gws_profile`, and `model_bucket`. `vault_root` is relative to `CIAO_WORKSPACE` unless absolute. It is an internal/setup migration field: fresh setup and ordinary PWA workspace creation derive `<CIAO_VAULT_ROOT>/<name>`, while existing-folder setup preserves the selected root until a model-guided migration updates the registry. Later Settings updates preserve the stored path. If unset, Ciaobot reads `.runtime/workspaces.json`; if that is also missing, it falls back to the legacy `personal` and `work` workspace definitions. `model_bucket` is a routing label, not a workspace name: `work` and `anthropic` keep Anthropic aliases, `personal` and `ollama` route Claude aliases through the configured Ollama tier models, and any other configured bucket is accepted as an Anthropic-style bucket until a provider mapping is added. Schedules assigned to a workspace inherit its current `default_provider` and `default_model` on every run unless an explicit override is stored. Example: `[{"name":"default","vault_root":"memory-vault/default","default_provider":"claude","default_model":"opus","gws_profile":"personal","model_bucket":"anthropic"}]`.
 - `claude_ai_mcps` (workspace field, also settable from the PWA Workspaces tab): tri-state toggle for the claude.ai account-OAuth connector MCPs (Airtable, Atlassian, Slack, Asana, BigQuery, incident.io, Salesforce, Sentry). `null` = per-workspace default (personal off, else on). When off, the connector set is added to the effective denylist for that workspace. `disallowed_tools` covers extra non-connector tools (e.g. `mcp__n8n_mcp`); the effective denylist is the union of the two.

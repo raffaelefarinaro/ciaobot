@@ -339,21 +339,35 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     asyncio.create_task(check_claude_code())
 
-    tracker.start("connect_codex")
+    # Every other runtime provider reports readiness through its registry
+    # status probe, so a new provider gets a startup phase for free. Claude
+    # keeps the hand-written check above because its phase id
+    # (`connect_claude_code`) predates the registry and is a UI contract.
+    from ciao import provider_registry
 
-    async def check_codex():
-        try:
-            from ciao.providers.codex import codex_login_status
+    def _start_provider_check(descriptor) -> None:
+        phase = f"connect_{descriptor.id}"
+        tracker.start(phase)
 
-            status = await asyncio.to_thread(codex_login_status)
-            if status.get("ok"):
-                tracker.done("connect_codex", str(status.get("detail") or "connected"))
-            else:
-                tracker.fail("connect_codex", str(status.get("detail") or "not connected"))
-        except Exception as exc:
-            tracker.fail("connect_codex", f"not found: {exc}")
+        async def check() -> None:
+            try:
+                status = await asyncio.to_thread(
+                    descriptor.status_probe, os.environ
+                )
+                detail = str(status.get("detail") or "")
+                if status.get("ok"):
+                    tracker.done(phase, detail or "connected")
+                else:
+                    tracker.fail(phase, detail or "not connected")
+            except Exception as exc:  # a probe must never block startup
+                tracker.fail(phase, f"not found: {exc}")
 
-    asyncio.create_task(check_codex())
+        asyncio.create_task(check())
+
+    for descriptor in provider_registry.descriptors():
+        if descriptor.id == "claude" or not descriptor.status_probe_path:
+            continue
+        _start_provider_check(descriptor)
 
     # Sync workspace before anything else
     if config.auto_sync_on_start:
@@ -524,6 +538,16 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
     app.state.node_state_manager = node_state_manager
+    # Stamp the target project's name on schedules that only recorded its id,
+    # while those ids still resolve. After a fresh init they would not, and the
+    # run would fall back to General with the user's choice lost.
+    try:
+        schedule_manager.backfill_project_names(
+            lambda pid: (lambda p: p.name if p else None)(pcm.get_project(pid))
+        )
+    except Exception:
+        logger.warning("Could not backfill schedule project names", exc_info=True)
+
     app.state.schedule_manager = schedule_manager
     app.state.loop_manager = loop_manager
     app.state.background_runner = background_runner

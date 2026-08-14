@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover
 
 import yaml
 
-from ciao import job_runs, native_sidecar, subagent_tracking
+from ciao import job_runs, native_sidecar, provider_registry, subagent_tracking
 from ciao.config import BridgeConfig
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import (
@@ -99,7 +99,7 @@ from ciao.custom_providers import (
     provider_for_model,
     runtime_model,
 )
-from ciao.provider_service import ProviderService, supported_providers
+from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
 from ciao.web.chat_broker import (
@@ -299,11 +299,9 @@ def _parse_iso(value: str) -> datetime | None:
 
 
 def _provider_label(provider: str) -> str:
-    labels = {
-        "claude": "Claude",
-        "codex": "Codex",
-    }
-    return labels.get(provider, provider or "Provider")
+    if not provider:
+        return "Provider"
+    return provider_registry.label(provider, short=True)
 
 
 def _clean_handover_messages(messages: list[dict] | None) -> list[dict]:
@@ -4831,8 +4829,9 @@ class ProjectChatManager:
         OpenRouter model from the static allowlist or tier targets (valid
         even when catalog discovery failed and never merged them into
         ``claude_models``), or a ``custom:<id>:<model>`` id routed through
-        a configured custom provider. Native Codex ids are skipped because
-        the catalog is async and the Codex CLI already rejects unknown ids
+        a configured custom provider. Native ids for providers that discover
+        their own catalog (Codex, opencode) are skipped because
+        the catalog is async and those CLIs already reject unknown ids
         with a clear error at the first turn; ``custom:``-prefixed ids
         still flow through the custom-provider membership check before
         that exemption fires.
@@ -4860,12 +4859,18 @@ class ProjectChatManager:
             raise UnknownModelError(
                 f"Unknown custom model '{model}' (provider not registered)"
             )
-        if provider == "codex" and custom is None:
-            # Exempt only native Codex ids (no ``custom:`` prefix): the
-            # catalog is async and the Codex CLI rejects unknown ids with a
-            # clear error at the first turn. A rejected custom id must not
-            # be rescued by this exemption, else the typo reaches the
-            # endpoint anyway (#259).
+        if custom is None and provider and capabilities_for(provider).dynamic_models:
+            # Providers that discover their own catalog (Codex, opencode) are
+            # exempt: the catalog is async, so this synchronous validator has
+            # nothing to check against, and the provider itself rejects an
+            # unknown id with a clear error on the first turn. Keyed on the
+            # capability rather than a provider name so a new dynamic-catalog
+            # provider is not rejected against the Claude/Ollama/OpenRouter
+            # model lists, which do not describe it.
+            #
+            # Only native ids (no ``custom:`` prefix): a rejected custom id
+            # must not be rescued here, else the typo reaches the endpoint
+            # anyway (#259).
             return
         if is_tier(model):
             return
@@ -6719,7 +6724,7 @@ class ProjectChatManager:
                 if (
                     chat_for_watcher is not None
                     and chat_for_watcher.session_id
-                    and chat_for_watcher.provider in {"claude", "codex"}
+                    and capabilities_for(chat_for_watcher.provider).background_subagents
                 ):
                     self._start_subagent_watcher(chat_id, project_id)
                     # Keep the SDK pipe drained while the client idles: a
@@ -8534,27 +8539,69 @@ class ProjectChatManager:
         ))
         return result
 
+    def find_project(self, name: str, workspace: str) -> ProjectInfo | None:
+        """The project with this name in this workspace, or None.
+
+        Names are unique per workspace, which is what lets a schedule survive
+        the per-instance id regeneration that strands ``web_project_id``.
+        """
+        wanted = (name or "").strip()
+        if not wanted:
+            return None
+        return next(
+            (
+                project
+                for project in self._projects.values()
+                if project.workspace == workspace and project.name == wanted
+            ),
+            None,
+        )
+
     def _resolve_schedule_project(
         self, stale_id: str, entry: object
     ) -> ProjectInfo | None:
         """Resolve a stale web_project_id to a local project.
 
         schedules.json is shared via git but project IDs are per-instance
-        (regenerated on each fresh init). When the ID doesn't match, infer
-        the workspace from the schedule ID convention and fall back to the
-        matching General project.
+        (regenerated on each fresh init), so the id alone decays into "no
+        target". The recorded project *name* survives that, so it is tried
+        first and the entry's id is repaired in place — otherwise every run
+        re-resolves and the schedule editor keeps showing a dead id.
+
+        Only when there is no name to match (entries written before the name
+        was recorded) does this fall back to the workspace's General project.
+        That fallback discards the user's choice, so it is logged as a warning
+        rather than an info line.
         """
         # Prefer the explicit workspace field; it survives the per-device id
         # regeneration that makes web_project_id go stale. Legacy entries use
         # the historical id-prefix fallback, while stock ``default`` routines
         # resolve to the first configured workspace.
         workspace = self._schedule_workspace_hint(entry)
+
+        wanted = (getattr(entry, "web_project_name", "") or "").strip()
+        if wanted:
+            match = self.find_project(wanted, workspace)
+            if match is not None:
+                logger.info(
+                    "Re-homed schedule from stale project %s to %s (%s/%s)",
+                    stale_id, match.project_id, workspace, match.name,
+                )
+                return match
+            logger.warning(
+                "Schedule target project %r no longer exists in workspace %s; "
+                "falling back to General",
+                wanted, workspace,
+            )
+
         for p in self._projects.values():
             if p.workspace == workspace and p.name == "General":
-                logger.info(
-                    "Resolved stale project %s -> %s (%s General)",
-                    stale_id, p.project_id, workspace,
-                )
+                if not wanted:
+                    logger.warning(
+                        "Schedule target %s is stale and records no project name; "
+                        "falling back to %s General. Re-pick the project to repair it.",
+                        stale_id, workspace,
+                    )
                 return p
         return None
 

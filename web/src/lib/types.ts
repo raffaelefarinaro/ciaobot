@@ -1,10 +1,57 @@
 export type WorkspaceName = string
-export type WorkspaceProvider = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
+
+/**
+ * A runtime provider id, enumerated by the backend registry
+ * (`ciao/provider_registry.py`). The `(string & {})` arm keeps editor
+ * autocomplete for the providers that ship today while still accepting any id
+ * the backend reports, so adding a provider does not mean editing this union.
+ */
+export type RuntimeProvider = 'claude' | 'codex' | (string & {})
+
+/**
+ * What a runtime provider supports, mirroring `ProviderCapabilities` in
+ * `ciao/providers/base.py`. The PWA gates affordances on these rather than on
+ * provider ids — e.g. no "steer" control renders for a provider that reports
+ * `steer: false`.
+ */
+export interface ProviderCapabilities {
+  resume: boolean
+  fork: boolean
+  images: boolean
+  stop: boolean
+  steer: boolean
+  permissions: boolean
+  structured_questions: boolean
+  dynamic_models: boolean
+  thinking_levels: boolean
+  usage: boolean
+  quota: boolean
+  subagents: boolean
+  background_subagents: boolean
+  subagent_messages: boolean
+  session_history: boolean
+  schedule_unattended: boolean
+}
+
+/** One runtime provider as described by the backend registry. */
+export interface ProviderDescriptor {
+  id: RuntimeProvider
+  label: string
+  short_label: string
+  model_bucket: string
+  capabilities: ProviderCapabilities
+}
+
+export type WorkspaceProvider =
+  | RuntimeProvider
+  | 'ollama'
+  | 'openrouter'
+  | `custom:${string}`
 
 export interface WorkspaceProviderOption {
   value: WorkspaceProvider
   label: string
-  runner?: 'claude' | 'codex'
+  runner?: RuntimeProvider
   default_model?: string
 }
 
@@ -108,7 +155,7 @@ export interface ChatInfo {
   model: string
   // Runtime provider. Claude also covers Ollama/OpenRouter env-injection;
   // Codex uses the authenticated OpenAI CLI app-server session.
-  provider: 'claude' | 'codex'
+  provider: RuntimeProvider
   // Claude routing bucket. Legacy values: 'work'/'anthropic' pin Anthropic,
   // 'personal'/'ollama' pin Ollama routing. '' = auto from project workspace.
   // Only meaningful when provider is 'claude'.
@@ -408,6 +455,10 @@ export interface Schedule {
   days_of_week: string[] | null
   thread_id: number | null
   context_label: string
+  // Whether the schedule's target project/chat still resolves. Explicit
+  // because context_label is always set, so its truthiness says nothing
+  // about whether the target is still there.
+  context_available?: boolean
   frequency: 'daily' | 'weekly' | 'monthly' | 'manual' | 'once'
   day_of_month: number | null
   run_at_date: string | null
@@ -415,9 +466,9 @@ export interface Schedule {
   web_project_id: string | null
   workspace: WorkspaceName
   model: string
-  provider?: 'claude' | 'codex'
+  provider?: RuntimeProvider
   effective_model?: string
-  effective_provider?: 'claude' | 'codex'
+  effective_provider?: RuntimeProvider
   next_run: string | null
   last_expected_run: string | null
   missed: boolean
@@ -473,6 +524,12 @@ export interface ModelsResponse {
   openrouter_models?: string[]
   // Account-visible Codex models and their app-server metadata.
   codex_models?: string[]
+  // Models reachable through opencode's connected backends, already
+  // namespaced as `providerID/modelID`. Empty when nothing is authenticated.
+  opencode_models?: string[]
+  // Registry-driven provider descriptors, so the PWA never has to hard-code
+  // the set of runtime providers. See `ciao/provider_registry.py`.
+  providers?: ProviderDescriptor[]
   custom_providers?: Array<CustomProviderSettings & {
     model_labels?: Record<string, string>
   }>
@@ -511,8 +568,13 @@ export interface RoutineSettings {
   openrouter_sonnet_model: string
   openrouter_opus_model: string
   openrouter_fable_model: string
-  // Codex per-tier pins; empty = automatic catalog mapping. Effective
-  // values come from /api/models (alias_tiers.codex).
+  // Per-runtime-provider tier pins, keyed by provider id then tier; a missing
+  // entry = automatic catalog mapping. This is the canonical shape — PATCH it
+  // rather than the flat keys below. Effective values come from /api/models
+  // (alias_tiers.<provider>).
+  provider_routing?: Record<string, Record<string, string>>
+  // Flat mirror of the same Codex pins, still emitted and accepted for
+  // clients written before provider_routing existed.
   codex_haiku_model: string
   codex_sonnet_model: string
   codex_opus_model: string
@@ -566,6 +628,10 @@ export interface RoutineSettings {
 
 export interface ProviderConnection {
   name: string
+  // Display names from the backend registry, so the Settings card never has to
+  // map provider ids to product names itself.
+  label?: string
+  short_label?: string
   ok: boolean
   auth: string
   command: string
@@ -581,7 +647,7 @@ export interface CustomProviderSettings {
   id: string
   name: string
   url: string
-  runner: 'claude' | 'codex'
+  runner: RuntimeProvider
   models: string[]
   token_configured: boolean
 }

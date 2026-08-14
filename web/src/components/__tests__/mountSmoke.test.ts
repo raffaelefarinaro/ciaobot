@@ -118,6 +118,8 @@ vi.mock('../../lib/api', () => {
           version: '2.1.205 (Claude Code)',
           account: 'person@example.com',
           protocol: 'Agent SDK ready',
+          label: 'Claude Code',
+          short_label: 'Claude',
         },
         codex: {
           name: 'codex',
@@ -127,6 +129,18 @@ vi.mock('../../lib/api', () => {
           version: 'codex-cli 0.144.0-alpha.4',
           account: 'ChatGPT account',
           protocol: 'app-server protocol compatible',
+          label: 'OpenAI Codex',
+          short_label: 'Codex',
+        },
+        opencode: {
+          name: 'opencode',
+          ok: false,
+          auth: 'login_required',
+          command: 'opencode auth login',
+          version: '1.18.18',
+          detail: 'login required',
+          label: 'opencode',
+          short_label: 'opencode',
         },
       },
       requires_restart: true,
@@ -812,6 +826,31 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
+  it('SettingsView labels every provider connection from the backend registry', async () => {
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const names = wrapper.findAll('.provider-connections .routine-name').map((el) => el.text())
+    // Names come from the payload, so a provider the PWA has never heard of
+    // still gets its own card rather than another provider's label.
+    expect(names).toEqual(['Claude Code', 'OpenAI Codex', 'opencode'])
+
+    // The unauthenticated provider offers Connect but not Log out.
+    const rows = wrapper.findAll('.provider-connections .credential-row')
+    const opencodeRow = rows[2]!
+    expect(opencodeRow.text()).toContain('Not connected')
+    const actions = opencodeRow.findAll('.provider-connection-actions button').map((b) => b.text())
+    expect(actions).toEqual(['Connect', 'Verify'])
+    wrapper.unmount()
+  })
+
   it('SettingsView shows the OpenAI voice key without provider protocol labels', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
@@ -850,6 +889,8 @@ describe('component mount smoke', () => {
     expect(providerSelect.classes()).toContain('routine-select')
     expect(providerSelect.findAll('option').map((option) => option.text())).toEqual([
       'OpenAI (via Codex)',
+      // Registered but with no authenticated backend in this fixture.
+      'opencode (not configured)',
       'Ollama (via Claude Code)',
       'OpenRouter (via Claude Code)',
     ])
@@ -871,8 +912,10 @@ describe('component mount smoke', () => {
     expect(codexOption).toBeTruthy()
     await codexOption!.trigger('click')
     await flushPromises()
+    // Runtime-provider pins go through the nested provider_routing map, not
+    // the flat per-provider scalars (which the backend still accepts).
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      codex_haiku_model: 'gpt-5.6-terra',
+      provider_routing: { codex: { haiku: 'gpt-5.6-terra' } },
     })
     expect(wrapper.find('.routing-model-catalog').exists()).toBe(false)
 

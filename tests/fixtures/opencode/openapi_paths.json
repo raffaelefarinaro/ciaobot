@@ -1,0 +1,520 @@
+{
+ "info": {
+  "version": "1.18.18"
+ },
+ "openapi": "3.1.0",
+ "paths": {
+  "/agent": {
+   "get": {}
+  },
+  "/api/agent": {
+   "get": {}
+  },
+  "/api/command": {
+   "get": {}
+  },
+  "/api/credential/{credentialID}": {
+   "delete": {},
+   "patch": {}
+  },
+  "/api/event": {
+   "get": {}
+  },
+  "/api/fs/find": {
+   "get": {}
+  },
+  "/api/fs/list": {
+   "get": {}
+  },
+  "/api/fs/read/*": {
+   "get": {}
+  },
+  "/api/health": {
+   "get": {}
+  },
+  "/api/integration": {
+   "get": {}
+  },
+  "/api/integration/attempt/{attemptID}": {
+   "delete": {},
+   "get": {}
+  },
+  "/api/integration/attempt/{attemptID}/complete": {
+   "post": {}
+  },
+  "/api/integration/{integrationID}": {
+   "get": {}
+  },
+  "/api/integration/{integrationID}/connect/key": {
+   "post": {}
+  },
+  "/api/integration/{integrationID}/connect/oauth": {
+   "post": {}
+  },
+  "/api/location": {
+   "get": {}
+  },
+  "/api/model": {
+   "get": {}
+  },
+  "/api/permission/request": {
+   "get": {}
+  },
+  "/api/permission/saved": {
+   "get": {}
+  },
+  "/api/permission/saved/{id}": {
+   "delete": {}
+  },
+  "/api/provider": {
+   "get": {}
+  },
+  "/api/provider/{providerID}": {
+   "get": {}
+  },
+  "/api/pty": {
+   "get": {},
+   "post": {}
+  },
+  "/api/pty/{ptyID}": {
+   "delete": {},
+   "get": {},
+   "put": {}
+  },
+  "/api/pty/{ptyID}/connect": {
+   "get": {}
+  },
+  "/api/pty/{ptyID}/connect-token": {
+   "post": {}
+  },
+  "/api/question/request": {
+   "get": {}
+  },
+  "/api/reference": {
+   "get": {}
+  },
+  "/api/session": {
+   "get": {},
+   "post": {}
+  },
+  "/api/session/active": {
+   "get": {}
+  },
+  "/api/session/{sessionID}": {
+   "get": {}
+  },
+  "/api/session/{sessionID}/agent": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/compact": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/context": {
+   "get": {}
+  },
+  "/api/session/{sessionID}/event": {
+   "get": {}
+  },
+  "/api/session/{sessionID}/history": {
+   "get": {}
+  },
+  "/api/session/{sessionID}/interrupt": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/message": {
+   "get": {}
+  },
+  "/api/session/{sessionID}/message/{messageID}": {
+   "get": {}
+  },
+  "/api/session/{sessionID}/model": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/permission": {
+   "get": {},
+   "post": {}
+  },
+  "/api/session/{sessionID}/permission/{requestID}": {
+   "get": {}
+  },
+  "/api/session/{sessionID}/permission/{requestID}/reply": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/prompt": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/question": {
+   "get": {}
+  },
+  "/api/session/{sessionID}/question/{requestID}/reject": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/question/{requestID}/reply": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/revert/clear": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/revert/commit": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/revert/stage": {
+   "post": {}
+  },
+  "/api/session/{sessionID}/wait": {
+   "post": {}
+  },
+  "/api/skill": {
+   "get": {}
+  },
+  "/auth/{providerID}": {
+   "delete": {},
+   "put": {}
+  },
+  "/command": {
+   "get": {}
+  },
+  "/config": {
+   "get": {},
+   "patch": {}
+  },
+  "/config/providers": {
+   "get": {}
+  },
+  "/event": {
+   "get": {}
+  },
+  "/experimental/capabilities": {
+   "get": {}
+  },
+  "/experimental/console": {
+   "get": {}
+  },
+  "/experimental/console/orgs": {
+   "get": {}
+  },
+  "/experimental/console/switch": {
+   "post": {}
+  },
+  "/experimental/control-plane/move-session": {
+   "post": {}
+  },
+  "/experimental/project/{projectID}/copy": {
+   "delete": {},
+   "post": {}
+  },
+  "/experimental/project/{projectID}/copy/generate-name": {
+   "post": {}
+  },
+  "/experimental/project/{projectID}/copy/refresh": {
+   "post": {}
+  },
+  "/experimental/resource": {
+   "get": {}
+  },
+  "/experimental/session": {
+   "get": {}
+  },
+  "/experimental/session/{sessionID}/background": {
+   "post": {}
+  },
+  "/experimental/tool": {
+   "get": {}
+  },
+  "/experimental/tool/ids": {
+   "get": {}
+  },
+  "/experimental/workspace": {
+   "get": {},
+   "post": {}
+  },
+  "/experimental/workspace/adapter": {
+   "get": {}
+  },
+  "/experimental/workspace/status": {
+   "get": {}
+  },
+  "/experimental/workspace/sync-list": {
+   "post": {}
+  },
+  "/experimental/workspace/warp": {
+   "post": {}
+  },
+  "/experimental/workspace/{id}": {
+   "delete": {}
+  },
+  "/experimental/worktree": {
+   "delete": {},
+   "get": {},
+   "post": {}
+  },
+  "/experimental/worktree/reset": {
+   "post": {}
+  },
+  "/file": {
+   "get": {}
+  },
+  "/file/content": {
+   "get": {}
+  },
+  "/file/status": {
+   "get": {}
+  },
+  "/find": {
+   "get": {}
+  },
+  "/find/file": {
+   "get": {}
+  },
+  "/find/symbol": {
+   "get": {}
+  },
+  "/formatter": {
+   "get": {}
+  },
+  "/global/config": {
+   "get": {},
+   "patch": {}
+  },
+  "/global/dispose": {
+   "post": {}
+  },
+  "/global/event": {
+   "get": {}
+  },
+  "/global/health": {
+   "get": {}
+  },
+  "/global/upgrade": {
+   "post": {}
+  },
+  "/instance/dispose": {
+   "post": {}
+  },
+  "/log": {
+   "post": {}
+  },
+  "/lsp": {
+   "get": {}
+  },
+  "/mcp": {
+   "get": {},
+   "post": {}
+  },
+  "/mcp/{name}/auth": {
+   "delete": {},
+   "post": {}
+  },
+  "/mcp/{name}/auth/authenticate": {
+   "post": {}
+  },
+  "/mcp/{name}/auth/callback": {
+   "post": {}
+  },
+  "/mcp/{name}/connect": {
+   "post": {}
+  },
+  "/mcp/{name}/disconnect": {
+   "post": {}
+  },
+  "/path": {
+   "get": {}
+  },
+  "/permission": {
+   "get": {}
+  },
+  "/permission/{requestID}/reply": {
+   "post": {}
+  },
+  "/project": {
+   "get": {}
+  },
+  "/project/current": {
+   "get": {}
+  },
+  "/project/git/init": {
+   "post": {}
+  },
+  "/project/{projectID}": {
+   "patch": {}
+  },
+  "/project/{projectID}/directories": {
+   "get": {}
+  },
+  "/provider": {
+   "get": {}
+  },
+  "/provider/auth": {
+   "get": {}
+  },
+  "/provider/{providerID}/oauth/authorize": {
+   "post": {}
+  },
+  "/provider/{providerID}/oauth/callback": {
+   "post": {}
+  },
+  "/pty": {
+   "get": {},
+   "post": {}
+  },
+  "/pty/shells": {
+   "get": {}
+  },
+  "/pty/{ptyID}": {
+   "delete": {},
+   "get": {},
+   "put": {}
+  },
+  "/pty/{ptyID}/connect": {
+   "get": {}
+  },
+  "/pty/{ptyID}/connect-token": {
+   "post": {}
+  },
+  "/question": {
+   "get": {}
+  },
+  "/question/{requestID}/reject": {
+   "post": {}
+  },
+  "/question/{requestID}/reply": {
+   "post": {}
+  },
+  "/session": {
+   "get": {},
+   "post": {}
+  },
+  "/session/status": {
+   "get": {}
+  },
+  "/session/{sessionID}": {
+   "delete": {},
+   "get": {},
+   "patch": {}
+  },
+  "/session/{sessionID}/abort": {
+   "post": {}
+  },
+  "/session/{sessionID}/children": {
+   "get": {}
+  },
+  "/session/{sessionID}/command": {
+   "post": {}
+  },
+  "/session/{sessionID}/diff": {
+   "get": {}
+  },
+  "/session/{sessionID}/fork": {
+   "post": {}
+  },
+  "/session/{sessionID}/init": {
+   "post": {}
+  },
+  "/session/{sessionID}/message": {
+   "get": {},
+   "post": {}
+  },
+  "/session/{sessionID}/message/{messageID}": {
+   "delete": {},
+   "get": {}
+  },
+  "/session/{sessionID}/message/{messageID}/part/{partID}": {
+   "delete": {},
+   "patch": {}
+  },
+  "/session/{sessionID}/permissions/{permissionID}": {
+   "post": {}
+  },
+  "/session/{sessionID}/prompt_async": {
+   "post": {}
+  },
+  "/session/{sessionID}/revert": {
+   "post": {}
+  },
+  "/session/{sessionID}/share": {
+   "delete": {},
+   "post": {}
+  },
+  "/session/{sessionID}/shell": {
+   "post": {}
+  },
+  "/session/{sessionID}/summarize": {
+   "post": {}
+  },
+  "/session/{sessionID}/todo": {
+   "get": {}
+  },
+  "/session/{sessionID}/unrevert": {
+   "post": {}
+  },
+  "/skill": {
+   "get": {}
+  },
+  "/sync/history": {
+   "post": {}
+  },
+  "/sync/replay": {
+   "post": {}
+  },
+  "/sync/start": {
+   "post": {}
+  },
+  "/sync/steal": {
+   "post": {}
+  },
+  "/tui/append-prompt": {
+   "post": {}
+  },
+  "/tui/clear-prompt": {
+   "post": {}
+  },
+  "/tui/control/next": {
+   "get": {}
+  },
+  "/tui/control/response": {
+   "post": {}
+  },
+  "/tui/execute-command": {
+   "post": {}
+  },
+  "/tui/open-help": {
+   "post": {}
+  },
+  "/tui/open-models": {
+   "post": {}
+  },
+  "/tui/open-sessions": {
+   "post": {}
+  },
+  "/tui/open-themes": {
+   "post": {}
+  },
+  "/tui/publish": {
+   "post": {}
+  },
+  "/tui/select-session": {
+   "post": {}
+  },
+  "/tui/show-toast": {
+   "post": {}
+  },
+  "/tui/submit-prompt": {
+   "post": {}
+  },
+  "/vcs": {
+   "get": {}
+  },
+  "/vcs/apply": {
+   "post": {}
+  },
+  "/vcs/diff": {
+   "get": {}
+  },
+  "/vcs/diff/raw": {
+   "get": {}
+  },
+  "/vcs/status": {
+   "get": {}
+  }
+ }
+}

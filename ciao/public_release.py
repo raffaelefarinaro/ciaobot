@@ -38,8 +38,10 @@ _FORBIDDEN_PATH_PREFIXES: tuple[str, ...] = (
     ".claude/",
     ".agents/",
     ".codex/",
+    ".opencode/",
     ".runtime/",
     ".mcp.json",
+    "opencode.json",
 )
 
 _FORBIDDEN_PATH_GLOBS: tuple[str, ...] = (

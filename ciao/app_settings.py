@@ -16,7 +16,61 @@ import logging
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
+from ciao import provider_registry
+
 logger = logging.getLogger(__name__)
+
+_TIERS = ("haiku", "sonnet", "opus", "fable")
+
+
+def _clean_tier_routes(raw: object) -> dict[str, dict[str, str]]:
+    """Normalize a ``{provider: {tier: model}}`` map, dropping junk."""
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(provider_id): {
+            str(tier): str(model).strip()
+            for tier, model in routes.items()
+            if str(tier) in _TIERS and isinstance(model, str) and model.strip()
+        }
+        for provider_id, routes in raw.items()
+        if isinstance(routes, dict)
+    }
+
+
+def _tier_settings(config: object, descriptor: object) -> object | None:
+    """This provider's per-tier settings dataclass on ``config``, if present.
+
+    Returns ``None`` when the provider declares no tier pins, or when the
+    config object simply does not carry them — settings overlays run against
+    duck-typed configs in tests and during bootstrap, and a missing attribute
+    means "nothing to pin", not a failure.
+    """
+    attr = getattr(descriptor, "tier_settings_attr", "")
+    if not attr:
+        return None
+    return getattr(config, attr, None)
+
+
+def _merge_legacy_tier_pins(
+    raw: dict, routing: dict[str, dict[str, str]]
+) -> dict[str, dict[str, str]]:
+    """Fold pre-``provider_routing`` ``<provider>_<tier>_model`` keys in.
+
+    Settings files written before the per-provider map stored Codex pins as
+    four flat scalars. They are read once here and re-persisted in the nested
+    shape on the next save; an explicit ``provider_routing`` entry wins.
+    """
+    merged = {key: dict(value) for key, value in routing.items()}
+    for descriptor in provider_registry.descriptors():
+        if not descriptor.tier_settings_attr:
+            continue
+        for tier in _TIERS:
+            value = raw.get(f"{descriptor.id}_{tier}_model")
+            if not isinstance(value, str) or not value.strip():
+                continue
+            merged.setdefault(descriptor.id, {}).setdefault(tier, value.strip())
+    return merged
 
 
 
@@ -24,8 +78,9 @@ logger = logging.getLogger(__name__)
 class AppSettings:
     """One value per overridable knob; empty string = use config default.
 
-    ``custom_routing`` is the exception: user-defined providers are dynamic, so
-    it nests a per-provider tier map rather than a single scalar.
+    ``provider_routing`` and ``custom_routing`` are the exceptions: the set of
+    runtime providers and of user-defined providers are both dynamic, so they
+    nest a per-provider tier map rather than a scalar per provider and tier.
     """
 
     # Model used by the chat title generator. Overrides both the Ollama
@@ -51,13 +106,15 @@ class AppSettings:
     openrouter_sonnet_model: str = ""
     openrouter_opus_model: str = ""
     openrouter_fable_model: str = ""
-    # Codex per-tier pins. Unlike Ollama/OpenRouter there is no env-backed
-    # default: empty string means the tier resolves through the automatic
-    # catalog mapping (luna→haiku, terra→sonnet, sol→opus/fable).
-    codex_haiku_model: str = ""
-    codex_sonnet_model: str = ""
-    codex_opus_model: str = ""
-    codex_fable_model: str = ""
+    # Per-runtime-provider tier pins, keyed by provider id then tier. Unlike
+    # Ollama/OpenRouter there is no env-backed default: a missing entry means
+    # the tier resolves through that provider's automatic catalog mapping
+    # (for Codex: luna→haiku, terra→sonnet, sol→opus/fable).
+    #
+    # A nested map rather than four scalars per provider, so a new provider
+    # costs a registry entry instead of four fields threaded through the
+    # settings route and the PWA.
+    provider_routing: dict[str, dict[str, str]] | None = None
     # Per-custom-provider tier routes. Keys are provider ids and values map
     # haiku/sonnet/opus/fable to concrete ``custom:<id>:<model>`` ids.
     custom_routing: dict[str, dict[str, str]] | None = None
@@ -81,27 +138,24 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
+        nested_fields = {"custom_routing", "provider_routing"}
         string_fields = {
             field.name
             for field in fields(AppSettings)
-            if field.name != "custom_routing"
+            if field.name not in nested_fields
         }
         settings = AppSettings()
         for key, value in raw.items():
             if key in string_fields and isinstance(value, str):
                 setattr(settings, key, value.strip())
-        custom_routing = raw.get("custom_routing")
-        if isinstance(custom_routing, dict):
-            settings.custom_routing = {
-                str(provider_id): {
-                    str(tier): str(model).strip()
-                    for tier, model in routes.items()
-                    if str(tier) in {"haiku", "sonnet", "opus", "fable"}
-                    and isinstance(model, str) and model.strip()
-                }
-                for provider_id, routes in custom_routing.items()
-                if isinstance(routes, dict)
-            }
+        custom_routing = _clean_tier_routes(raw.get("custom_routing"))
+        if custom_routing:
+            settings.custom_routing = custom_routing
+        provider_routing = _merge_legacy_tier_pins(
+            raw, _clean_tier_routes(raw.get("provider_routing"))
+        )
+        if provider_routing:
+            settings.provider_routing = provider_routing
         return settings
 
     def _save(self) -> None:
@@ -116,25 +170,40 @@ class AppSettingsStore:
 
         Unknown keys are ignored. Raises ``ValueError`` on a bad engine
         value so the API route can 400 instead of persisting garbage.
+
+        Legacy flat ``<provider>_<tier>_model`` tier pins are still accepted
+        and folded into ``provider_routing``, so a client written against the
+        pre-map settings API keeps working.
         """
         known = {f.name for f in fields(AppSettings)}
+        legacy_pins = self._legacy_pin_updates(changes)
+        if legacy_pins:
+            merged = {
+                key: dict(value)
+                for key, value in (self.settings.provider_routing or {}).items()
+            }
+            for provider_id, routes in legacy_pins.items():
+                target = merged.setdefault(provider_id, {})
+                for tier, model in routes.items():
+                    # An empty value clears the pin back to automatic.
+                    if model:
+                        target[tier] = model
+                    else:
+                        target.pop(tier, None)
+                # Drop a provider that has no pins left, so clearing the last
+                # one persists as absence rather than an empty object.
+                if not target:
+                    del merged[provider_id]
+            self.settings.provider_routing = merged
         for key, value in changes.items():
             if key not in known:
                 continue
-            if key == "custom_routing":
+            if key in {"custom_routing", "provider_routing"}:
                 if not isinstance(value, dict):
-                    raise ValueError("custom_routing must be an object")
-                cleaned_routes: dict[str, dict[str, str]] = {}
-                for provider_id, routes in value.items():
-                    if not isinstance(routes, dict):
-                        raise ValueError("custom_routing entries must be objects")
-                    cleaned_routes[str(provider_id)] = {
-                        str(tier): str(model).strip()
-                        for tier, model in routes.items()
-                        if str(tier) in {"haiku", "sonnet", "opus", "fable"}
-                        and isinstance(model, str) and model.strip()
-                    }
-                setattr(self.settings, key, cleaned_routes)
+                    raise ValueError(f"{key} must be an object")
+                if any(not isinstance(routes, dict) for routes in value.values()):
+                    raise ValueError(f"{key} entries must be objects")
+                setattr(self.settings, key, _clean_tier_routes(value))
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
@@ -142,6 +211,27 @@ class AppSettingsStore:
             setattr(self.settings, key, value)
         self._save()
         return self.settings
+
+    @staticmethod
+    def _legacy_pin_updates(changes: dict[str, object]) -> dict[str, dict[str, str]]:
+        """Extract ``<provider>_<tier>_model`` keys from a legacy PATCH body."""
+        found: dict[str, dict[str, str]] = {}
+        for descriptor in provider_registry.descriptors():
+            if not descriptor.tier_settings_attr:
+                continue
+            for tier in _TIERS:
+                key = f"{descriptor.id}_{tier}_model"
+                if key not in changes:
+                    continue
+                value = changes[key]
+                if not isinstance(value, str):
+                    raise ValueError(f"{key} must be a string")
+                found.setdefault(descriptor.id, {})[tier] = value.strip()
+        return found
+
+    def tier_pin(self, provider: str, tier: str) -> str:
+        """Operator-pinned model for a provider tier; "" means automatic."""
+        return (self.settings.provider_routing or {}).get(provider, {}).get(tier, "")
 
     def tier_model_defaults(self) -> dict[str, dict[str, str]]:
         """Return the env-backed tier models captured before overrides."""
@@ -177,11 +267,17 @@ class AppSettingsStore:
                 "openrouter_sonnet_model": config.openrouter.sonnet_model,
                 "openrouter_opus_model": config.openrouter.opus_model,
                 "openrouter_fable_model": config.openrouter.fable_model,
-                "codex_haiku_model": config.codex.haiku_model,
-                "codex_sonnet_model": config.codex.sonnet_model,
-                "codex_opus_model": config.codex.opus_model,
-                "codex_fable_model": config.codex.fable_model,
             }
+            for descriptor in provider_registry.descriptors():
+                # A config object that predates this provider (or a duck-typed
+                # stand-in) simply has no pins to snapshot.
+                current = _tier_settings(config, descriptor)
+                if current is None:
+                    continue
+                for tier in _TIERS:
+                    self._defaults[f"{descriptor.id}_{tier}_model"] = getattr(
+                        current, f"{tier}_model", ""
+                    )
         d = self._defaults
         s = self.settings
         config.title_model_override = s.title_model or d["title_model_override"]
@@ -206,11 +302,22 @@ class AppSettingsStore:
             opus_model=s.openrouter_opus_model or d["openrouter_opus_model"],
             fable_model=s.openrouter_fable_model or d["openrouter_fable_model"],
         )
-        config.codex = replace(
-            config.codex,
-            haiku_model=s.codex_haiku_model or d["codex_haiku_model"],
-            sonnet_model=s.codex_sonnet_model or d["codex_sonnet_model"],
-            opus_model=s.codex_opus_model or d["codex_opus_model"],
-            fable_model=s.codex_fable_model or d["codex_fable_model"],
-        )
+        routing = s.provider_routing or {}
+        for descriptor in provider_registry.descriptors():
+            current = _tier_settings(config, descriptor)
+            if current is None:
+                continue
+            routes = routing.get(descriptor.id, {})
+            setattr(
+                config,
+                descriptor.tier_settings_attr,
+                replace(
+                    current,
+                    **{
+                        f"{tier}_model": routes.get(tier)
+                        or d.get(f"{descriptor.id}_{tier}_model", "")
+                        for tier in _TIERS
+                    },
+                ),
+            )
         config.custom_routing = s.custom_routing or {}

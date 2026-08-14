@@ -222,6 +222,19 @@ def get_bundled_claude_path() -> str | None:
     return None
 
 
+def auth_command(*, device_auth: bool = False) -> list[str]:
+    """Interactive login command, for ``ciao auth claude`` and the PWA.
+
+    ``device_auth`` has no Claude equivalent and is ignored.
+    """
+    import shutil
+
+    binary = get_bundled_claude_path() or shutil.which("claude")
+    if not binary:
+        raise FileNotFoundError("Claude CLI not found")
+    return [binary, "login"]
+
+
 # Patterns from the bundled Claude Code CLI's stderr that are harmless noise
 # (the CLI process losing a race with its own teardown, mostly). Without
 # pattern-matching we either flood the server log on every turn or hide

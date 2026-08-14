@@ -51,7 +51,7 @@ _COMMON_STEMS = {
 EXCLUDE_DIRS = {
     "Logs", "Templates", ".obsidian",
     ".venv", "venv", "node_modules", ".git",
-    ".claude", ".agents", ".codex", "__pycache__",
+    ".claude", ".agents", ".codex", ".opencode", "__pycache__",
 }
 
 

@@ -781,7 +781,7 @@
               <div>
                 <p class="section-title">providers</p>
                 <p class="hint">
-                  Claude Code and Codex manage their own login and credentials. Ciaobot verifies each CLI connection.
+                  Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
                 </p>
               </div>
             </div>
@@ -790,7 +790,7 @@
               <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row">
                 <div class="setting-row-main setting-row-main--inline">
                   <div class="routine-info">
-                    <span class="routine-name">{{ connKey === 'codex' ? 'OpenAI Codex' : 'Claude Code' }}</span>
+                    <span class="routine-name">{{ conn.label || connKey }}</span>
                     <p class="hint hint--compact provider-connection-detail">
                       <span v-if="conn.version">{{ conn.version }}</span>
                       <span v-if="conn.account">{{ conn.account }}</span>
@@ -803,35 +803,20 @@
                 </div>
                 <div class="provider-mcps-preview">
                   <div class="ws-connectors-header">
-                    <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connKey === 'claude' ? claudeConnectionMcps.length : codexConnectionMcps.length }})</span>
+                    <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connectionMcps(String(connKey)).length }})</span>
                   </div>
                   <div class="workspace-connector-pills">
-                    <template v-if="connKey === 'claude'">
-                      <template v-if="claudeConnectionMcps.length">
-                        <span
-                          v-for="mcpName in claudeConnectionMcps"
-                          :key="mcpName"
-                          class="connector-pill connector-pill--enabled"
-                          :title="`${mcpName} configured for Claude Code`"
-                        >
-                          <span class="pill-dot"></span> {{ mcpName }}
-                        </span>
-                      </template>
-                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
+                    <template v-if="connectionMcps(String(connKey)).length">
+                      <span
+                        v-for="mcpName in connectionMcps(String(connKey))"
+                        :key="mcpName"
+                        class="connector-pill connector-pill--enabled"
+                        :title="`${mcpName} configured for ${conn.label || connKey}`"
+                      >
+                        <span class="pill-dot"></span> {{ mcpName }}
+                      </span>
                     </template>
-                    <template v-else-if="connKey === 'codex'">
-                      <template v-if="codexConnectionMcps.length">
-                        <span
-                          v-for="mcpName in codexConnectionMcps"
-                          :key="mcpName"
-                          class="connector-pill connector-pill--enabled"
-                          :title="`${mcpName} MCP configured for Codex`"
-                        >
-                          <span class="pill-dot"></span> {{ mcpName }}
-                        </span>
-                      </template>
-                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
-                    </template>
+                    <span v-else class="hint hint--compact">No MCP servers enabled</span>
                   </div>
 
                   <!-- Platform System Skills -->
@@ -844,14 +829,9 @@
                         <span class="pill-dot"></span> {{ skill }}
                       </span>
                     </template>
-                    <template v-else-if="connKey === 'claude'">
-                      <span v-for="skill in ['web-search', 'code-analysis', 'git-workflow', 'bash-executor']" :key="skill" class="connector-pill connector-pill--enabled">
-                        <span class="pill-dot"></span> {{ skill }}
-                      </span>
-                    </template>
-                    <template v-else-if="connKey === 'codex'">
-                      <span v-for="skill in ['build-web-apps', 'stripe', 'supabase', 'browser']" :key="skill" class="connector-pill connector-pill--enabled">
-                        <span class="pill-dot"></span> {{ skill }}
+                    <template v-else>
+                      <span class="hint hint--compact">
+                        {{ conn.ok ? 'None reported by this CLI' : 'Connect to discover' }}
                       </span>
                     </template>
                   </div>
@@ -2265,6 +2245,7 @@ import type {
   SlashCommand,
   SubagentAsset,
   WorkspaceInfo,
+  RuntimeProvider,
   WorkspaceHealthResponse,
   WorkspaceProvider,
   PackageStatus,
@@ -2768,7 +2749,7 @@ type InsightsComparison = {
 }
 const insightsComparison = ref<InsightsComparison | null>(null)
 
-type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
+type AliasProviderKey = RuntimeProvider | 'ollama' | 'openrouter' | `custom:${string}`
 type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
 type RoutingProviderKey = Exclude<AliasProviderKey, 'claude'>
 type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
@@ -2976,6 +2957,11 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
     || workspaceModels.value?.provider_models?.codex
     || []
   ).join(','))
+  const opencodeModels = parseModelList((
+    workspaceModels.value?.opencode_models
+    || workspaceModels.value?.provider_models?.opencode
+    || []
+  ).join(','))
   const ollamaAvailable = !!settings.backends?.ollama
   const openrouterAvailable = !!settings.backends?.openrouter
   return [
@@ -2985,6 +2971,13 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
       options: codexModels,
       configurable: true,
       available: codexModels.length > 0,
+    },
+    {
+      key: 'opencode',
+      label: 'opencode',
+      options: opencodeModels,
+      configurable: true,
+      available: opencodeModels.length > 0,
     },
     {
       key: 'ollama',
@@ -3071,19 +3064,40 @@ const tierProviderUnavailableHint = computed(() => {
 
 const DEFAULT_TIER_SELECTION = '__ciao_default__'
 
+/**
+ * Whether a tier-pin provider is a runtime provider (Claude, Codex, opencode)
+ * rather than a routing backend (Ollama, OpenRouter) or a custom endpoint.
+ *
+ * Runtime providers store their pins in the nested `provider_routing` map and
+ * resolve their tiers from the account catalog in `/api/models`; the routing
+ * backends keep env-backed flat settings. Read from the backend registry so a
+ * new provider needs no change here.
+ */
+function isRuntimeProvider(provider: string): boolean {
+  const descriptors = workspaceModels.value?.providers
+  if (descriptors?.length) return descriptors.some((item) => item.id === provider)
+  // Before /api/models resolves, fall back to "not a routing backend".
+  return !provider.startsWith('custom:') && provider !== 'ollama' && provider !== 'openrouter'
+}
+
 function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
   if (provider.startsWith('custom:')) {
     const id = provider.slice('custom:'.length)
     return routines.value?.custom_routing?.[id]?.[tier] || ''
+  }
+  if (isRuntimeProvider(provider)) {
+    return routines.value?.provider_routing?.[provider]?.[tier] || ''
   }
   const key = tierSettingKeys[provider][tier]
   return routines.value?.[key] || ''
 }
 
 function tierEffectiveValue(provider: TierProviderKey, tier: TierKey): string {
-  // Codex effective tiers come from the account catalog, exposed by
-  // /api/models rather than the routines payload.
-  if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || ''
+  // A runtime provider's effective tiers come from its account catalog,
+  // exposed by /api/models rather than the routines payload.
+  if (isRuntimeProvider(provider)) {
+    return workspaceModels.value?.alias_tiers?.[provider]?.[tier] || ''
+  }
   return routines.value?.alias_tiers?.[provider]?.[tier] || ''
 }
 
@@ -3092,13 +3106,15 @@ function tierDefaultValue(provider: TierProviderKey, tier: TierKey): string {
     return workspaceModels.value?.codex_tier_defaults?.[tier]
       || tierEffectiveValue(provider, tier)
   }
+  if (isRuntimeProvider(provider)) return tierEffectiveValue(provider, tier)
   return routines.value?.tier_defaults?.[provider]?.[tier]
     || tierEffectiveValue(provider, tier)
 }
 
 function tierDefaultLabel(provider: TierProviderKey, tier: TierKey): string {
   const model = tierDefaultValue(provider, tier)
-  const word = provider === 'codex' ? 'Automatic' : 'Default'
+  // "Automatic" for catalog-derived tiers, "Default" for env-backed ones.
+  const word = isRuntimeProvider(provider) ? 'Automatic' : 'Default'
   return model ? `${word} (${model})` : word
 }
 
@@ -3130,13 +3146,23 @@ async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: st
     if (Object.keys(routes).length) routing[id] = routes
     else delete routing[id]
     await saveRoutines({ custom_routing: routing })
+  } else if (isRuntimeProvider(provider)) {
+    const routing = JSON.parse(
+      JSON.stringify(routines.value?.provider_routing || {}),
+    ) as Record<string, Record<string, string>>
+    const routes = { ...(routing[provider] || {}) }
+    if (model.trim()) routes[tier] = model.trim()
+    else delete routes[tier]
+    if (Object.keys(routes).length) routing[provider] = routes
+    else delete routing[provider]
+    await saveRoutines({ provider_routing: routing })
   } else {
     const key = tierSettingKeys[provider][tier]
     await saveRoutines({ [key]: model.trim() })
   }
-  // Codex effective tiers live in /api/models; refresh so the badges and
-  // "Automatic (…)" labels reflect the new pin immediately.
-  if (provider === 'codex') await fetchWorkspaceModels()
+  // A runtime provider's effective tiers live in /api/models; refresh so the
+  // badges and "Automatic (…)" labels reflect the new pin immediately.
+  if (isRuntimeProvider(provider)) await fetchWorkspaceModels()
 }
 
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
@@ -4518,44 +4544,41 @@ const inspectorEmbeddedTools = computed(() => {
   ]
 })
 
-const codexConnectionMcps = computed(() => {
-  const codexConn = providerKeys.value?.connections?.codex
-  // Platform MCP list only — exclude Ciaobot project servers from .mcp.json
-  // (n8n_mcp, notion, ciaobot), which have their own MCP status section.
-  const excluded = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
-  return (codexConn?.mcps || []).filter((name: string) => !excluded.has(name))
-})
+// Platform MCP list only — exclude Ciaobot project servers from .mcp.json
+// (n8n_mcp, notion, ciaobot), which have their own MCP status section.
+const EXCLUDED_PLATFORM_MCPS = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
 
-const claudeConnectionMcps = computed(() => {
+/**
+ * Platform MCP servers a provider's CLI reports.
+ *
+ * Keyed by provider id rather than written per provider, so a provider added
+ * to the backend registry gets a correct card without another branch here.
+ * Claude is the one special case: when it reports nothing, its account-OAuth
+ * connectors are inferred from the active workspace's toggle.
+ */
+function connectionMcps(providerId: string): string[] {
+  const discovered = providerKeys.value?.connections?.[providerId]?.mcps || []
   const result: string[] = []
-  const excluded = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
-  // Platform connectors only. Project .mcp.json servers (n8n_mcp, notion, …)
-  // are managed under the MCP status section, not the Providers tab.
-  const discoveredMcps = providerKeys.value?.connections?.claude?.mcps || []
-  if (discoveredMcps.length) {
-    for (const mcpName of discoveredMcps) {
-      if (excluded.has(mcpName)) continue
-      const label = formatConnectorLabel(mcpName)
-      if (!result.includes(label)) {
-        result.push(label)
-      }
-    }
-  } else {
-    const currentWs = workspaceForms.value.find((w) => w.name === projectStore.activeWorkspace) || workspaceForms.value[0]
-    if (!currentWs || currentWs.claude_ai_mcps !== 'off') {
-      const connectors = projectStore.workspaceClaudeAiConnectors.length
-        ? projectStore.workspaceClaudeAiConnectors
-        : defaultClaudeAiConnectors
-      for (const c of connectors) {
-        const label = formatConnectorLabel(c)
-        if (!result.includes(label)) {
-          result.push(label)
-        }
-      }
-    }
+  for (const mcpName of discovered) {
+    if (EXCLUDED_PLATFORM_MCPS.has(mcpName)) continue
+    const label = formatConnectorLabel(mcpName)
+    if (!result.includes(label)) result.push(label)
+  }
+  if (result.length || providerId !== 'claude') return result
+
+  const currentWs = workspaceForms.value.find((w) => w.name === projectStore.activeWorkspace)
+    || workspaceForms.value[0]
+  if (currentWs && currentWs.claude_ai_mcps === 'off') return result
+  const connectors = projectStore.workspaceClaudeAiConnectors.length
+    ? projectStore.workspaceClaudeAiConnectors
+    : defaultClaudeAiConnectors
+  for (const c of connectors) {
+    const label = formatConnectorLabel(c)
+    if (!result.includes(label)) result.push(label)
   }
   return result
-})
+}
+
 
 async function fetchWorkspacesList() {
   workspacesError.value = ''

@@ -426,6 +426,8 @@ _WORKSPACE_GITIGNORE_ENTRIES = (
     ".claude/",
     ".agents/",
     ".codex/",
+    ".opencode/",
+    "opencode.json",
     "*.log",
 )
 
@@ -1067,23 +1069,28 @@ def _setup_url_command(args: argparse.Namespace) -> int:
 def _auth_command_for_provider(
     provider: str, *, device_auth: bool = False
 ) -> list[str]:
-    if provider == "claude":
-        from ciao.providers.claude import get_bundled_claude_path
+    # Runtime providers carry their own login command in the registry; ollama
+    # is a routing backend with no provider module, so it stays inline.
+    from ciao import provider_registry
 
-        binary = get_bundled_claude_path() or shutil.which("claude")
-        if not binary:
-            raise FileNotFoundError("Claude CLI not found")
-        return [binary, "login"]
-    if provider == "codex":
-        from ciao.providers.codex import resolve_codex_binary
-
-        binary = resolve_codex_binary()
-        if not binary:
-            raise FileNotFoundError("Codex CLI not found")
-        return [binary, "login", "--device-auth"] if device_auth else [binary, "login"]
+    descriptor = provider_registry.get(provider)
+    if descriptor is not None:
+        return descriptor.auth_command(device_auth=device_auth)
     if provider == "ollama":
         return ["ollama", "signin"]
     raise ValueError(f"Unknown provider '{provider}'")
+
+
+def _runtime_provider_choices() -> tuple[str, ...]:
+    """Runtime providers accepted by ``--provider`` flags."""
+    from ciao import provider_registry
+
+    return provider_registry.provider_ids()
+
+
+def _auth_provider_choices() -> list[str]:
+    """Providers ``ciao auth`` accepts: runtime providers plus ollama."""
+    return [*_runtime_provider_choices(), "ollama"]
 
 
 def _auth_command(args: argparse.Namespace) -> int:
@@ -1855,7 +1862,7 @@ def build_parser() -> argparse.ArgumentParser:
         "auth",
         help="Run a provider OAuth/login command for first-run setup.",
     )
-    auth_parser.add_argument("provider", choices=["claude", "codex", "ollama"])
+    auth_parser.add_argument("provider", choices=_auth_provider_choices())
     auth_parser.add_argument(
         "--print-only",
         action="store_true",
@@ -2066,7 +2073,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--model", help="Model override. Inherits CIAO_MODEL.")
     chat_parser.add_argument(
         "--provider",
-        choices=["claude", "codex"],
+        choices=list(_runtime_provider_choices()),
         help="Provider override. Inherits CIAO_PROVIDER.",
     )
     chat_parser.add_argument(
@@ -2200,7 +2207,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_parser.add_argument(
         "--provider",
-        choices=["claude", "codex"],
+        choices=list(_runtime_provider_choices()),
         help="Provider override applied above scenario and suite defaults.",
     )
     eval_parser.add_argument(

@@ -20,6 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Mapping, Any
 
+from ciao import provider_registry
 from ciao.providers.codex import codex_login_status
 
 # Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
@@ -27,6 +28,22 @@ from ciao.providers.codex import codex_login_status
 _CLAUDE_DISCOVERY_TTL_SECONDS = 60.0
 _claude_mcps_cache: tuple[float, str, tuple[str, ...]] | None = None
 _claude_skills_cache: tuple[float, tuple[str, ...]] | None = None
+
+
+def _resolve_root(raw: Any) -> Path:
+    """Resolve a root without assuming the process cwd still exists.
+
+    The desktop deploy relaunch can leave the engine with a cwd inside the
+    staging bundle the swap then renames, and there both ``Path.cwd()`` and
+    resolving a relative path raise ``FileNotFoundError``. Readiness must still
+    answer, so an unresolvable root is kept as written: its checks then report
+    not-ready instead of pointing at a directory we made up.
+    """
+    path = Path(raw).expanduser()
+    try:
+        return path.resolve()
+    except OSError:
+        return path
 
 
 def clear_claude_discovery_cache() -> None:
@@ -228,7 +245,7 @@ def discover_claude_mcps(
     """
     global _claude_mcps_cache
     now = time.monotonic()
-    ws_key = str(Path(workspace_root).expanduser().resolve()) if workspace_root else ""
+    ws_key = str(_resolve_root(workspace_root)) if workspace_root else ""
     if (
         _claude_mcps_cache is not None
         and now - _claude_mcps_cache[0] < _CLAUDE_DISCOVERY_TTL_SECONDS
@@ -356,6 +373,38 @@ def _discover_claude_mcps_uncached(
     except Exception:
         pass
     return connected
+
+
+# Provider status probes share one keyword-only contract so ``setup_status``
+# can enumerate them from ``ciao.provider_registry`` instead of naming each
+# provider. Each probe takes whatever context it needs and ignores the rest.
+def claude_status_probe(
+    env: Mapping[str, str],
+    *,
+    credentials_path: Path,
+    config_path: Path,
+    workspace_root: Path | None = None,
+    **_unused: Any,
+) -> dict[str, Any]:
+    return _claude_status(
+        env, credentials_path, config_path, workspace_root=workspace_root
+    )
+
+
+def codex_status_probe(
+    env: Mapping[str, str],
+    **_unused: Any,
+) -> dict[str, Any]:
+    return codex_login_status(env)
+
+
+def opencode_status_probe(
+    env: Mapping[str, str],
+    **_unused: Any,
+) -> dict[str, Any]:
+    from ciao.providers.opencode import opencode_login_status
+
+    return opencode_login_status(env)
 
 
 def _claude_status(
@@ -525,8 +574,14 @@ def setup_status(
     process environment without exposing secret values in the response.
     """
     source = env if env is not None else os.environ
-    workspace_root = Path(getattr(config, "workspace_root", Path.cwd())).resolve()
-    vault_root = Path(getattr(config, "vault_root", workspace_root / "memory-vault")).resolve()
+    # ``Path.cwd()`` cannot be the getattr default: it is evaluated even when the
+    # config carries an explicit workspace_root, and it raises once the cwd is gone.
+    configured_root = getattr(config, "workspace_root", None)
+    workspace_root = _resolve_root(configured_root if configured_root is not None else Path("."))
+    configured_vault = getattr(config, "vault_root", None)
+    vault_root = _resolve_root(
+        configured_vault if configured_vault is not None else workspace_root / "memory-vault"
+    )
     raw_credentials_path = source.get("CLAUDE_CREDENTIALS_PATH", "").strip()
     credentials_path = (
         claude_credentials_path
@@ -589,13 +644,20 @@ def setup_status(
         ),
     ]
     providers = {
-        "claude": _claude_status(
-            source, credentials_path, config_path, workspace_root=workspace_root
-        ),
-        "codex": codex_login_status(source),
-        "ollama": _ollama_status(config, source),
-        "openrouter": _openrouter_status(source),
+        descriptor.id: descriptor.status_probe(
+            source,
+            config=config,
+            credentials_path=credentials_path,
+            config_path=config_path,
+            workspace_root=workspace_root,
+        )
+        for descriptor in provider_registry.descriptors()
+        if descriptor.status_probe_path
     }
+    # Routing backends, not runtime providers: they have no provider module and
+    # run through Claude Code, but Settings still shows their credential state.
+    providers["ollama"] = _ollama_status(config, source)
+    providers["openrouter"] = _openrouter_status(source)
     configured = all(row["ok"] for row in checks if row["required"])
     provider_ready = any(row["ok"] for row in providers.values())
     bootstrap = bool(getattr(config, "bootstrap_mode", False))

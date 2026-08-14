@@ -27,6 +27,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import subagent_tracking
 from ciao import desktop_build
+from ciao import provider_registry
 from ciao.config import (
     WorkspaceConfig,
     CLAUDE_AI_CONNECTORS,
@@ -49,7 +50,8 @@ from ciao.model_tiers import codex_tier_models
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.codex import CodexProvider, codex_login_status, codex_tier_overrides
-from ciao.provider_service import supported_providers
+from ciao.providers.opencode import OpencodeProvider, opencode_tier_overrides
+from ciao.provider_service import capabilities_for, supported_providers
 from ciao.schedules import (
     ScheduleEntry,
     compute_last_expected_run,
@@ -120,9 +122,10 @@ _IMAGE_MANIFEST_RE = re.compile(
 )
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# Runtime-provider labels come from the registry; the two routing backends run
+# through Claude Code and are named here because they have no provider module.
 _WORKSPACE_PROVIDER_LABELS = {
-    "claude": "Anthropic (via Claude Code)",
-    "codex": "OpenAI (via Codex)",
+    **{item.id: item.label for item in provider_registry.descriptors()},
     "ollama": "Ollama (via Claude Code)",
     "openrouter": "OpenRouter (via Claude Code)",
 }
@@ -237,7 +240,7 @@ def _ollama_cloud_model_options(config) -> list[str]:
 
 
 def _workspace_provider_options(config) -> list[dict[str, str]]:
-    values = ["claude", "codex"]
+    values = list(provider_registry.provider_ids())
     if _ollama_backend_available(config):
         values.append("ollama")
     openrouter = getattr(config, "openrouter", None)
@@ -1192,10 +1195,17 @@ def _provider_config_payload(config) -> dict:
         "auto_update_github_skills": getattr(config, "auto_update_github_skills", False),
         "requires_restart": True,
         "env_path": str(_env_path(config)),
+        # Each row carries its own labels so the Settings card does not have to
+        # map provider ids to names; a new provider gets a correct card for
+        # free instead of falling through to another provider's label.
         "connections": {
-            key: providers[key]
-            for key in ("claude", "codex")
-            if key in providers
+            descriptor.id: {
+                **providers[descriptor.id],
+                "label": descriptor.cli_label,
+                "short_label": descriptor.short_label,
+            }
+            for descriptor in provider_registry.descriptors()
+            if descriptor.id in providers
         },
         "custom_providers": [
             public_provider(provider) for provider in load_custom_providers(config)
@@ -1205,7 +1215,7 @@ def _provider_config_payload(config) -> dict:
 
 def _launch_provider_login(config, provider: str) -> tuple[bool, str]:
     """Open the provider-owned interactive login in macOS Terminal."""
-    if provider not in {"claude", "codex"}:
+    if not provider_registry.is_provider(provider):
         raise ValueError(f"unsupported provider '{provider}'")
     command = _auth_command_for_provider(provider)
     rendered = shlex.join(command)
@@ -1239,7 +1249,7 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     provider = request.path_params["provider"]
     action = request.path_params["action"]
     config = request.app.state.config
-    if provider not in {"claude", "codex"}:
+    if not provider_registry.is_provider(provider):
         return JSONResponse({"error": "unsupported provider"}, status_code=404)
     if action == "connect":
         try:
@@ -4329,12 +4339,29 @@ def _enrich_schedule(
         entry_dict["effective_model"] = entry.model
     web_project_id = entry_dict.get("web_project_id")
     web_chat_id = entry_dict.get("web_chat_id")
+    # Whether the target still resolves. Stated explicitly because the PWA
+    # cannot infer it from context_label: that field is always set, so a
+    # truthy label suppressed the "unavailable" indicator and a stale target
+    # rendered as an ordinary one (previously as a bare `proj-...` id).
+    entry_dict["context_available"] = True
     if web_project_id and pcm:
         project = pcm.get_project(web_project_id)
-        entry_dict["context_label"] = f"{project.name} (new chat per run)" if project else web_project_id
+        if project:
+            entry_dict["context_label"] = f"{project.name} (new chat per run)"
+        else:
+            # A stale id is not a label. Show the remembered name, which is
+            # also what the dispatcher re-homes by.
+            remembered = (entry_dict.get("web_project_name") or "").strip()
+            entry_dict["context_label"] = (
+                f"{remembered} (new chat per run)" if remembered else "Project not found"
+            )
+            entry_dict["context_available"] = bool(
+                remembered and pcm.find_project(remembered, entry_dict.get("workspace") or "")
+            )
     elif web_chat_id and pcm:
         chat = pcm.get_chat(web_chat_id)
         entry_dict["context_label"] = chat.title if chat else web_chat_id
+        entry_dict["context_available"] = chat is not None
     else:
         entry_dict["context_label"] = ""
     next_run = compute_next_run(entry)
@@ -4528,6 +4555,10 @@ async def create_schedule(request: Request) -> JSONResponse:
         run_at_date=run_at_date,
         web_chat_id=web_chat_id,
         web_project_id=web_project_id,
+        web_project_name=(
+            (pcm.get_project(web_project_id).name if pcm.get_project(web_project_id) else "")
+            if web_project_id else ""
+        ),
         archive_policy=archive_policy,
         workspace=workspace if workspace in known_workspaces else "",
         title=str(body.get("title", "")).strip(),
@@ -4590,11 +4621,13 @@ async def schedule_detail(request: Request) -> JSONResponse:
         entry.web_chat_id = body["web_chat_id"] or None
     if "web_project_id" in body:
         entry.web_project_id = body["web_project_id"] or None
-        # Re-stamp the workspace to match the new target project so the
-        # stale-id fallback keeps routing to the right General project.
+        # Re-stamp the workspace and the target's name. Project ids regenerate
+        # per instance, so the name is what lets a later run find the same
+        # project again instead of silently falling back to General.
         pcm = request.app.state.project_chat_manager
         project = pcm.get_project(entry.web_project_id) if entry.web_project_id else None
         entry.workspace = project.workspace if project else ""
+        entry.web_project_name = project.name if project else ""
     if "workspace" in body:
         ws = (body["workspace"] or "").strip().lower()
         pcm = request.app.state.project_chat_manager
@@ -4818,10 +4851,30 @@ async def list_models(request: Request) -> JSONResponse:
     # Automatic (catalog-derived) mapping vs the effective one after the
     # operator's per-tier pins; the settings UI labels "Automatic (…)"
     # from the former and shows the latter on the tier badges.
+    # opencode is bring-your-own-provider: its catalog is whatever backends the
+    # user has connected, so an empty list simply means "not signed in yet".
+    opencode_catalog = await OpencodeProvider.model_catalog(config.workspace_root)
+    opencode_models = [
+        str(item.get("model") or "") for item in opencode_catalog if item.get("model")
+    ]
+    # Per-model reasoning-effort variants, merged into the same map the PWA
+    # already reads for Codex so the picker needs no provider-specific branch.
+    opencode_reasoning_levels = {
+        str(item.get("model")): list(item.get("variants") or [])
+        for item in opencode_catalog
+        if item.get("model")
+    }
+    opencode_overrides = opencode_tier_overrides(config)
+    opencode_tiers = {
+        tier: model for tier, model in opencode_overrides.items() if model in opencode_models
+    }
     codex_overrides = codex_tier_overrides(config)
     codex_tier_defaults = codex_tier_models(codex_catalog)
     codex_tiers = codex_tier_models(codex_catalog, overrides=codex_overrides)
-    model_reasoning_levels = _codex_reasoning_levels(codex_catalog, codex_overrides)
+    model_reasoning_levels = {
+        **opencode_reasoning_levels,
+        **_codex_reasoning_levels(codex_catalog, codex_overrides),
+    }
     codex_model_metadata: dict[str, dict] = {}
     for item in visible_codex:
         model_id = str(item.get("model") or item.get("id") or "")
@@ -4879,12 +4932,14 @@ async def list_models(request: Request) -> JSONResponse:
             "claude_personal": claude_personal,
             "openrouter": openrouter_models,
             "codex": codex_models,
+            "opencode": opencode_models,
         },
         "provider_defaults": {
             "claude_work": work_default,
             "claude_personal": personal_default,
             "openrouter": openrouter_default,
             "codex": codex_default,
+            "opencode": opencode_models[0] if opencode_models else "",
         },
         # Per-backend tier models, so the picker can show
         # "sonnet -> kimi (ollama) / gpt-5.6-terra (codex)". Tier names are
@@ -4898,6 +4953,7 @@ async def list_models(request: Request) -> JSONResponse:
             },
             "openrouter": openrouter_tiers,
             "codex": codex_tiers,
+            "opencode": opencode_tiers,
         },
         # Catalog-derived codex mapping before per-tier pins, so the
         # settings UI can label the automatic choice while an override
@@ -4908,6 +4964,7 @@ async def list_models(request: Request) -> JSONResponse:
             "openrouter": or_settings.available,
             "anthropic": True,
             "codex": bool(codex_models),
+            "opencode": bool(opencode_models),
         },
         "ollama_models": ollama,
         "ollama_local_models": list(config.ollama.local_models),
@@ -4915,6 +4972,19 @@ async def list_models(request: Request) -> JSONResponse:
         "custom_providers": custom_payload,
         "codex_models": codex_models,
         "codex_model_metadata": codex_model_metadata,
+        "opencode_models": opencode_models,
+        # Registry-driven descriptors so the PWA can build its provider list
+        # (labels, buckets, capabilities) without a hard-coded union.
+        "providers": [
+            {
+                "id": item.id,
+                "label": item.label,
+                "short_label": item.short_label,
+                "model_bucket": item.model_bucket,
+                "capabilities": asdict(capabilities_for(item.id)),
+            }
+            for item in provider_registry.descriptors()
+        ],
         "model_reasoning_levels": model_reasoning_levels,
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
     })
@@ -4980,10 +5050,17 @@ def _routines_payload(config, app_settings) -> dict:
         "openrouter_sonnet_model": s.openrouter_sonnet_model,
         "openrouter_opus_model": s.openrouter_opus_model,
         "openrouter_fable_model": s.openrouter_fable_model,
-        "codex_haiku_model": s.codex_haiku_model,
-        "codex_sonnet_model": s.codex_sonnet_model,
-        "codex_opus_model": s.codex_opus_model,
-        "codex_fable_model": s.codex_fable_model,
+        # Canonical shape: {provider_id: {tier: model}} for every runtime
+        # provider with operator-settable tier pins.
+        "provider_routing": s.provider_routing or {},
+        # Flat mirror of the same pins, kept so a client written against the
+        # pre-map settings API keeps rendering. PATCH accepts either shape.
+        **{
+            f"{descriptor.id}_{tier}_model": app_settings.tier_pin(descriptor.id, tier)
+            for descriptor in provider_registry.descriptors()
+            if descriptor.tier_settings_attr
+            for tier in ("haiku", "sonnet", "opus", "fable")
+        },
         "custom_routing": s.custom_routing or {},
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from ciao import provider_registry
+
 ExecutionMode = Literal["provider_prompt", "provider_cli_arg", "bot_handler"]
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
 ControlSurface = Literal["legacy", "mcp", "auto"]
@@ -88,13 +90,12 @@ class ImageAttachment:
 
 # Native thinking/reasoning levels per provider, surfaced as-is in the PWA
 # model picker. Empty string = provider default: no flag/option is sent.
-# Maps to ``ClaudeAgentOptions.effort``.
-THINKING_LEVELS: dict[str, tuple[str, ...]] = {
-    "claude": ("low", "medium", "high", "xhigh", "max"),
-    # The model catalog is authoritative and the API narrows this per model.
-    # This union is the validation fallback when discovery is unavailable.
-    "codex": ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
-}
+# Claude's maps to ``ClaudeAgentOptions.effort``.
+#
+# Sourced from ``ciao.provider_registry`` so the level ladders live beside the
+# rest of each provider's static facts. Kept as a module-level dict because
+# this is a hot import and callers subscript it directly.
+THINKING_LEVELS: dict[str, tuple[str, ...]] = provider_registry.thinking_levels()
 
 
 @dataclass(slots=True)

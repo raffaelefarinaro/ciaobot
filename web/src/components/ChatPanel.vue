@@ -1166,7 +1166,7 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
-import type { AgentAssetsResponse, CommandsResponse, Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, Loop, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1850,6 +1850,7 @@ const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
 const modelsResponse = ref<ModelsResponse | null>(null)
+
 const thinkingLevels = ref<Record<string, string[]>>({})
 
 const openTraces = ref<Record<number, boolean>>({})
@@ -2064,17 +2065,20 @@ const touchedFiles = computed<TouchedFile[]>(() => {
   return Array.from(byPath.values()).sort((a, b) => b.index - a.index)
 })
 
-type ProviderKey = 'claude' | 'codex'
-type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex' | `custom:${string}`
+type ProviderKey = RuntimeProvider
+type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex' | 'opencode' | `custom:${string}`
 type ModelBucketValue = 'work' | 'personal' | 'openrouter' | ''
-type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex' | 'custom'
+type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex' | 'opencode' | 'custom'
 type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
+// The first three buckets are all served by the Claude runner, differing only
+// in env-injected routing; the rest are one bucket per runtime provider.
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
   { key: 'claude_work', label: 'Claude', provider: 'claude' },
   { key: 'claude_personal', label: 'Ollama', provider: 'claude' },
   { key: 'openrouter', label: 'OpenRouter', provider: 'claude' },
   { key: 'codex', label: 'Codex', provider: 'codex' },
+  { key: 'opencode', label: 'opencode', provider: 'opencode' },
 ]
 
 
@@ -2424,6 +2428,7 @@ function cancelCapability(q: { request_id: string }) {
 // the capability card opens the full picker.
 function capabilitySectionForBucket(bucket: BucketKey): string {
   if (bucket === 'codex') return 'codex'
+  if (bucket === 'opencode') return 'opencode'
   if (bucket === 'openrouter') return 'openrouter'
   if (bucket === 'claude_personal') return 'ollama'
   return 'anthropic'
@@ -2438,6 +2443,12 @@ const activeProvider = computed<ProviderKey>(() => {
 const activeBucket = computed<BucketKey>(() => {
   const c = chat.value
   if (!c) return 'claude_work'
+  // A provider that serves its own catalog gets a bucket named after it.
+  // Registry-driven, and checked before the `owner/model` shape heuristic
+  // below — opencode ids look exactly like OpenRouter ones, so the heuristic
+  // filed them under OpenRouter and the header said so.
+  const providerDescriptor = modelsResponse.value?.providers?.find((p) => p.id === c.provider)
+  if (providerDescriptor && !providerDescriptor.model_bucket) return c.provider as BucketKey
   if (c.provider === 'codex') return 'codex'
   if (c.model.startsWith('custom:')) {
     const parts = c.model.split(':', 3)
@@ -3972,6 +3983,8 @@ function routingProviderLabel(bucket: string | undefined, provider: string): str
   if (lower === 'anthropic') return 'Anthropic'
   if (lower === 'openrouter') return 'OpenRouter'
   if (lower === 'codex') return 'Codex'
+  // Lower-case on purpose: that is how opencode brands itself.
+  if (lower === 'opencode') return 'opencode'
   if (lower === 'claude') return 'Claude'
   if (lower === 'custom') {
     if (bucket?.startsWith('custom:')) {
@@ -3986,7 +3999,8 @@ function routingProviderLabel(bucket: string | undefined, provider: string): str
 
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
   if (bucket.startsWith('custom:')) return ''
-  if (bucket === 'codex') return ''
+  // Providers that serve their own models have no Anthropic-style bucket.
+  if (bucket === 'codex' || bucket === 'opencode') return ''
   if (bucket === 'openrouter') return 'openrouter'
   return bucket === 'claude_personal' ? 'personal' : 'work'
 }
@@ -4009,6 +4023,9 @@ function bucketForSelectedModel(model: string): BucketKey {
   if (response?.alias_tiers?.codex?.[model]) return 'codex'
   if ((response?.codex_models || []).includes(model)) return 'codex'
   if (model === CODEX_FABLE_PSEUDO_MODEL) return 'codex'
+  // Must precede the OpenRouter check: opencode ids are also `provider/model`,
+  // so the shape heuristic below would otherwise claim them.
+  if ((response?.opencode_models || []).includes(model)) return 'opencode'
   const openrouterModels = response?.openrouter_models || []
   if (openrouterModels.includes(model) || (model.includes('/') && !model.includes(':'))) {
     return 'openrouter'
@@ -4021,7 +4038,7 @@ function bucketForSelectedModel(model: string): BucketKey {
 }
 
 function effectiveModelForBucket(model: string, bucket: BucketKey): string {
-  if (bucket === 'codex') return model
+  if (bucket === 'codex' || bucket === 'opencode') return model
   const tier = tierAlias(model)
   if (!tier) return model
   if (bucket === 'openrouter') {
@@ -4036,6 +4053,7 @@ function effectiveModelForBucket(model: string, bucket: BucketKey): string {
 function routeKindFor(model: string, bucket: BucketKey): RouteKind {
   if (bucket.startsWith('custom:')) return 'custom'
   if (bucket === 'codex') return 'codex'
+  if (bucket === 'opencode') return 'opencode'
   const effective = effectiveModelForBucket(model, bucket)
   if (bucket === 'openrouter' || (effective.includes('/') && !effective.includes(':'))) {
     return 'openrouter'
@@ -4057,6 +4075,7 @@ async function selectModel(value: string | string[], sectionKey = '') {
   const sectionBucket: Partial<Record<string, BucketKey>> = {
     anthropic: 'claude_work',
     codex: 'codex',
+    opencode: 'opencode',
     ollama: 'claude_personal',
     openrouter: 'openrouter',
   }

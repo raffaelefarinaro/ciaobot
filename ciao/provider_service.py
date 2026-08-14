@@ -5,22 +5,30 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import cast
 
+from ciao import provider_registry
 from ciao.config import BridgeConfig
 from ciao.models import AgentRequest, StreamEvent
-from ciao.providers import ClaudeProvider, CodexProvider
 from ciao.providers.base import ActiveHandle, BaseProvider, ProviderCapabilities
 
 ProviderImpl = BaseProvider
 
-_PROVIDER_FACTORIES = {
-    "claude": ClaudeProvider,
-    "codex": CodexProvider,
-}
-
 
 def supported_providers() -> tuple[str, ...]:
     """Provider names accepted by chats, schedules, and the CLI."""
-    return tuple(_PROVIDER_FACTORIES)
+    return provider_registry.provider_ids()
+
+
+def capabilities_for(provider: str) -> ProviderCapabilities:
+    """Static capabilities of a provider, without instantiating it.
+
+    Lets routes and the PWA describe a provider the current chat is not
+    running. Unknown ids get the all-``False`` default rather than raising, so
+    a stale chat record degrades to "supports nothing" instead of a 500.
+    """
+    descriptor = provider_registry.get(provider)
+    if descriptor is None:
+        return ProviderCapabilities()
+    return descriptor.factory().capabilities
 
 
 class ProviderService:
@@ -36,9 +44,7 @@ class ProviderService:
     def _ensure_provider(self, provider: str) -> ProviderImpl:
         """Create the provider instance on first use based on provider name."""
         if self._provider is None:
-            factory = _PROVIDER_FACTORIES.get(provider)
-            if factory is None:
-                raise ValueError(f"Unknown provider '{provider}'")
+            factory = provider_registry.require(provider).factory()
             self._provider = factory(self._config.workspace_root, config=self._config)
         return self._provider
 

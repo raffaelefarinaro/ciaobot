@@ -551,6 +551,10 @@ def workspace_health(config: Any) -> dict:
         (root / ".agents" / "skills", "Generated Codex skills directory"),
         (root / ".codex" / "agents", "Generated Codex native agents directory"),
         (root / ".codex" / "config.toml", "Generated Codex agent registrations"),
+        # opencode reads .claude/skills, .agents/skills, AGENTS.md and
+        # CLAUDE.md natively, so only these two directories are generated.
+        (root / ".opencode" / "agents", "Generated opencode subagents directory"),
+        (root / ".opencode" / "commands", "Generated opencode commands directory"),
     ])
 
     for path, title in check_paths:
@@ -754,6 +758,23 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
             "Project instructions selected by Codex CLI discovery.",
             "project",
             "codex",
+            "",
+        ))
+
+    # opencode reads AGENTS.md, falling back to CLAUDE.md, plus its own global
+    # file. It shares the project AGENTS.md row above rather than duplicating
+    # it, so only the opencode-specific global is listed here.
+    opencode_global = first_nonempty((
+        Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        .expanduser() / "opencode" / "AGENTS.md",
+    ))
+    if opencode_global is not None:
+        file_assets.append((
+            opencode_global,
+            "Global opencode AGENTS.md",
+            "User-level instructions loaded by opencode before project files.",
+            "global",
+            "opencode",
             "",
         ))
 

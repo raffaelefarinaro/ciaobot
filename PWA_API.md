@@ -90,7 +90,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror |
 | PATCH, DELETE | `/api/agent-assets/commands/{name}` | Update or delete a custom workspace-owned slash command |
 | GET | `/api/rate-limits` | Read Claude rate-limit snapshots |
-| GET | `/api/models` | List configured models |
+| GET | `/api/models` | List configured models, plus `providers[]` (id, labels, model_bucket, capabilities) from the runtime-provider registry |
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, project MCP servers (env-key status + observed tools), and active-session counts (no credentials) |
 | GET | `/api/mcp/usage` | Embedded Ciaobot MCP per-tool call/error counters (no credentials) |
@@ -290,7 +290,9 @@ downloads rather than executable inline content.
 
 ```bash
 # Create — title/model/mode/provider/model_bucket all optional.
-# provider is `claude` or `codex`. model_bucket only controls Claude backends:
+# provider is any id from the registry (`claude`, `codex`, `opencode`); see
+# GET /api/models -> providers[] for the live list and per-provider
+# capabilities. model_bucket only controls Claude backends:
 # '' = auto from the project's configured workspace bucket. Legacy
 # work/personal buckets still work; anthropic/ollama are the clearer
 # configured names. Unknown buckets are rejected unless a workspace config

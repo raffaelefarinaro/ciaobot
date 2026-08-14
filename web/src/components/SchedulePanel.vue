@@ -546,7 +546,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
 import type { ScheduleUpdate } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
-import type { Loop, Schedule, ScheduleArchivePolicy } from '../lib/types'
+import type { Loop, RuntimeProvider, Schedule, ScheduleArchivePolicy } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
 import NewLoopForm from './NewLoopForm.vue'
 import PaneHeader from './PaneHeader.vue'
@@ -881,7 +881,7 @@ function formatWhen(iso: string | null): string {
 }
 
 const scheduleModelSections = computed(() => sectionsFromModelsResponse(store.models))
-const editModelProvider = ref<'claude' | 'codex' | ''>('')
+const editModelProvider = ref<RuntimeProvider | ''>('')
 
 const editWorkspaceConfig = computed(() =>
   projectStore.workspaceOptions.find(workspace => workspace.name === editData.value.workspace),
@@ -1002,6 +1002,10 @@ function contextLabel(s: Schedule): string {
 }
 
 function contextUnavailable(s: Schedule): boolean {
+  // The server states this outright. Inferring it from context_label was
+  // wrong: that field is always set, so a stale target rendered as an
+  // ordinary one and the indicator never appeared.
+  if (s.context_available !== undefined) return !s.context_available
   if (s.context_label) return false
   if (s.web_project_id) {
     return !projectStore.projects.some(p => p.project_id === s.web_project_id)

@@ -118,13 +118,20 @@ def _read_frontmatter_description(path: Path) -> str:
 
 
 def _installed_targets(root: Path, name: str) -> list[str]:
+    """Providers that can see this skill, from where its SKILL.md landed.
+
+    opencode discovers both catalogs natively, so it needs no projection of
+    its own and is credited whenever either path exists.
+    """
     targets: list[str] = []
-    path = root / ".claude" / "skills" / name / "SKILL.md"
-    if path.exists():
+    claude_path = root / ".claude" / "skills" / name / "SKILL.md"
+    agents_path = root / ".agents" / "skills" / name / "SKILL.md"
+    if claude_path.exists():
         targets.append("claude")
-    path = root / ".agents" / "skills" / name / "SKILL.md"
-    if path.exists():
+    if agents_path.exists():
         targets.append("codex")
+    if claude_path.exists() or agents_path.exists():
+        targets.append("opencode")
     return targets
 
 

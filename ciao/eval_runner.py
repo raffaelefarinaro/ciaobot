@@ -18,7 +18,9 @@ from importlib import resources
 from pathlib import Path
 from typing import IO, Any, Iterable, Literal
 
-Provider = Literal["claude", "codex"]
+# Validated at runtime against ciao.provider_registry; a plain str so adding a
+# provider does not require editing a Literal.
+Provider = str
 Surface = Literal["legacy", "mcp"]
 
 
