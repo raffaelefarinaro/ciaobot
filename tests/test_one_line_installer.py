@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -33,10 +35,37 @@ def test_bundled_launcher_keeps_child_ciao_commands_on_matching_runtime() -> Non
     )
 
     assert 'export PATH="$root/bin${PATH:+:$PATH}"' in script
-    assert 'export PYTHONPATH="$site${PYTHONPATH:+:$PYTHONPATH}"' in script
     assert 'export CIAO_ENGINE_PATH="$root/bin/ciao"' in script
     assert "unset CIAO_RUNTIME_ROOT" in script
     assert 'CIAO_RUNTIME_ROOT="${CIAO_RUNTIME_ROOT:-$root}"' not in script
+
+
+def test_bundled_launcher_does_not_export_pythonpath_to_children() -> None:
+    """PYTHONPATH is inherited by every descendant, including a child `ciao`
+    running a different CPython against the bundle's 3.12 extension modules -
+    which fails with `No module named 'pydantic_core._pydantic_core'`. The
+    interpreter attaches its own tree instead, so the launcher must not export
+    PYTHONPATH nor pass an inherited one through."""
+    script = (REPO_ROOT / "scripts" / "build-bundled-runtime.sh").read_text(
+        encoding="utf-8"
+    )
+    launcher = script.split("<<'LAUNCHER'", 1)[1].split("LAUNCHER", 1)[0]
+
+    assert "export PYTHONPATH" not in launcher
+    assert "unset PYTHONPATH" in launcher
+
+
+def test_runtime_builder_installs_the_bundled_site_hook() -> None:
+    script = (REPO_ROOT / "scripts" / "build-bundled-runtime.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "runtime_bundled_site.py" in script
+    assert '>"$purelib/ciao_bundled_site.py"' in script
+    assert "echo 'import ciao_bundled_site' >\"$purelib/zz-ciao-bundled-site.pth\"" in script
+    # A silently unsubstituted placeholder would ship a runtime that cannot
+    # import anything, so the build has to fail on it.
+    assert "kept its unsubstituted placeholder" in script
 
 
 def test_runtime_builder_probes_pydantic_core_for_each_architecture() -> None:
@@ -46,7 +75,9 @@ def test_runtime_builder_probes_pydantic_core_for_each_architecture() -> None:
 
     assert "import pydantic_core" in script
     assert "Bundled ${arch} runtime cannot import pydantic-core" in script
-    assert 'PYTHONPATH="$output/site-packages/$arch"' in script
+    # The probe has to run without PYTHONPATH, because that is how the
+    # launcher invokes the interpreter.
+    assert "unset PYTHONPATH;" in script
 
 
 def test_runtime_builder_installs_from_the_frozen_hashed_lock_export() -> None:
@@ -58,6 +89,88 @@ def test_runtime_builder_installs_from_the_frozen_hashed_lock_export() -> None:
     assert "--frozen" in script
     assert "--require-hashes" in script
     assert "-r \"$requirements\"" in script
+
+
+def test_bundled_site_hook_attaches_the_tree_for_its_own_architecture(
+    tmp_path: Path,
+) -> None:
+    """Exercise the hook's path math against the real bundle layout.
+
+    The relative path is what lets the signed app work from either
+    ``/Applications`` or ``~/Applications``; getting it wrong ships a runtime
+    that imports nothing.
+    """
+    runtime = tmp_path / "ciao-runtime"
+    purelib = runtime / "python" / "arm64" / "lib" / "python3.12" / "site-packages"
+    tree = runtime / "site-packages" / "arm64"
+    other = runtime / "site-packages" / "x86_64"
+    for directory in (purelib, tree, other):
+        directory.mkdir(parents=True)
+    (tree / "bundled_marker.py").write_text("ARCH = 'arm64'\n", encoding="utf-8")
+    (other / "wrong_arch_marker.py").write_text("ARCH = 'x86_64'\n", encoding="utf-8")
+
+    template = (REPO_ROOT / "scripts" / "runtime_bundled_site.py").read_text(
+        encoding="utf-8"
+    )
+    assert "@BUNDLED_SITE_REL@" in template, "build-time placeholder is gone"
+    rel = os.path.relpath(tree, purelib)
+    (purelib / "ciao_bundled_site.py").write_text(
+        template.replace("@BUNDLED_SITE_REL@", rel), encoding="utf-8"
+    )
+
+    probe = (
+        "import sys;"
+        f" sys.path.insert(0, {str(purelib)!r});"
+        " import ciao_bundled_site;"
+        " import bundled_marker;"
+        " print(bundled_marker.ARCH)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "arm64"
+
+    # The sibling architecture's tree must stay off sys.path.
+    wrong = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            probe.replace("import bundled_marker;", "import wrong_arch_marker;").replace(
+                "print(bundled_marker.ARCH)", "print('unexpected')"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert wrong.returncode != 0
+    assert "ModuleNotFoundError" in wrong.stderr
+
+
+def test_bundled_site_hook_is_inert_when_the_tree_is_missing(tmp_path: Path) -> None:
+    """A partially assembled runtime must not crash every `import site`."""
+    purelib = tmp_path / "lib" / "python3.12" / "site-packages"
+    purelib.mkdir(parents=True)
+    template = (REPO_ROOT / "scripts" / "runtime_bundled_site.py").read_text(
+        encoding="utf-8"
+    )
+    (purelib / "ciao_bundled_site.py").write_text(
+        template.replace("@BUNDLED_SITE_REL@", "../../../nope/arm64"),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; sys.path.insert(0, {str(purelib)!r}); import ciao_bundled_site",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_installer_requires_native_verification_before_extraction() -> None:
