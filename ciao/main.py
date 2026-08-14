@@ -272,21 +272,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # error log (asyncio would otherwise log them at ERROR). See issue #163.
     install_asyncio_noise_filter()
 
-    # Discover models installed on the local Ollama daemon (best-effort,
-    # 2s timeout) and surface them in the model pickers alongside the cloud
-    # allowlist. Models already in the cloud allowlist keep their cloud
-    # routing so discovery never silently changes existing behaviour. Also
-    # re-run whenever the Settings → Models tab loads (routes_api), so a
-    # freshly pulled model shows up without a restart.
-    from ciao.config import (
-        refresh_local_ollama_models,
-        refresh_cloud_ollama_models,
-        refresh_openrouter_models,
-    )
-
-    refresh_local_ollama_models(config)
-    refresh_cloud_ollama_models(config)
-    refresh_openrouter_models(config)
+    # No model discovery at startup: each provider serves its own catalog on
+    # demand (Codex and opencode) or has a fixed tier vocabulary (Claude Code),
+    # so there is no allowlist to warm here.
 
     # Runtime-mutable settings overlay (PWA Settings → Models tab). Applied
     # on top of the env-backed config so PATCHes take effect without a

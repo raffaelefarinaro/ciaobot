@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from ciao.config import CiaoConfig
-from ciao.providers.ollama import OllamaSettings
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -19,7 +18,6 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        ollama=OllamaSettings(api_key="sk-ollama", models=("kimi-k2.7-code:cloud",)),
     )
     state = StateStore(config.state_path, tmp_path, config.media_root)
     transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
@@ -49,23 +47,23 @@ def test_handover_chat_switches_model_and_persists_messages(tmp_path: Path) -> N
     updated = pcm.handover_chat(
         chat.chat_id,
         provider="claude",
-        model="kimi-k2.7-code:cloud",
+        model="haiku",
         messages=messages,
     )
 
     assert updated is not None
     assert updated.provider == "claude"
-    assert updated.model == "kimi-k2.7-code:cloud"
+    assert updated.model == "haiku"
     assert updated.session_id == ""
     assert updated.handover_context_pending is True
     assert updated.handover_messages[0]["content"] == "Build the handover feature"
     assert updated.handover_messages[-1]["role"] == "system"
-    assert "Handed over from Claude / opus to Claude / kimi-k2.7-code:cloud" in updated.handover_messages[-1]["content"]
+    assert "Handed over from Claude / opus to Claude / haiku" in updated.handover_messages[-1]["content"]
 
     persisted = json.loads((tmp_path / ".runtime" / "web_projects.json").read_text(encoding="utf-8"))
     saved = persisted["chats"][chat.chat_id]
     assert saved["provider"] == "claude"
-    assert saved["model"] == "kimi-k2.7-code:cloud"
+    assert saved["model"] == "haiku"
     assert saved["session_id"] == ""
     assert saved["handover_context_pending"] is True
     assert saved["handover_messages"][-1]["role"] == "system"
@@ -107,7 +105,7 @@ def test_handover_messages_are_injected_into_next_prompt_once(tmp_path: Path) ->
     pcm.handover_chat(
         chat.chat_id,
         provider="claude",
-        model="kimi-k2.7-code:cloud",
+        model="haiku",
         messages=[
             {"role": "user", "content": "First request"},
             {"role": "assistant", "content": "First answer"},
@@ -143,10 +141,10 @@ def test_handover_chat_validates_and_canonicalizes_model(tmp_path: Path) -> None
     assert updated is not None
     assert updated.model == "sonnet"
 
-    with pytest.raises(ValueError, match="Unknown custom model"):
+    with pytest.raises(ValueError, match="Unknown model"):
         pcm.handover_chat(
             chat.chat_id,
             provider="claude",
-            model="custom:missing:foo",
+            model="no-such-model",
         )
     assert pcm.get_chat(chat.chat_id).model == "sonnet"

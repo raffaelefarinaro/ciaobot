@@ -36,15 +36,6 @@ from ciao.config import (
     coerce_claude_ai_mcps,
     coerce_workspace_color,
 )
-from ciao.custom_providers import (
-    discover_models,
-    encode_model,
-    load_custom_providers,
-    parse_model,
-    public_provider,
-    provider_for_model,
-    save_custom_providers,
-)
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.model_tiers import codex_tier_models
@@ -123,23 +114,14 @@ _IMAGE_MANIFEST_RE = re.compile(
 )
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-# Runtime-provider labels come from the registry; the two routing backends run
-# through Claude Code and are named here because they have no provider module.
+# Every selectable provider is a runtime provider, so the registry is the only
+# source for labels.
 _WORKSPACE_PROVIDER_LABELS = {
-    **{item.id: item.label for item in provider_registry.descriptors()},
-    "ollama": "Ollama (via Claude Code)",
-    "openrouter": "OpenRouter (via Claude Code)",
+    item.id: item.label for item in provider_registry.descriptors()
 }
-_PROVIDER_KEY_META = {
-    "CIAO_OLLAMA_API_KEY": {
-        "label": "Ollama Cloud API key",
-        "description": "Routes configured Ollama cloud models directly through ollama.com.",
-    },
-    "OPENROUTER_API_KEY": {
-        "label": "OpenRouter API key",
-        "description": "Optional key for critique/review model routing.",
-    },
-}
+# Provider API keys editable from Settings. Empty: every provider authenticates
+# through its own CLI (`ciao auth <provider>`), so there is no key to type here.
+_PROVIDER_KEY_META: dict[str, dict[str, str]] = {}
 # Keys Ciaobot itself consumes, as opposed to provider logins. Empty since
 # voice moved on-device: OPENAI_API_KEY lived here for cloud transcription and
 # speech, and nothing else in the app ever read it.
@@ -195,71 +177,12 @@ def _known_workspace_names(pcm: object) -> set[str]:
     return {"personal", "work"}
 
 
-def _ollama_cloud_available(config) -> bool:
-    ollama = getattr(config, "ollama", None)
-    if ollama is None:
-        return False
-    return bool(getattr(ollama, "api_key", "")) and ollama.api_key != "ollama"
-
-
-def _ollama_backend_available(config) -> bool:
-    ollama = getattr(config, "ollama", None)
-    if ollama is None:
-        return False
-    return bool(ollama.local_models) or _ollama_cloud_available(config)
-
-
-def _openrouter_model_options(config) -> list[str]:
-    openrouter = config.openrouter
-    if not openrouter.available:
-        return []
-    return list(
-        dict.fromkeys(
-            [
-                openrouter.haiku_model,
-                openrouter.sonnet_model,
-                openrouter.opus_model,
-                openrouter.fable_model,
-                *openrouter.models,
-            ]
-        )
-    )
-
-
-def _ollama_cloud_model_options(config) -> list[str]:
-    ollama = config.ollama
-    tier_models = (
-        [
-            ollama.haiku_model,
-            ollama.sonnet_model,
-            ollama.opus_model,
-            ollama.fable_model,
-            ollama.title_model,
-        ]
-        if _ollama_cloud_available(config)
-        else []
-    )
-    return list(dict.fromkeys([*ollama.models, *tier_models]))
-
-
 def _workspace_provider_options(config) -> list[dict[str, str]]:
     values = list(provider_registry.provider_ids())
-    if _ollama_backend_available(config):
-        values.append("ollama")
-    openrouter = getattr(config, "openrouter", None)
-    if openrouter is not None and openrouter.available:
-        values.append("openrouter")
     options = [
         {"value": value, "label": _WORKSPACE_PROVIDER_LABELS[value]}
         for value in values
     ]
-    for provider in load_custom_providers(config):
-        options.append({
-            "value": f"custom:{provider.id}",
-            "label": f"{provider.name} (via {provider.runner.title()})",
-            "runner": provider.runner,
-            "default_model": encode_model(provider.id, provider.models[0]) if provider.models else "",
-        })
     return options
 
 
@@ -972,26 +895,9 @@ def _workspace_from_request(
         allowed = ", ".join(sorted(available_providers))
         raise ValueError(f"default_provider must be one of: {allowed}")
     provider = requested_provider
-    custom_workspace = None
-    if requested_provider.startswith("custom:"):
-        custom_id = requested_provider.split(":", 1)[1]
-        custom_workspace = next(
-            (item for item in load_custom_providers(config) if item.id == custom_id),
-            None,
-        )
-        if custom_workspace is None:
-            raise ValueError(f"unknown custom provider '{custom_id}'")
-        provider = custom_workspace.runner
     default_model = str(
         data.get("default_model", existing.default_model if existing else "")
     ).strip()
-    if custom_workspace is not None:
-        if default_model and parse_model(default_model) is None:
-            default_model = encode_model(custom_workspace.id, default_model)
-        if not default_model:
-            if not custom_workspace.models:
-                raise ValueError("custom provider must have at least one model before it can be a workspace default")
-            default_model = encode_model(custom_workspace.id, custom_workspace.models[0])
     if "disallowed_tools" in data:
         disallowed_tools = _parse_disallowed_tools_value(data.get("disallowed_tools"))
     elif existing is not None:
@@ -1031,10 +937,11 @@ def _workspace_from_request(
         disallowed_tools=disallowed_tools,
         claude_ai_mcps=claude_ai_mcps,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
-        model_bucket=(
-            str(data.get("model_bucket", existing.model_bucket if existing else "")).strip()
-            or (f"custom:{custom_workspace.id}" if custom_workspace is not None else "")
-        ),
+        # Accepted and preserved, but no longer read: see
+        # ProjectChatManager._model_bucket_allowed.
+        model_bucket=str(
+            data.get("model_bucket", existing.model_bucket if existing else "")
+        ).strip(),
         color=color,
     )
 
@@ -1168,8 +1075,6 @@ def _provider_key_auth_method(config, key: str) -> str:
     file_value = _read_env_value(_env_path(config), key)
     if file_value:
         return "api_key"
-    if key == "CIAO_OLLAMA_API_KEY" and getattr(config.ollama, "api_key", "ollama") != "ollama":
-        return "api_key"
     if key == "ANTHROPIC_API_KEY" and _claude_oauth_ready():
         return "oauth"
     return "missing"
@@ -1210,9 +1115,6 @@ def _provider_config_payload(config) -> dict:
             for descriptor in provider_registry.descriptors()
             if descriptor.id in providers
         },
-        "custom_providers": [
-            public_provider(provider) for provider in load_custom_providers(config)
-        ],
     }
 
 
@@ -1286,19 +1188,17 @@ async def provider_connection_action(request: Request) -> JSONResponse:
 
 
 def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
+    """Push edited service keys into the process env.
+
+    No provider key reaches the live config: every provider authenticates
+    through its own CLI, so there is nothing here to re-point.
+    """
     for key, value in updates.items():
         value = value.strip()
         if value:
             os.environ[key] = value
         else:
             os.environ.pop(key, None)
-        if key == "CIAO_OLLAMA_API_KEY":
-            if value:
-                base_url = os.environ.get("CIAO_OLLAMA_URL", "").strip() or "https://ollama.com"
-                config.ollama = replace(config.ollama, api_key=value, base_url=base_url)
-            else:
-                base_url = os.environ.get("CIAO_OLLAMA_URL", "").strip() or "http://localhost:11434"
-                config.ollama = replace(config.ollama, api_key="ollama", base_url=base_url)
 
 
 async def provider_config_settings(request: Request) -> JSONResponse:
@@ -1329,12 +1229,6 @@ async def provider_config_settings(request: Request) -> JSONResponse:
         updates["CIAO_AUTO_UPDATE_GITHUB_SKILLS"] = "true" if val else "false"
         config.auto_update_github_skills = val
 
-    if "custom_providers" in body:
-        try:
-            await asyncio.to_thread(save_custom_providers, config, body["custom_providers"])
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-
     _write_env_values(_env_path(config), updates)
     provider_key_changes = {
         k: v for k, v in updates.items()
@@ -1352,26 +1246,6 @@ async def provider_config_settings(request: Request) -> JSONResponse:
                 raise RestartRequested(config.restart_exit_code)
         asyncio.create_task(_do_restart())
     return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
-
-
-async def custom_provider_probe(request: Request) -> JSONResponse:
-    """Probe an unsaved custom endpoint for OpenAI-compatible model ids."""
-    try:
-        body = await request.json()
-        if not isinstance(body, dict):
-            raise ValueError("expected object")
-        from ciao.custom_providers import _provider_from_mapping
-
-        existing = next(
-            (item for item in load_custom_providers(request.app.state.config)
-             if item.id == str(body.get("id") or "").strip().lower()),
-            None,
-        )
-        provider = _provider_from_mapping(body, existing=existing)
-        models = await asyncio.to_thread(discover_models, provider)
-        return JSONResponse({"ok": bool(models), "models": list(models)})
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 def _gws_profile_config_dir(config, profile: str) -> Path | None:
@@ -5046,70 +4920,32 @@ async def list_models(request: Request) -> JSONResponse:
             ),
             "input_modalities": list(item.get("inputModalities") or []),
         }
-    # Cloud allowlist + locally-discovered daemon models both count as
-    # "Ollama" for bucketing: they show in the personal Claude bucket,
-    # never in the work (Anthropic subscription) bucket.
-    ollama_cloud = _ollama_cloud_model_options(config)
-    ollama = list(dict.fromkeys([*ollama_cloud, *config.ollama.local_models]))
-    claude_work = [m for m in config.claude_models if m not in ollama]
-    claude_personal = [m for m in config.claude_models if m in ollama]
-
-    work_default = config.claude_default_model if config.claude_default_model in claude_work else (claude_work[0] if claude_work else "")
-    personal_default = claude_personal[0] if claude_personal else ""
-
-    # OpenRouter backend: available when an API key is set. The picker
-    # offers the per-tier alias defaults plus any discovered/disabled
-    # anthropic-family models.
-    or_settings = config.openrouter
-    openrouter_models = _openrouter_model_options(config)
-    openrouter_tiers = {
-        "haiku": or_settings.haiku_model,
-        "sonnet": or_settings.sonnet_model,
-        "opus": or_settings.opus_model,
-        "fable": or_settings.fable_model,
-    } if or_settings.available else {}
-    openrouter_default = or_settings.sonnet_model if or_settings.available else ""
-
-    custom_providers = load_custom_providers(config)
-    custom_payload = []
-    for provider in custom_providers:
-        models = provider.models
-        custom_payload.append({
-            **public_provider(provider),
-            "models": [encode_model(provider.id, model) for model in models],
-            "model_labels": {
-                encode_model(provider.id, model): model for model in models
-            },
-        })
+    # Claude Code serves one upstream, so its models are a single list rather
+    # than the work/personal split the Ollama routing era needed.
+    claude_models = list(config.claude_models)
+    claude_default = (
+        config.claude_default_model
+        if config.claude_default_model in claude_models
+        else (claude_models[0] if claude_models else "")
+    )
 
     return JSONResponse({
         "models": config.claude_models,
         "default": config.claude_default_model,
         "provider_models": {
-            "claude_work": claude_work,
-            "claude_personal": claude_personal,
-            "openrouter": openrouter_models,
+            "claude": claude_models,
             "codex": codex_models,
             "opencode": opencode_models,
         },
         "provider_defaults": {
-            "claude_work": work_default,
-            "claude_personal": personal_default,
-            "openrouter": openrouter_default,
+            "claude": claude_default,
             "codex": codex_default,
             "opencode": opencode_models[0] if opencode_models else "",
         },
-        # Per-backend tier models, so the picker can show
-        # "sonnet -> kimi (ollama) / gpt-5.6-terra (codex)". Tier names are
-        # resolved to provider-native ids only at the dispatch boundary.
+        # Per-provider tier models, so the picker can show
+        # "sonnet -> gpt-5.6-terra (codex)". Tier names resolve to
+        # provider-native ids only at the dispatch boundary.
         "alias_tiers": {
-            "ollama": {
-                "haiku": config.ollama.haiku_model,
-                "sonnet": config.ollama.sonnet_model,
-                "opus": config.ollama.opus_model,
-                "fable": config.ollama.fable_model,
-            },
-            "openrouter": openrouter_tiers,
             "codex": codex_tiers,
             "opencode": opencode_tiers,
         },
@@ -5118,16 +4954,10 @@ async def list_models(request: Request) -> JSONResponse:
         # is active.
         "codex_tier_defaults": codex_tier_defaults,
         "backends": {
-            "ollama": _ollama_backend_available(config),
-            "openrouter": or_settings.available,
             "anthropic": True,
             "codex": bool(codex_models),
             "opencode": bool(opencode_models),
         },
-        "ollama_models": ollama,
-        "ollama_local_models": list(config.ollama.local_models),
-        "openrouter_models": openrouter_models,
-        "custom_providers": custom_payload,
         "codex_models": codex_models,
         "codex_model_metadata": codex_model_metadata,
         "opencode_models": opencode_models,
@@ -5161,7 +4991,6 @@ def _routines_payload(config, app_settings) -> dict:
     )
 
     s = app_settings.settings
-    ollama = config.ollama
     if config.title_model_override:
         title_effective = config.title_model_override
     else:
@@ -5200,14 +5029,6 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model": s.insights_model,
 
         "critique_models": s.critique_models,
-        "ollama_haiku_model": s.ollama_haiku_model,
-        "ollama_sonnet_model": s.ollama_sonnet_model,
-        "ollama_opus_model": s.ollama_opus_model,
-        "ollama_fable_model": s.ollama_fable_model,
-        "openrouter_haiku_model": s.openrouter_haiku_model,
-        "openrouter_sonnet_model": s.openrouter_sonnet_model,
-        "openrouter_opus_model": s.openrouter_opus_model,
-        "openrouter_fable_model": s.openrouter_fable_model,
         # Canonical shape: {provider_id: {tier: model}} for every runtime
         # provider with operator-settable tier pins.
         "provider_routing": s.provider_routing or {},
@@ -5219,7 +5040,6 @@ def _routines_payload(config, app_settings) -> dict:
             if descriptor.tier_settings_attr
             for tier in ("haiku", "sonnet", "opus", "fable")
         },
-        "custom_routing": s.custom_routing or {},
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,
@@ -5228,32 +5048,6 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model_by_workspace": insights_by_workspace,
 
         "critique_models_effective": critique_effective,
-        "tier_defaults": app_settings.tier_model_defaults(),
-        "alias_tiers": {
-            "ollama": {
-                "haiku": config.ollama.haiku_model,
-                "sonnet": config.ollama.sonnet_model,
-                "opus": config.ollama.opus_model,
-                "fable": config.ollama.fable_model,
-            },
-            "openrouter": {
-                "haiku": config.openrouter.haiku_model,
-                "sonnet": config.openrouter.sonnet_model,
-                "opus": config.openrouter.opus_model,
-                "fable": config.openrouter.fable_model,
-            } if config.openrouter.available else {},
-            **{
-                f"custom:{provider.id}": {
-                    tier: (s.custom_routing or {}).get(provider.id, {}).get(tier, "")
-                    or (
-                        encode_model(provider.id, provider.models[0])
-                        if provider.models else ""
-                    )
-                    for tier in ("haiku", "sonnet", "opus", "fable")
-                }
-                for provider in load_custom_providers(config)
-            },
-        },
         # The "apple" title/insights options need macOS 26+, the desktop app,
         # and Apple Intelligence switched on; the routine rows explain which
         # prerequisite is missing instead of silently hiding the option.
@@ -5277,23 +5071,8 @@ def _routines_payload(config, app_settings) -> dict:
         # Grouped options for the routine model selectors.
         "model_options": {
             "anthropic": ["haiku", "sonnet", "opus", "fable"],
-            "ollama_cloud": _ollama_cloud_model_options(config),
-            "ollama_local": list(ollama.local_models),
-            "openrouter": _openrouter_model_options(config),
-            "custom_providers": [
-                {
-                    **public_provider(provider),
-                    "models": [encode_model(provider.id, model) for model in provider.models],
-                    "model_labels": {
-                        encode_model(provider.id, model): model for model in provider.models
-                    },
-                }
-                for provider in load_custom_providers(config)
-            ],
         },
         "backends": {
-            "ollama": _ollama_backend_available(config),
-            "openrouter": config.openrouter.available,
             "anthropic": True,
         },
         "workspace_context": {
@@ -5314,19 +5093,6 @@ async def settings_routines(request: Request) -> JSONResponse:
     app_settings = request.app.state.app_settings
     if app_settings is None:
         return JSONResponse({"error": "settings store unavailable"}, status_code=503)
-    if request.method == "GET":
-        # Re-discover local daemon models so a freshly `ollama pull`-ed
-        # model appears in the selectors without a restart. Bounded by the
-        # discovery timeout (2s) and run off the event loop.
-        from ciao.config import (
-            refresh_local_ollama_models,
-            refresh_cloud_ollama_models,
-            refresh_openrouter_models,
-        )
-
-        await asyncio.to_thread(refresh_local_ollama_models, config)
-        await asyncio.to_thread(refresh_cloud_ollama_models, config)
-        await asyncio.to_thread(refresh_openrouter_models, config)
     if request.method == "PATCH":
         try:
             body = await request.json()

@@ -15,29 +15,11 @@ from ciao.config import CiaoConfig
 from ciao.web.routes_api import settings_routines
 
 
-@pytest.fixture(autouse=True)
-def mock_discoveries(monkeypatch):
-    monkeypatch.setattr(
-        "ciao.providers.ollama.discover_cloud_models",
-        lambda settings, timeout_s=4.0: (),
-    )
-    monkeypatch.setattr(
-        "ciao.providers.openrouter.discover_models",
-        lambda settings, timeout_s=4.0, anthropic_only=False: ((), {}),
-    )
-
-
 def _make_client(tmp_path, env_extra: dict[str, str] | None = None):
     env = {
         "PWA_AUTH_TOKEN": "t",
         "CIAO_WORKSPACE": str(tmp_path),
         "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
-        "CIAO_OLLAMA_MODELS": "kimi-k2.7-code:cloud",
-        "CIAO_OLLAMA_API_KEY": "sk-cloud",
-        "CIAO_OLLAMA_LOCAL_MODELS": "gemma4:12b-it-qat",
-        # Keep tests off the network: the settings GET re-discovers local
-        # daemon models when this is enabled.
-        "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
     }
     env.update(env_extra or {})
     config = CiaoConfig.from_env(env)
@@ -62,22 +44,13 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
     assert data["title_model"] == ""  # no override stored
-    # Ollama configured → free-tier title model is the effective default.
-    assert data["title_model_effective"] == config.haiku_model_for_workspace("personal")
-    assert data["insights_model_effective"] == config.sonnet_model_for_workspace("personal")
-    assert data["alias_tiers"]["ollama"]["sonnet"] == config.ollama.sonnet_model
-    assert data["alias_tiers"]["ollama"]["fable"] == "glm-5.2:cloud"
-    assert "codex" not in data["alias_tiers"]
-    assert data["tier_defaults"]["ollama"]["sonnet"] == "kimi-k2.7-code:cloud"
-    assert data["tier_defaults"]["openrouter"]["fable"] == "anthropic/claude-fable-latest"
-    assert data["model_options"]["ollama_cloud"] == [
-        "kimi-k2.7-code:cloud",
-        "deepseek-v4-flash:0731-cloud",
-        "minimax-m3:cloud",
-        "glm-5.2:cloud",
-        "gemma4:e2b-it-qat",
-    ]
-    assert data["model_options"]["ollama_local"] == ["gemma4:12b-it-qat"]
+    # Automatic resolves to the workspace's tier alias; the provider running
+    # the routine resolves that alias against its own catalog.
+    assert data["title_model_effective"] == "haiku"
+    assert data["insights_model_effective"] == "sonnet"
+    # Tier aliases are the whole vocabulary the selectors offer.
+    assert data["model_options"]["anthropic"] == ["haiku", "sonnet", "opus", "fable"]
+    assert data["backends"] == {"anthropic": True}
     assert data["workspace_context"] == {
         "workspace_root": str(config.workspace_root),
         "vault_root": str(config.vault_root),
@@ -102,7 +75,7 @@ def test_get_title_effective_is_haiku_not_apfel_when_no_override(monkeypatch, tm
     data = client.get("/api/settings/routines").json()
     assert data["title_model"] == ""  # no override stored
     assert data["title_model_effective"] != "apfel"
-    assert data["title_model_effective"] == config.haiku_model_for_workspace("personal")
+    assert data["title_model_effective"] == "haiku"
 
 
 def test_get_title_effective_is_apfel_when_explicitly_chosen(monkeypatch, tmp_path):
@@ -122,7 +95,7 @@ def test_get_insights_effective_is_sonnet_not_apfel_when_no_override(
     data = client.get("/api/settings/routines").json()
     assert data["insights_model"] == ""
     assert data["insights_model_effective"] != "apfel"
-    assert data["insights_model_effective"] == config.sonnet_model_for_workspace("personal")
+    assert data["insights_model_effective"] == "sonnet"
 
 
 def test_get_insights_effective_is_apfel_when_explicitly_chosen(
@@ -153,34 +126,6 @@ def test_patch_applies_to_live_config_and_persists(tmp_path):
     assert fresh.settings.title_model == "gemma4:12b-it-qat"
 
 
-def test_patch_applies_tier_model_overrides(tmp_path):
-    client, config = _make_client(tmp_path, {"OPENROUTER_API_KEY": "sk-or"})
-    resp = client.patch(
-        "/api/settings/routines",
-        json={
-            "ollama_haiku_model": "llama3.1:latest",
-            "openrouter_sonnet_model": "anthropic/claude-sonnet-4.6",
-            "ollama_fable_model": "minimax-m3:cloud",
-            "openrouter_fable_model": "anthropic/claude-fable-5",
-        },
-    )
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["ollama_haiku_model"] == "llama3.1:latest"
-    assert data["openrouter_sonnet_model"] == "anthropic/claude-sonnet-4.6"
-    assert data["ollama_fable_model"] == "minimax-m3:cloud"
-    assert data["openrouter_fable_model"] == "anthropic/claude-fable-5"
-    assert data["alias_tiers"]["ollama"]["haiku"] == "llama3.1:latest"
-    assert data["alias_tiers"]["openrouter"]["sonnet"] == "anthropic/claude-sonnet-4.6"
-    assert data["alias_tiers"]["ollama"]["fable"] == "minimax-m3:cloud"
-    assert data["alias_tiers"]["openrouter"]["fable"] == "anthropic/claude-fable-5"
-    assert config.ollama.haiku_model == "llama3.1:latest"
-    assert config.openrouter.sonnet_model == "anthropic/claude-sonnet-4.6"
-    assert config.ollama.fable_model == "minimax-m3:cloud"
-    assert config.openrouter.fable_model == "anthropic/claude-fable-5"
-
-
 def test_patch_applies_codex_tier_pins(tmp_path):
     """The legacy flat ``<provider>_<tier>_model`` PATCH shape still works."""
     client, config = _make_client(tmp_path)
@@ -198,9 +143,9 @@ def test_patch_applies_codex_tier_pins(tmp_path):
         "sonnet": "gpt-5.6-sol",
         "haiku": "gpt-5.6-terra",
     }
-    # Codex effective tiers need the account catalog, so they live in
-    # /api/models, not here.
-    assert "codex" not in data["alias_tiers"]
+    # Per-provider effective tiers need the account catalog, so they live in
+    # /api/models rather than here; this route only carries the pins.
+    assert "alias_tiers" not in data
     assert config.codex.sonnet_model == "gpt-5.6-sol"
     fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
     assert fresh.tier_pin("codex", "sonnet") == "gpt-5.6-sol"
@@ -263,13 +208,13 @@ def test_automatic_routines_report_every_workspace_not_just_the_primary(
     names = config.workspace_names()
     assert names, "fixture should register at least one workspace"
 
-    for key, resolve in (
-        ("title_model_by_workspace", config.haiku_model_for_workspace),
-        ("insights_model_by_workspace", config.sonnet_model_for_workspace),
+    for key, expected in (
+        ("title_model_by_workspace", "haiku"),
+        ("insights_model_by_workspace", "sonnet"),
     ):
         assert set(data[key]) == set(names), f"{key} must cover every workspace"
         for name in names:
-            assert data[key][name] == resolve(name)
+            assert data[key][name] == expected
 
 
 def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):

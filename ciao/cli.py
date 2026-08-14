@@ -795,8 +795,6 @@ def setup_workspace(
     provider = (default_provider or "claude").strip().lower()
     model_bucket = {
         "codex": "",
-        "ollama": "personal",
-        "openrouter": "openrouter",
     }.get(provider, "anthropic")
     scaffold_vaults: list[tuple[str, Path]]
     if registered_vaults is not None:
@@ -1072,15 +1070,13 @@ def _setup_url_command(args: argparse.Namespace) -> int:
 def _auth_command_for_provider(
     provider: str, *, device_auth: bool = False
 ) -> list[str]:
-    # Runtime providers carry their own login command in the registry; ollama
+    # Runtime providers carry their own login command in the registry.
     # is a routing backend with no provider module, so it stays inline.
     from ciao import provider_registry
 
     descriptor = provider_registry.get(provider)
     if descriptor is not None:
         return descriptor.auth_command(device_auth=device_auth)
-    if provider == "ollama":
-        return ["ollama", "signin"]
     raise ValueError(f"Unknown provider '{provider}'")
 
 
@@ -1092,8 +1088,8 @@ def _runtime_provider_choices() -> tuple[str, ...]:
 
 
 def _auth_provider_choices() -> list[str]:
-    """Providers ``ciao auth`` accepts: runtime providers plus ollama."""
-    return [*_runtime_provider_choices(), "ollama"]
+    """Providers ``ciao auth`` accepts."""
+    return list(_runtime_provider_choices())
 
 
 def _auth_command(args: argparse.Namespace) -> int:

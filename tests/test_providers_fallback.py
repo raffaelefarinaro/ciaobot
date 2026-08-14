@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from ciao.models import AgentRequest
 from ciao.model_tiers import (
     is_capability_error,
-    model_supports_vision,
     next_tier_for_failure,
     tier_order,
 )
@@ -92,149 +91,27 @@ def test_is_capability_error_rejects_rate_limit_and_auth() -> None:
     assert not is_capability_error("")
 
 
-def test_next_tier_walks_down_then_up_for_anthropic() -> None:
-    # Bare tier aliases on the Anthropic-direct path walk the ladder
-    # in the order the user specified: fable -> opus -> sonnet -> haiku.
-    cfg = SimpleNamespace(ollama=None, openrouter=None)
-    assert next_tier_for_failure("fable", cfg) == "opus"
-    assert next_tier_for_failure("opus", cfg) == "sonnet"
-    assert next_tier_for_failure("sonnet", cfg) == "haiku"
-    # haiku at the bottom of the ladder has only one direction left
-    # (escalate to sonnet).
-    assert next_tier_for_failure("haiku", cfg) == "sonnet"
+def test_next_tier_walks_down_then_up() -> None:
+    # Tier aliases are provider-agnostic, so the ladder needs no config: the
+    # provider running the chat resolves the returned alias itself.
+    assert next_tier_for_failure("fable") == "opus"
+    assert next_tier_for_failure("opus") == "sonnet"
+    assert next_tier_for_failure("sonnet") == "haiku"
+    # haiku sits at the bottom, so escalating is the only direction left.
+    assert next_tier_for_failure("haiku") == "sonnet"
 
 
-def test_next_tier_resolves_ollama_configured_ids() -> None:
-    # Ollama chats use concrete model ids, not bare aliases. The helper
-    # has to look up the failing model against the configured
-    # OllamaSettings.{tier}_model to find the right slot. With the
-    # user's default (fable=kimi5.2, opus=minimax-m3, sonnet=kimi-k2.7,
-    # haiku=deepseek-v4-flash), kimi5.2 failing should retry on
-    # minimax-m3 — exactly the screenshot scenario.
-    cfg = SimpleNamespace(
-        ollama=SimpleNamespace(
-            haiku_model="deepseek-v4-flash:0731-cloud",
-            sonnet_model="kimi-k2.7-code:cloud",
-            opus_model="minimax-m3:cloud",
-            fable_model="kimi5.2:cloud",
-        ),
-        openrouter=None,
-    )
-    assert next_tier_for_failure("kimi5.2:cloud", cfg) == "minimax-m3:cloud"
-    assert next_tier_for_failure("minimax-m3:cloud", cfg) == "kimi-k2.7-code:cloud"
-    assert next_tier_for_failure("kimi-k2.7-code:cloud", cfg) == "deepseek-v4-flash:0731-cloud"
-    assert next_tier_for_failure("deepseek-v4-flash:0731-cloud", cfg) == "kimi-k2.7-code:cloud"
+def test_next_tier_returns_none_for_a_pinned_concrete_model() -> None:
+    """A chat pinned to a concrete id opted into that model.
+
+    Swapping it for a neighbouring tier would broaden scope the user declined,
+    so the ladder only applies to bare tier aliases.
+    """
+    assert next_tier_for_failure("claude-opus-4-8") is None
+    assert next_tier_for_failure("anthropic/claude-sonnet-4-6") is None
+    assert next_tier_for_failure("some-local-model") is None
+    assert next_tier_for_failure("") is None
 
 
-def test_next_tier_resolves_openrouter_configured_ids() -> None:
-    cfg = SimpleNamespace(
-        ollama=None,
-        openrouter=SimpleNamespace(
-            haiku_model="anthropic/claude-haiku-latest",
-            sonnet_model="anthropic/claude-sonnet-latest",
-            opus_model="anthropic/claude-opus-latest",
-            fable_model="anthropic/claude-fable-latest",
-        ),
-    )
-    assert (
-        next_tier_for_failure("anthropic/claude-fable-latest", cfg)
-        == "anthropic/claude-opus-latest"
-    )
-    assert (
-        next_tier_for_failure("anthropic/claude-opus-latest", cfg)
-        == "anthropic/claude-sonnet-latest"
-    )
-    assert (
-        next_tier_for_failure("anthropic/claude-haiku-latest", cfg)
-        == "anthropic/claude-sonnet-latest"
-    )
-
-
-def test_next_tier_returns_none_for_unknown_model() -> None:
-    # A model id that isn't on the configured ladder (e.g. an ad-hoc
-    # Ollama model pulled for a one-off job) has no neighbor to fall
-    # back to. Returning None lets the caller surface the original
-    # error instead of guessing.
-    cfg = SimpleNamespace(
-        ollama=SimpleNamespace(
-            haiku_model="deepseek-v4-flash:0731-cloud",
-            sonnet_model="kimi-k2.7-code:cloud",
-            opus_model="minimax-m3:cloud",
-            fable_model="kimi5.2:cloud",
-        ),
-        openrouter=None,
-    )
-    assert next_tier_for_failure("random-adhoc-model:cloud", cfg) is None
-    assert next_tier_for_failure("", cfg) is None
-    # claude-* ids (Anthropic-direct concrete ids) are not on the
-    # tier ladder — they pass through the SDK's rate-limit fallback
-    # path instead.
-    assert next_tier_for_failure("claude-opus-4-8", cfg) is None
-
-
-def test_next_tier_avoids_retrying_same_model() -> None:
-    # If the operator pinned two adjacent slots to the same model id
-    # (a degenerate but legal config), the helper must not propose
-    # the same model as the retry target. The comparison is on the
-    # resolved model id, not the slot.
-    cfg = SimpleNamespace(
-        ollama=SimpleNamespace(
-            haiku_model="same:cloud",
-            sonnet_model="same:cloud",  # operator mistake: same as haiku
-            opus_model="opus-distinct:cloud",
-            fable_model="fable-distinct:cloud",
-        ),
-        openrouter=None,
-    )
-    # fable-distinct -> should try opus-distinct, not same
-    assert (
-        next_tier_for_failure("fable-distinct:cloud", cfg) == "opus-distinct:cloud"
-    )
-    # opus-distinct -> should try sonnet, but sonnet == haiku, and
-    # the comparison is "candidate != model", so sonnet's "same:cloud"
-    # is fine to return for opus-distinct.
-    assert next_tier_for_failure("opus-distinct:cloud", cfg) == "same:cloud"
-
-
-def test_model_supports_vision() -> None:
-    assert model_supports_vision("sonnet") is True
-    assert model_supports_vision("opus") is True
-    assert model_supports_vision("haiku") is True
-    assert model_supports_vision("claude-3-5-sonnet") is True
-    assert model_supports_vision("minimax-m3:cloud") is True
-    assert model_supports_vision("kimi-k2.7-code:cloud") is False
-    assert model_supports_vision("deepseek-v4-flash:0731-cloud") is False
-    assert model_supports_vision("glm-5.2:cloud") is False
-
-
-def test_model_supports_vision_short_circuits_known_ids() -> None:
-    # The pre-flight fast path classifies these without any probe: Claude
-    # tiers, gemini, gpt-4o are known vision-capable; the known-bad
-    # prefixes are known non-vision.
-    assert model_supports_vision("claude-opus-4-8") is True
-    assert model_supports_vision("gemini-2.5-pro") is True
-    assert model_supports_vision("gpt-4o") is True
-    assert model_supports_vision("llama-3.3:cloud") is False
-    assert model_supports_vision("qwen-2.5:cloud") is False
-    assert model_supports_vision("codex-gpt-5.6-terra") is False
-
-
-def test_model_vision_ambiguous() -> None:
-    from ciao.model_tiers import model_vision_ambiguous
-
-    # Unknown ids the table has no token for are ambiguous: the pre-flight
-    # probes them (cached) instead of trusting the fast-path default True.
-    assert model_vision_ambiguous("some-unknown-ollama:cloud") is True
-    assert model_vision_ambiguous("owner/unknown-model") is True
-    # Known-good and known-bad ids are already classified, so they are not
-    # ambiguous and never take the slow path.
-    assert model_vision_ambiguous("sonnet") is False
-    assert model_vision_ambiguous("minimax-m3:cloud") is False
-    # kimi5.2 has no dash, so the "kimi-" token does not match: it is
-    # ambiguous and takes the slow path. kimi-k2.7-code matches and is
-    # classified non-vision without a probe.
-    assert model_vision_ambiguous("kimi5.2:cloud") is True
-    assert model_vision_ambiguous("kimi-k2.7-code:cloud") is False
-    assert model_vision_ambiguous("deepseek-v4-flash:cloud") is False
-    assert model_vision_ambiguous("") is False
-
+def test_next_tier_is_case_and_whitespace_insensitive() -> None:
+    assert next_tier_for_failure("  Opus  ") == "sonnet"

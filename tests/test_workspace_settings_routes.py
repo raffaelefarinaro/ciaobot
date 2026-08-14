@@ -37,7 +37,6 @@ def _client(tmp_path: Path, env_extra: dict[str, str] | None = None):
         "PWA_AUTH_TOKEN": "t",
         "CIAO_WORKSPACE": str(tmp_path),
         "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
-        "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
     }
     env.update(env_extra or {})
     config = CiaoConfig.from_env(env)
@@ -280,30 +279,23 @@ def test_workspace_validation_rejects_bad_name_and_provider(tmp_path):
     assert "provider" in bad_provider.json()["error"]
 
 
-def test_workspace_provider_options_follow_available_backends(tmp_path):
-    client, _config, _pcm = _client(
-        tmp_path,
-        {
-            "CIAO_OLLAMA_API_KEY": "sk-ollama",
-            "OPENROUTER_API_KEY": "sk-or",
-        },
-    )
+def test_workspace_provider_options_are_the_runtime_providers(tmp_path):
+    """The registry is the only source: no backend keys widen this list."""
+    client, _config, _pcm = _client(tmp_path)
 
     data = client.get("/api/workspaces").json()
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
         {"value": "codex", "label": "OpenAI (via Codex)"},
         {"value": "opencode", "label": "opencode"},
-        {"value": "ollama", "label": "Ollama (via Claude Code)"},
-        {"value": "openrouter", "label": "OpenRouter (via Claude Code)"},
     ]
 
     resp = client.post(
         "/api/workspaces",
-        json={"name": "client-a", "default_provider": "openrouter"},
+        json={"name": "client-a", "default_provider": "opencode"},
     )
     assert resp.status_code == 201
-    assert resp.json()["workspaces"][-1]["default_provider"] == "openrouter"
+    assert resp.json()["workspaces"][-1]["default_provider"] == "opencode"
 
 
 def test_claude_ai_mcps_toggle_persists_and_resolves(tmp_path):
@@ -391,58 +383,42 @@ def test_workspace_color_defaults_persists_and_validates(tmp_path):
     assert "color" in bad.json()["error"]
 
 
-def test_provider_config_status_and_write_only_patch(tmp_path, monkeypatch):
-    # This asserts CIAO_OLLAMA_API_KEY reads as unconfigured, so a real one in
-    # the ambient environment (any Ciaobot-spawned shell has it) must not leak
-    # in, and from_env() must not load a real workspace .env over the top.
-    monkeypatch.delenv("CIAO_OLLAMA_API_KEY", raising=False)
+def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
+    """Settings -> Providers has no key fields left to type into.
+
+    Every provider authenticates through its own CLI, so both key maps are
+    empty and a PATCH naming any key is rejected rather than silently written.
+    """
     monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
     env_path = tmp_path / ".env"
     env_path.write_text(
         "PWA_AUTH_TOKEN=t\nCIAO_PUSH_CONTACT=mailto:owner@example.com\nANTHROPIC_API_KEY=sk-anthropic\n",
         encoding="utf-8",
     )
-    client, _config, _pcm = _client(
-        tmp_path,
-        {
-            "ANTHROPIC_API_KEY": "sk-anthropic",
-            "CIAO_OLLAMA_API_KEY": "",
-        },
-    )
+    client, _config, _pcm = _client(tmp_path, {"ANTHROPIC_API_KEY": "sk-anthropic"})
 
     data = client.get("/api/settings/providers").json()
-    assert "ANTHROPIC_API_KEY" not in data["keys"]
+    assert data["keys"] == {}
     # service_keys is empty since voice moved on-device: OPENAI_API_KEY was
     # the only entry, and nothing in the app reads it any more.
     assert data["service_keys"] == {}
-    assert data["keys"]["CIAO_OLLAMA_API_KEY"]["configured"] is False
     assert data["auto_update_github_skills"] is False
     assert "sk-anthropic" not in json.dumps(data)
+    # The connection rows survive: they are how a provider is signed in.
+    assert set(data["connections"]) == {"claude", "codex", "opencode"}
 
     resp = client.patch(
         "/api/settings/providers",
-        json={
-            "keys": {
-                "CIAO_OLLAMA_API_KEY": "sk-ollama",
-                "UNSUPPORTED_KEY": "nope",
-            }
-        },
+        json={"keys": {"OPENROUTER_API_KEY": "sk-or"}},
     )
-
     assert resp.status_code == 400
 
     resp = client.patch(
         "/api/settings/providers",
-        json={
-            "keys": {"CIAO_OLLAMA_API_KEY": "sk-ollama"},
-            "auto_update_github_skills": False
-        },
+        json={"auto_update_github_skills": False},
     )
     assert resp.status_code == 200
-    env_text = env_path.read_text(encoding="utf-8")
-    assert "CIAO_OLLAMA_API_KEY=sk-ollama" in env_text
-    assert "CIAO_AUTO_UPDATE_GITHUB_SKILLS=false" in env_text
-    assert "sk-ollama" not in json.dumps(resp.json())
+    assert "CIAO_AUTO_UPDATE_GITHUB_SKILLS=false" in env_path.read_text(encoding="utf-8")
     assert resp.json()["auto_update_github_skills"] is False
 
 

@@ -79,13 +79,13 @@ def _merge_legacy_tier_pins(
 class AppSettings:
     """One value per overridable knob; empty string = use config default.
 
-    ``provider_routing`` and ``custom_routing`` are the exceptions: the set of
-    runtime providers and of user-defined providers are both dynamic, so they
-    nest a per-provider tier map rather than a scalar per provider and tier.
+    ``provider_routing`` is the exception: the set of runtime providers is
+    dynamic, so it nests a per-provider tier map rather than a scalar per
+    provider and tier.
     """
 
-    # Model used by the chat title generator. Overrides both the Ollama
-    # free-tier title model and the Anthropic fallback when set.
+    # Model used by the chat title generator. Overrides the workspace's
+    # haiku-tier default when set.
     title_model: str = ""
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
@@ -97,28 +97,15 @@ class AppSettings:
     tts_local_voice: str = ""
     # Comma-separated list of models for the adversarial_review MCP tool.
     critique_models: str = ""
-    # Per-backend tier aliases used when a chat asks for haiku/sonnet/opus/fable
-    # while the workspace routes through Ollama or OpenRouter.
-    ollama_haiku_model: str = ""
-    ollama_sonnet_model: str = ""
-    ollama_opus_model: str = ""
-    ollama_fable_model: str = ""
-    openrouter_haiku_model: str = ""
-    openrouter_sonnet_model: str = ""
-    openrouter_opus_model: str = ""
-    openrouter_fable_model: str = ""
-    # Per-runtime-provider tier pins, keyed by provider id then tier. Unlike
-    # Ollama/OpenRouter there is no env-backed default: a missing entry means
-    # the tier resolves through that provider's automatic catalog mapping
-    # (for Codex: luna→haiku, terra→sonnet, sol→opus/fable).
+    # Per-runtime-provider tier pins, keyed by provider id then tier. There is
+    # no env-backed default: a missing entry means the tier resolves through
+    # that provider's automatic catalog mapping (for Codex: luna→haiku,
+    # terra→sonnet, sol→opus/fable).
     #
     # A nested map rather than four scalars per provider, so a new provider
     # costs a registry entry instead of four fields threaded through the
     # settings route and the PWA.
     provider_routing: dict[str, dict[str, str]] | None = None
-    # Per-custom-provider tier routes. Keys are provider ids and values map
-    # haiku/sonnet/opus/fable to concrete ``custom:<id>:<model>`` ids.
-    custom_routing: dict[str, dict[str, str]] | None = None
 
 
 class AppSettingsStore:
@@ -139,7 +126,7 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
-        nested_fields = {"custom_routing", "provider_routing"}
+        nested_fields = {"provider_routing"}
         string_fields = {
             field.name
             for field in fields(AppSettings)
@@ -149,9 +136,6 @@ class AppSettingsStore:
         for key, value in raw.items():
             if key in string_fields and isinstance(value, str):
                 setattr(settings, key, value.strip())
-        custom_routing = _clean_tier_routes(raw.get("custom_routing"))
-        if custom_routing:
-            settings.custom_routing = custom_routing
         provider_routing = _merge_legacy_tier_pins(
             raw, _clean_tier_routes(raw.get("provider_routing"))
         )
@@ -199,7 +183,7 @@ class AppSettingsStore:
         for key, value in changes.items():
             if key not in known:
                 continue
-            if key in {"custom_routing", "provider_routing"}:
+            if key == "provider_routing":
                 if not isinstance(value, dict):
                     raise ValueError(f"{key} must be an object")
                 if any(not isinstance(routes, dict) for routes in value.values()):
@@ -234,17 +218,6 @@ class AppSettingsStore:
         """Operator-pinned model for a provider tier; "" means automatic."""
         return (self.settings.provider_routing or {}).get(provider, {}).get(tier, "")
 
-    def tier_model_defaults(self) -> dict[str, dict[str, str]]:
-        """Return the env-backed tier models captured before overrides."""
-        defaults = self._defaults or {}
-        return {
-            provider: {
-                tier: defaults.get(f"{provider}_{tier}_model", "")
-                for tier in ("haiku", "sonnet", "opus", "fable")
-            }
-            for provider in ("ollama", "openrouter")
-        }
-
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
 
@@ -260,14 +233,6 @@ class AppSettingsStore:
                 "transcription_locale": config.transcription_locale,
                 "tts_local_voice": config.tts_local_voice,
                 "critique_models": config.critique_models,
-                "ollama_haiku_model": config.ollama.haiku_model,
-                "ollama_sonnet_model": config.ollama.sonnet_model,
-                "ollama_opus_model": config.ollama.opus_model,
-                "ollama_fable_model": config.ollama.fable_model,
-                "openrouter_haiku_model": config.openrouter.haiku_model,
-                "openrouter_sonnet_model": config.openrouter.sonnet_model,
-                "openrouter_opus_model": config.openrouter.opus_model,
-                "openrouter_fable_model": config.openrouter.fable_model,
             }
             for descriptor in provider_registry.descriptors():
                 # A config object that predates this provider (or a duck-typed
@@ -289,20 +254,6 @@ class AppSettingsStore:
         )
         config.tts_local_voice = s.tts_local_voice or d["tts_local_voice"]
         config.critique_models = s.critique_models or d["critique_models"]
-        config.ollama = replace(
-            config.ollama,
-            haiku_model=s.ollama_haiku_model or d["ollama_haiku_model"],
-            sonnet_model=s.ollama_sonnet_model or d["ollama_sonnet_model"],
-            opus_model=s.ollama_opus_model or d["ollama_opus_model"],
-            fable_model=s.ollama_fable_model or d["ollama_fable_model"],
-        )
-        config.openrouter = replace(
-            config.openrouter,
-            haiku_model=s.openrouter_haiku_model or d["openrouter_haiku_model"],
-            sonnet_model=s.openrouter_sonnet_model or d["openrouter_sonnet_model"],
-            opus_model=s.openrouter_opus_model or d["openrouter_opus_model"],
-            fable_model=s.openrouter_fable_model or d["openrouter_fable_model"],
-        )
         routing = s.provider_routing or {}
         for descriptor in provider_registry.descriptors():
             current = _tier_settings(config, descriptor)
@@ -321,4 +272,3 @@ class AppSettingsStore:
                     },
                 ),
             )
-        config.custom_routing = s.custom_routing or {}

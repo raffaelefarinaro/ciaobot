@@ -183,7 +183,6 @@ class IsolatedChatServer:
                 "CIAO_BENCHMARK_MODE": "true",
                 "CIAO_AUTO_SYNC_ON_START": "false",
                 "CIAO_AUTO_VAULT_INDEX": "false",
-                "CIAO_OLLAMA_LOCAL_DISCOVERY": "false",
                 "CIAO_INSIGHTS_DISABLED": "1",
                 "CIAO_TRAJECTORIES_DISABLED": "1",
                 "CIAO_SKILL_EVOLUTION_DISABLED": "1",

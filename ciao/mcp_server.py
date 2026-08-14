@@ -1182,7 +1182,7 @@ class CiaoMcpService:
                 title: Short sidebar label, e.g. "Fix #238 NSIRD drop".
                 model: Model for the delegate, e.g. a cheaper or specialized
                     one. Must be in the configured model set for the resolved
-                    provider (Ollama local/cloud, OpenRouter, or Anthropic
+                    provider (Anthropic, OpenAI via Codex, or opencode
                     tier alias). Unknown ids are rejected with `invalid_model`
                     and a list of valid alternatives. Omit to inherit the
                     workspace default.

@@ -16,7 +16,6 @@ from ciao.dependency_review import (
     _extract_json_block,
     _pinned_version,
     _read_baseline,
-    _resolve_model,
     apply_auto_updates,
     build_review_dag,
     check_available_updates,
@@ -39,29 +38,25 @@ def test_dag_structure_is_valid() -> None:
     assert ids == {"read_baseline", "installed", "research", "write_baseline"}
 
 
-def test_resolve_model_uses_ollama_sonnet_override(monkeypatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("CIAO_OLLAMA_SONNET_MODEL", "kimi-k2.7-code:cloud")
-    assert _resolve_model("sonnet") == "kimi-k2.7-code:cloud"
-    assert _resolve_model("opus") == "opus"
+def test_research_node_carries_no_upstream_env(tmp_path: Path, monkeypatch) -> None:
+    """The research subagent inherits the provider's own auth, not injected env.
 
-
-def test_research_node_gets_ollama_routing_env(tmp_path: Path, monkeypatch) -> None:
+    This used to carry ANTHROPIC_BASE_URL/AUTH_TOKEN to point the bundled CLI at
+    a third-party upstream. With every model reached through the provider that
+    owns it, there is nothing to override.
+    """
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
-    monkeypatch.setenv("CIAO_OLLAMA_API_KEY", "sk-cloud")
 
     nodes, _edges, holder = build_review_dag(
         baseline_path=tmp_path / ".runtime" / "dependency_baseline.json",
-        research_model="kimi-k2.7-code:cloud",
+        research_model="sonnet",
         research_timeout_s=10,
     )
     research = next(n for n in nodes if n.id == "research")
-    env = research.payload["env"]
-
-    assert env["ANTHROPIC_BASE_URL"] == "https://ollama.com"
-    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
-    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "kimi-k2.7-code:cloud"
+    assert research.payload["env"] == {}
+    # A tier alias is passed through untouched for the provider to resolve.
+    assert research.model == "sonnet"
 
 
 def test_read_baseline_missing_file_is_empty(tmp_path: Path) -> None:

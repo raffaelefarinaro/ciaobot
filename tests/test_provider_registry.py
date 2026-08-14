@@ -62,11 +62,6 @@ def test_label_falls_back_to_the_raw_id():
     assert provider_registry.label("no-such-provider") == "no-such-provider"
 
 
-def test_custom_runner_ids_are_registered_providers():
-    for runner in provider_registry.custom_runner_ids():
-        assert provider_registry.is_provider(runner)
-
-
 @pytest.mark.parametrize("descriptor", provider_registry.descriptors(), ids=lambda d: d.id)
 def test_every_provider_is_installable_and_inspectable(descriptor):
     """A provider users can pick must also be one they can set up.

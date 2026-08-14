@@ -199,25 +199,17 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
     note about the retry, and a ``model_changed`` event after success.
     """
     pcm = _make_manager(tmp_path)
-    # Pin OllamaSettings to the user's actual config (kimi5.2 = fable,
-    # minimax-m3 = opus) so the retry target resolves to a real model.
-    pcm._config.ollama = pcm._config.ollama.__class__(
-        haiku_model="deepseek-v4-flash:0731-cloud",
-        sonnet_model="kimi-k2.7-code:cloud",
-        opus_model="minimax-m3:cloud",
-        fable_model="kimi5.2:cloud",
-    )
     project = pcm.create_project("tier-fallback", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="tier-fallback-test")
-    # Pin the chat to the Ollama fable model so intended_backend
-    # resolves to "ollama" and the retry path is enabled.
-    chat.model = "kimi5.2:cloud"
+    # A bare tier alias is what makes the chat eligible for the ladder.
+    chat.model = "fable"
     pcm._save()
-    # The image-capability pre-flight would intercept kimi5.2 (known
-    # non-vision) before dispatch. This test exercises the dispatch-time
-    # ladder safety net, so let the turn through as if the pre-flight
-    # approved the model.
-    pcm._model_capable = lambda model, chat: True  # type: ignore[assignment]
+    # This test exercises the dispatch-time ladder, not the pre-flight, so
+    # let the turn through as if the pre-flight approved the model.
+    async def _always_capable(model, chat):
+        return True
+
+    pcm._model_capable = _always_capable  # type: ignore[assignment]
 
     seen_models: list[str] = []
     seen_image_counts: list[int] = []
@@ -225,10 +217,10 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
     async def fake_drive(*, chat_id, request, outcome):
         seen_models.append(request.model)
         seen_image_counts.append(len(request.images or []))
-        if request.model == "kimi5.2:cloud":
+        if request.model == "fable":
             outcome.response_text = "API Error: 400 this model does not support image input"
             outcome.had_error = True
-            outcome.effective_model = "kimi5.2:cloud"
+            outcome.effective_model = "fable"
             evt = ResultEvent(
                 type="result",
                 result=(
@@ -237,7 +229,7 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
                 ),
                 session_id="sess-1",
                 is_error=True,
-                effective_model="kimi5.2:cloud",
+                effective_model="fable",
                 usage={},
                 quota={},
                 cost_usd=0.0,
@@ -281,8 +273,8 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
 
     # First attempt fired on kimi5.2; retry attempted on minimax-m3
     # (configured Ollama opus slot). Both must appear in the seen list.
-    assert seen_models[0] == "kimi5.2:cloud"
-    assert seen_models[-1] == "minimax-m3:cloud"
+    assert seen_models[0] == "fable"
+    assert seen_models[-1] == "opus"
     # Images must be preserved on the retry (not stripped).
     assert seen_image_counts == [1, 1]
     # A status line was emitted between the two attempts so the PWA
@@ -301,29 +293,23 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
     assert "Here is my answer" in final.get("text", "")
     # Successful fallback notifies the PWA of the model switch.
     model_changed = [e for e in events if e.get("type") == "model_changed"]
-    assert model_changed == [{"type": "model_changed", "model": "minimax-m3:cloud"}]
+    assert model_changed == [{"type": "model_changed", "model": "opus"}]
     # And persists it on the chat so the next turn uses the working model.
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
-    assert updated.model == "minimax-m3:cloud"
+    assert updated.model == "opus"
 
 
 async def test_capability_fallback_persists_model_change(tmp_path: Path) -> None:
     """After a successful capability fallback, chat.model must stick."""
     pcm = _make_manager(tmp_path)
-    pcm._config.ollama = pcm._config.ollama.__class__(
-        haiku_model="deepseek-v4-flash:0731-cloud",
-        sonnet_model="kimi-k2.7-code:cloud",
-        opus_model="minimax-m3:cloud",
-        fable_model="kimi5.2:cloud",
-    )
     project = pcm.create_project("tier-fallback-persist", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="persist-model")
-    chat.model = "kimi5.2:cloud"
+    chat.model = "fable"
     pcm._save()
 
     async def fake_drive(*, chat_id, request, outcome):
-        if request.model == "kimi5.2:cloud":
+        if request.model == "fable":
             outcome.response_text = "API Error: 400 this model does not support image input"
             outcome.had_error = True
             outcome.effective_model = request.model
@@ -363,36 +349,33 @@ async def test_capability_fallback_persists_model_change(tmp_path: Path) -> None
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
-    assert updated.model == "minimax-m3:cloud"
+    assert updated.model == "opus"
     # Reloading from disk must keep the persisted model.
     pcm2 = _make_manager(tmp_path)
     reloaded = pcm2.get_chat(chat.chat_id)
     assert reloaded is not None
-    assert reloaded.model == "minimax-m3:cloud"
+    assert reloaded.model == "opus"
 
 
 async def test_capability_fallback_preserves_images(tmp_path: Path) -> None:
     """Capability fallback must retry with the original images intact."""
     pcm = _make_manager(tmp_path)
-    pcm._config.ollama = pcm._config.ollama.__class__(
-        haiku_model="deepseek-v4-flash:0731-cloud",
-        sonnet_model="kimi-k2.7-code:cloud",
-        opus_model="minimax-m3:cloud",
-        fable_model="kimi5.2:cloud",
-    )
     project = pcm.create_project("tier-fallback-images", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="preserve-images")
-    chat.model = "kimi5.2:cloud"
+    chat.model = "fable"
     pcm._save()
     # Bypass the image-capability pre-flight: this test targets the
     # dispatch-time ladder's image preservation, not the pre-flight ask.
-    pcm._model_capable = lambda model, chat: True  # type: ignore[assignment]
+    async def _always_capable(model, chat):
+        return True
+
+    pcm._model_capable = _always_capable  # type: ignore[assignment]
 
     retry_images: list | None = None
 
     async def fake_drive(*, chat_id, request, outcome):
         nonlocal retry_images
-        if request.model == "kimi5.2:cloud":
+        if request.model == "fable":
             outcome.response_text = "API Error: 400 this model does not support image input"
             outcome.had_error = True
             outcome.effective_model = request.model
@@ -448,15 +431,9 @@ async def test_capability_fallback_preserves_images(tmp_path: Path) -> None:
 async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None:
     """Rate limit errors are NOT capability errors — no retry, error surfaces."""
     pcm = _make_manager(tmp_path)
-    pcm._config.ollama = pcm._config.ollama.__class__(
-        haiku_model="deepseek-v4-flash:0731-cloud",
-        sonnet_model="kimi-k2.7-code:cloud",
-        opus_model="minimax-m3:cloud",
-        fable_model="kimi5.2:cloud",
-    )
     project = pcm.create_project("tier-fallback-no-retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="tier-fallback-no-retry-test")
-    chat.model = "kimi5.2:cloud"
+    chat.model = "fable"
     pcm._save()
 
     drive_calls: list[str] = []
@@ -486,7 +463,7 @@ async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None
 
     # _drive_stream is only called once — the retry is gated on
     # is_capability_error, which rejects rate limits.
-    assert drive_calls == ["kimi5.2:cloud"]
+    assert drive_calls == ["fable"]
     result_events = [e for e in events if e.get("type") == "result"]
     assert result_events
     assert result_events[-1].get("is_error") is True
@@ -495,7 +472,7 @@ async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None
     # Chat model stays on the original.
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
-    assert updated.model == "kimi5.2:cloud"
+    assert updated.model == "fable"
 
 
 async def test_connection_error_marks_turn_for_fast_retry(tmp_path: Path) -> None:

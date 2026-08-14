@@ -7,9 +7,8 @@ Runs weekly (Sunday night) via ``.runtime/schedules.json``. The pass:
 2. Groups by skill and flags any skill that appeared in a session whose
    outcome wasn't clean (errors > 0 or user_corrections > 0 or
    outcome != ``success``).
-3. For each flagged skill, runs a small DAG: propose via
-   ``kimi-k2.7-code:cloud`` (resolved through
-   :func:`ciao.providers.routing.routing_routine_env_for_model`) →
+3. For each flagged skill, runs a small DAG: propose via the configured
+   model (``sonnet`` by default, run through whichever provider owns it) →
    semantic check (LLM-as-judge, same model) → test gate (pytest on
    ``tests/test_<skill>.py``) → write a draft proposal Markdown. The DAG
    helper is in :mod:`ciao.dag`; per-node timing lands in
@@ -50,8 +49,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ciao.providers.oneshot import run_oneshot
-from ciao.providers.ollama import OllamaSettings, routine_env_for_model
-from ciao.providers.routing import routing_routine_env_for_model
 from ciao.trajectory_builder import (
     DEFAULT_RETENTION_MONTHS,
     list_trajectories,
@@ -434,7 +431,6 @@ async def propose_skill_edit(
     skill_path: Path,
     trajectories: list[dict[str, Any]],
     *,
-    env: dict[str, str] | None = None,
     model: str,
     timeout_s: float = 180.0,
     force_trim: bool = False,
@@ -474,7 +470,6 @@ async def propose_skill_edit(
             prompt,
             system_prompt=system_prompt,
             model=model,
-            env=env,
             timeout_s=timeout_s,
         )
     except (TimeoutError, OSError, RuntimeError) as exc:
@@ -495,7 +490,6 @@ async def passes_semantic_check(
     skill_path: Path,
     proposal_text: str,
     *,
-    env: dict[str, str] | None = None,
     model: str,
     timeout_s: float = 60.0,
 ) -> tuple[bool, str]:
@@ -523,7 +517,6 @@ async def passes_semantic_check(
             prompt,
             system_prompt=SEMANTIC_CHECK_SYSTEM_PROMPT,
             model=model,
-            env=env,
             timeout_s=timeout_s,
         )
     except (TimeoutError, OSError, RuntimeError) as exc:
@@ -622,7 +615,6 @@ async def _process_skill_dag(
     skill_trajectories: list[dict[str, Any]],
     *,
     output_dir: Path,
-    env: dict[str, str] | None,
     model: str,
     now: datetime,
     enable_test_gate: bool,
@@ -653,7 +645,6 @@ async def _process_skill_dag(
     proposal = await propose_skill_edit(
         skill_path,
         skill_trajectories,
-        env=env,
         model=model,
         force_trim=over_cap,
     )
@@ -665,7 +656,6 @@ async def _process_skill_dag(
         semantic_ok, semantic_reason = await passes_semantic_check(
             skill_path,
             proposal,
-            env=env,
             model=model,
         )
         semantic_verdict = "PRESERVED" if semantic_ok else "DRIFTED"
@@ -779,9 +769,7 @@ async def run_evolution_pass(
     since_days: int = 7,
     skills_root: Path | None = None,
     output_dir: Path | None = None,
-    env: dict[str, str] | None = None,
-    ollama_settings: OllamaSettings | None = None,
-    model: str = "kimi-k2.7-code:cloud",
+    model: str = "sonnet",
     min_sessions: int = 1,
     enable_test_gate: bool = False,
     enable_semantic_check: bool = True,
@@ -811,8 +799,6 @@ async def run_evolution_pass(
     ``skillevo:<skill>:<node>``.
     """
     output_dir = output_dir or _default_proposals_dir()
-    if env is None:
-        env = routine_env_for_model(model, ollama_settings) if ollama_settings is not None else {}
     now = now or datetime.now(UTC)
     since = now - timedelta(days=since_days)
 
@@ -850,7 +836,6 @@ async def run_evolution_pass(
                     skill_path,
                     skill_trajectories,
                     output_dir=output_dir,
-                    env=env,
                     model=model,
                     now=now,
                     enable_test_gate=enable_test_gate,
@@ -916,7 +901,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--model",
         default=None,
-        help="model to call for proposals (Ollama / OpenRouter / Anthropic). Defaults to the runtime skill_evolution_model setting.",
+        help="model to call for proposals. Defaults to the runtime skill_evolution_model setting.",
     )
     parser.add_argument(
         "--min-sessions",
@@ -1012,13 +997,13 @@ def _main(argv: list[str] | None = None) -> int:
     with job_runs.track_sync(
         "skill_evolution", "Skill evolution", model=args.model
     ) as run:
+        from ciao import native_sidecar
         from ciao.config import CiaoConfig
-        from ciao.providers.routing import resolve_with_fallback
         cfg = CiaoConfig.from_env()
         if args.model is None:
             args.model = os.environ.get("CIAO_MODEL") or cfg.claude_default_model or "sonnet"
-        args.model, env, note = resolve_with_fallback(
-            args.model, cfg, default_model=cfg.claude_default_model
+        args.model, note = native_sidecar.resolve_model_or_fallback(
+            args.model, default_model=cfg.claude_default_model
         )
         if note:
             run.extra["fallback"] = note
@@ -1028,7 +1013,6 @@ def _main(argv: list[str] | None = None) -> int:
                 since_days=args.since_days,
                 skills_root=args.skills_root,
                 output_dir=args.output_dir,
-                env=env,
                 model=args.model,
                 min_sessions=args.min_sessions,
                 enable_test_gate=args.test_gate,

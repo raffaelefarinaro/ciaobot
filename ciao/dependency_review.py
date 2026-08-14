@@ -14,7 +14,7 @@ Release research is done *before* the model call: Python fetches the latest
 registry versions and GitHub release notes for a focused list of curated tools,
 then asks the ``subagent`` node to synthesize the structured baseline update.
 This avoids asking the bundled ``claude -p`` process to browse the web or spawn
-its own Agent calls, which is unreliable in headless/Ollama-routed environments.
+its own Agent calls, which is unreliable in headless environments.
 PyPI/npm remain authoritative for installable package versions. The DAG
 isolates the deterministic edges around it (load the baseline, persist the
 merged baseline) so a research hiccup can't corrupt
@@ -736,28 +736,6 @@ def apply_auto_updates(
     return applied
 
 
-def _resolve_model(requested: str) -> str:
-    if requested != "sonnet":
-        return requested
-    override = os.environ.get("CIAO_OLLAMA_SONNET_MODEL", "").strip()
-    if override:
-        return override
-    return requested
-
-
-def _routing_env_for_research_model(model: str) -> dict[str, str]:
-    """Return provider env overrides for the depcheck research subprocess."""
-    try:
-        from ciao.config import CiaoConfig
-        from ciao.providers.routing import routing_env_for_model
-
-        config = CiaoConfig.from_env()
-        return routing_env_for_model(model, config)
-    except Exception as exc:  # noqa: BLE001 - depcheck can still run Anthropic
-        logger.debug("depcheck routing env unavailable for %s: %s", model, exc)
-        return {}
-
-
 def _read_baseline(path: Path) -> dict[str, Any]:
     try:
         baseline: dict[str, Any] = json.loads(path.read_text())
@@ -988,7 +966,6 @@ def build_review_dag(
     from ciao.providers.claude import get_bundled_claude_path
     import shutil
     cli_path = get_bundled_claude_path() or shutil.which("claude") or "claude"
-    research_env = _routing_env_for_research_model(research_model)
 
     nodes: list[Node] = [
         Node(id="read_baseline", kind="gate", payload={"fn": read_baseline_node}),
@@ -998,7 +975,7 @@ def build_review_dag(
             kind="subagent",
             model=research_model,
             timeout_s=research_timeout_s,
-            payload={"prompt": research_prompt, "cli": cli_path, "env": research_env},
+            payload={"prompt": research_prompt, "cli": cli_path, "env": {}},
         ),
         Node(id="write_baseline", kind="gate", payload={"fn": write_baseline_node}),
     ]
@@ -1019,7 +996,7 @@ def run_review(
     baseline_path = baseline_path or _DEFAULT_BASELINE
     nodes, edges, holder = build_review_dag(
         baseline_path=baseline_path,
-        research_model=_resolve_model(research_model),
+        research_model=research_model,
         research_timeout_s=research_timeout_s,
     )
     ctx = run_dag(nodes, edges, job="dependency_review", label="depcheck")
@@ -1049,12 +1026,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--model",
         default="sonnet",
-        help=(
-            "model for the research subagent (claude -p). The literal "
-            "'sonnet' is rewritten to $CIAO_OLLAMA_SONNET_MODEL when set, "
-            "so scheduling with --model sonnet reaches the configured "
-            "Ollama tier instead of the bundled CLI's sonnet-4.6 alias."
-        ),
+        help="model for the research subagent (claude -p)",
     )
     parser.add_argument("--timeout", type=float, default=1800.0, help="research node timeout (s)")
     parser.add_argument(
@@ -1063,7 +1035,7 @@ def _main(argv: list[str] | None = None) -> int:
         help="validate + print the DAG structure without calling the model",
     )
     args = parser.parse_args(argv)
-    resolved_model = _resolve_model(args.model)
+    resolved_model = args.model
 
     nodes, edges, _holder = build_review_dag(
         baseline_path=args.baseline,

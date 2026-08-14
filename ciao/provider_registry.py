@@ -1,10 +1,9 @@
 """Descriptors for the runtime agent providers Ciaobot can run.
 
 A *runtime provider* is a CLI or SDK that executes a whole agentic turn:
-``claude``, ``codex``, and ``opencode`` today. Ollama, OpenRouter, and
-user-defined custom endpoints are not providers in this sense — they are
-model-routing backends that run *through* one of these runners via environment
-injection (see ``ciao/providers/routing.py`` and ``ciao/custom_providers.py``).
+``claude``, ``codex``, and ``opencode``. Every model Ciaobot can run belongs to
+one of them, and each authenticates itself -- there is no separate notion of a
+model-routing backend layered underneath.
 
 This module is the single enumeration of that set. It deliberately holds only
 data plus dotted import paths, and imports nothing from the rest of the app, so
@@ -71,13 +70,10 @@ class ProviderDescriptor:
     # default model for this provider, when it has one. Takes precedence over
     # ``default_model``; empty means the provider has no such setting.
     default_model_config_key: str = ""
-    # Model-routing bucket for such a workspace. Empty means "no bucket": the
-    # provider serves its own models and the Anthropic/Ollama/OpenRouter
-    # bucket vocabulary does not apply.
+    # Vestigial: the model-routing bucket vocabulary is retired. Still emitted
+    # on ``/api/models`` because the PWA reads its emptiness to mean "this
+    # provider serves its own catalog".
     model_bucket: str = ""
-    # Whether a user-defined OpenAI/Anthropic-compatible endpoint can name this
-    # provider as its runner (see ``ciao/custom_providers.py``).
-    custom_runner: bool = False
 
     def factory(self) -> type["BaseProvider"]:
         """Import and return the provider class."""
@@ -133,7 +129,6 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         thinking_levels=("low", "medium", "high", "xhigh", "max"),
         default_model_config_key="claude_default_model",
         model_bucket="work",
-        custom_runner=True,
     ),
     ProviderDescriptor(
         id="codex",
@@ -150,7 +145,6 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         # model. This union is the validation fallback when discovery is
         # unavailable.
         thinking_levels=("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
-        custom_runner=True,
     ),
     ProviderDescriptor(
         id="opencode",
@@ -169,7 +163,6 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         thinking_levels=("low", "medium", "high", "max"),
         # Models come from the signed-in accounts' catalog; an empty default
         # lets opencode pick, and the chat records what it resolved.
-        custom_runner=False,
     ),
 )
 
@@ -215,8 +208,3 @@ def label(provider: str, *, short: bool = False) -> str:
 def thinking_levels() -> dict[str, tuple[str, ...]]:
     """Native thinking/reasoning levels keyed by provider id."""
     return {item.id: item.thinking_levels for item in _DESCRIPTORS if item.thinking_levels}
-
-
-def custom_runner_ids() -> tuple[str, ...]:
-    """Providers a custom OpenAI/Anthropic-compatible endpoint may run through."""
-    return tuple(item.id for item in _DESCRIPTORS if item.custom_runner)

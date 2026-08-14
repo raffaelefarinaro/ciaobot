@@ -786,9 +786,15 @@ def test_setup_url_reads_port_from_env(tmp_path: Path, capsys) -> None:
 
 
 def test_auth_print_only_outputs_terminal_command(capsys) -> None:
-    assert cli.main(["auth", "ollama", "--print-only"]) == 0
+    assert cli.main(["auth", "opencode", "--print-only"]) == 0
 
-    assert capsys.readouterr().out.strip() == "ollama signin"
+    assert capsys.readouterr().out.strip().endswith("auth login")
+
+
+def test_auth_rejects_a_non_runtime_provider(capsys) -> None:
+    """Only the three runtime providers have a login; nothing else is offered."""
+    with pytest.raises(SystemExit):
+        cli.main(["auth", "ollama", "--print-only"])
 
 
 def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:

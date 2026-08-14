@@ -191,7 +191,7 @@ def test_resolve_title_model_uses_workspace_haiku_when_automatic() -> None:
 
     config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "CIAO_OLLAMA_API_KEY": "sk-cloud"})
     config.title_model_override = ""
-    assert resolve_title_model(config, "personal") == config.ollama.haiku_model
+    assert resolve_title_model(config, "personal") == "haiku"
     assert resolve_title_model(config, "work") == "haiku"
 
 

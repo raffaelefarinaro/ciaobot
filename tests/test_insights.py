@@ -10,7 +10,6 @@ from unittest.mock import patch
 import pytest
 
 from ciao import insights, native_sidecar
-from ciao.providers.ollama import OllamaSettings
 
 
 # ── filter_session_jsonl ─────────────────────────────────────────────────
@@ -173,17 +172,9 @@ def test_filter_drops_sidechain_entries(
 # ── extract_and_append ───────────────────────────────────────────────────
 
 
-def _ollama() -> OllamaSettings:
-    return OllamaSettings(
-        models=(),
-        base_url="http://localhost:11434",
-        api_key="ollama",
-    )
-
-
 def _config():
     from ciao.config import CiaoConfig
-    return CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "CIAO_OLLAMA_API_KEY": "sk-cloud"})
+    return CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
 
 
 def test_extract_appends_section_when_archive_exists(tmp_path: Path) -> None:
@@ -503,7 +494,7 @@ def test_resolve_insights_model_uses_override() -> None:
 def test_resolve_insights_model_uses_workspace_sonnet_when_automatic() -> None:
     config = _config()
     config.insights_model_override = ""
-    assert insights.resolve_insights_model(config, "personal") == config.ollama.sonnet_model
+    assert insights.resolve_insights_model(config, "personal") == "sonnet"
     assert insights.resolve_insights_model(config, "work") == "sonnet"
 
 

@@ -172,15 +172,6 @@ def _cli_version(binary: str) -> str:
     return lines[-1] if lines else "installed"
 
 
-def _ollama_daemon_ready(local_url: str) -> bool:
-    url = local_url.rstrip("/") + "/api/tags"
-    try:
-        with urllib.request.urlopen(url, timeout=0.4) as response:
-            return 200 <= getattr(response, "status", 200) < 300
-    except (OSError, urllib.error.URLError, TimeoutError):
-        return False
-
-
 def discover_claude_system_skills() -> list[str]:
     """Discover enabled Claude Code plugins via CLI, falling back to installed_plugins.json."""
     global _claude_skills_cache
@@ -601,51 +592,6 @@ def _claude_oauth_account(config_path: Path) -> str:
     return "oauthAccount present"
 
 
-def _ollama_status(config: Any, env: Mapping[str, str]) -> dict[str, Any]:
-    if env.get("CIAO_OLLAMA_API_KEY", "").strip():
-        return _provider(
-            name="ollama",
-            ok=True,
-            auth="api_key",
-            command="ciao auth ollama",
-            detail="CIAO_OLLAMA_API_KEY is set.",
-        )
-    local_url = getattr(getattr(config, "ollama", None), "local_url", "http://localhost:11434")
-    if _ollama_daemon_ready(local_url):
-        return _provider(
-            name="ollama",
-            ok=True,
-            auth="local_daemon",
-            command="ciao auth ollama",
-            detail=f"{local_url.rstrip('/')}/api/tags responded.",
-        )
-    return _provider(
-        name="ollama",
-        ok=False,
-        auth="missing",
-        command="ciao auth ollama",
-        detail="Set CIAO_OLLAMA_API_KEY or sign in to a local Ollama daemon.",
-    )
-
-
-def _openrouter_status(env: Mapping[str, str]) -> dict[str, Any]:
-    if env.get("OPENROUTER_API_KEY", "").strip():
-        return _provider(
-            name="openrouter",
-            ok=True,
-            auth="api_key",
-            command="OPENROUTER_API_KEY=sk-or-...",
-            detail="OPENROUTER_API_KEY is set.",
-        )
-    return _provider(
-        name="openrouter",
-        ok=False,
-        auth="missing",
-        command="OPENROUTER_API_KEY=sk-or-...",
-        detail="Create an OpenRouter key and add OPENROUTER_API_KEY to .env.",
-    )
-
-
 def _workspace_guides_linked(workspace_root: Path) -> bool:
     """True when AGENTS.md resolves to CLAUDE.md so both CLIs share one guide."""
     claude_guide = workspace_root / "CLAUDE.md"
@@ -759,8 +705,6 @@ def setup_status(
     }
     # Routing backends, not runtime providers: they have no provider module and
     # run through Claude Code, but Settings still shows their credential state.
-    providers["ollama"] = _ollama_status(config, source)
-    providers["openrouter"] = _openrouter_status(source)
     configured = all(row["ok"] for row in checks if row["required"])
     provider_ready = any(row["ok"] for row in providers.values())
     bootstrap = bool(getattr(config, "bootstrap_mode", False))

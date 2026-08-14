@@ -6,7 +6,7 @@ turn on a ``model_capability_question``; the PWA answers with
 ``capability_response`` (switch / picker / cancel). This suite drives the
 full flow through ``ProjectChatManager`` exactly like the tier-fallback
 tests in ``test_chat_retry.py``, plus unit tests for the two slow-path
-probes (Ollama ``/api/show`` with its 24h cache, OpenRouter catalog).
+capability source (opencode's own model catalog).
 """
 
 from __future__ import annotations
@@ -42,16 +42,36 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
-def _pin_ollama(pcm: ProjectChatManager) -> None:
-    # The user's actual config: fable=kimi5.2, opus=minimax-m3,
-    # sonnet=kimi-k2.7-code, haiku=deepseek-v4-flash. Only minimax-m3 is
-    # vision-capable, so it is the sole candidate for a non-vision chat.
-    pcm._config.ollama = pcm._config.ollama.__class__(
-        haiku_model="deepseek-v4-flash:cloud",
-        sonnet_model="kimi-k2.7-code:cloud",
-        opus_model="minimax-m3:cloud",
-        fable_model="kimi5.2:cloud",
+# opencode is bring-your-own-provider, so it is the only provider whose catalog
+# can contain a model that cannot accept an image. `images` mirrors what
+# opencode reports in `capabilities.input.image`; an absent key means "opencode
+# did not say", which must read as capable rather than as a refusal.
+_TEXT_ONLY = "test/text-only"
+_CATALOG = [
+    {"model": _TEXT_ONLY, "label": "Text Only (test)", "variants": [], "images": False},
+    {"model": "test/sees", "label": "Sees (test)", "variants": [], "images": True},
+    {"model": "test/also-sees", "label": "Also Sees (test)", "variants": [], "images": True},
+    {"model": "test/third", "label": "Third (test)", "variants": [], "images": True},
+    {"model": "test/unstated", "label": "Unstated (test)", "variants": []},
+]
+
+
+def _stub_catalog(monkeypatch, catalog=None) -> None:
+    async def fake_catalog(cls, workspace_root, *, force=False):
+        return [dict(row) for row in (_CATALOG if catalog is None else catalog)]
+
+    from ciao.providers.opencode import OpencodeProvider
+
+    monkeypatch.setattr(
+        OpencodeProvider, "model_catalog", classmethod(fake_catalog)
     )
+
+
+def _opencode_chat(pcm: ProjectChatManager, chat, model: str = _TEXT_ONLY) -> None:
+    """Point a chat at an opencode model, bypassing the picker's validation."""
+    chat.provider = "opencode"
+    chat.model = model
+    pcm._save()
 
 
 def _img(tmp_path: Path) -> ImageAttachment:
@@ -95,19 +115,18 @@ async def _consume_answering(stream, pcm, chat_id, responder) -> list[dict]:
 # ── Pre-flight flow through ProjectChatManager ─────────────────────────
 
 
-async def test_preflight_question_shape_and_cancel(tmp_path: Path) -> None:
+async def test_preflight_question_shape_and_cancel(tmp_path: Path, monkeypatch) -> None:
     """A non-vision model with images pauses on a well-formed question.
 
-    The current model leads the candidates as the disabled entry; the only
-    same-backend vision neighbor is the opus slot (minimax-m3). Cancel
-    closes the turn with the system bubble, no dispatch, no result.
+    The current model leads the candidates as the disabled entry, followed by
+    the models opencode states accept images (capped at three). Cancel closes
+    the turn with the system bubble: no dispatch, no result.
     """
+    _stub_catalog(monkeypatch)
     pcm = _make_manager(tmp_path)
-    _pin_ollama(pcm)
     project = pcm.create_project("cap", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="cap-test")
-    chat.model = "deepseek-v4-flash:cloud"  # known non-vision (haiku slot)
-    pcm._save()
+    _opencode_chat(pcm, chat)
 
     drive_calls: list[str] = []
 
@@ -134,21 +153,20 @@ async def test_preflight_question_shape_and_cancel(tmp_path: Path) -> None:
     assert questions, f"expected a capability question, got {events}"
     q = questions[0]
     assert q["missing"] == "image_input"
-    assert q["current_model"] == "deepseek-v4-flash:cloud"
+    assert q["current_model"] == _TEXT_ONLY
     assert q["timeout_s"] == 30
     assert q["candidates"][0] == {
-        "id": "deepseek-v4-flash:cloud",
-        "label": "deepseek-v4-flash:cloud",
+        "id": _TEXT_ONLY,
+        "label": _TEXT_ONLY,
         "disabled": True,
     }
-    # The fable slot (kimi5.2) is not in the known-bad prefix set ("kimi-"
-    # needs the dash), so it fast-paths as vision-capable and is offered;
-    # the sonnet slot (kimi-k2.7-code) is known non-vision and skipped. A
-    # wrong guess here is caught at dispatch time by the capability-error
-    # ladder, exactly like the tier-fallback tests exercise.
+    # Only models opencode positively states accept images are offered, capped
+    # at three. `test/unstated` is omitted: an unknown answer is good enough to
+    # let the current turn through, but not to recommend a switch.
     assert [c["id"] for c in q["candidates"][1:]] == [
-        "kimi5.2:cloud",
-        "minimax-m3:cloud",
+        "test/sees",
+        "test/also-sees",
+        "test/third",
     ]
     assert all(c["supports_vision"] is True for c in q["candidates"][1:])
     # No dispatch happened, and the turn ended without a result.
@@ -160,18 +178,17 @@ async def test_preflight_question_shape_and_cancel(tmp_path: Path) -> None:
     assert any(_CAPABILITY_IMAGE_MSG in (e.get("message") or "") for e in status)
 
 
-async def test_preflight_switch_redispatches_on_picked_model(tmp_path: Path) -> None:
+async def test_preflight_switch_redispatches_on_picked_model(tmp_path: Path, monkeypatch) -> None:
     """Switch answers re-dispatch the turn on the picked model.
 
     The chat model is persisted, a ``model_changed`` event is emitted, and
     the request is rebuilt against the new model before dispatch.
     """
+    _stub_catalog(monkeypatch)
     pcm = _make_manager(tmp_path)
-    _pin_ollama(pcm)
     project = pcm.create_project("cap", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="cap-test")
-    chat.model = "deepseek-v4-flash:cloud"
-    pcm._save()
+    _opencode_chat(pcm, chat)
 
     seen: list[str] = []
 
@@ -196,37 +213,36 @@ async def test_preflight_switch_redispatches_on_picked_model(tmp_path: Path) -> 
                 chat.chat_id,
                 request_id=q["request_id"],
                 action="switch",
-                model_id="minimax-m3:cloud",
+                model_id="test/sees",
             ),
         ),
         timeout=2.0,
     )
 
     # Dispatched exactly once, on the picked model.
-    assert seen == ["minimax-m3:cloud"]
+    assert seen == ["test/sees"]
     model_changed = [e for e in events if e.get("type") == "model_changed"]
-    assert model_changed == [{"type": "model_changed", "model": "minimax-m3:cloud"}]
+    assert model_changed == [{"type": "model_changed", "model": "test/sees"}]
     results = [e for e in events if e.get("type") == "result"]
     assert len(results) == 1
     assert results[0].get("is_error") is False
     # The switch persisted on the chat for the next turn.
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
-    assert updated.model == "minimax-m3:cloud"
+    assert updated.model == "test/sees"
 
 
-async def test_preflight_picker_closes_cleanly(tmp_path: Path) -> None:
+async def test_preflight_picker_closes_cleanly(tmp_path: Path, monkeypatch) -> None:
     """Picker answers end the turn with no result and no bubble.
 
     The PWA opens the model selector and the user re-sends through the
     normal path, so this turn just stops.
     """
+    _stub_catalog(monkeypatch)
     pcm = _make_manager(tmp_path)
-    _pin_ollama(pcm)
     project = pcm.create_project("cap", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="cap-test")
-    chat.model = "deepseek-v4-flash:cloud"
-    pcm._save()
+    _opencode_chat(pcm, chat)
 
     drive_calls: list[str] = []
 
@@ -262,12 +278,11 @@ async def test_preflight_timeout_closes_turn_with_bubble(tmp_path: Path, monkeyp
     turn ends with no dispatch and no result event.
     """
     monkeypatch.setattr("ciao.web.project_chats.CAPABILITY_QUESTION_TIMEOUT_S", 0.1)
+    _stub_catalog(monkeypatch)
     pcm = _make_manager(tmp_path)
-    _pin_ollama(pcm)
     project = pcm.create_project("cap", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="cap-test")
-    chat.model = "deepseek-v4-flash:cloud"
-    pcm._save()
+    _opencode_chat(pcm, chat)
 
     drive_calls: list[str] = []
 
@@ -287,14 +302,13 @@ async def test_preflight_timeout_closes_turn_with_bubble(tmp_path: Path, monkeyp
     assert not any(e.get("type") == "result" for e in events)
 
 
-async def test_preflight_skips_without_images(tmp_path: Path) -> None:
+async def test_preflight_skips_without_images(tmp_path: Path, monkeypatch) -> None:
     """Text-only turns never hit the pre-flight, even on a non-vision model."""
+    _stub_catalog(monkeypatch)
     pcm = _make_manager(tmp_path)
-    _pin_ollama(pcm)
     project = pcm.create_project("cap", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="cap-test")
-    chat.model = "deepseek-v4-flash:cloud"
-    pcm._save()
+    _opencode_chat(pcm, chat)
 
     seen: list[str] = []
 
@@ -312,18 +326,17 @@ async def test_preflight_skips_without_images(tmp_path: Path) -> None:
     stream = pcm.start_stream(chat.chat_id, "hello there")
     events = await asyncio.wait_for(_consume(stream), timeout=2.0)
 
-    assert seen == ["deepseek-v4-flash:cloud"]
+    assert seen == [_TEXT_ONLY]
     assert not any(e.get("type") == "model_capability_question" for e in events)
 
 
-async def test_preflight_unattended_never_blocks(tmp_path: Path) -> None:
+async def test_preflight_unattended_never_blocks(tmp_path: Path, monkeypatch) -> None:
     """Scheduled turns skip the question and close with the bubble instead."""
+    _stub_catalog(monkeypatch)
     pcm = _make_manager(tmp_path)
-    _pin_ollama(pcm)
     project = pcm.create_project("cap", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="cap-test")
-    chat.model = "deepseek-v4-flash:cloud"
-    pcm._save()
+    _opencode_chat(pcm, chat)
 
     drive_calls: list[str] = []
 
@@ -346,146 +359,3 @@ async def test_preflight_unattended_never_blocks(tmp_path: Path) -> None:
 
 
 # ── Slow-path probes ────────────────────────────────────────────────────
-
-
-def test_ollama_vision_probe_cached_24h(monkeypatch) -> None:
-    """The /api/show probe runs once; the answer is cached 24h per model."""
-    from ciao.providers import ollama as ollama_mod
-    from ciao.providers.ollama import vision_support_ollama
-
-    calls: list[str] = []
-
-    class FakeResponse:
-        def __init__(self, payload: dict) -> None:
-            self._payload = payload
-
-        def read(self) -> bytes:
-            return json.dumps(self._payload).encode("utf-8")
-
-        def __enter__(self) -> FakeResponse:
-            return self
-
-        def __exit__(self, *exc) -> Literal[False]:
-            return False
-
-    def fake_urlopen(req, timeout=None):
-        calls.append(req.full_url)
-        return FakeResponse({"model_info": {"vision.clip": 1}})
-
-    monkeypatch.setattr(ollama_mod.urllib.request, "urlopen", fake_urlopen)
-    # A cloud-routed id needs a real cloud key to be routable.
-    settings = ollama_mod.OllamaSettings(
-        base_url="https://ollama.com",
-        api_key="sk-cloud",
-        haiku_model="probe-model:cloud",
-        sonnet_model="probe-model:cloud",
-        opus_model="probe-model:cloud",
-        fable_model="probe-model:cloud",
-    )
-    try:
-        assert vision_support_ollama("probe-model:cloud", settings) is True
-        assert vision_support_ollama("probe-model:cloud", settings) is True
-    finally:
-        ollama_mod._VISION_CACHE.clear()
-    assert len(calls) == 1, "second call must be served from the 24h cache"
-    assert calls[0].endswith("/api/show")
-
-
-def test_ollama_vision_probe_unreachable_defaults_to_capable(monkeypatch) -> None:
-    """A failed probe logs and returns None; the pre-flight treats None as
-    capable so an image turn is never blocked on a dead daemon."""
-    from ciao.providers import ollama as ollama_mod
-    from ciao.providers.ollama import vision_support_ollama
-
-    def fake_urlopen(req, timeout=None):
-        raise OSError("connection refused")
-
-    monkeypatch.setattr(ollama_mod.urllib.request, "urlopen", fake_urlopen)
-    settings = ollama_mod.OllamaSettings(
-        base_url="https://ollama.com",
-        api_key="sk-cloud",
-        haiku_model="probe-model:cloud",
-        sonnet_model="probe-model:cloud",
-        opus_model="probe-model:cloud",
-        fable_model="probe-model:cloud",
-    )
-    try:
-        assert vision_support_ollama("probe-model:cloud", settings) is None
-    finally:
-        ollama_mod._VISION_CACHE.clear()
-
-
-def test_openrouter_catalog_flags_vision(monkeypatch) -> None:
-    """discover_models extracts vision support from the catalog, and
-    vision_support_openrouter reads it back without a refresh of its own."""
-    from ciao.providers import openrouter as or_mod
-    from ciao.providers.openrouter import (
-        discover_models,
-        vision_support_openrouter,
-    )
-
-    payload = {
-        "data": [
-            {
-                "id": "anthropic/claude-sonnet-4-6",
-                "architecture": {
-                    "modality": "text+image",
-                    "input_modalities": ["text", "image"],
-                },
-            },
-            {
-                "id": "deepseek/deepseek-chat",
-                "architecture": {"modality": "text"},
-            },
-            {"id": "no-arch-model"},
-        ]
-    }
-
-    class FakeResponse:
-        def read(self) -> bytes:
-            return json.dumps(payload).encode("utf-8")
-
-        def __enter__(self) -> FakeResponse:
-            return self
-
-        def __exit__(self, *exc) -> Literal[False]:
-            return False
-
-    def fake_urlopen(req, timeout=None):
-        return FakeResponse()
-
-    monkeypatch.setattr(or_mod.urllib.request, "urlopen", fake_urlopen)
-    settings = or_mod.OpenRouterSettings(api_key="sk-test")
-    ids, vision = discover_models(settings)
-    assert "anthropic/claude-sonnet-4-6" in ids
-    assert vision["anthropic/claude-sonnet-4-6"] is True
-    assert vision["deepseek/deepseek-chat"] is False
-    assert vision["no-arch-model"] is False
-    assert vision_support_openrouter("anthropic/claude-sonnet-4-6", settings) is True
-    assert vision_support_openrouter("deepseek/deepseek-chat", settings) is False
-    # Unknown ids (not in the last catalog fetch) are None, not False.
-    assert vision_support_openrouter("unknown/model", settings) is None
-
-    # A subsequent refresh replaces the map, so a removed model cannot keep
-    # a stale vision answer from the previous catalog.
-    second_payload = {
-        "data": [{"id": "new/model", "architecture": {"modality": "text"}}]
-    }
-
-    class SecondResponse:
-        def read(self) -> bytes:
-            return json.dumps(second_payload).encode("utf-8")
-
-        def __enter__(self) -> SecondResponse:
-            return self
-
-        def __exit__(self, *exc) -> Literal[False]:
-            return False
-
-    monkeypatch.setattr(
-        or_mod.urllib.request,
-        "urlopen",
-        lambda req, timeout=None: SecondResponse(),
-    )
-    discover_models(settings)
-    assert vision_support_openrouter("anthropic/claude-sonnet-4-6", settings) is None

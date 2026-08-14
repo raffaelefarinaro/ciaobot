@@ -263,28 +263,6 @@ def test_setup_status_reports_the_resolved_cli_path(tmp_path) -> None:
     assert claude["cli_path"] == "/usr/local/bin/claude"
 
 
-def test_setup_status_detects_ollama_cloud_key_or_local_daemon(tmp_path, monkeypatch) -> None:
-    config = _config(tmp_path, {"CIAO_OLLAMA_API_KEY": "sk-ollama"})
-    data = setup_status(config, env={"CIAO_OLLAMA_API_KEY": "sk-ollama"})
-    assert data["providers"]["ollama"]["ok"] is True
-    assert data["providers"]["ollama"]["auth"] == "api_key"
-
-    monkeypatch.setattr("ciao.setup_status._ollama_daemon_ready", lambda url: True)
-    config = _config(tmp_path)
-    data = setup_status(config, env={})
-    assert data["providers"]["ollama"]["ok"] is True
-    assert data["providers"]["ollama"]["auth"] == "local_daemon"
-
-
-def test_setup_status_detects_openrouter_key(tmp_path) -> None:
-    config = _config(tmp_path, {"OPENROUTER_API_KEY": "sk-or-test"})
-
-    data = setup_status(config, env={"OPENROUTER_API_KEY": "sk-or-test"})
-
-    assert data["providers"]["openrouter"]["ok"] is True
-    assert data["providers"]["openrouter"]["auth"] == "api_key"
-
-
 def test_setup_status_includes_codex_subscription_login(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         "ciao.setup_status.codex_login_status",

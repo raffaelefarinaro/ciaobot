@@ -228,25 +228,6 @@ def test_legacy_entity_owner_is_the_workspace_that_owns_the_global_vault(
     assert config.legacy_entity_workspace() == "research"
 
 
-def test_model_bucket_fallback_does_not_key_on_the_name_work(tmp_path: Path) -> None:
-    """An unregistered name has no bucket of its own; don't guess from the name."""
-    config = CiaoConfig(
-        pwa_auth_token="test-token",
-        workspace_root=tmp_path,
-        state_path=tmp_path / ".runtime" / "state.json",
-        media_root=tmp_path / ".runtime" / "media",
-        workspaces={
-            "research": WorkspaceConfig(
-                name="research", vault_root="research", model_bucket="openrouter"
-            ),
-        },
-    )
-
-    assert config.model_bucket_for_workspace("research") == "openrouter"
-    # Previously any name but the literal "work" fell through to "personal".
-    assert config.model_bucket_for_workspace("unknown") == "openrouter"
-
-
 def test_upgrade_notice_reports_a_vault_left_outside_the_vault_root(tmp_path: Path) -> None:
     """The install tells the operator, instead of a release note hoping they read it."""
     from ciao.os_audit import audit_upgrade_notices

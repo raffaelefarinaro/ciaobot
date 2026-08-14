@@ -65,25 +65,6 @@ def test_sidecar_path_honours_the_dev_override(tmp_path, monkeypatch):
     assert voice.sidecar_path() is None
 
 
-def test_ollama_local_env_parsing(tmp_path):
-    config = _config(
-        {
-            "CIAO_OLLAMA_MODELS": "kimi-k2.7-code:cloud",
-            "CIAO_OLLAMA_API_KEY": "sk",
-            "CIAO_OLLAMA_LOCAL_MODELS": "gemma4:12b-it-qat",
-            "CIAO_OLLAMA_LOCAL_URL": "http://127.0.0.1:11434",
-            "CIAO_OLLAMA_LOCAL_DISCOVERY": "false",
-        },
-        tmp_path,
-    )
-    assert config.ollama.local_models == ("gemma4:12b-it-qat",)
-    assert config.ollama.local_url == "http://127.0.0.1:11434"
-    assert config.ollama_local_discovery is False
-    assert "gemma4:12b-it-qat" in config.claude_models
-
-
-
-
 def test_dictation_settings_have_no_engine_choice(tmp_path):
     """Cloud transcription is gone with the openai dependency, so there is one
     engine and nothing to select."""
