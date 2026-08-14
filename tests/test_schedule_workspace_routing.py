@@ -271,3 +271,66 @@ def test_the_name_round_trips_through_the_schedule_store(tmp_path: Path) -> None
     reloaded = ScheduleStore(tmp_path).get(created.schedule_id)
     assert reloaded is not None
     assert reloaded.web_project_name == "docs-improvement"
+
+
+# ── backfilling the name onto id-only entries ───────────────────────────
+
+
+def test_backfill_records_the_name_while_the_id_still_resolves(tmp_path: Path) -> None:
+    """An entry carrying only an id is one fresh init away from running in
+    General. While the id resolves here, the intended project is knowable —
+    afterwards it is not, so the stamp has to happen in that window."""
+    from ciao.schedules import ScheduleManager
+
+    store = ScheduleStore(tmp_path)
+    entry = store.create(
+        daily_time_utc="08:00", prompt="p", chat_id=0, model="", mode="normal",
+        web_project_id="proj-live01", workspace="work",
+    )
+    assert not entry.web_project_name
+
+    manager = ScheduleManager(
+        store=store, resolve_target=lambda *a, **k: None,
+        dispatch_to_web=None, prepare_chat=None,
+    )
+    stamped = manager.backfill_project_names(
+        lambda pid: "docs-improvement" if pid == "proj-live01" else None
+    )
+
+    assert stamped == 1
+    assert ScheduleStore(tmp_path).get(entry.schedule_id).web_project_name == "docs-improvement"
+
+
+def test_backfill_leaves_unresolvable_ids_alone(tmp_path: Path) -> None:
+    """Inventing a name for an id that no longer resolves would defeat the point."""
+    from ciao.schedules import ScheduleManager
+
+    store = ScheduleStore(tmp_path)
+    entry = store.create(
+        daily_time_utc="08:00", prompt="p", chat_id=0, model="", mode="normal",
+        web_project_id="proj-gone01", workspace="work",
+    )
+    manager = ScheduleManager(
+        store=store, resolve_target=lambda *a, **k: None,
+        dispatch_to_web=None, prepare_chat=None,
+    )
+
+    assert manager.backfill_project_names(lambda _pid: None) == 0
+    assert not ScheduleStore(tmp_path).get(entry.schedule_id).web_project_name
+
+
+def test_backfill_does_not_overwrite_an_existing_name(tmp_path: Path) -> None:
+    from ciao.schedules import ScheduleManager
+
+    store = ScheduleStore(tmp_path)
+    entry = store.create(
+        daily_time_utc="08:00", prompt="p", chat_id=0, model="", mode="normal",
+        web_project_id="proj-live01", web_project_name="chosen", workspace="work",
+    )
+    manager = ScheduleManager(
+        store=store, resolve_target=lambda *a, **k: None,
+        dispatch_to_web=None, prepare_chat=None,
+    )
+
+    assert manager.backfill_project_names(lambda _pid: "something-else") == 0
+    assert ScheduleStore(tmp_path).get(entry.schedule_id).web_project_name == "chosen"

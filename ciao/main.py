@@ -529,6 +529,16 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
     app.state.node_state_manager = node_state_manager
+    # Stamp the target project's name on schedules that only recorded its id,
+    # while those ids still resolve. After a fresh init they would not, and the
+    # run would fall back to General with the user's choice lost.
+    try:
+        schedule_manager.backfill_project_names(
+            lambda pid: (lambda p: p.name if p else None)(pcm.get_project(pid))
+        )
+    except Exception:
+        logger.warning("Could not backfill schedule project names", exc_info=True)
+
     app.state.schedule_manager = schedule_manager
     app.state.loop_manager = loop_manager
     app.state.background_runner = background_runner

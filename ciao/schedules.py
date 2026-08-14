@@ -573,6 +573,33 @@ class ScheduleManager:
             description=description,
         )
 
+    def backfill_project_names(self, resolve_name) -> int:
+        """Record the target project's name on entries that only have its id.
+
+        Project ids are per-instance, so an entry carrying only an id is one
+        fresh init away from silently running in General. Entries written
+        before the name was stored — or synced in from another device — are
+        still repairable while their id resolves *here*, which is the only
+        window in which the intended project is knowable rather than guessed.
+
+        ``resolve_name`` maps a project id to its name, or None when the id
+        does not resolve; those are left alone, since inventing a name would
+        defeat the point. Returns how many entries were stamped.
+        """
+        stamped = 0
+        for entry in self.list_entries():
+            if entry.web_project_name or not entry.web_project_id:
+                continue
+            name = resolve_name(entry.web_project_id)
+            if not name:
+                continue
+            entry.web_project_name = name
+            self.replace(entry)
+            stamped += 1
+        if stamped:
+            logger.info("Recorded the target project name on %d schedule(s)", stamped)
+        return stamped
+
     def delete(self, schedule_id: str) -> bool:
         return self._store.delete(schedule_id)
 
