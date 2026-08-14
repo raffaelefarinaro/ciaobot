@@ -27,8 +27,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import socket
+import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,7 +46,6 @@ from ciao.models import (
     PermissionRequestEvent,
     ResultEvent,
     StreamEvent,
-    SystemStatusEvent,
     ThinkingEvent,
     TokenUsageEvent,
     ToolUseEvent,
@@ -56,6 +57,7 @@ from ciao.providers.base import (
     build_prompt,
     build_runtime_context,
 )
+from ciao.execution_modes import MCP_SERVER_NAME
 from ciao.tool_path import resolve_tool
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,12 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
     "/question/{requestID}/reply",
     "/question/{requestID}/reject",
 })
+
+# The catalog needs a throwaway `opencode serve` (~1-2s), and /api/models is
+# hit on every model-picker open. Cache it like Codex does rather than paying
+# a server spawn per request.
+_MODEL_CACHE_TTL = 300.0
+_MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 _SERVER_START_TIMEOUT = 30.0
 _REQUEST_TIMEOUT = 30.0
@@ -413,6 +421,7 @@ class OpencodeProvider(BaseSDKProvider):
         try:
             await self._await_health()
             await self._verify_contract()
+            await self._register_control_plane(request)
         except BaseException:
             # A server we could not validate is a server nobody will ever
             # shut down; reap it here rather than leaking it for the life of
@@ -455,6 +464,47 @@ class OpencodeProvider(BaseSDKProvider):
                 "this opencode build is missing operations Ciaobot needs: "
                 + ", ".join(missing)
             )
+
+    async def _register_control_plane(self, request: AgentRequest) -> None:
+        """Attach Ciaobot's own MCP server to this chat's opencode process.
+
+        Claude gets this through ``options.mcp_servers`` and Codex through
+        ``-c mcp_servers.ciaobot.*``. opencode takes it over the running
+        server's API, which is what makes the per-chat process worth having:
+        the token is scoped to this chat and never written to
+        ``opencode.json``, where it would be workspace-wide and on disk.
+
+        The token goes in the header literally: opencode's ``{env:VAR}``
+        interpolation is a config-*file* feature and is not applied to configs
+        registered through the API (verified — the placeholder was sent
+        through verbatim, which the control plane would reject as a bad
+        token). The call is loopback and password-authenticated, and the
+        server already holds the token in its environment, so this adds no
+        exposure — and unlike ``opencode.json`` it never reaches disk.
+        """
+        client = self._client
+        if client is None or not request.mcp_url or not request.mcp_token:
+            return
+        config: dict[str, Any] = {
+            "type": "remote",
+            "url": request.mcp_url,
+            "enabled": True,
+            "headers": {"Authorization": f"Bearer {request.mcp_token}"},
+        }
+        try:
+            response = await client.post(
+                "/mcp", json={"name": MCP_SERVER_NAME, "config": config}
+            )
+        except httpx.HTTPError as exc:
+            if request.mcp_required:
+                raise RuntimeError(f"could not attach the Ciaobot MCP server: {exc}") from exc
+            logger.warning("opencode: Ciaobot MCP server not attached: %s", exc)
+            return
+        if response.status_code >= 400:
+            detail = _sanitize_error(response.text)
+            if request.mcp_required:
+                raise RuntimeError(f"opencode refused the Ciaobot MCP server: {detail}")
+            logger.warning("opencode: Ciaobot MCP server refused: %s", detail)
 
     async def disconnect(self) -> None:
         """Tear down the server, denying anything still awaiting a reply."""
@@ -694,10 +744,10 @@ class OpencodeProvider(BaseSDKProvider):
             return self._question_event(props)
 
         if kind == "session.status":
-            status = props.get("status")
-            name = status.get("type") if isinstance(status, Mapping) else None
-            if name and name != "idle":
-                return [SystemStatusEvent(type="system", status=str(name))]
+            # Deliberately not surfaced. opencode repeats `busy` throughout a
+            # turn and the PWA renders a SystemStatusEvent as a visible row, so
+            # forwarding it printed a column of "busy" lines above the reply.
+            # The streaming events already show the turn is running.
             return []
 
         return []
@@ -1010,6 +1060,10 @@ class OpencodeProvider(BaseSDKProvider):
         Runs a short-lived server rather than reusing a chat's: the catalog is
         queried from Settings, where no chat is necessarily open.
         """
+        key = str(workspace_root)
+        cached = _MODEL_CACHE.get(key)
+        if cached and not force and time.monotonic() - cached[0] < _MODEL_CACHE_TTL:
+            return [dict(item) for item in cached[1]]
         async with _EphemeralServer(workspace_root) as client:
             if client is None:
                 return []
@@ -1019,7 +1073,13 @@ class OpencodeProvider(BaseSDKProvider):
                 payload = response.json()
             except (httpx.HTTPError, ValueError):
                 return []
-        return _catalog_from_providers(payload)
+        catalog = _catalog_from_providers(payload)
+        # Only a non-empty catalog is cached: an empty one usually means the
+        # server failed to start, and caching that would hide the models for
+        # the next five minutes after opencode starts working.
+        if catalog:
+            _MODEL_CACHE[key] = (time.monotonic(), catalog)
+        return catalog
 
     @classmethod
     async def read_thread(
@@ -1172,6 +1232,34 @@ class _EphemeralServer:
                 await process.wait()
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_CREDENTIAL_COUNT_RE = re.compile(r"(\d+)\s+credentials?\b", re.IGNORECASE)
+
+
+def _credential_count(binary: str, *, timeout: float) -> int | None:
+    """How many provider credentials opencode has stored, or None if unknown.
+
+    Reads the count opencode itself prints (`0 credentials`). The output is a
+    decorated TUI box — ANSI codes and box-drawing characters — so counting
+    non-empty lines counts the decoration, which is how this once reported
+    "10 provider(s) authenticated" against an empty store.
+
+    `~/.local/share/opencode/auth.json` is deliberately not read: parsing a
+    provider's cached credential file to determine identity is out of bounds
+    (see docs/plans/GEMINI_CLI_PROVIDER_PLAN.md).
+    """
+    import subprocess
+
+    try:
+        listed = subprocess.run(
+            [binary, "auth", "list"], capture_output=True, text=True, timeout=timeout
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = _CREDENTIAL_COUNT_RE.search(_ANSI_RE.sub("", listed.stdout))
+    return int(match.group(1)) if match else None
+
+
 def opencode_login_status(
     env: Mapping[str, str] | None = None, *, timeout: float = 5.0
 ) -> dict[str, Any]:
@@ -1198,25 +1286,26 @@ def opencode_login_status(
         version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
     except (OSError, subprocess.SubprocessError):
         version = ""
-    accounts: list[str] = []
-    try:
-        listed = subprocess.run(
-            [binary, "auth", "list"], capture_output=True, text=True, timeout=timeout
-        )
-        for line in listed.stdout.splitlines():
-            text = line.strip()
-            # Skip the header and any decorative rules; keep provider rows.
-            if text and not text.lower().startswith(("credentials", "─", "-")):
-                accounts.append(text)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    connected = bool(accounts)
+    credentials = _credential_count(binary, timeout=timeout)
+    # opencode's own free tier serves models with no credentials at all, so an
+    # empty credential store still means "usable" — it does not mean "not set
+    # up". Say which it is rather than implying the user has connected
+    # something they have not.
+    if credentials is None:
+        detail = "installed; credential state unknown"
+        auth = "unknown"
+    elif credentials > 0:
+        detail = f"{credentials} provider credential(s)"
+        auth = "oauth"
+    else:
+        detail = "no credentials — free models only"
+        auth = "free"
     return _provider(
         name="opencode",
-        ok=connected,
-        auth="oauth" if connected else "login_required",
+        ok=True,
+        auth=auth,
         command="opencode auth login",
-        detail=f"{len(accounts)} provider(s) authenticated" if connected else "login required",
+        detail=detail,
         version=version or "unknown",
     )
 

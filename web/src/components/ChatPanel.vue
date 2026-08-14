@@ -2419,6 +2419,7 @@ function cancelCapability(q: { request_id: string }) {
 // the capability card opens the full picker.
 function capabilitySectionForBucket(bucket: BucketKey): string {
   if (bucket === 'codex') return 'codex'
+  if (bucket === 'opencode') return 'opencode'
   if (bucket === 'openrouter') return 'openrouter'
   if (bucket === 'claude_personal') return 'ollama'
   return 'anthropic'
@@ -2433,6 +2434,12 @@ const activeProvider = computed<ProviderKey>(() => {
 const activeBucket = computed<BucketKey>(() => {
   const c = chat.value
   if (!c) return 'claude_work'
+  // A provider that serves its own catalog gets a bucket named after it.
+  // Registry-driven, and checked before the `owner/model` shape heuristic
+  // below — opencode ids look exactly like OpenRouter ones, so the heuristic
+  // filed them under OpenRouter and the header said so.
+  const providerDescriptor = modelsResponse.value?.providers?.find((p) => p.id === c.provider)
+  if (providerDescriptor && !providerDescriptor.model_bucket) return c.provider as BucketKey
   if (c.provider === 'codex') return 'codex'
   if (c.model.startsWith('custom:')) {
     const parts = c.model.split(':', 3)

@@ -479,9 +479,11 @@ def test_idle_status_is_not_surfaced_as_activity(tmp_path):
     assert _convert(_provider(tmp_path), "session.status", {"status": {"type": "idle"}}) == []
 
 
-def test_busy_status_is_surfaced(tmp_path):
-    events = _convert(_provider(tmp_path), "session.status", {"status": {"type": "busy"}})
-    assert events[0].status == "busy"
+def test_busy_status_is_not_rendered_as_a_message(tmp_path):
+    """opencode repeats `busy` through a turn and the PWA renders a system
+    event as a visible row, which printed a column of "busy" lines above the
+    reply. The streaming events already show the turn is running."""
+    assert _convert(_provider(tmp_path), "session.status", {"status": {"type": "busy"}}) == []
 
 
 def test_unknown_events_are_ignored(tmp_path):
@@ -759,3 +761,285 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     assert by_id["opencode"]["short_label"] == "opencode"
     assert payload["opencode_models"] == ["opencode/big-pickle"]
     assert payload["backends"]["opencode"] is True
+
+
+# ── credential reporting ────────────────────────────────────────────────
+
+
+def test_credential_count_reads_the_reported_number(monkeypatch):
+    """Captured verbatim from `opencode auth list` with an empty store.
+
+    Regression: counting non-empty lines counted the ANSI reset and the
+    box-drawing characters, so an empty store was reported as several
+    authenticated providers.
+    """
+    from types import SimpleNamespace
+
+    import ciao.providers.opencode as mod
+
+    output = "\x1b[0m\n┌  Credentials \x1b[90m~/.local/share/opencode/auth.json\n│\n└  0 credentials\n"
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout=output, returncode=0)
+    )
+    assert mod._credential_count("/bin/opencode", timeout=1.0) == 0
+
+
+def test_credential_count_parses_a_populated_store(monkeypatch):
+    from types import SimpleNamespace
+
+    import ciao.providers.opencode as mod
+
+    output = "┌  Credentials\n│  anthropic\n│  openai\n└  2 credentials\n"
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout=output, returncode=0)
+    )
+    assert mod._credential_count("/bin/opencode", timeout=1.0) == 2
+
+
+def test_credential_count_is_unknown_when_the_cli_fails(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    def boom(*_a, **_k):
+        raise OSError("nope")
+
+    monkeypatch.setattr("subprocess.run", boom)
+    assert mod._credential_count("/bin/opencode", timeout=1.0) is None
+
+
+def test_status_does_not_claim_authentication_without_credentials(monkeypatch):
+    """The free tier works with zero credentials, so `ok` stays true — but the
+    detail must not imply the user connected something."""
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    monkeypatch.setattr(mod, "_credential_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: __import__("types").SimpleNamespace(stdout="1.18.18\n"))
+
+    status = mod.opencode_login_status()
+
+    assert status["ok"] is True
+    assert status["auth"] == "free"
+    assert "authenticated" not in status["detail"]
+    assert "free models only" in status["detail"]
+
+
+# ── chat model validation ───────────────────────────────────────────────
+
+
+def test_dynamic_catalog_providers_skip_the_configured_model_check():
+    """Regression: selecting an opencode model returned a 400.
+
+    `_validate_configured_model` checks a free-text id against the
+    Claude/Ollama/OpenRouter lists. Those do not describe a provider that
+    serves its own catalog, so `opencode/hy3-free` was rejected with
+    "Unknown model ... (configured models: opus, sonnet, haiku, ...)". The
+    exemption is keyed on the `dynamic_models` capability so it covers any
+    such provider, not just Codex by name.
+    """
+    from ciao.provider_service import capabilities_for
+
+    assert capabilities_for("opencode").dynamic_models is True
+    assert capabilities_for("codex").dynamic_models is True
+    # Claude's catalog is configured, so it must stay validated.
+    assert capabilities_for("claude").dynamic_models is False
+    # An unknown provider must not be waved through.
+    assert capabilities_for("nope").dynamic_models is False
+
+
+def _chat_manager(tmp_path: Path):
+    from ciao.config import CiaoConfig
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+    )
+    return ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "archives"),
+        path=runtime / "web_projects.json",
+    )
+
+
+def test_an_opencode_model_id_is_accepted(tmp_path):
+    """`opencode/hy3-free` must not be rejected against the Claude model list."""
+    manager = _chat_manager(tmp_path)
+    manager._validate_configured_model("opencode/hy3-free", "opencode")
+
+
+def test_an_unconfigured_claude_model_is_still_rejected(tmp_path):
+    """The exemption must not disable validation for configured-catalog providers."""
+    from ciao.web.project_chats import UnknownModelError
+
+    manager = _chat_manager(tmp_path)
+    with pytest.raises(UnknownModelError):
+        manager._validate_configured_model("totally-made-up-model", "claude")
+
+
+# ── catalog caching ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_model_catalog_is_cached_between_calls(tmp_path, monkeypatch):
+    """/api/models is hit on every picker open; a server spawn each time is ~2s."""
+    import ciao.providers.opencode as mod
+
+    mod._MODEL_CACHE.clear()
+    calls = {"n": 0}
+
+    class FakeClient:
+        async def get(self, _path):
+            calls["n"] += 1
+            return SimpleNamespaceResponse()
+
+    class SimpleNamespaceResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "connected": ["opencode"],
+                "all": [{"id": "opencode", "models": {"m": {"id": "m", "name": "M"}}}],
+            }
+
+    class FakeServer:
+        def __init__(self, _root):
+            pass
+
+        async def __aenter__(self):
+            return FakeClient()
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    monkeypatch.setattr(mod, "_EphemeralServer", FakeServer)
+
+    first = await mod.OpencodeProvider.model_catalog(tmp_path)
+    second = await mod.OpencodeProvider.model_catalog(tmp_path)
+
+    assert first == second
+    assert calls["n"] == 1, "second call must be served from cache"
+
+    forced = await mod.OpencodeProvider.model_catalog(tmp_path, force=True)
+    assert forced == first
+    assert calls["n"] == 2, "force must bypass the cache"
+    mod._MODEL_CACHE.clear()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_catalog_is_not_cached(tmp_path, monkeypatch):
+    """Caching 'no models' would hide them for 5 minutes once opencode works."""
+    import ciao.providers.opencode as mod
+
+    mod._MODEL_CACHE.clear()
+
+    class FakeServer:
+        def __init__(self, _root):
+            pass
+
+        async def __aenter__(self):
+            return None  # opencode not installed / server failed to start
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    monkeypatch.setattr(mod, "_EphemeralServer", FakeServer)
+
+    assert await mod.OpencodeProvider.model_catalog(tmp_path) == []
+    assert str(tmp_path) not in mod._MODEL_CACHE
+
+
+# ── Ciaobot control-plane MCP ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_control_plane_mcp_is_attached_with_a_literal_token(tmp_path):
+    """Ciaobot's own MCP must reach the chat, or opencode has no memory/vault.
+
+    Two things are pinned. First that it is registered at all: Claude gets it
+    via `options.mcp_servers` and Codex via `-c mcp_servers.ciaobot.*`, and
+    opencode initially got neither, so those chats silently had no control
+    plane. Second that the token is literal: opencode's `{env:VAR}`
+    interpolation is a config-file feature and is NOT applied to configs
+    registered through the API — the placeholder went out verbatim and the
+    control plane would have rejected it.
+    """
+    from ciao.models import AgentRequest
+
+    provider = _provider(tmp_path)
+    posted: dict = {}
+
+    class FakeClient:
+        async def post(self, path, json=None):
+            posted["path"] = path
+            posted["body"] = json
+            return SimpleResponse()
+
+    class SimpleResponse:
+        status_code = 200
+        text = ""
+
+    provider._client = FakeClient()  # type: ignore[assignment]
+    request = AgentRequest(
+        prompt="hi", model="opencode/big-pickle", mode="bypass", provider="opencode",
+        mcp_url="http://127.0.0.1:1234/mcp", mcp_token="tok-abc", mcp_required=True,
+    )
+
+    await provider._register_control_plane(request)
+
+    assert posted["path"] == "/mcp"
+    assert posted["body"]["name"] == "ciaobot"
+    config = posted["body"]["config"]
+    assert config["url"] == "http://127.0.0.1:1234/mcp"
+    assert config["headers"]["Authorization"] == "Bearer tok-abc"
+    assert "{env:" not in config["headers"]["Authorization"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_control_plane_is_fatal_only_when_required(tmp_path):
+    from ciao.models import AgentRequest
+
+    class Refusing:
+        async def post(self, _path, json=None):
+            class R:
+                status_code = 500
+                text = "nope"
+            return R()
+
+    def _request(required: bool):
+        return AgentRequest(
+            prompt="hi", model="m", mode="bypass", provider="opencode",
+            mcp_url="http://127.0.0.1:1/mcp", mcp_token="t", mcp_required=required,
+        )
+
+    provider = _provider(tmp_path)
+    provider._client = Refusing()  # type: ignore[assignment]
+    # Optional: degrade rather than break the turn.
+    await provider._register_control_plane(_request(False))
+    with pytest.raises(RuntimeError, match="refused the Ciaobot MCP"):
+        await provider._register_control_plane(_request(True))
+
+
+@pytest.mark.asyncio
+async def test_no_control_plane_registration_without_a_token(tmp_path):
+    from ciao.models import AgentRequest
+
+    calls = []
+
+    class Recording:
+        async def post(self, path, json=None):
+            calls.append(path)
+
+    provider = _provider(tmp_path)
+    provider._client = Recording()  # type: ignore[assignment]
+    await provider._register_control_plane(
+        AgentRequest(prompt="hi", model="m", mode="bypass", provider="opencode")
+    )
+    assert calls == []

@@ -4541,8 +4541,9 @@ class ProjectChatManager:
         OpenRouter model from the static allowlist or tier targets (valid
         even when catalog discovery failed and never merged them into
         ``claude_models``), or a ``custom:<id>:<model>`` id routed through
-        a configured custom provider. Native Codex ids are skipped because
-        the catalog is async and the Codex CLI already rejects unknown ids
+        a configured custom provider. Native ids for providers that discover
+        their own catalog (Codex, opencode) are skipped because
+        the catalog is async and those CLIs already reject unknown ids
         with a clear error at the first turn; ``custom:``-prefixed ids
         still flow through the custom-provider membership check before
         that exemption fires.
@@ -4570,12 +4571,18 @@ class ProjectChatManager:
             raise UnknownModelError(
                 f"Unknown custom model '{model}' (provider not registered)"
             )
-        if provider == "codex" and custom is None:
-            # Exempt only native Codex ids (no ``custom:`` prefix): the
-            # catalog is async and the Codex CLI rejects unknown ids with a
-            # clear error at the first turn. A rejected custom id must not
-            # be rescued by this exemption, else the typo reaches the
-            # endpoint anyway (#259).
+        if custom is None and provider and capabilities_for(provider).dynamic_models:
+            # Providers that discover their own catalog (Codex, opencode) are
+            # exempt: the catalog is async, so this synchronous validator has
+            # nothing to check against, and the provider itself rejects an
+            # unknown id with a clear error on the first turn. Keyed on the
+            # capability rather than a provider name so a new dynamic-catalog
+            # provider is not rejected against the Claude/Ollama/OpenRouter
+            # model lists, which do not describe it.
+            #
+            # Only native ids (no ``custom:`` prefix): a rejected custom id
+            # must not be rescued here, else the typo reaches the endpoint
+            # anyway (#259).
             return
         if is_tier(model):
             return
