@@ -25,12 +25,15 @@ from ciao.providers.opencode import (
     OpencodeProvider,
     OpencodeSettings,
     _catalog_from_providers,
+    config_placeholder_problems,
     error_text,
     missing_required_paths,
     mode_settings,
     opencode_tier_overrides,
     split_model,
+    unresolved_placeholders,
     usage_payload,
+    workspace_config_placeholder_problems,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
@@ -1240,3 +1243,69 @@ def test_permission_events_match_the_house_convention(tmp_path):
     events = _convert(_provider(tmp_path), "permission.asked", LIVE_PERMISSION)
     assert events[0].type == "system"
     assert events[0].message == "Approve use of bash?"
+
+
+def test_dollar_brace_is_not_opencode_interpolation_syntax():
+    """Verified against opencode 1.18.x, whose config substitution is
+    ``/\\{env:([^}]+)\\}/g``: ``${VAR}`` is passed through verbatim. That is how
+    a literal ``${NOTION_TOKEN}`` reached the Notion MCP server as a bearer
+    token and came back 401.
+    """
+    problems = config_placeholder_problems(
+        {"mcp": {"notion": {"environment": {"NOTION_TOKEN": "${NOTION_TOKEN}"}}}},
+        {"NOTION_TOKEN": "ntn_real"},
+    )
+    assert len(problems) == 1
+    assert "{env:NOTION_TOKEN}" in problems[0]
+
+
+def test_a_missing_variable_resolves_to_an_empty_credential():
+    """opencode's substitution ends in ``|| ""``, so this is silent at spawn and
+    surfaces only as a 401 on the first tool call."""
+    problems = config_placeholder_problems(
+        {"mcp": {"notion": {"environment": {"NOTION_TOKEN": "{env:NOTION_TOKEN}"}}}},
+        {},
+    )
+    assert len(problems) == 1
+    assert "empty string" in problems[0]
+
+
+def test_correct_syntax_with_the_variable_set_is_silent():
+    config = {"mcp": {"notion": {"environment": {"NOTION_TOKEN": "{env:NOTION_TOKEN}"}}}}
+    assert config_placeholder_problems(config, {"NOTION_TOKEN": "ntn_real"}) == ()
+
+
+def test_placeholders_are_found_through_lists_and_nesting():
+    config = {
+        "mcp": {"n8n": {"headers": {"Authorization": "Bearer {env:N8N}"}}},
+        "command": ["npx", "-y", "${PKG}"],
+    }
+    assert set(unresolved_placeholders(config)) == {"{env:N8N}", "${PKG}"}
+
+
+def test_api_registered_configs_are_reported_regardless_of_the_environment():
+    """``{env:VAR}`` is a config-*file* feature; configs registered over ``/mcp``
+    are not interpolated, so a set variable does not make one safe."""
+    config = {"headers": {"Authorization": "Bearer {env:CIAO_MCP_SESSION_TOKEN}"}}
+    assert unresolved_placeholders(config) == ("{env:CIAO_MCP_SESSION_TOKEN}",)
+
+
+def test_the_workspace_config_is_the_file_opencode_will_load(tmp_path):
+    (tmp_path / "opencode.json").write_text(
+        json.dumps(
+            {"mcp": {"notion": {"environment": {"NOTION_TOKEN": "${NOTION_TOKEN}"}}}}
+        ),
+        encoding="utf-8",
+    )
+    problems = workspace_config_placeholder_problems(tmp_path, {"NOTION_TOKEN": "x"})
+    assert len(problems) == 1
+
+
+def test_a_workspace_without_a_config_is_not_a_problem(tmp_path):
+    assert workspace_config_placeholder_problems(tmp_path, {}) == ()
+
+
+def test_unparseable_config_is_left_alone(tmp_path):
+    """jsonc comments are legal for opencode and are not ours to diagnose."""
+    (tmp_path / "opencode.json").write_text("{ // comment\n}", encoding="utf-8")
+    assert workspace_config_placeholder_problems(tmp_path, {}) == ()
