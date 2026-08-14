@@ -367,6 +367,10 @@ async def ws_events(websocket: WebSocket) -> None:
             # client can paint the "N agents running" indicator immediately
             # (and clear a count left stale by a missed event during a gap).
             "background_agents": pcm.background_agent_counts,
+            # Chats whose post-archive pipeline is mid-flight. A client that
+            # connects between the start and finish events would otherwise show
+            # nothing at all until the next archive.
+            "postprocessing": pcm.postprocessing_chat_ids(),
             # Late connectors that missed `server_restarting` still get the
             # overlay instead of a chat-level turn rejection.
             "restarting": bool(getattr(pcm, "_restart_draining", False)),

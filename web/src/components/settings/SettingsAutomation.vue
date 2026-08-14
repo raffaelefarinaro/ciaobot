@@ -9,7 +9,8 @@
         <p class="hint">
           Work Ciaobot does on its own: naming chats, extracting insights when a chat is
           archived, keeping the vault and skills in order. Each row says when it runs and
-          what happened last time.
+          what happened last time. Rows that run several steps on one trigger list those
+          steps in the order they execute.
         </p>
       </div>
     </div>

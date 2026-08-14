@@ -16,10 +16,12 @@ import {
 import { archiveFailedToast, archiveStoppedToast } from '../lib/archiveCopy'
 import { errorMessage } from '../lib/errorMessage'
 import { readChatDraft } from '../lib/chatDrafts'
+import { isPostprocessing } from '../lib/postprocessView'
 import type {
   ArchiveChatResponse,
   ProjectInfo,
   ChatInfo,
+  ChatPostprocess,
   ChatRow,
   ChatGroup,
   ChatMessage,
@@ -622,6 +624,52 @@ export const useProjectStore = defineStore('projects', () => {
   // streaming but agents are still working.
   function chatHasBackgroundAgents(chatId: string): boolean {
     return (backgroundAgents.value[chatId] || 0) > 0
+  }
+
+  // ── Post-archive pipeline ────────────────────────────────────────────────
+  // Archiving a chat starts insights extraction, a project-doc fold, a
+  // trajectory and memory proposals. The state lives on the chat itself (so an
+  // archived chat can still report what was learned from it after a reload);
+  // these are the read paths every surface shares.
+
+  function chatPostprocess(chatId: string): ChatPostprocess | null {
+    return chats.value.find(c => c.chat_id === chatId)?.postprocess || null
+  }
+
+  function chatIsPostprocessing(chatId: string): boolean {
+    return isPostprocessing(chatPostprocess(chatId))
+  }
+
+  /** Chats being tidied up in a workspace, for the home lane summary. */
+  function workspacePostprocessingCount(ws: WorkspaceName): number {
+    const wsProjectIds = new Set(
+      projects.value.filter(p => p.workspace === ws).map(p => p.project_id),
+    )
+    return chats.value.filter(
+      c => wsProjectIds.has(c.project_id) && isPostprocessing(c.postprocess),
+    ).length
+  }
+
+  function projectPostprocessingCount(projectId: string): number {
+    return chats.value.filter(
+      c => c.project_id === projectId && isPostprocessing(c.postprocess),
+    ).length
+  }
+
+  /**
+   * Reconcile against the server's list of live pipelines. A chat the server
+   * omits has settled: downgrade it to 'done' rather than dropping the record,
+   * because the outcomes it already collected are still worth showing.
+   */
+  function applyPostprocessingSnapshot(runningIds: string[]): void {
+    const running = new Set(runningIds)
+    for (const chat of chats.value) {
+      const pp = chat.postprocess
+      if (!pp) continue
+      if (pp.state === 'running' && !running.has(chat.chat_id)) {
+        chat.postprocess = { ...pp, state: 'done', step: '' }
+      }
+    }
   }
 
   function projectIsStreaming(projectId: string): boolean {
@@ -2571,6 +2619,10 @@ export const useProjectStore = defineStore('projects', () => {
         // count left stale by a missed event (WS gap, server restart) heals
         // on reconnect.
         backgroundAgents.value = { ...(msg.background_agents || {}) }
+        // Post-archive pipelines still in flight. Authoritative like the counts
+        // above: a chat the server no longer lists as running has settled, so
+        // clear a stale 'running' rather than leaving it pulsing forever.
+        applyPostprocessingSnapshot(msg.postprocessing || [])
         if (msg.restarting) {
           beginServerRestart()
         }
@@ -2755,6 +2807,14 @@ export const useProjectStore = defineStore('projects', () => {
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null
         }
+        break
+      }
+      case 'chat_postprocess': {
+        // The post-archive pipeline reporting itself: which step is running, and
+        // once it settles, what it produced. Written onto the chat so the
+        // archived transcript keeps the record after the events stop.
+        const chat = chats.value.find(c => c.chat_id === msg.chat_id)
+        if (chat) chat.postprocess = msg.postprocess || null
         break
       }
       case 'chat_deleted': {
@@ -4237,6 +4297,7 @@ export const useProjectStore = defineStore('projects', () => {
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
     chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, clearUnread, markRead, markAllRead,
     recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
+    chatPostprocess, chatIsPostprocessing, workspacePostprocessingCount, projectPostprocessingCount,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,

@@ -300,6 +300,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     job_runs.configure(config.state_path.parent)
     tracker = StartupTracker(on_finish=job_runs.record_startup_phase)
+    # Live job events reach the PWA through the chat manager's event bus, so a
+    # surface can show background work as it happens rather than only after it
+    # lands in the run log. Attached once the manager exists (see below).
 
     # Start provider checks in the background
     tracker.start("connect_claude_code")
@@ -420,6 +423,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         transcript_store=transcripts,
         path=config.state_path.parent / "web_projects.json",
     )
+    # Now that a manager exists, let tracked background jobs announce themselves
+    # through its event bus (see job_runs.set_publisher).
+    pcm.attach_job_runs_publisher()
 
     # Schedule manager with web-only dispatch
     async def _dispatch_to_web(entry, model, mode, provider, *, target_chat_id=None):

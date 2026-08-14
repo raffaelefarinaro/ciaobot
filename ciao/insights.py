@@ -439,6 +439,10 @@ async def extract_and_append(
     filing one workspace's facts into another workspace's queue.
     """
     output = ""
+    # Every live surface keys post-archive work by chat, and `track` reads this
+    # out of the `extra` it is given at entry (not from the handle mid-block),
+    # so it has to be resolved before the first tracked step opens.
+    chat_id = str((trajectory_meta or {}).get("chat_id") or "")
     try:
         if not archive_path.exists():
             logger.warning("Archive path %s missing, skipping insights", archive_path)
@@ -452,7 +456,11 @@ async def extract_and_append(
         )
         async with job_runs.track(
             "insights", "Session insights", model=effective_model,
-            extra={"archive": archive_path.name, "session_id": session_id},
+            extra={
+                "archive": archive_path.name,
+                "session_id": session_id,
+                "chat_id": chat_id,
+            },
         ) as run:
             if note:
                 run.extra["fallback"] = note
@@ -497,7 +505,11 @@ async def extract_and_append(
                 async with job_runs.track(
                     "project_doc_update", "Project doc update",
                     model=doc_model,
-                    extra={"doc": str(doc), "archive": archive_path.name},
+                    extra={
+                        "doc": str(doc),
+                        "archive": archive_path.name,
+                        "chat_id": chat_id,
+                    },
                 ) as run:
                     wrote = await update_project_doc(
                         doc_path=doc,
@@ -524,7 +536,7 @@ async def extract_and_append(
                 meta = trajectory_meta or {}
                 with job_runs.track_sync(
                     "trajectory", "Trajectory capture",
-                    extra={"session_id": session_id},
+                    extra={"session_id": session_id, "chat_id": chat_id},
                 ) as run:
                     path = build_and_persist_trajectory(
                         session_id=session_id,
@@ -561,8 +573,11 @@ async def extract_and_append(
 
                 with job_runs.track_sync(
                     "memory_proposals", "Memory proposals",
-                    extra={"archive": archive_path.name},
+                    extra={"archive": archive_path.name, "chat_id": chat_id},
                 ) as run:
+                    # The count is what the archived chat reports back to the
+                    # user ("3 memory proposals"); a bare bool cannot say that.
+                    proposal_stats: dict[str, int] = {}
                     proposals_result = proposals_from_archive(
                         archive_path,
                         proposal_vault_root,
@@ -573,8 +588,11 @@ async def extract_and_append(
                             and getattr(config, "workspace_root", None)
                             else None
                         ),
+                        stats=proposal_stats,
                     )
                     run.extra["wrote"] = bool(proposals_result)
+                    run.extra["proposals"] = proposal_stats.get("proposed", 0)
+                    run.extra["promoted"] = proposal_stats.get("promoted", 0)
             except Exception:  # noqa: BLE001 — fire-and-forget, never crash
                 logger.exception(
                     "Memory proposals failed for %s", archive_path
