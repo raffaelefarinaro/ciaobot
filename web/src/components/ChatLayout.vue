@@ -200,6 +200,7 @@ import HomeRecentChats from './HomeRecentChats.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
+import { pendingPrompt } from '../lib/prompt'
 import { isDesktopApp } from '../lib/desktop'
 import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
 
@@ -432,6 +433,7 @@ const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings'>(() => {
 const viewShortcutsActive = computed(() =>
   viewMode.value !== 'settings'
   && !pendingConfirm.value
+  && !pendingPrompt.value
   && !fileViewer.isOpen,
 )
 const shortcutsActive = computed(() =>
@@ -712,7 +714,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // bell), so this never steals the key from them.
   if (e.key === 'Escape') {
     // The confirm dialog and the file viewer own Esc while they are up.
-    if (pendingConfirm.value || fileViewer.isOpen) return
+    if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
     // A nested control that handled the key already, without claiming it. Popups
     // like ModelSelector close on Esc but do not stopPropagation, and treating
     // that press as "go home" both discarded their dismissal and navigated away

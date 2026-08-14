@@ -683,6 +683,7 @@ import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace
 import { colorForWorkspace } from '../lib/workspaceColors'
 import { archiveMenuLabel as menuLabel, archiveConfirmMessage } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
+import { askPrompt } from '../lib/prompt'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1020,11 +1021,21 @@ function toggleSubchats(chatId: string) {
   }
 }
 
+// `window.prompt` cannot be used here: wry's WKUIDelegate never shows it, so in
+// the desktop app it returned null and this button did nothing at all. See
+// lib/prompt.
 async function addProject() {
-  const name = prompt('Project name:')
+  const name = await askPrompt('Project name', { title: 'New project' })
   if (!name) return
-  const p = await store.createProject(name)
-  expandedProjects.add(p.project_id)
+  try {
+    const p = await store.createProject(name)
+    expandedProjects.add(p.project_id)
+  } catch (e) {
+    // A failed create used to reject silently, leaving the same "nothing
+    // happened" symptom the missing dialog caused. `alert` is also a no-op in
+    // the desktop webview, so surface it as a toast.
+    store.pushErrorToast('Could not create project', errorMessage(e))
+  }
 }
 
 function workspaceLabel(name: string): string {
