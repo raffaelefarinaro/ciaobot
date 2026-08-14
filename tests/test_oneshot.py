@@ -212,3 +212,115 @@ async def test_run_oneshot_disables_claude_auto_memory(monkeypatch) -> None:
     options = captured["options"]
     assert options.env.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY") == "1"
     assert options.env.get("CLAUDE_CODE_DISABLE_ARTIFACT") == "1"
+
+
+# ── opencode one-shot ───────────────────────────────────────────────────
+# Routines (titles, insights, critique) reach non-Anthropic, non-OpenAI models
+# through opencode, so opencode needs a one-shot path of its own.
+
+
+def _fake_opencode(captured: dict, events: list[object]):
+    """Stub OpencodeProvider recording construction and request arguments."""
+
+    class FakeOpencodeProvider:
+        def __init__(self, workspace_root, *, developer_instructions="", **_kw):
+            captured["workspace_root"] = workspace_root
+            captured["developer_instructions"] = developer_instructions
+            captured["disconnected"] = False
+
+        async def run_streaming(self, request, register_handle):
+            captured["request"] = request
+            register_handle(None)
+            for event in events:
+                yield event
+
+        async def disconnect(self):
+            captured["disconnected"] = True
+
+    return FakeOpencodeProvider
+
+
+@pytest.mark.asyncio
+async def test_run_oneshot_dispatches_to_opencode(monkeypatch, tmp_path) -> None:
+    from ciao.models import ResultEvent
+    import ciao.providers.opencode as opencode_mod
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        opencode_mod,
+        "OpencodeProvider",
+        _fake_opencode(captured, [ResultEvent(type="result", result="A Title")]),
+    )
+
+    out = await oneshot.run_oneshot(
+        "name this chat",
+        system_prompt="Reply with only the title.",
+        model="anthropic/claude-haiku-4.5",
+        provider="opencode",
+        cwd=tmp_path,
+    )
+
+    assert out == "A Title"
+    # The system prompt has to arrive as developer instructions: opencode takes
+    # it in the prompt body's `system` field, not as part of the user prompt.
+    assert captured["developer_instructions"] == "Reply with only the title."
+    assert captured["request"].provider == "opencode"
+    assert captured["request"].model == "anthropic/claude-haiku-4.5"
+    # A one-shot must not be able to write.
+    assert captured["request"].mode == "plan"
+    assert captured["workspace_root"] == tmp_path.resolve()
+
+
+@pytest.mark.asyncio
+async def test_run_oneshot_opencode_always_disconnects(monkeypatch, tmp_path) -> None:
+    """The server and session are torn down even when the turn errors."""
+    from ciao.models import ResultEvent
+    import ciao.providers.opencode as opencode_mod
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        opencode_mod,
+        "OpencodeProvider",
+        _fake_opencode(
+            captured,
+            [ResultEvent(type="result", result="model not found", is_error=True)],
+        ),
+    )
+
+    with pytest.raises(oneshot.OneShotError) as excinfo:
+        await oneshot.run_oneshot(
+            "hi", system_prompt="s", model="x/y", provider="opencode", cwd=tmp_path
+        )
+
+    assert "model not found" in excinfo.value.detail
+    # opencode does not distinguish retriable upstream flakes, so a returned
+    # error is terminal -- retrying would double-charge for the same failure.
+    assert excinfo.value.transient is False
+    assert captured["disconnected"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_oneshot_opencode_empty_stream_returns_empty(
+    monkeypatch, tmp_path
+) -> None:
+    """No ResultEvent is not an error -- the caller decides what empty means."""
+    import ciao.providers.opencode as opencode_mod
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        opencode_mod, "OpencodeProvider", _fake_opencode(captured, [])
+    )
+
+    out = await oneshot.run_oneshot(
+        "hi", system_prompt="s", model="x/y", provider="opencode", cwd=tmp_path
+    )
+    assert out == ""
+    assert captured["disconnected"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_oneshot_rejects_unknown_provider() -> None:
+    with pytest.raises(ValueError, match="Unknown one-shot provider"):
+        await oneshot.run_oneshot(
+            "hi", system_prompt="s", model="haiku", provider="nope"
+        )

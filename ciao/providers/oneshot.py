@@ -1,9 +1,10 @@
-"""One-shot model calls via the Claude Agent SDK.
+"""One-shot model calls, dispatched to a runtime provider.
 
-The upstream (Anthropic / Ollama / OpenRouter) is chosen by the caller
-through the ``env`` dict -- the same ``ANTHROPIC_BASE_URL`` /
-``ANTHROPIC_AUTH_TOKEN`` env injection used for chats -- so this helper is
-backend-agnostic and needs no provider switch of its own.
+``provider`` selects the runner: ``claude`` (Claude Agent SDK), ``codex``, or
+``opencode``. The Apple on-device sentinel is handled ahead of all three, in
+:func:`run_oneshot`. On the ``claude`` path the upstream can still be
+redirected by the caller through the ``env`` dict -- the same
+``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN`` injection used for chats.
 
 Calls are intentionally bare: custom system prompt, no filesystem
 settings/skills, no tools, no MCP discovery. Titles, insights, critique,
@@ -221,6 +222,49 @@ async def _run_codex_oneshot(
         await codex.disconnect()
 
 
+async def _run_opencode_oneshot(
+    prompt: str,
+    *,
+    system_prompt: str,
+    model: str,
+    env: dict[str, str] | None,
+    cwd: Path | None,
+) -> str:
+    from ciao.models import AgentRequest, ResultEvent
+    from ciao.providers.opencode import OpencodeProvider
+
+    # `mode="plan"` for the same reason as Codex: a one-shot must not be able to
+    # write. opencode has no ephemeral flag -- a fresh provider instance already
+    # starts its own server and creates its own session, and `disconnect()`
+    # tears both down.
+    opencode = OpencodeProvider(
+        (cwd or Path.cwd()).resolve(),
+        developer_instructions=system_prompt,
+    )
+    try:
+        async for event in opencode.run_streaming(
+            AgentRequest(
+                prompt=prompt,
+                model=model,
+                mode="plan",
+                provider="opencode",
+                extra_env=env or {},
+            ),
+            lambda _handle: None,
+        ):
+            if isinstance(event, ResultEvent):
+                if event.is_error:
+                    detail = (event.result or "").strip() or "opencode one-shot failed"
+                    # opencode reports a rejected prompt or a dead server as a
+                    # terminal ResultEvent; it does not distinguish retriable
+                    # upstream flakes, so do not double-retry here.
+                    raise OneShotError(detail, transient=False)
+                return event.result
+        return ""
+    finally:
+        await opencode.disconnect()
+
+
 async def run_oneshot(
     prompt: str,
     *,
@@ -282,6 +326,15 @@ async def run_oneshot(
     if provider == "codex":
         async def _attempt() -> str:
             return await _run_codex_oneshot(
+                prompt,
+                system_prompt=system_prompt,
+                model=model,
+                env=env,
+                cwd=cwd,
+            )
+    elif provider == "opencode":
+        async def _attempt() -> str:
+            return await _run_opencode_oneshot(
                 prompt,
                 system_prompt=system_prompt,
                 model=model,

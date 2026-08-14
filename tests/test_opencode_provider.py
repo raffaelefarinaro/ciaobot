@@ -25,6 +25,7 @@ from ciao.providers.opencode import (
     OpencodeProvider,
     OpencodeSettings,
     _catalog_from_providers,
+    compose_system,
     config_placeholder_problems,
     error_text,
     missing_required_paths,
@@ -122,6 +123,24 @@ def test_mode_agents(mode, agent):
 def _actions(mode: str) -> dict[str, str]:
     """Flatten a ruleset to {permission: action} for readable assertions."""
     return {rule["permission"]: rule["action"] for rule in mode_settings(mode)[1]}
+
+
+def test_compose_system_puts_instructions_before_runtime_facts():
+    assert compose_system("Reply with only a title.", "today=2026-08-14") == (
+        "Reply with only a title.\n\ntoday=2026-08-14"
+    )
+
+
+def test_compose_system_keeps_either_half_alone():
+    # A chat supplies no instructions; a one-shot in a bare env has no runtime.
+    assert compose_system("", "today=2026-08-14") == "today=2026-08-14"
+    assert compose_system("Only the title.", "") == "Only the title."
+
+
+def test_compose_system_is_empty_when_both_halves_are():
+    # An empty result means "send no `system` field at all".
+    assert compose_system("", "") == ""
+    assert compose_system("   ", "\n") == ""
 
 
 def test_permission_rules_use_the_api_shape_not_the_config_map():

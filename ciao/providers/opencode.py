@@ -418,6 +418,20 @@ def split_model(model: str) -> tuple[str, str]:
     return provider, rest
 
 
+def compose_system(developer_instructions: str, runtime: str) -> str:
+    """Build the prompt body's ``system`` field from its two halves.
+
+    Instructions first, runtime facts after: the caller's system prompt is what
+    defines the call, and the date/workspace lines are context it may refer to.
+    Either half may be empty -- a chat supplies no instructions (opencode's own
+    agent config owns the system prompt) and a bare environment yields no
+    runtime lines -- and an empty result means "send no ``system`` at all".
+    """
+    return "\n\n".join(
+        part for part in (developer_instructions.strip(), runtime.strip()) if part
+    )
+
+
 class OpencodeActiveHandle(ActiveHandle):
     """Stops the in-flight turn by aborting its session."""
 
@@ -467,8 +481,21 @@ class OpencodeProvider(BaseSDKProvider):
         schedule_unattended=True,
     )
 
-    def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
+    def __init__(
+        self,
+        workspace_root: Path,
+        *,
+        config: object | None = None,
+        developer_instructions: str = "",
+    ) -> None:
         super().__init__(workspace_root, config=config)
+        # Caller-supplied system prompt, prepended to the per-request runtime
+        # context in the prompt body's `system` field. Chats leave this empty
+        # and let opencode's own agent config supply the system prompt; the
+        # one-shot path (titles, insights, critique) sets it because those
+        # calls are defined by their instructions. Mirrors CodexProvider's
+        # `developer_instructions`.
+        self._developer_instructions = developer_instructions.strip()
         self._process: asyncio.subprocess.Process | None = None
         # Reads the server's stderr for its whole life; see
         # `_start_stderr_reader` for why leaving the pipe unread is not an option.
@@ -1207,9 +1234,11 @@ class OpencodeProvider(BaseSDKProvider):
         # Reasoning effort rides beside the model, not inside it, on prompts.
         if request.thinking_level:
             body["variant"] = request.thinking_level
-        runtime = build_runtime_context(request)
-        if runtime:
-            body["system"] = runtime
+        system = compose_system(
+            self._developer_instructions, build_runtime_context(request)
+        )
+        if system:
+            body["system"] = system
 
         error: str = ""
         saw_output = False
