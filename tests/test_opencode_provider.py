@@ -28,6 +28,7 @@ from ciao.providers.opencode import (
     compose_system,
     config_placeholder_problems,
     error_text,
+    model_accepts_images,
     missing_required_paths,
     mode_settings,
     opencode_tier_overrides,
@@ -291,6 +292,77 @@ def test_catalog_reports_per_model_reasoning_variants():
     by_model = {row["model"]: row["variants"] for row in _catalog_from_providers(payload)}
     assert by_model["opencode/deepseek-v4-flash-free"] == ["high", "low", "max"]
     assert by_model["opencode/big-pickle"] == []
+
+
+# ── image capability ────────────────────────────────────────────────────
+# opencode is bring-your-own-backend, so it is the one provider where a user can
+# pin a model that cannot take an image. Its catalog states this per model, which
+# is what lets the image pre-flight stop guessing from model-name families.
+
+
+def test_model_accepts_images_reads_the_input_modality():
+    """`capabilities.input.image` is the authoritative per-model answer.
+
+    Shape captured live from opencode 1.18's `GET /provider`.
+    """
+    capable = {
+        "id": "m",
+        "capabilities": {
+            "attachment": True,
+            "input": {"text": True, "image": True, "pdf": False},
+        },
+    }
+    text_only = {
+        "id": "m",
+        "capabilities": {
+            "attachment": False,
+            "input": {"text": True, "image": False, "pdf": False},
+        },
+    }
+    assert model_accepts_images(capable) is True
+    assert model_accepts_images(text_only) is False
+
+
+def test_model_accepts_images_falls_back_to_the_attachment_flag():
+    """`attachment` covers any non-text input, so it can only rule vision out.
+
+    attachment=false is a reliable no; attachment=true says "some attachment"
+    and could mean pdf or audio, so it stays unknown rather than a false yes.
+    """
+    assert model_accepts_images({"capabilities": {"attachment": False}}) is False
+    assert model_accepts_images({"capabilities": {"attachment": True}}) is None
+
+
+def test_model_accepts_images_is_unknown_when_unstated():
+    """Older builds omit the block; unknown must not read as a refusal."""
+    assert model_accepts_images({"id": "m"}) is None
+    assert model_accepts_images({"id": "m", "capabilities": "junk"}) is None
+    assert model_accepts_images({"capabilities": {"input": {"image": "yes"}}}) is None
+
+
+def test_catalog_states_image_support_only_when_opencode_does():
+    """An absent `images` key means unknown -- distinct from a stated False."""
+    payload = {
+        "connected": ["opencode"],
+        "all": [{
+            "id": "opencode",
+            "models": {
+                "seer": {
+                    "id": "seer",
+                    "capabilities": {"input": {"text": True, "image": True}},
+                },
+                "reader": {
+                    "id": "reader",
+                    "capabilities": {"input": {"text": True, "image": False}},
+                },
+                "quiet": {"id": "quiet"},
+            },
+        }],
+    }
+    by_model = {row["model"]: row for row in _catalog_from_providers(payload)}
+    assert by_model["opencode/seer"]["images"] is True
+    assert by_model["opencode/reader"]["images"] is False
+    assert "images" not in by_model["opencode/quiet"]
 
 
 def test_catalog_is_empty_when_nothing_is_connected():

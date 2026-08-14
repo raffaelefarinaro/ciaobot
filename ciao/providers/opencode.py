@@ -1398,6 +1398,35 @@ class OpencodeProvider(BaseSDKProvider):
                 return False
 
 
+def model_accepts_images(model: Mapping[str, Any]) -> bool | None:
+    """Whether an opencode catalog entry accepts image input.
+
+    Reads the entry's own ``capabilities`` block, which opencode sources from
+    models.dev::
+
+        "capabilities": {"attachment": false, "toolcall": true,
+                         "input": {"text": true, "image": false, ...}}
+
+    ``capabilities.input.image`` is the authoritative per-model answer, so this
+    replaces guessing from model-name families. ``None`` means "the build did
+    not say": older opencode versions omit the block, and an unknown answer must
+    not be reported as a refusal -- the caller treats it as capable and lets the
+    upstream reject the attachment itself if it really cannot take one.
+    """
+    capabilities = model.get("capabilities")
+    if not isinstance(capabilities, Mapping):
+        return None
+    inputs = capabilities.get("input")
+    if isinstance(inputs, Mapping) and isinstance(inputs.get("image"), bool):
+        return bool(inputs["image"])
+    # Some entries carry only the coarser `attachment` flag. It covers any
+    # non-text input (pdf, audio, image), so it can only rule vision *out*:
+    # attachment=false is a reliable no, attachment=true is not a reliable yes.
+    if capabilities.get("attachment") is False:
+        return False
+    return None
+
+
 def _catalog_from_providers(payload: object) -> list[dict[str, Any]]:
     """Flatten ``GET /provider`` into Ciaobot's ``{model, label}`` rows.
 
@@ -1430,14 +1459,21 @@ def _catalog_from_providers(payload: object) -> list[dict[str, Any]]:
             if not model_id:
                 continue
             variants = model.get("variants")
-            rows.append({
+            row: dict[str, Any] = {
                 "model": f"{provider_id}/{model_id}",
                 "label": f"{model.get('name') or model_id} ({provider_id})",
                 # Reasoning-effort variants this model accepts, e.g.
                 # ["low", "medium", "high"]. Empty for models with no effort
                 # control; opencode calls the parameter `variant`.
                 "variants": sorted(variants) if isinstance(variants, Mapping) else [],
-            })
+            }
+            # Only stated when opencode said so. Omitting the key rather than
+            # defaulting it keeps "unknown" distinguishable from "no" for the
+            # image pre-flight, which must not refuse an attachment on a guess.
+            accepts_images = model_accepts_images(model)
+            if accepts_images is not None:
+                row["images"] = accepts_images
+            rows.append(row)
     return rows
 
 
