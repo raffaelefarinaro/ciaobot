@@ -483,7 +483,7 @@
               <p class="section-title">internal models</p>
               <p class="hint">
                 These tasks use their own model setting, separate from the active chat model.
-                "Automatic" keeps the built-in default. Local Ollama models run on this machine.
+                "Automatic" keeps the built-in default.
                 System automations without a model picker are tracked on the Automations page.
               </p>
             </div>
@@ -895,56 +895,6 @@
               />
             </div>
 
-            <div class="custom-providers-block">
-              <div class="settings-card-header">
-                <div>
-                  <p class="section-title">custom compatible providers</p>
-                  <p class="hint">
-                    Add any endpoint compatible with the selected CLI, including local Ollama, LM Studio, or Unsloth. Choose Claude Code or Codex as the runner. Tokens stay on this machine.
-                  </p>
-                </div>
-                <button class="btn-small" type="button" @click="addCustomProvider">Add provider</button>
-              </div>
-              <div v-if="!customProviderDrafts.length" class="hint hint--compact">No custom endpoints configured.</div>
-              <div v-for="draft in customProviderDrafts" :key="draft.id" class="custom-provider-row">
-                <div class="settings-field-grid custom-provider-grid">
-                  <label class="settings-field">
-                    <span class="ws-label">Name</span>
-                    <input class="routine-input" v-model="draft.name" @input="customProvidersDirty = true" placeholder="LM Studio" />
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Id</span>
-                    <input class="routine-input" v-model="draft.id" @input="customProvidersDirty = true" placeholder="lm-studio" />
-                  </label>
-                  <label class="settings-field custom-provider-url">
-                    <span class="ws-label">Base URL</span>
-                    <input class="routine-input" v-model="draft.url" @input="customProvidersDirty = true" placeholder="http://localhost:1234/v1" />
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Use with</span>
-                    <select class="routine-select" v-model="draft.runner" @change="customProvidersDirty = true">
-                      <option value="claude">Claude Code</option>
-                      <option value="codex">Codex</option>
-                    </select>
-                  </label>
-                  <label class="settings-field custom-provider-token">
-                    <span class="ws-label">Token</span>
-                    <input class="routine-input" type="password" v-model="draft.token" @input="customProvidersDirty = true" :placeholder="draft.token_configured ? '•••••••• (leave blank to keep)' : 'Optional for local servers'" />
-                  </label>
-                  <label class="settings-field custom-provider-models">
-                    <span class="ws-label">Models (optional)</span>
-                    <input class="routine-input" v-model="draft.models" @input="customProvidersDirty = true" placeholder="model-id, another-model" />
-                  </label>
-                </div>
-                <div class="action-row provider-connection-actions">
-                  <button class="btn-small" type="button" :disabled="customProviderProbePending === draft.id" @click="probeCustomProvider(draft)">
-                    {{ customProviderProbePending === draft.id ? 'Discovering…' : 'Discover models' }}
-                  </button>
-                  <button class="btn-small btn-danger" type="button" @click="removeCustomProvider(draft.id)">Remove</button>
-                </div>
-              </div>
-            </div>
-
 
             <div class="action-row settings-actions">
               <button class="btn-primary" @click="saveProviderKeys" :disabled="providerKeysSaving">
@@ -960,7 +910,7 @@
             <div class="settings-card-header">
               <p class="section-title">model routing</p>
               <p class="hint">
-                Ciaobot maps Haiku, Sonnet, Opus, and Fable to provider-specific models. OpenAI routes run through Codex; Ollama and OpenRouter routes run through Claude Code.
+                Ciaobot maps Haiku, Sonnet, Opus, and Fable to each provider's own models.
               </p>
             </div>
             <div class="alias-provider-bar">
@@ -1019,6 +969,7 @@
           :notify-saved="notifySaved"
           :notify-failed="notifyFailed"
           :routines="routines"
+          :alias-tiers="workspaceModels?.alias_tiers"
           :provider-labels="aliasProviderLabels"
         />
       </template>
@@ -2298,7 +2249,6 @@ import type {
   McpEnvKey,
   PromptAsset,
   ProviderConfigSettings,
-  CustomProviderSettings,
   RoutineSettings,
   SkillInventory,
   SlashCommand,
@@ -2808,7 +2758,8 @@ type InsightsComparison = {
 }
 const insightsComparison = ref<InsightsComparison | null>(null)
 
-type AliasProviderKey = RuntimeProvider | 'ollama' | 'openrouter' | `custom:${string}`
+// Every provider with models or tier pins is a runtime provider now.
+type AliasProviderKey = RuntimeProvider
 type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
 type RoutingProviderKey = Exclude<AliasProviderKey, 'claude'>
 type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
@@ -2820,52 +2771,17 @@ type AliasProviderSection = {
   label: string
   options: string[]
   configurable: boolean
-  // Whether the backend is configured (API key set, or for Ollama: local
-  // models OR cloud key). Routine selectors filter to available sections;
-  // the Providers tab tier card shows unavailable sections disabled.
+  // Whether the provider is signed in and reporting models. Routine selectors
+  // filter to available sections; the Providers tab tier card shows unavailable
+  // sections disabled with setup guidance.
   available: boolean
 }
-type TierSettingKey =
-  | 'ollama_haiku_model'
-  | 'ollama_sonnet_model'
-  | 'ollama_opus_model'
-  | 'ollama_fable_model'
-  | 'openrouter_haiku_model'
-  | 'openrouter_sonnet_model'
-  | 'openrouter_opus_model'
-  | 'openrouter_fable_model'
-  | 'codex_haiku_model'
-  | 'codex_sonnet_model'
-  | 'codex_opus_model'
-  | 'codex_fable_model'
-
 const modelTiers: { key: TierKey; label: string }[] = [
   { key: 'haiku', label: 'Haiku' },
   { key: 'sonnet', label: 'Sonnet' },
   { key: 'opus', label: 'Opus' },
   { key: 'fable', label: 'Fable' },
 ]
-
-const tierSettingKeys: Record<TierProviderKey, Record<TierKey, TierSettingKey>> = {
-  ollama: {
-    haiku: 'ollama_haiku_model',
-    sonnet: 'ollama_sonnet_model',
-    opus: 'ollama_opus_model',
-    fable: 'ollama_fable_model',
-  },
-  openrouter: {
-    haiku: 'openrouter_haiku_model',
-    sonnet: 'openrouter_sonnet_model',
-    opus: 'openrouter_opus_model',
-    fable: 'openrouter_fable_model',
-  },
-  codex: {
-    haiku: 'codex_haiku_model',
-    sonnet: 'codex_sonnet_model',
-    opus: 'codex_opus_model',
-    fable: 'codex_fable_model',
-  },
-}
 
 const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
   title_model: 'title_model_effective',
@@ -2932,14 +2848,29 @@ function serializeModelList(models: string[]): string {
   return parseModelList(models.join(',')).join(',')
 }
 
+// A panel entry may name the provider that runs it. Anthropic tiers are bare
+// aliases; Codex and opencode entries carry a `<provider>:` prefix, matching
+// what `ciao/critique.py::_split_provider` dispatches on.
 const critiqueModelSections = computed<ModelSection[]>(() => {
   const options = routines.value?.model_options
   if (!options) return []
+  const tiers = options.anthropic || []
+  const prefixed = (provider: string, models: string[]) =>
+    models.filter((m) => tiers.includes(m)).map((m) => `${provider}:${m}`)
+  const codexModels = workspaceModels.value?.codex_models || []
+  const opencodeModels = workspaceModels.value?.opencode_models || []
   return [
-    { key: 'ollama_local', label: 'Ollama (local, free)', models: options.ollama_local || [], badge: 'local' },
-    { key: 'ollama_cloud', label: 'Ollama cloud', models: options.ollama_cloud || [] },
-    { key: 'openrouter', label: 'OpenRouter', models: options.openrouter || [] },
-    { key: 'anthropic', label: 'Anthropic', models: options.anthropic || [] },
+    { key: 'anthropic', label: 'Anthropic', models: tiers },
+    {
+      key: 'codex',
+      label: 'OpenAI (via Codex)',
+      models: codexModels.length ? prefixed('codex', tiers) : [],
+    },
+    {
+      key: 'opencode',
+      label: 'opencode',
+      models: opencodeModels.length ? prefixed('opencode', tiers) : [],
+    },
   ].filter((section) => section.models.length > 0)
 })
 
@@ -2969,34 +2900,32 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
       available: true,
     },
   ]
-  if (settings.backends?.ollama) {
+  // Codex and opencode can serve routines too (see `_run_codex_oneshot` /
+  // `_run_opencode_oneshot`), so offer them once their catalog is non-empty.
+  const codexModels = parseModelList((
+    workspaceModels.value?.codex_models
+    || workspaceModels.value?.provider_models?.codex
+    || []
+  ).join(','))
+  if (codexModels.length) {
     sections.push({
-      key: 'ollama',
-      label: 'Ollama (via Claude Code)',
-      options: parseModelList([
-        ...(settings.model_options.ollama_local || []),
-        ...(settings.model_options.ollama_cloud || []),
-      ].join(',')),
+      key: 'codex',
+      label: 'OpenAI (via Codex)',
+      options: codexModels,
       configurable: true,
       available: true,
     })
   }
-  if (settings.backends?.openrouter) {
+  const opencodeModels = parseModelList((
+    workspaceModels.value?.opencode_models
+    || workspaceModels.value?.provider_models?.opencode
+    || []
+  ).join(','))
+  if (opencodeModels.length) {
     sections.push({
-      key: 'openrouter',
-      label: 'OpenRouter (via Claude Code)',
-      options: parseModelList((settings.model_options.openrouter || []).join(',')),
-      configurable: true,
-      available: true,
-    })
-  }
-  for (const provider of settings.model_options.custom_providers || []) {
-    const options = parseModelList((provider.models || []).join(','))
-    if (!options.length) continue
-    sections.push({
-      key: `custom:${provider.id}` as AliasProviderKey,
-      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
-      options,
+      key: 'opencode',
+      label: 'opencode',
+      options: opencodeModels,
       configurable: true,
       available: true,
     })
@@ -3004,13 +2933,12 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   return sections
 })
 
-// Provider-neutral routing overview for the Providers tab. OpenAI models and
-// their automatic tier mapping come from Codex discovery in `/api/models`;
-// Ollama and OpenRouter expose editable Claude Code tier routes. Unconfigured
-// backends stay visible with setup guidance instead of vanishing.
+// Provider-neutral routing overview for the Providers tab. Models and their
+// automatic tier mapping come from each provider's own discovery in
+// `/api/models`. A provider that is not signed in stays visible with setup
+// guidance instead of vanishing.
 const tierProviderSections = computed<AliasProviderSection[]>(() => {
-  const settings = routines.value
-  if (!settings) return []
+  if (!routines.value) return []
   const codexModels = parseModelList((
     workspaceModels.value?.codex_models
     || workspaceModels.value?.provider_models?.codex
@@ -3021,8 +2949,6 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
     || workspaceModels.value?.provider_models?.opencode
     || []
   ).join(','))
-  const ollamaAvailable = !!settings.backends?.ollama
-  const openrouterAvailable = !!settings.backends?.openrouter
   return [
     {
       key: 'codex',
@@ -3038,34 +2964,6 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
       configurable: true,
       available: opencodeModels.length > 0,
     },
-    {
-      key: 'ollama',
-      label: 'Ollama (via Claude Code)',
-      options: ollamaAvailable
-        ? parseModelList([
-            ...(settings.model_options.ollama_local || []),
-            ...(settings.model_options.ollama_cloud || []),
-          ].join(','))
-        : [],
-      configurable: true,
-      available: ollamaAvailable,
-    },
-    {
-      key: 'openrouter',
-      label: 'OpenRouter (via Claude Code)',
-      options: openrouterAvailable
-        ? parseModelList((settings.model_options.openrouter || []).join(','))
-        : [],
-      configurable: true,
-      available: openrouterAvailable,
-    },
-    ...(settings.model_options.custom_providers || []).map((provider) => ({
-      key: `custom:${provider.id}` as AliasProviderKey,
-      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
-      options: parseModelList((provider.models || []).join(',')),
-      configurable: true,
-      available: (provider.models || []).length > 0,
-    })),
   ]
 })
 
@@ -3088,18 +2986,13 @@ const selectedTierProviderSection = computed(() =>
 const tierModelSections = computed<ModelSection[]>(() => {
   const section = selectedTierProviderSection.value
   if (!section || !section.options.length) return []
-  const aliasTiers = section.key === 'codex'
-    ? workspaceModels.value?.alias_tiers
-    : routines.value?.alias_tiers
-  const localModels = section.key === 'ollama'
-    ? routines.value?.model_options.ollama_local || []
-    : []
+  const aliasTiers = workspaceModels.value?.alias_tiers
   return [
     {
       key: section.key,
       label: section.label,
       models: section.options,
-      modelBadges: providerModelBadges(section.key, section.options, aliasTiers, localModels),
+      modelBadges: providerModelBadges(section.key, section.options, aliasTiers),
       disabled: !section.available,
       hint: section.available ? undefined : tierProviderUnavailableHint.value,
     },
@@ -3112,52 +3005,22 @@ const tierProviderUnavailableHint = computed(() => {
   if (section.key === 'codex') {
     return 'Sign in to Codex to discover the available OpenAI models and their tier routing.'
   }
-  if (section.key === 'ollama') {
-    return 'Install local Ollama models or set the Ollama Cloud API key above to enable tier mapping.'
-  }
-  if (section.key === 'openrouter') {
-    return 'Set the OpenRouter API key above to enable tier mapping.'
+  if (section.key === 'opencode') {
+    return 'Sign in to opencode (and connect at least one of its providers) to enable tier mapping.'
   }
   return 'Configure this provider to enable tier mapping.'
 })
 
 const DEFAULT_TIER_SELECTION = '__ciao_default__'
 
-/**
- * Whether a tier-pin provider is a runtime provider (Claude, Codex, opencode)
- * rather than a routing backend (Ollama, OpenRouter) or a custom endpoint.
- *
- * Runtime providers store their pins in the nested `provider_routing` map and
- * resolve their tiers from the account catalog in `/api/models`; the routing
- * backends keep env-backed flat settings. Read from the backend registry so a
- * new provider needs no change here.
- */
-function isRuntimeProvider(provider: string): boolean {
-  const descriptors = workspaceModels.value?.providers
-  if (descriptors?.length) return descriptors.some((item) => item.id === provider)
-  // Before /api/models resolves, fall back to "not a routing backend".
-  return !provider.startsWith('custom:') && provider !== 'ollama' && provider !== 'openrouter'
-}
-
 function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
-  if (provider.startsWith('custom:')) {
-    const id = provider.slice('custom:'.length)
-    return routines.value?.custom_routing?.[id]?.[tier] || ''
-  }
-  if (isRuntimeProvider(provider)) {
-    return routines.value?.provider_routing?.[provider]?.[tier] || ''
-  }
-  const key = tierSettingKeys[provider][tier]
-  return routines.value?.[key] || ''
+  return routines.value?.provider_routing?.[provider]?.[tier] || ''
 }
 
 function tierEffectiveValue(provider: TierProviderKey, tier: TierKey): string {
   // A runtime provider's effective tiers come from its account catalog,
   // exposed by /api/models rather than the routines payload.
-  if (isRuntimeProvider(provider)) {
-    return workspaceModels.value?.alias_tiers?.[provider]?.[tier] || ''
-  }
-  return routines.value?.alias_tiers?.[provider]?.[tier] || ''
+  return workspaceModels.value?.alias_tiers?.[provider]?.[tier] || ''
 }
 
 function tierDefaultValue(provider: TierProviderKey, tier: TierKey): string {
@@ -3165,16 +3028,14 @@ function tierDefaultValue(provider: TierProviderKey, tier: TierKey): string {
     return workspaceModels.value?.codex_tier_defaults?.[tier]
       || tierEffectiveValue(provider, tier)
   }
-  if (isRuntimeProvider(provider)) return tierEffectiveValue(provider, tier)
-  return routines.value?.tier_defaults?.[provider]?.[tier]
-    || tierEffectiveValue(provider, tier)
+  return tierEffectiveValue(provider, tier)
 }
 
 function tierDefaultLabel(provider: TierProviderKey, tier: TierKey): string {
   const model = tierDefaultValue(provider, tier)
-  // "Automatic" for catalog-derived tiers, "Default" for env-backed ones.
-  const word = isRuntimeProvider(provider) ? 'Automatic' : 'Default'
-  return model ? `${word} (${model})` : word
+  // Always "Automatic": every tier is derived from the provider's own catalog
+  // now, never from an env-backed default.
+  return model ? `Automatic (${model})` : 'Automatic'
 }
 
 function tierSelectorValue(provider: TierProviderKey, tier: TierKey): string {
@@ -3196,38 +3057,24 @@ function tierModelSectionsFor(provider: TierProviderKey, tier: TierKey): ModelSe
 async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: string | string[]) {
   const selected = Array.isArray(value) ? value[0] || '' : value
   const model = selected === DEFAULT_TIER_SELECTION ? '' : selected
-  if (provider.startsWith('custom:')) {
-    const id = provider.slice('custom:'.length)
-    const routing = JSON.parse(JSON.stringify(routines.value?.custom_routing || {})) as Record<string, Record<string, string>>
-    const routes = { ...(routing[id] || {}) }
-    if (model.trim()) routes[tier] = model.trim()
-    else delete routes[tier]
-    if (Object.keys(routes).length) routing[id] = routes
-    else delete routing[id]
-    await saveRoutines({ custom_routing: routing })
-  } else if (isRuntimeProvider(provider)) {
-    const routing = JSON.parse(
-      JSON.stringify(routines.value?.provider_routing || {}),
-    ) as Record<string, Record<string, string>>
-    const routes = { ...(routing[provider] || {}) }
-    if (model.trim()) routes[tier] = model.trim()
-    else delete routes[tier]
-    if (Object.keys(routes).length) routing[provider] = routes
-    else delete routing[provider]
-    await saveRoutines({ provider_routing: routing })
-  } else {
-    const key = tierSettingKeys[provider][tier]
-    await saveRoutines({ [key]: model.trim() })
-  }
-  // A runtime provider's effective tiers live in /api/models; refresh so the
-  // badges and "Automatic (…)" labels reflect the new pin immediately.
-  if (isRuntimeProvider(provider)) await fetchWorkspaceModels()
+  const routing = JSON.parse(
+    JSON.stringify(routines.value?.provider_routing || {}),
+  ) as Record<string, Record<string, string>>
+  const routes = { ...(routing[provider] || {}) }
+  if (model.trim()) routes[tier] = model.trim()
+  else delete routes[tier]
+  if (Object.keys(routes).length) routing[provider] = routes
+  else delete routing[provider]
+  await saveRoutines({ provider_routing: routing })
+  // Effective tiers live in /api/models; refresh so the badges and
+  // "Automatic (…)" labels reflect the new pin immediately.
+  await fetchWorkspaceModels()
 }
 
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
-  if (provider === 'claude') return routines.value?.alias_tiers?.claude?.[tier] || tier
+  // Claude's tiers *are* the aliases; the others pin concrete models.
+  if (provider === 'claude') return tier
   if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || 'Not available'
-  if (provider.startsWith('custom:')) return tierEffectiveValue(provider, tier) || ''
   return tierEffectiveValue(provider, tier) || ''
 }
 
@@ -3271,7 +3118,7 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
     return { provider: 'claude', tier: claudeTiers[raw] }
   }
 
-  const providers: TierProviderKey[] = ['ollama', 'openrouter']
+  const providers: TierProviderKey[] = ['codex', 'opencode']
   for (const provider of providers) {
     for (const tier of modelTiers) {
       if (tierEffectiveValue(provider, tier.key) === raw) {
@@ -3306,8 +3153,7 @@ function routineTierValue(key: RoutineModelKey): TierKey {
 
 function routineTierSelectable(key: RoutineModelKey): boolean {
   const provider = routineProviderValue(key)
-  return provider === 'claude' || provider === 'ollama' || provider === 'openrouter'
-    || provider === 'codex' || provider.startsWith('custom:')
+  return provider === 'claude' || provider === 'codex' || provider === 'opencode'
 }
 
 function routineCustomModel(key: RoutineModelKey): string {
@@ -3390,10 +3236,6 @@ const mcpUsageError = ref('')
 const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
-type CustomProviderDraft = Omit<CustomProviderSettings, 'models'> & { token: string; models: string }
-const customProviderDrafts = ref<CustomProviderDraft[]>([])
-const customProvidersDirty = ref(false)
-const customProviderProbePending = ref('')
 const autoUpdateGithubSkills = ref(false)
 const autoUpdateSaving = ref(false)
 const autoUpdateResult = ref('')
@@ -3642,12 +3484,6 @@ async function fetchProviderKeys() {
   try {
     const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
     providerKeys.value = res
-    customProviderDrafts.value = (res.custom_providers || []).map((provider) => ({
-      ...provider,
-      token: '',
-      models: provider.models.join(', '),
-    }))
-    customProvidersDirty.value = false
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
@@ -3661,48 +3497,6 @@ async function fetchProviderKeys() {
     providerKeysError.value = `Failed to load provider keys: ${errorMessage(e)}`
   } finally {
     providerKeysLoaded.value = true
-  }
-}
-
-function addCustomProvider() {
-  const id = `custom-${Date.now().toString(36)}`
-  customProviderDrafts.value.push({
-    id,
-    name: 'Custom provider',
-    url: 'http://localhost:1234/v1',
-    runner: 'claude',
-    models: '',
-    token_configured: false,
-    token: '',
-  })
-  customProvidersDirty.value = true
-}
-
-function removeCustomProvider(id: string) {
-  customProviderDrafts.value = customProviderDrafts.value.filter((provider) => provider.id !== id)
-  customProvidersDirty.value = true
-}
-
-async function probeCustomProvider(draft: CustomProviderDraft) {
-  customProviderProbePending.value = draft.id
-  try {
-    const result = await api.post<{ ok: boolean; models: string[] }>('/api/settings/providers/custom/probe', {
-      id: draft.id,
-      name: draft.name,
-      url: draft.url,
-      runner: draft.runner,
-      token: draft.token || undefined,
-    })
-    if (result.models?.length) {
-      draft.models = result.models.join(', ')
-      customProvidersDirty.value = true
-    } else {
-      providerKeysResult.value = 'No models were discovered. You can enter model ids manually.'
-    }
-  } catch (e) {
-    providerKeysResult.value = `Could not discover models: ${errorMessage(e)}`
-  } finally {
-    customProviderProbePending.value = ''
   }
 }
 
@@ -3781,10 +3575,7 @@ async function saveProviderKeys() {
     }
   }
   
-  const hasKeyChanges = Object.keys(patchKeys).length > 0
-  const customProvidersChanged = customProvidersDirty.value
-  
-  if (!hasKeyChanges && !customProvidersDirty.value) {
+  if (!Object.keys(patchKeys).length) {
     providerKeysResult.value = 'No changes to save.'
     providerKeysSaving.value = false
     setTimeout(() => { providerKeysResult.value = '' }, 2000)
@@ -3792,26 +3583,11 @@ async function saveProviderKeys() {
   }
   
   try {
-    const payload: { keys: Record<string, string>; custom_providers?: object[] } = { keys: patchKeys }
-    if (customProvidersDirty.value) {
-      payload.custom_providers = customProviderDrafts.value.map((draft) => ({
-        id: draft.id,
-        name: draft.name,
-        url: draft.url,
-        runner: draft.runner,
-        models: draft.models,
-        ...(draft.token ? { token: draft.token } : {}),
-      }))
-    }
-    
-    const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', payload)
+    const res = await api.patch<ProviderConfigSettings>(
+      '/api/settings/providers',
+      { keys: patchKeys },
+    )
     providerKeys.value = res
-    customProviderDrafts.value = (res.custom_providers || []).map((provider) => ({
-      ...provider,
-      token: '',
-      models: provider.models.join(', '),
-    }))
-    customProvidersDirty.value = false
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
@@ -3822,16 +3598,9 @@ async function saveProviderKeys() {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
     providerKeysResult.value = ''
-    if (customProvidersChanged) {
-      // Provider selectors are mounted from separate payloads; refresh them
-      // immediately so a newly saved endpoint is usable without a page reload.
-      await Promise.all([fetchRoutines(), fetchWorkspaceModels(), fetchWorkspacesList()])
-    }
-    if (hasKeyChanges) {
-      await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
-    } else {
-      providerKeysResult.value = 'Custom providers saved.'
-    }
+    // A service key only reaches the process env on startup, so a change here
+    // always needs a restart. There is nothing else this save can change.
+    await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
   } catch (e) {
     providerKeysResult.value = `Error: ${errorMessage(e)}`
   } finally {
@@ -4528,13 +4297,10 @@ function blankWorkspaceForm(): WorkspaceForm {
 
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
   const mcps = ws.claude_ai_mcps
-  const customProvider = ws.default_model.startsWith('custom:')
-    ? `custom:${ws.default_model.split(':', 3)[1]}` as WorkspaceProvider
-    : null
   return {
     name: ws.name,
     vault_root: ws.vault_root || '',
-    default_provider: customProvider || ws.default_provider || 'claude',
+    default_provider: ws.default_provider || 'claude',
     default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
     model_bucket: ws.model_bucket || '',
@@ -5925,28 +5691,6 @@ a.btn-secondary {
   content: '·';
   margin-right: 10px;
   color: var(--fg3);
-}
-.custom-providers-block {
-  margin-top: var(--space-4);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--border);
-}
-.custom-provider-row {
-  margin-top: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg) 55%, transparent);
-}
-.custom-provider-grid {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-}
-.custom-provider-url,
-.custom-provider-models {
-  grid-column: span 2;
-}
-.custom-provider-token {
-  grid-column: span 2;
 }
 .settings-control {
   width: min(100%, 430px);

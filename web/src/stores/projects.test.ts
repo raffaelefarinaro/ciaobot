@@ -2227,13 +2227,13 @@ describe('workspace and chat transitions', () => {
       if (path === '/api/workspaces') {
         return Promise.resolve({
           workspaces: [
-            { name: 'home', vault_root: 'memory-vault/home', default_provider: 'ollama', default_model: '', gws_profile: 'personal', model_bucket: 'personal' },
+            { name: 'home', vault_root: 'memory-vault/home', default_provider: 'opencode', default_model: '', gws_profile: 'personal', model_bucket: '' },
             { name: 'client', vault_root: 'vaults/client', default_provider: 'claude', default_model: '', gws_profile: 'work', model_bucket: 'work' },
           ],
           active: 'home',
           provider_options: [
             { value: 'claude', label: 'Claude' },
-            { value: 'ollama', label: 'Ollama' },
+            { value: 'opencode', label: 'opencode' },
           ],
         })
       }

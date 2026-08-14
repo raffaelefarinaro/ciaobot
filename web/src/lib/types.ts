@@ -42,11 +42,9 @@ export interface ProviderDescriptor {
   capabilities: ProviderCapabilities
 }
 
-export type WorkspaceProvider =
-  | RuntimeProvider
-  | 'ollama'
-  | 'openrouter'
-  | `custom:${string}`
+// Every selectable provider is a runtime provider now; the alias survives
+// because workspace payloads and pickers name it throughout.
+export type WorkspaceProvider = RuntimeProvider
 
 export interface WorkspaceProviderOption {
   value: WorkspaceProvider
@@ -153,12 +151,11 @@ export interface ChatInfo {
   project_id: string
   title: string
   model: string
-  // Runtime provider. Claude also covers Ollama/OpenRouter env-injection;
-  // Codex uses the authenticated OpenAI CLI app-server session.
+  // Runtime provider: which CLI runs the turn.
   provider: RuntimeProvider
-  // Claude routing bucket. Legacy values: 'work'/'anthropic' pin Anthropic,
-  // 'personal'/'ollama' pin Ollama routing. '' = auto from project workspace.
-  // Only meaningful when provider is 'claude'.
+  // Vestigial. Named which upstream a tier alias resolved to, back when
+  // Ollama/OpenRouter ran through Claude Code by env injection. Still carried
+  // on existing chats and accepted by the API, but nothing reads it.
   model_bucket?: string
   mode: string
   // Provider-native thinking/reasoning level ('' = provider default).
@@ -510,18 +507,9 @@ export interface StatusResponse {
 export interface ModelsResponse {
   models: string[]
   default: string
-  // Keyed by picker bucket (claude_work, claude_personal, openrouter).
+  // Keyed by provider id: claude, codex, opencode.
   provider_models: Record<string, string[]>
   provider_defaults: Record<string, string>
-  // Names listed in CIAO_OLLAMA_MODELS, repeated here so the UI can
-  // derive a chat's active bucket from (provider, model) without an
-  // extra round-trip.
-  ollama_models?: string[]
-  // Subset of ollama_models served by the local Ollama daemon (free,
-  // on-device); the picker can badge these as "local".
-  ollama_local_models?: string[]
-  // OpenRouter owner/model ids available as a backend.
-  openrouter_models?: string[]
   // Account-visible Codex models and their app-server metadata.
   codex_models?: string[]
   // Models reachable through opencode's connected backends, already
@@ -530,9 +518,6 @@ export interface ModelsResponse {
   // Registry-driven provider descriptors, so the PWA never has to hard-code
   // the set of runtime providers. See `ciao/provider_registry.py`.
   providers?: ProviderDescriptor[]
-  custom_providers?: Array<CustomProviderSettings & {
-    model_labels?: Record<string, string>
-  }>
   codex_model_metadata?: Record<string, {
     display_name: string
     description: string
@@ -560,14 +545,6 @@ export interface RoutineSettings {
   insights_model: string
 
   critique_models: string
-  ollama_haiku_model: string
-  ollama_sonnet_model: string
-  ollama_opus_model: string
-  ollama_fable_model: string
-  openrouter_haiku_model: string
-  openrouter_sonnet_model: string
-  openrouter_opus_model: string
-  openrouter_fable_model: string
   // Per-runtime-provider tier pins, keyed by provider id then tier; a missing
   // entry = automatic catalog mapping. This is the canonical shape — PATCH it
   // rather than the flat keys below. Effective values come from /api/models
@@ -579,7 +556,6 @@ export interface RoutineSettings {
   codex_sonnet_model: string
   codex_opus_model: string
   codex_fable_model: string
-  custom_routing?: Record<string, Record<string, string>>
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string
@@ -614,10 +590,6 @@ export interface RoutineSettings {
   }
   model_options: {
     anthropic: string[]
-    ollama_cloud: string[]
-    ollama_local: string[]
-    openrouter?: string[]
-    custom_providers?: Array<CustomProviderSettings & { model_labels?: Record<string, string> }>
   }
   backends?: Record<string, boolean>
   workspace_context?: {
@@ -649,15 +621,6 @@ export interface ProviderConnection {
   cli_path?: string
 }
 
-export interface CustomProviderSettings {
-  id: string
-  name: string
-  url: string
-  runner: RuntimeProvider
-  models: string[]
-  token_configured: boolean
-}
-
 export interface ProviderConfigSettings {
   keys: Record<string, {
     label: string
@@ -672,7 +635,6 @@ export interface ProviderConfigSettings {
     auth_method?: string
   }>
   connections?: Record<string, ProviderConnection>
-  custom_providers?: CustomProviderSettings[]
   auto_update_github_skills?: boolean
   requires_restart: boolean
   env_path: string

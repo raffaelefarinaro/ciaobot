@@ -98,7 +98,7 @@ export const useProjectStore = defineStore('projects', () => {
   // `thinking_delta` events: we accumulate the model's reasoning text and
   // commit it as a `kind: 'thinking'` timeline entry the moment a visible
   // text delta or tool_use starts (i.e. thinking has ended). Without this
-  // buffer, intermediate thinking blocks emitted by Ollama models would
+  // buffer, intermediate thinking blocks emitted by some models would
   // disappear entirely (they used to be silently dropped at end-of-stream).
   const streamingThinking = ref<Record<string, string>>({})
   // Per-chat live token totals for the in-flight turn, fed by `token_usage`
@@ -3955,7 +3955,7 @@ export const useProjectStore = defineStore('projects', () => {
         // when the model switches to visible text or fires a tool_use
         // (those signal the end of this thinking block). For Anthropic
         // models thinking is usually short and the buffer flushes within
-        // the same turn; for Ollama-routed models (Kimi K2.6 etc.) the
+        // the same turn; for some models the
         // thinking block can be long and is the user's main view into
         // the model's actual reasoning, so dropping it would hurt.
         if (event.text) {

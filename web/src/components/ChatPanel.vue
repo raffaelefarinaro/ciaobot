@@ -2164,20 +2164,25 @@ const touchedFiles = computed<TouchedFile[]>(() => {
 })
 
 type ProviderKey = RuntimeProvider
-type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex' | 'opencode' | `custom:${string}`
-type ModelBucketValue = 'work' | 'personal' | 'openrouter' | ''
-type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex' | 'opencode' | 'custom'
+// One bucket per runtime provider: each owns its own auth and its own catalog,
+// so the provider *is* the route. (This used to also enumerate the env-injected
+// Ollama/OpenRouter/custom routes that ran through the Claude runner.)
+type BucketKey = ProviderKey
 type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
-// The first three buckets are all served by the Claude runner, differing only
-// in env-injected routing; the rest are one bucket per runtime provider.
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
-  { key: 'claude_work', label: 'Claude', provider: 'claude' },
-  { key: 'claude_personal', label: 'Ollama', provider: 'claude' },
-  { key: 'openrouter', label: 'OpenRouter', provider: 'claude' },
+  { key: 'claude', label: 'Claude', provider: 'claude' },
   { key: 'codex', label: 'Codex', provider: 'codex' },
   { key: 'opencode', label: 'opencode', provider: 'opencode' },
 ]
+
+// ModelSelector names the Claude section 'anthropic' (the models are Anthropic's,
+// the runner is Claude Code), so the two vocabularies need one hop between them.
+const SECTION_BY_BUCKET: Record<BucketKey, string> = {
+  claude: 'anthropic',
+  codex: 'codex',
+  opencode: 'opencode',
+}
 
 
 function toggleTrace(i: number) {
@@ -2525,11 +2530,7 @@ function cancelCapability(q: { request_id: string }) {
 // Section key (ModelSelector) for a bucket, used to preselect the backend when
 // the capability card opens the full picker.
 function capabilitySectionForBucket(bucket: BucketKey): string {
-  if (bucket === 'codex') return 'codex'
-  if (bucket === 'opencode') return 'opencode'
-  if (bucket === 'openrouter') return 'openrouter'
-  if (bucket === 'claude_personal') return 'ollama'
-  return 'anthropic'
+  return SECTION_BY_BUCKET[bucket] || 'anthropic'
 }
 
 const capabilityPickerSection = ref('')
@@ -2539,39 +2540,13 @@ const activeProvider = computed<ProviderKey>(() => {
 })
 
 const activeBucket = computed<BucketKey>(() => {
-  const c = chat.value
-  if (!c) return 'claude_work'
-  // A provider that serves its own catalog gets a bucket named after it.
-  // Registry-driven, and checked before the `owner/model` shape heuristic
-  // below — opencode ids look exactly like OpenRouter ones, so the heuristic
-  // filed them under OpenRouter and the header said so.
-  const providerDescriptor = modelsResponse.value?.providers?.find((p) => p.id === c.provider)
-  if (providerDescriptor && !providerDescriptor.model_bucket) return c.provider as BucketKey
-  if (c.provider === 'codex') return 'codex'
-  if (c.model.startsWith('custom:')) {
-    const parts = c.model.split(':', 3)
-    if (parts[1]) return `custom:${parts[1]}`
-  }
-  // OpenRouter ids are owner/model (no ':' tag); Ollama ids carry ':'.
-  if (c.model.includes('/') && !c.model.includes(':')) return 'openrouter'
-  // The server records the explicit bucket choice. Legacy values are kept
-  // for existing chats; new workspace config may use clearer bucket names.
-  if (c.model_bucket === 'openrouter') return 'openrouter'
-  if (c.model_bucket === 'work' || c.model_bucket === 'anthropic') return 'claude_work'
-  if (c.model_bucket === 'personal' || c.model_bucket === 'ollama') return 'claude_personal'
-  const ollamaModels = modelsResponse.value?.ollama_models || []
-  return ollamaModels.includes(c.model) ? 'claude_personal' : 'claude_work'
+  return (chat.value?.provider as BucketKey) || 'claude'
 })
 
 const chatModelSections = computed(() => {
   const baseSections = sectionsFromModelsResponse(modelsResponse.value)
-  // The Anthropic section is always the real Anthropic subscription: its tier
-  // aliases route to Anthropic and picking one hands the chat over there. It is
-  // NOT relabeled per active bucket — when routing through Ollama/OpenRouter
-  // those tiers already appear as badges on that provider's concrete models
-  // (e.g. "minimax-m3:cloud · Opus"), so a "Claude (Ollama)" clone would just
-  // duplicate them. Keeping a single fixed "Claude (Anthropic)" section both
-  // removes that duplicate and preserves an explicit handover path to Anthropic.
+  // Name the Anthropic section for its vendor so it reads as a peer of the
+  // Codex and opencode sections rather than as "the default".
   return baseSections.map(section => {
     if (section.key === 'anthropic') {
       return { ...section, label: 'Claude (Anthropic)' }
@@ -2580,16 +2555,10 @@ const chatModelSections = computed(() => {
   })
 })
 
-// The exact model id the chat is running on. When the chat is on a tier alias
-// (e.g. "sonnet") it would otherwise render as that bare alias in the header
-// chip; resolve it through the active bucket so the user sees the actual
-// provider-native model (e.g. "minimax-m3:cloud") instead of the alias.
-const activeModelId = computed(() => {
-  const c = chat.value
-  if (!c) return ''
-  const resolved = effectiveModelForBucket(c.model, activeBucket.value)
-  return resolved || c.model
-})
+// The model id the chat is running on, as stored. A tier alias stays an alias
+// here: the provider resolves it per turn against its own catalog, so there is
+// no single concrete id to substitute.
+const activeModelId = computed(() => chat.value?.model || '')
 
 const activeModelHighlights = computed(() => {
   const c = chat.value
@@ -2597,21 +2566,17 @@ const activeModelHighlights = computed(() => {
   const resolvedModel = canonicalTier(c.model)
   const tier = tierAlias(resolvedModel)
   if (tier) {
-    // Only the Anthropic subscription bucket highlights the bare tier, because
-    // there the model literally IS the tier and lives in the "Claude
-    // (Anthropic)" section. For concrete-provider buckets (codex / ollama /
-    // openrouter) highlight only that provider's real model — the bare tier now
-    // belongs to the separate Anthropic handover section and must not light up.
-    if (activeBucket.value === 'claude_work') return [tier]
-    const provider = activeBucket.value === 'claude_personal' ? 'ollama' : activeBucket.value
-    const nativeModel = modelsResponse.value?.alias_tiers?.[provider]?.[tier]
+    // On Claude the model literally IS the tier, so highlight the alias. Codex
+    // and opencode pin tiers to concrete models, so highlight the pinned model
+    // and leave the bare alias to the Anthropic section.
+    if (activeBucket.value === 'claude') return [tier]
+    const nativeModel = modelsResponse.value?.alias_tiers?.[activeBucket.value]?.[tier]
     return nativeModel ? [nativeModel] : [c.model]
   }
   if (isFableSelection(c.model, c.thinking_level)) {
     return [CODEX_FABLE_PSEUDO_MODEL]
   }
-  const effective = effectiveModelForBucket(c.model, activeBucket.value)
-  return [effective || c.model]
+  return [c.model]
 })
 
 const bucketLocked = computed(() => {
@@ -4038,8 +4003,7 @@ function tierAlias(model: string): TierAlias | null {
 
 function tierForModel(model: string, bucket: BucketKey): TierAlias | null {
   if (bucket === 'codex') return null
-  const provider = bucket === 'claude_personal' ? 'ollama' : bucket
-  const tiers = modelsResponse.value?.alias_tiers?.[provider] || {}
+  const tiers = modelsResponse.value?.alias_tiers?.[bucket] || {}
   for (const [tier, target] of Object.entries(tiers)) {
     if (target === model) return tier as TierAlias
   }
@@ -4054,113 +4018,45 @@ function canonicalTier(model: string): string {
   return resolvedAlias || model
 }
 
-// Render the routing backend (Ollama / Anthropic / OpenRouter / Codex / custom)
-// as the operator in the brain chip. Falls back to the CLI provider when no
-// bucket is set, so chats in the legacy / auto state still show something
-// sensible ('claude' or 'codex') instead of going blank.
+// Render the vendor behind the chat as the operator in the brain chip. Falls
+// back to the CLI provider when no bucket is set, so a chat in the legacy /
+// auto state still shows something sensible instead of going blank.
 function routingBucketLabel(bucket: string | undefined, provider: string): string {
   if (!bucket) return provider
-  if (bucket === 'claude_personal') return 'ollama'
-  if (bucket === 'claude_work') return 'anthropic'
-  if (bucket.startsWith('custom:')) return 'custom'
+  if (bucket === 'claude') return 'anthropic'
   return bucket
 }
 
-// Capitalize the provider for the header chip (Ollama / Anthropic / OpenRouter /
-// Codex / custom name). Falls back to the bucket label when the bucket is not
-// one of the known routes.
-// Takes a NORMALISED bucket (activeBucket), not the raw ChatInfo.model_bucket.
-// The raw field carries legacy values like 'work' / 'personal' / '' that match
-// none of the cases below, so passing it through printed the workspace name
-// ("Work") where the provider belongs. activeBucket already folds those into
-// claude_work / claude_personal / openrouter / codex / custom:<id>.
+// Vendor name for the header chip. Takes a NORMALISED bucket (activeBucket),
+// not the raw ChatInfo.model_bucket: that field is vestigial and still carries
+// legacy values like 'work' / 'personal' which would print the workspace name
+// where the vendor belongs.
 function routingProviderLabel(bucket: string | undefined, provider: string): string {
   const lower = routingBucketLabel(bucket, provider)
   if (!lower) return ''
-  if (lower === 'ollama') return 'Ollama'
   if (lower === 'anthropic') return 'Anthropic'
-  if (lower === 'openrouter') return 'OpenRouter'
   if (lower === 'codex') return 'Codex'
   // Lower-case on purpose: that is how opencode brands itself.
   if (lower === 'opencode') return 'opencode'
   if (lower === 'claude') return 'Claude'
-  if (lower === 'custom') {
-    if (bucket?.startsWith('custom:')) {
-      const id = bucket.slice('custom:'.length)
-      const cp = modelsResponse.value?.custom_providers?.find((item) => item.id === id)
-      return cp?.name || 'Custom'
-    }
-    return 'Custom'
-  }
   return lower.charAt(0).toUpperCase() + lower.slice(1)
 }
 
-function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
-  if (bucket.startsWith('custom:')) return ''
-  // Providers that serve their own models have no Anthropic-style bucket.
-  if (bucket === 'codex' || bucket === 'opencode') return ''
-  if (bucket === 'openrouter') return 'openrouter'
-  return bucket === 'claude_personal' ? 'personal' : 'work'
-}
-
 function bucketLabel(bucket: BucketKey): string {
-  if (bucket.startsWith('custom:')) {
-    const id = bucket.slice('custom:'.length)
-    const provider = modelsResponse.value?.custom_providers?.find(item => item.id === id)
-    return provider ? `${provider.name} via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'}` : id
-  }
   return BUCKET_DEFS.find((def) => def.key === bucket)?.label || 'Claude'
 }
 
+// Which provider owns a model id. Membership in a provider's catalog is
+// authoritative; the `provider/model` shape is the fallback for an opencode id
+// the catalog has not reported yet.
 function bucketForSelectedModel(model: string): BucketKey {
-  if (model.startsWith('custom:')) {
-    const parts = model.split(':', 3)
-    if (parts[1]) return `custom:${parts[1]}`
-  }
   const response = modelsResponse.value
   if (response?.alias_tiers?.codex?.[model]) return 'codex'
   if ((response?.codex_models || []).includes(model)) return 'codex'
   if (model === CODEX_FABLE_PSEUDO_MODEL) return 'codex'
-  // Must precede the OpenRouter check: opencode ids are also `provider/model`,
-  // so the shape heuristic below would otherwise claim them.
   if ((response?.opencode_models || []).includes(model)) return 'opencode'
-  const openrouterModels = response?.openrouter_models || []
-  if (openrouterModels.includes(model) || (model.includes('/') && !model.includes(':'))) {
-    return 'openrouter'
-  }
-  const ollamaModels = response?.ollama_models || []
-  if (ollamaModels.includes(model) || model.includes(':')) {
-    return 'claude_personal'
-  }
-  return 'claude_work'
-}
-
-function effectiveModelForBucket(model: string, bucket: BucketKey): string {
-  if (bucket === 'codex' || bucket === 'opencode') return model
-  const tier = tierAlias(model)
-  if (!tier) return model
-  if (bucket === 'openrouter') {
-    return modelsResponse.value?.alias_tiers?.openrouter?.[tier] || model
-  }
-  if (bucket === 'claude_personal') {
-    return modelsResponse.value?.alias_tiers?.ollama?.[tier] || model
-  }
-  return model
-}
-
-function routeKindFor(model: string, bucket: BucketKey): RouteKind {
-  if (bucket.startsWith('custom:')) return 'custom'
-  if (bucket === 'codex') return 'codex'
-  if (bucket === 'opencode') return 'opencode'
-  const effective = effectiveModelForBucket(model, bucket)
-  if (bucket === 'openrouter' || (effective.includes('/') && !effective.includes(':'))) {
-    return 'openrouter'
-  }
-  const local = modelsResponse.value?.ollama_local_models || []
-  if (local.includes(effective)) return 'ollama-local'
-  const ollama = modelsResponse.value?.ollama_models || []
-  if (ollama.includes(effective) || effective.includes(':')) return 'ollama'
-  return 'anthropic'
+  if (model.includes('/')) return 'opencode'
+  return 'claude'
 }
 
 
@@ -4171,18 +4067,14 @@ async function selectModel(value: string | string[], sectionKey = '') {
     return
   }
   const sectionBucket: Partial<Record<string, BucketKey>> = {
-    anthropic: 'claude_work',
+    anthropic: 'claude',
     codex: 'codex',
     opencode: 'opencode',
-    ollama: 'claude_personal',
-    openrouter: 'openrouter',
   }
-  // The Anthropic section is an explicit handover to the Anthropic
-  // subscription: picking a tier there always routes to claude_work, never the
-  // currently-active Ollama/OpenRouter/Codex bucket. To change tier while
-  // staying on a concrete provider, pick that provider's real model instead.
+  // Picking from the Anthropic section is an explicit handover to Claude Code,
+  // never a tier change on whichever provider is active. To change tier while
+  // staying on a provider, pick that provider's own model instead.
   const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
-  const modelBucket = modelBucketForBucket(targetBucket)
   // A fable chat stores the real model, so comparing raw ids would make
   // "fable -> the plain model" look like re-picking what is already selected
   // and return without doing anything.
@@ -4199,20 +4091,17 @@ async function selectModel(value: string | string[], sectionKey = '') {
   }
   const isFablePseudo = model === CODEX_FABLE_PSEUDO_MODEL
   const realModel = isFablePseudo ? CODEX_FABLE_REAL_MODEL : model
-  const targetRoute = routeKindFor(realModel, targetBucket)
-  const currentRoute = routeKindFor(chat.value.model, activeBucket.value)
-  const customProvider = targetBucket.startsWith('custom:')
-    ? modelsResponse.value?.custom_providers?.find(item => item.id === targetBucket.slice('custom:'.length))
-    : undefined
+  // A handover is needed exactly when the provider changes: each runs its own
+  // CLI with its own session, so the new one has never seen this chat.
+  const targetRoute = targetBucket
+  const currentRoute = activeBucket.value
   const updates: {
     provider: ProviderKey
     model: string
-    model_bucket: ModelBucketValue
     thinking_level?: string
   } = {
-    provider: (customProvider?.runner || BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
+    provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
     model: realModel,
-    model_bucket: modelBucket,
   }
   if (isFablePseudo) {
     updates.thinking_level = CODEX_FABLE_LEVEL
