@@ -39,6 +39,7 @@ ciao public-preflight scan /tmp/ciao-public-export --private-patterns /tmp/priva
 ciao package-smoke --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
 ciao auth codex --print-only               # show Codex / ChatGPT login command
+ciao auth opencode --print-only            # show opencode login command
 ciao auth ollama                           # run provider login helper
 ciao scaffold eval example --workspace .  # create evals/example.json
 ciao eval --suite evals/example.json --workspace .
@@ -115,7 +116,7 @@ npm install          # optional root Node tooling
 cd web
 npm install
 npm run build        # typecheck + Vite build, outputs to ciao/web/static/
-npm test             # 42 files / 345 tests
+npm test             # 61 test files under web/src
 ```
 
 ## macOS desktop development
@@ -162,10 +163,12 @@ The main webview loads the live localhost PWA and must never be added to a
 Tauri capability. While the engine is unreachable it loads the bundled
 `startup.html` recovery page and automatically navigates to the PWA after
 recovery; test both states when changing desktop startup or service lifecycle
-code. The shell exposes **no** Tauri commands and declares no capabilities:
-every desktop preference and action is driven from the tray in Rust, so remote
-page content has no IPC surface to reach. Keep it that way — adding a command
-means re-introducing a bundled window to own it. Release builds require `TAURI_SIGNING_PRIVATE_KEY` and
+code. The shell's IPC surface is deliberately tiny: exactly two Tauri commands
+(`check_permission` / `request_permission`, backing the PWA's push-notification
+permission flow, declared in the `main` capability) — everything else about the
+desktop experience is driven from the tray in Rust, so remote page content has
+no other IPC surface to reach. Keep it that way — adding a command means
+re-introducing a bundled window to own it. Release builds require `TAURI_SIGNING_PRIVATE_KEY` and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; Apple signing remains ad-hoc.
 The main window keeps Tauri's native drag/drop handler enabled so Finder paths
 are preserved. Rust creates a short-lived, single-use grant under the runtime

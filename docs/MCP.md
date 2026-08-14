@@ -252,8 +252,13 @@ server-wide via `config.control_surface` rather than per provider.
 
 ### Promotion / `auto` status (2026-07-18)
 
-No provider has been promoted through the formal 240-turn release evaluation, so
-`auto` continues to resolve to `legacy`. This is independent of the default
+`auto` is a per-chat value, not a server default: a chat on `auto` resolves at
+dispatch through `.runtime/control_surface_decision.json`
+(`ciao/control_surfaces.py`), which records the promoted per-provider decision
+from the latest release evaluation, and falls back to `legacy` when no provider
+has been promoted. As of the record below no provider has been promoted through
+the formal 240-turn release evaluation, so `auto` resolves to `legacy`. This is
+independent of the default
 above: the default governs chats that do not opt into `auto`.
 
 The Codex release run attempted all 120 turns. Three final scenario pairs were

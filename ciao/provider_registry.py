@@ -1,10 +1,10 @@
 """Descriptors for the runtime agent providers Ciaobot can run.
 
 A *runtime provider* is a CLI or SDK that executes a whole agentic turn:
-``claude`` and ``codex`` today. Ollama, OpenRouter, and user-defined custom
-endpoints are not providers in this sense — they are model-routing backends
-that run *through* one of these runners via environment injection (see
-``ciao/providers/routing.py`` and ``ciao/custom_providers.py``).
+``claude``, ``codex``, and ``opencode`` today. Ollama, OpenRouter, and
+user-defined custom endpoints are not providers in this sense — they are
+model-routing backends that run *through* one of these runners via environment
+injection (see ``ciao/providers/routing.py`` and ``ciao/custom_providers.py``).
 
 This module is the single enumeration of that set. It deliberately holds only
 data plus dotted import paths, and imports nothing from the rest of the app, so
