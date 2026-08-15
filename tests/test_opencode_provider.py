@@ -890,6 +890,101 @@ def test_turn_fixture_carries_no_private_paths(tmp_path):
         assert needle not in raw
 
 
+# ── the terminal ResultEvent ─────────────────────────────────────────────
+#
+# `record_turn` persists `ResultEvent.result` as the durable transcript's
+# response, which is what the PWA replays when the opencode session cannot be
+# read. A success that carried "" made every replayed turn render blank (#295).
+
+
+class _FakeEventStream:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+
+class _FakeServerClient:
+    """Just enough of httpx.AsyncClient for a run_streaming turn."""
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    def stream(self, _method: str, _path: str) -> _FakeEventStream:
+        return _FakeEventStream(self._lines)
+
+    async def post(self, _path: str, json=None):
+        class _Accepted:
+            status_code = 200
+            text = ""
+
+        return _Accepted()
+
+
+async def _run_fixture_turn(provider, monkeypatch, name: str, session_id: str):
+    from ciao.models import AgentRequest
+
+    lines = [
+        f"data: {line}"
+        for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    client = _FakeServerClient(lines)
+
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        return session_id
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    request = AgentRequest(prompt="hi", model="", mode="bypass", provider="opencode")
+    return [
+        event
+        async for event in provider.run_streaming(request, lambda _handle: None)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_success_result_carries_the_accumulated_answer(tmp_path, monkeypatch):
+    events = await _run_fixture_turn(
+        _provider(tmp_path), monkeypatch,
+        "turn_with_tool.jsonl", "ses_003133027ffeJooFKUT3slZ0al",
+    )
+    result = events[-1]
+    assert result.type == "result"
+    assert not result.is_error
+    assert result.result == _joined(events, "text").strip()
+    assert "DONE" in result.result
+    assert _joined(events, "thinking") not in result.result
+
+
+@pytest.mark.asyncio
+async def test_failure_result_still_carries_the_error(tmp_path, monkeypatch):
+    events = await _run_fixture_turn(
+        _provider(tmp_path), monkeypatch,
+        "live_events.jsonl", "ses_0034015a8ffetzCVc5kq6mI2oW",
+    )
+    result = events[-1]
+    assert result.type == "result"
+    assert result.is_error
+    # The error text wins over any accumulated output, and stays sanitized.
+    assert result.result
+    assert "\n" not in result.result
+
+
 # ── server lifecycle ────────────────────────────────────────────────────
 
 

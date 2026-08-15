@@ -50,7 +50,12 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.codex import CodexProvider, codex_login_status, codex_tier_overrides
-from ciao.providers.opencode import OpencodeProvider, opencode_tier_overrides
+from ciao.providers.opencode import (
+    OpencodeProvider,
+    _file_touches as _opencode_file_touches,
+    _summarize_tool_input as _summarize_opencode_tool_input,
+    opencode_tier_overrides,
+)
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.schedules import (
     ScheduleEntry,
@@ -2764,7 +2769,116 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
     return result
 
 
-def _overlay_codex_transcript_metadata(
+def _render_opencode_thread(thread: dict, chat) -> list[dict]:
+    """Render opencode session messages into the provider-neutral PWA row shape.
+
+    ``thread`` is :meth:`OpencodeProvider.read_thread`'s ``{"info", "messages"}``
+    payload; each message is ``{"info": {role, ...}, "parts": [...]}``.
+    """
+    messages = thread.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+    result: list[dict] = []
+    user_idx = 0
+    pending_tools: list[str] = []
+
+    def flush_tools() -> None:
+        if pending_tools:
+            result.append({
+                "role": "system",
+                "content": "\n".join(pending_tools),
+                "tool_name": "_activity",
+            })
+            pending_tools.clear()
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        info = message.get("info")
+        info = info if isinstance(info, dict) else {}
+        role = str(info.get("role") or "")
+        parts = message.get("parts")
+        parts = [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
+        if role == "user":
+            flush_tools()
+            # A prompt can span several text parts; synthetic ones are
+            # opencode's own injections (compaction summaries), not something
+            # the user typed.
+            texts = [
+                str(part.get("text") or "")
+                for part in parts
+                if part.get("type") == "text" and not part.get("synthetic")
+            ]
+            content = _strip_injected_context("\n".join(texts)).strip()
+            if not content:
+                continue
+            entry: dict = {
+                "role": "user",
+                "content": content,
+                "turn_index": user_idx,
+            }
+            refs = chat.user_turn_images.get(str(user_idx))
+            if refs:
+                entry["images"] = list(refs)
+            timing = chat.user_turn_timings.get(str(user_idx)) or {}
+            if timing.get("sent_at"):
+                entry["sent_at"] = timing["sent_at"]
+            if chat.user_turn_unattended.get(str(user_idx)):
+                entry["unattended"] = True
+            result.append(entry)
+            user_idx += 1
+            continue
+        if role != "assistant":
+            continue
+        for part in parts:
+            kind = str(part.get("type") or "")
+            if kind == "text":
+                flush_tools()
+                text = str(part.get("text") or "").strip()
+                if text:
+                    result.append({"role": "assistant", "content": text})
+                continue
+            if kind == "reasoning":
+                # Same `_thinking` tag as the Claude replay path: the PWA
+                # folds it into the collapsed Activity trace.
+                flush_tools()
+                text = str(part.get("text") or "").strip()
+                if text:
+                    result.append({
+                        "role": "system",
+                        "content": text,
+                        "tool_name": "_thinking",
+                    })
+                continue
+            if kind == "tool":
+                tool = str(part.get("tool") or "tool")
+                state = part.get("state")
+                state = state if isinstance(state, dict) else {}
+                raw_input = state.get("input")
+                touches = _opencode_file_touches(tool, raw_input)
+                if touches:
+                    flush_tools()
+                    for touch in touches:
+                        result.append({
+                            "role": "system",
+                            "tool_name": "_filecard",
+                            "content": touch["file_path"],
+                            "file_path": touch["file_path"],
+                            "action": touch.get("action") or "touched",
+                            "tool": tool,
+                        })
+                    continue
+                summary = _summarize_opencode_tool_input(tool, raw_input)
+                line = f"{_tool_icon(tool)} {tool}"
+                if summary:
+                    line += f" {summary}"
+                pending_tools.append(line)
+        flush_tools()
+    _overlay_assistant_timings(result, chat.user_turn_timings)
+    return result
+
+
+def _overlay_transcript_metadata(
     entries: list[dict], transcript_rows: list[dict]
 ) -> None:
     metadata = [
@@ -2822,7 +2936,10 @@ async def chat_messages(request: Request) -> JSONResponse:
     """Return conversation history for a chat.
 
     Claude chats read the SDK session file via ``get_session_messages``.
-    Codex chats read the app-server thread via ``thread/read``.
+    Codex chats read the app-server thread via ``thread/read``; opencode chats
+    read the session history from a short-lived ``opencode serve``. Both fall
+    back to the durable ``.runtime`` transcript when the provider-side session
+    is unreadable.
 
     When a chat is archived, provider-side session storage is deleted to reclaim
     disk space (Claude SDK blob, Codex thread). In that case we fall back to the
@@ -2839,34 +2956,40 @@ async def chat_messages(request: Request) -> JSONResponse:
         return JSONResponse(handover_messages)
 
     config = request.app.state.config
-    if getattr(chat, "provider", "claude") == "codex":
-        thread = await CodexProvider.read_thread(
-            config.workspace_root, chat.session_id
-        )
-        if thread is not None:
-            rendered = _render_codex_thread(thread, chat)
-            if rendered:
-                current = pcm._transcripts.current_messages(
-                    ChatContext.for_web(chat_id), "codex"
-                )
-                if current and current[-1].get("role") == "assistant" and current[-1].get("is_error"):
-                    has_error_in_rendered = False
-                    for row in reversed(rendered):
-                        if row.get("role") == "assistant":
-                            if row.get("is_error") or row.get("content") == current[-1].get("content"):
-                                has_error_in_rendered = True
-                            break
-                    if not has_error_in_rendered:
-                        err_msg = dict(current[-1])
-                        rendered.append(err_msg)
-                _overlay_codex_transcript_metadata(
-                    rendered,
-                    current,
-                )
-                return JSONResponse(handover_messages + rendered)
+    provider = getattr(chat, "provider", "claude")
+    if provider in ("codex", "opencode"):
+        rendered: list[dict] = []
+        if provider == "codex":
+            thread = await CodexProvider.read_thread(
+                config.workspace_root, chat.session_id
+            )
+            if thread is not None:
+                rendered = _render_codex_thread(thread, chat)
+        else:
+            opencode_thread = await OpencodeProvider.read_thread(
+                config.workspace_root, chat.session_id
+            )
+            if opencode_thread:
+                rendered = _render_opencode_thread(opencode_thread, chat)
         current = pcm._transcripts.current_messages(
-            ChatContext.for_web(chat_id), "codex"
+            ChatContext.for_web(chat_id), provider
         )
+        if rendered:
+            if current and current[-1].get("role") == "assistant" and current[-1].get("is_error"):
+                has_error_in_rendered = False
+                for row in reversed(rendered):
+                    if row.get("role") == "assistant":
+                        if row.get("is_error") or row.get("content") == current[-1].get("content"):
+                            has_error_in_rendered = True
+                        break
+                if not has_error_in_rendered:
+                    err_msg = dict(current[-1])
+                    rendered.append(err_msg)
+            _overlay_transcript_metadata(
+                rendered,
+                current,
+            )
+            return JSONResponse(handover_messages + rendered)
         if current:
             _overlay_assistant_timings(current, chat.user_turn_timings)
             return JSONResponse(handover_messages + current)
@@ -3166,6 +3289,32 @@ async def chat_subagents(request: Request) -> JSONResponse:
                 "turn_index": int(item.get("root_turn_index") or 0),
             })
         return JSONResponse(entries)
+
+    if getattr(chat, "provider", "claude") == "opencode":
+        opencode_entries: list[dict] = []
+        for item in await OpencodeProvider.read_collab_tree(
+            config.workspace_root, chat.session_id
+        ):
+            info = item.get("info")
+            info = info if isinstance(info, dict) else {}
+            agent_id = str(info.get("id") or "")
+            if not agent_id:
+                continue
+            opencode_entries.append({
+                "agent_id": agent_id,
+                "parent_agent_id": str(info.get("parentID") or ""),
+                "messages": _render_opencode_thread(item, chat),
+                "tool_use_id": "",
+                "description": str(info.get("title") or ""),
+                "subagent_type": "opencode",
+                "is_async": True,
+                # opencode reports no per-child lifecycle state over this API;
+                # live progress streams through the chat itself, so by the time
+                # a replay asks for children they have settled.
+                "status": "completed",
+                "turn_index": 0,
+            })
+        return JSONResponse(opencode_entries)
 
     workspace = str(config.workspace_root)
 

@@ -31,6 +31,12 @@ def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+# The injected-context envelope stays in the stored turns — chat recovery
+# parses its [CONTEXT]/[Project] lines to re-home a transcript — and is only
+# stripped when turns are rendered as visible chat rows.
+_INJECTED_CONTEXT_RE = re.compile(r"(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*")
+
+
 def _safe_slug(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
     return cleaned or "session"
@@ -165,7 +171,7 @@ class TranscriptStore:
             if not isinstance(turn, dict):
                 continue
             timestamp = str(turn.get("timestamp") or "")
-            prompt = str(turn.get("prompt") or "").strip()
+            prompt = _INJECTED_CONTEXT_RE.sub("", str(turn.get("prompt") or "")).strip()
             response = str(turn.get("response") or "").strip()
             if prompt:
                 rows.append({
