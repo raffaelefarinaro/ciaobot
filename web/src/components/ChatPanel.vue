@@ -160,7 +160,7 @@
             class="model-picker-summary desktop-only"
             :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
-          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ activeModelId }} · {{ chipModeLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
+          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ chipModelLabel }} · {{ chipModeLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
@@ -2599,6 +2599,17 @@ const chipThinkingLabel = computed(() => {
 // run silently or raise approval cards, so the chip names it next to the
 // model instead of leaving it discoverable only inside the picker.
 const chipModeLabel = computed(() => chat.value?.mode || 'auto')
+
+// The provider is already the chip's first segment, so a model id that
+// repeats it as a prefix ("opencode/deepseek-...") wastes the width budget
+// that now also carries the mode segment. The tooltip keeps the full id.
+const chipModelLabel = computed(() => {
+  const model = activeModelId.value || ''
+  const provider = chat.value?.provider || ''
+  return provider && model.startsWith(`${provider}/`)
+    ? model.slice(provider.length + 1)
+    : model
+})
 
 const inputPlaceholder = computed(() => {
   if (store.isStreaming) return 'Follow-up...'
@@ -6895,12 +6906,12 @@ details[open] > .activity-summary::before {
   line-height: 1.4;
   font-family: var(--font);
   white-space: nowrap;
-  /* Three segments now (provider · model · thinking). The thinking level is
-     last, so a 220px clip ellipsised away the very thing the chip exists to
-     report; a long custom-provider name plus a tagged model id already filled
-     that budget on its own. Still bounded so the pill cannot crowd out the
-     chat title. */
-  max-width: min(320px, calc(100vw - 200px));
+  /* Four segments now (provider · model · mode · thinking). The trailing
+     segments are the very thing the chip exists to report, so the content is
+     kept short (the model segment drops a provider-repeating prefix) and the
+     budget sized for the four-segment shape. Still bounded so the pill cannot
+     crowd out the chat title. */
+  max-width: min(380px, calc(100vw - 200px));
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
