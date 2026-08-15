@@ -803,3 +803,77 @@ def test_backfill_caps_an_unlimited_run_and_reports_it(monkeypatch, tmp_path):
 
     monkeypatch.setenv("CIAO_INSIGHTS_BACKFILL_MAX", "2")
     assert insights._backfill_ceiling() == 2
+
+
+# ── locate_insights_section ──────────────────────────────────────────────
+
+
+def test_locate_returns_none_without_marker() -> None:
+    assert insights.locate_insights_section("# chat\n\n## Turn 1\n\nhi\n") is None
+
+
+def test_locate_finds_legacy_appended_section() -> None:
+    text = "# chat\n\n## Turn 1\n\nhi\n\n## Session insights\n\n## Errors\n- x\n"
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert text[location[1]:].lstrip().startswith("## Errors")
+
+
+def test_locate_rejects_marker_quoted_mid_transcript() -> None:
+    """A turn heading after the marker proves the marker is quoted content.
+
+    Curation chats quote insights sections verbatim; the old substring check
+    treated those archives as already processed and skipped extraction.
+    """
+    text = (
+        "# chat\n\n## Turn 1\n\nquoting:\n\n## Session insights\n\n"
+        "## Decisions\n- old bullet\n\n## Turn 2\n\nmore chat\n"
+    )
+    assert insights.locate_insights_section(text) is None
+
+
+def test_locate_prefers_last_marker_over_quoted_one() -> None:
+    text = (
+        "# chat\n\n## Turn 1\n\nquoting:\n\n## Session insights\n\n- old\n\n"
+        "## Turn 2\n\nbye\n\n## Session insights\n\n## Errors\n- real\n"
+    )
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert "real" in text[location[1]:]
+    assert "old" not in text[location[1]:]
+
+
+def test_locate_trusts_the_stamp() -> None:
+    """A stamped section is authoritative even when a turn heading follows.
+
+    Nothing writes turns after the appended section today, but the stamp is
+    the forward-compatible signal and must win over the heuristic.
+    """
+    text = (
+        "# chat\n\n## Turn 1\n\nhi\n\n"
+        "<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- real\n"
+    )
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert text[location[0]:].startswith("<!-- ciao:session-insights -->")
+
+
+def test_append_section_stamps_and_is_detected(tmp_path: Path) -> None:
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n\n## Turn 1\n\nhi\n", encoding="utf-8")
+
+    insights._append_section(archive, "## Errors\n- x")
+
+    text = archive.read_text(encoding="utf-8")
+    assert "<!-- ciao:session-insights -->\n## Session insights" in text
+    assert insights._has_insights_section(archive)
+
+
+def test_has_insights_section_ignores_quoted_marker(tmp_path: Path) -> None:
+    archive = tmp_path / "archive.md"
+    archive.write_text(
+        "# chat\n\n## Turn 1\n\nquoting:\n\n## Session insights\n\n- old\n\n"
+        "## Turn 2\n\nbye\n",
+        encoding="utf-8",
+    )
+    assert not insights._has_insights_section(archive)

@@ -29,6 +29,7 @@ Regions are char-capped (~2200 memory / ~1375 profile) because they are injected
 - Edit regions with `Edit`. Nothing enforces the cap at write time — the cap is your responsibility.
 - Never drop a durable fact because a region is full — make room by consolidating, or leave it in the proposals queue.
 - When promoting from proposals: edit the region first, then dismiss with `memory_proposal_resolve` (the reverse can lose the fact).
+- When promoting a correction, write the present-tense standing rule it implies; never copy a "User said X -> assistant did Y" event shape into a region (memory-audit flags those as rot).
 
 Rules:
 - Search local memory before external sources.

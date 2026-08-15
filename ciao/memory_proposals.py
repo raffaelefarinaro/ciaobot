@@ -19,11 +19,15 @@ via Edit on the CLAUDE.md regions, then ``memory_proposal_resolve`` to
 dismiss) reviews and promotes them. Auto-apply is intentionally NOT the
 default — the agent layer is the right place to make the consolidation call.
 
-One exception: "User corrections" are rare, inherently durable, and
-highest-signal, so :func:`promote_user_corrections` appends them straight to
-the matching CLAUDE.md region at archive time (when the caller opts in via
-``auto_promote_memory``). Exact duplicates are dropped; on any write failure
-the entry falls back to the proposals file for the daily curator.
+One exception: "User corrections" are rare and highest-signal, so
+:func:`promote_user_corrections` promotes them straight to the matching
+CLAUDE.md region at archive time (when the caller opts in via
+``auto_promote_memory``). Only state-shaped text is written: the extraction
+prompt's trailing "Durable rule:" clause when present, or the bullet itself
+when it passes the :mod:`ciao.memory_audit` event-shape check. Event-shaped
+bullets, exact duplicates aside, stay in the proposals file for the daily
+curator to rephrase; on any write failure the entry likewise falls back
+there.
 """
 
 from __future__ import annotations
@@ -147,6 +151,36 @@ def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
 # ── Auto-promotion ────────────────────────────────────────────────────────
 
 
+# The extraction prompt asks for the standing preference a correction implies
+# as a trailing "Durable rule: <...>" sentence. That clause — not the
+# "User said X -> assistant did Y" event around it — is what belongs in a
+# region: the regions are a state surface, and memory_audit flags the event
+# shape as rot for the nightly curator to remove.
+_DURABLE_RULE_RE = re.compile(r"\bDurable rule:\s*(.+)$", re.IGNORECASE)
+
+
+def _promotable_text(text: str) -> str | None:
+    """The state-shaped text safe to write to a bounded region, or None.
+
+    None means "keep it in the proposals queue": the curator rephrases
+    event-shaped corrections into standing rules on the next pass. Writing
+    them verbatim used to overflow the always-injected region with entries
+    the shipped audit itself classifies as event-shaped rot.
+    """
+    from ciao.memory_audit import find_event_shaped
+
+    match = _DURABLE_RULE_RE.search(text)
+    if match:
+        rule = match.group(1).strip().rstrip(".").strip()
+        # Models sometimes echo the template placeholder for one-off fixes.
+        if rule and "if any" not in rule.lower() and not find_event_shaped("memory", [rule]):
+            return rule + "."
+        return None
+    if find_event_shaped("memory", [text]):
+        return None
+    return text
+
+
 def promote_user_corrections(
     proposals: list[MemoryProposal],
     *,
@@ -154,8 +188,10 @@ def promote_user_corrections(
 ) -> tuple[list[MemoryProposal], list[str]]:
     """Apply "User corrections" proposals straight to CLAUDE.md regions.
 
-    Returns ``(remaining, promoted_texts)``. Exact duplicates are dropped
-    from both. On any write failure the proposal stays reviewable.
+    Returns ``(remaining, promoted_texts)``. Only the state-shaped text
+    (see :func:`_promotable_text`) is written; event-shaped bullets stay in
+    ``remaining`` for the curator. Exact duplicates are dropped from both.
+    On any write failure the proposal stays reviewable.
     """
     from ciao.memory_tool import ensure_regions, read_region, resolve_region, write_region
 
@@ -174,6 +210,12 @@ def promote_user_corrections(
         if proposal.source_section not in _AUTO_PROMOTE_SECTIONS:
             remaining.append(proposal)
             continue
+        promotable = _promotable_text(proposal.text)
+        if promotable is None:
+            # Event-shaped and no durable rule to lift: the regions are a
+            # state surface, so leave it for the curator to rephrase.
+            remaining.append(proposal)
+            continue
         try:
             region = resolve_region(proposal.target)
             entries, diags = read_region(guide_path, region)
@@ -184,14 +226,14 @@ def promote_user_corrections(
                 )
                 remaining.append(proposal)
                 continue
-            if proposal.text in entries:
+            if promotable in entries:
                 logger.info(
                     "memory promote: dropped exact duplicate %r",
-                    proposal.text[:80],
+                    promotable[:80],
                 )
                 continue
-            write_region(guide_path, region, entries + [proposal.text])
-            promoted.append(proposal.text)
+            write_region(guide_path, region, entries + [promotable])
+            promoted.append(promotable)
         except Exception as exc:  # noqa: BLE001
             logger.info("memory promote: falling back to proposals (%s)", exc)
             remaining.append(proposal)
@@ -328,9 +370,16 @@ def proposals_from_archive(
 
 
 def _extract_insights_section(archive_md: str) -> str:
-    """Return the body under the first ``## Session insights`` header, or ''."""
-    marker = "## Session insights"
-    idx = archive_md.find(marker)
-    if idx < 0:
+    """Return the body of the archive's real appended insights section, or ''.
+
+    Delegates to :func:`ciao.insights.locate_insights_section` so a transcript
+    that merely quotes the header (curation chats do) is never mistaken for
+    the appended section — the old first-occurrence match re-proposed bullets
+    the curator had already reviewed and deleted from the queue.
+    """
+    from ciao.insights import locate_insights_section
+
+    location = locate_insights_section(archive_md)
+    if location is None:
         return ""
-    return archive_md[idx + len(marker):].strip()
+    return archive_md[location[1]:].strip()
