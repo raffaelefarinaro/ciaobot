@@ -148,7 +148,7 @@
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn touch-hit mobile-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
@@ -158,9 +158,9 @@
             v-if="chat.provider"
             type="button"
             class="model-picker-summary desktop-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
-          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ activeModelId }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
+          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ activeModelId }} · {{ chipModeLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
@@ -2589,9 +2589,16 @@ const showThinkingLevels = computed(() => {
 // level that is somehow set is always shown even then.
 const chipThinkingLabel = computed(() => {
   const level = chat.value?.thinking_level || ''
-  if (level) return level
-  return showThinkingLevels.value ? 'auto' : ''
+  // "think:" keeps this segment apart from the mode segment, whose default
+  // value is also "auto".
+  if (level) return `think:${level}`
+  return showThinkingLevels.value ? 'think:auto' : ''
 })
+
+// The permission mode (auto/bypass/manual/plan) decides whether tool calls
+// run silently or raise approval cards, so the chip names it next to the
+// model instead of leaving it discoverable only inside the picker.
+const chipModeLabel = computed(() => chat.value?.mode || 'auto')
 
 const inputPlaceholder = computed(() => {
   if (store.isStreaming) return 'Follow-up...'
