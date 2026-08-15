@@ -2515,6 +2515,13 @@ class ProjectChatManager:
     def _claude_session_exists(self, session_id: str) -> bool:
         if not session_id:
             return False
+        # Claude session ids are UUIDs; anything else (e.g. an opencode
+        # ``ses_*`` id) can never have a matching ``<session>.jsonl``, so
+        # skip the filesystem probe entirely.
+        try:
+            uuid.UUID(session_id)
+        except ValueError:
+            return False
         projects_dir = _claude_projects_dir(self._config.workspace_root)
         if (projects_dir / f"{session_id}.jsonl").exists():
             return True
@@ -3200,13 +3207,13 @@ class ProjectChatManager:
         if not chat.session_id:
             return True  # new chat, no session yet, treat as local
 
-        # Codex threads are owned by Codex and can be resumed by id through
-        # app-server. There is no public local thread-file contract to probe.
-        if chat.provider == "codex":
-            return True
-
-        # Default / "claude" provider
-        return self._claude_session_exists(chat.session_id)
+        # Only Claude has a local session-file contract we can probe
+        # (a ``<session>.jsonl`` under ``.claude/projects``). Every other
+        # provider (codex, opencode, pi, ...) owns its sessions and resumes
+        # them by id through its own server, so treat those as local.
+        if chat.provider in ("", "claude"):
+            return self._claude_session_exists(chat.session_id)
+        return True
 
     def list_chats_dicts(self, project_id: str | None = None) -> list[dict]:
         """Return chat dicts with a ``local`` flag indicating session availability."""
