@@ -71,6 +71,9 @@ def _client(*, pcm=None, tmp_path: Path | None = None):
     app.state.config = SimpleNamespace(
         claude_default_model="opus",
         primary_workspace=lambda: "personal",
+        # Mirrors CiaoConfig.default_provider_for_workspace for these
+        # workspaces (no stored provider -> the default backend).
+        default_provider_for_workspace=lambda name: "claude",
         workspaces={
             "personal": SimpleNamespace(
                 name="personal",

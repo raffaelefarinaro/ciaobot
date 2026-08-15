@@ -681,8 +681,9 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function workspaceIsStreaming(ws: WorkspaceName): boolean {
-    const wsProjectIds = new Set(projects.value.filter(p => p.workspace === ws).map(p => p.project_id))
-    return chats.value.some(c => wsProjectIds.has(c.project_id) && isChatStreaming(c.chat_id))
+    // Compose the project-level check so both dots follow the same
+    // visibility rules — a hidden chat must not light either level.
+    return projects.value.some(p => p.workspace === ws && projectIsStreaming(p.project_id))
   }
 
   function projectFor(chatId: string): ProjectInfo | null {

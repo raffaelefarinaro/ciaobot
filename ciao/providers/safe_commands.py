@@ -43,6 +43,13 @@ _SAFE_GIT_BRANCH_FLAGS = frozenset({
 # `-execdir`/`-okdir` and the `-fprint` family are covered too.
 _UNSAFE_FIND_PREFIXES = ("-delete", "-exec", "-ok", "-fprint", "-fls")
 
+# rg flags that execute an external command (`--pre <cmd>` runs it per file)
+# or a helper binary. Prefix-matched to cover the `=`-joined form too.
+_UNSAFE_RG_PREFIXES = ("--pre", "--hostname-bin")
+
+# `tree -o <file>` / `--output` writes its listing to a file.
+_UNSAFE_TREE_PREFIXES = ("-o", "--output")
+
 # Shell operators allowed between otherwise-safe segments. Everything else
 # shlex emits as punctuation (`>`, `>>`, `<`, `&`, `(`, `)`) is rejected.
 _CONNECTORS = frozenset({";", "&&", "||", "|"})
@@ -58,6 +65,11 @@ def _tokens(command: str) -> list[str] | None:
     """
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    # shlex defaults to shell-style `#` comments, but bash only honors `#` at
+    # the start of a word: `cat foo#>out.txt` truncates out.txt while shlex
+    # would silently drop everything from the `#` on and classify the visible
+    # prefix. Never strip; let a mid-word `#` reach the safety checks.
+    lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError:
@@ -84,6 +96,10 @@ def _segment_is_safe(tokens: list[str]) -> bool:
         return _git_is_safe(args)
     if name == "find":
         return not any(arg.startswith(_UNSAFE_FIND_PREFIXES) for arg in args)
+    if name == "rg":
+        return not any(arg.startswith(_UNSAFE_RG_PREFIXES) for arg in args)
+    if name == "tree":
+        return not any(arg.startswith(_UNSAFE_TREE_PREFIXES) for arg in args)
     return name in _SAFE_COMMANDS
 
 

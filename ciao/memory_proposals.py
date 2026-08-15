@@ -75,8 +75,11 @@ class MemoryProposal:
 def _split_sections(insights_md: str) -> dict[str, list[str]]:
     """Group bullet lines by their ``## Heading``.
 
-    Strips bullet markers and citation tags (``[idx=12]``) so the proposal is
-    one clean sentence. Empty sections are dropped.
+    Strips bullet markers and citation tags — ``[idx=12]`` and the
+    multi-index ``[idx=12,34]`` shape models improvise — so the proposal is
+    one clean sentence. A tag that survives here would trip memory_audit's
+    transcript-citation check and silently block auto-promotion.
+    Empty sections are dropped.
     """
     sections: dict[str, list[str]] = {}
     current: str | None = None
@@ -93,7 +96,7 @@ def _split_sections(insights_md: str) -> dict[str, list[str]]:
         if not bullet:
             continue
         text = bullet.group(1).strip()
-        text = re.sub(r"\s*\[idx=\d+\]\s*$", "", text).strip()
+        text = re.sub(r"\s*\[idx\s*=\s*[\d,\s]+\]\s*$", "", text).strip()
         if text:
             sections[current].append(text)
     return sections

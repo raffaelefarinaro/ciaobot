@@ -528,6 +528,10 @@ class OpencodeProvider(BaseSDKProvider):
         self._password: str = ""
         self._session_id: str = ""
         self._permission_requests: dict[str, _PendingRequest] = {}
+        # Auto-approval reply tasks. asyncio holds tasks only weakly, so a
+        # fire-and-forget task can be garbage-collected before the reply is
+        # posted; the set keeps each alive until its done-callback removes it.
+        self._auto_approve_tasks: set[asyncio.Task[None]] = set()
         self._question_requests: dict[str, _PendingRequest] = {}
         self._tool_calls: dict[str, str] = {}
         self._mcp_token: str = ""
@@ -898,7 +902,9 @@ class OpencodeProvider(BaseSDKProvider):
         suggested pattern for the rest of the session, which could over-approve
         (e.g. `git *` from one `git status`). Each request is re-judged.
         """
-        if not await self._reply_permission(pending, "once"):
+        replied = await self._reply_permission(pending, "once")
+        self._permission_requests.pop(pending.request_id, None)
+        if not replied:
             logger.warning(
                 "opencode auto-approval reply failed for %s", pending.request_id
             )
@@ -1213,7 +1219,13 @@ class OpencodeProvider(BaseSDKProvider):
                 "opencode auto-approved %s in %s mode: %s",
                 label, self._current_mode, detail or "(no detail)",
             )
-            asyncio.create_task(self._auto_approve(pending))
+            # Registered until the reply lands so the disconnect sweep can
+            # still reject it if the turn is torn down first; _auto_approve
+            # removes the entry once opencode has an answer.
+            self._permission_requests[request_id] = pending
+            task = asyncio.create_task(self._auto_approve(pending))
+            self._auto_approve_tasks.add(task)
+            task.add_done_callback(self._auto_approve_tasks.discard)
             return []
         self._permission_requests[request_id] = pending
         return [PermissionRequestEvent(

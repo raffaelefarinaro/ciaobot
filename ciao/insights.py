@@ -623,43 +623,52 @@ def locate_insights_section(text: str) -> tuple[int, int] | None:
     those archives and let the proposal parser re-ingest already-reviewed
     bullets. Resolution order:
 
-    * A stamped section (everything written since the stamp existed) is
-      authoritative — but only a stamp that sits outside any code fence and is
-      immediately followed by the header line, the exact shape
-      :func:`_append_section` writes. Rendered archives fence quoted
-      transcript text, so a stamp a curation chat quotes (or merely mentions
-      in prose) never binds to a distant header.
-    * Otherwise take the last line-anchored header outside any fence — the
-      pipeline appends at end of file — unless transcript structure (a turn
-      heading, the Subagents block, or a Usage/Quota trailer) follows it,
-      which proves the marker is quoted transcript content.
+    * A stamped section is authoritative — but only a stamp immediately
+      followed by the header line, the exact shape :func:`_append_section`
+      writes, with no transcript structure after it. The section is always
+      the last thing in the file, so anything transcript-shaped after the
+      header (a turn heading, a trailer, or a line-start ``` — rendered
+      archives fence quoted text, so a quoted stamp is followed by at least
+      its closing fence) proves the stamp is quoted content. The check looks
+      only *forward*: fence *parity* over the prefix would be flipped by a
+      single unbalanced ``` inside any earlier turn's verbatim text — common
+      in chats that paste partial code blocks — and would hide the real
+      section, re-triggering extraction on every pass.
+    * Otherwise take the last line-anchored header, under the same
+      forward-looking rule.
     """
     search_end = len(text)
     while True:
         stamp_idx = text.rfind(_INSIGHTS_STAMP, 0, search_end)
         if stamp_idx < 0:
             break
-        if not _inside_code_fence(text, stamp_idx):
-            match = _MARKER_LINE_RE.match(text, stamp_idx + len(_INSIGHTS_STAMP) + 1)
-            if match:
+        match = _MARKER_LINE_RE.match(text, stamp_idx + len(_INSIGHTS_STAMP) + 1)
+        if match:
+            # The real stamp is always the last stamp+header pair; if this
+            # one is followed by transcript structure it is quoted content,
+            # and every earlier pair sits even deeper in the transcript.
+            if _is_appended_tail(text, match.end()):
                 return stamp_idx, match.end()
-        search_end = stamp_idx
-    for match in reversed(list(_MARKER_LINE_RE.finditer(text))):
-        if _inside_code_fence(text, match.start()):
-            continue
-        if _TURN_HEADING_RE.search(text, match.end()):
             return None
-        return match.start(), match.end()
+        search_end = stamp_idx
+    matches = list(_MARKER_LINE_RE.finditer(text))
+    if matches and _is_appended_tail(text, matches[-1].end()):
+        return matches[-1].start(), matches[-1].end()
     return None
 
 
-def _inside_code_fence(text: str, idx: int) -> bool:
-    """True when *idx* falls inside an open line-start ``` code fence.
+def _is_appended_tail(text: str, idx: int) -> bool:
+    """True when everything after *idx* looks like an appended insights body.
 
-    Rendered archives quote transcript text inside ```text fences, so an odd
-    number of fence lines before a marker means it is quoted content.
+    Transcript structure after a marker — a turn heading, the Subagents
+    block, a Usage/Quota trailer, or a line-start ``` fence — proves the
+    marker is quoted transcript content, not the section the pipeline
+    appended at end of file. (The appended body's own snippet fences are
+    indented and never start a line.)
     """
-    return len(_FENCE_LINE_RE.findall(text, 0, idx)) % 2 == 1
+    return not _TURN_HEADING_RE.search(text, idx) and not _FENCE_LINE_RE.search(
+        text, idx
+    )
 
 
 def _has_insights_section(path: Path) -> bool:

@@ -82,11 +82,19 @@ def test_read_only_commands_are_safe(command):
     "echo 'unclosed",
     # Env assignments are not verified.
     "FOO=bar ls",
+    # bash treats `#` as a comment only at word start; shlex's default
+    # commenters would hide the write/second command behind the `#`.
+    "cat foo#>out.txt",
+    "ls a#; rm -rf /tmp/x",
     # Guarded commands with write-capable arguments.
     "find . -delete",
     "find . -exec rm {} ;",
     "find . -execdir rm {} ;",
     "find . -name '*.log' -fprint /tmp/out",
+    "rg --pre 'rm -rf /tmp/x' pattern .",
+    "rg --pre=gunzip pattern .",
+    "tree -o /tmp/out",
+    "tree --output=/tmp/out",
     "git branch new-feature",
     "git branch -D main",
     "git log --output=/tmp/x",

@@ -420,6 +420,25 @@ def test_promote_holds_back_no_op_rule_clause(tmp_path: Path) -> None:
     assert sum(p.source_section == "User corrections" for p in remaining) == 2
 
 
+def test_promote_survives_multi_index_citation(tmp_path: Path) -> None:
+    """A `[idx=12,34]` tag must not block promotion of a well-formed rule.
+
+    Models improvise multi-index citations (memory_audit's own comment and
+    fixtures use them); a tag that survives parsing trips the audit's
+    transcript-citation pattern and silently held the rule back.
+    """
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        '- User said: "no em dashes" -> assistant rewrote with commas. '
+        "Durable rule: Avoid em dashes; use commas instead. [idx=12,34]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    _remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == ["Avoid em dashes; use commas instead."]
+
+
 def test_promote_accepts_rule_containing_if_any(tmp_path: Path) -> None:
     """A genuine rule that happens to contain 'if any' still promotes."""
     guide = write_guide(tmp_path / "CLAUDE.md")

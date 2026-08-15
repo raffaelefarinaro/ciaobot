@@ -844,11 +844,7 @@ def test_locate_prefers_last_marker_over_quoted_one() -> None:
 
 
 def test_locate_trusts_the_stamp() -> None:
-    """A stamped section is authoritative even when a turn heading follows.
-
-    Nothing writes turns after the appended section today, but the stamp is
-    the forward-compatible signal and must win over the heuristic.
-    """
+    """A stamped section at end of file is authoritative."""
     text = (
         "# chat\n\n## Turn 1\n\nhi\n\n"
         "<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- real\n"
@@ -916,6 +912,25 @@ def test_locate_rejects_marker_quoted_in_last_turn() -> None:
         "### Usage\n- tokens\n"
     )
     assert insights.locate_insights_section(text) is None
+
+
+def test_locate_survives_unbalanced_fence_in_transcript() -> None:
+    """A stray line-start ``` inside a quoted turn must not hide the section.
+
+    Rendered archives embed turn text verbatim inside ```text fences, so a
+    message containing an odd number of line-start fences (a truncated code
+    block, a chat about Markdown) is routine. Prefix fence *parity* would
+    flip there and make the real appended stamp read as quoted content —
+    re-running extraction and appending a duplicate section on every pass.
+    """
+    text = (
+        "# chat\n\n## Turn 1\n\n```text\nlook:\n```python\nprint('unclosed')\n```\n\n"
+        "## Turn 2\n\nbye\n\n"
+        "<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- real\n"
+    )
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert text[location[1]:].lstrip().startswith("## Errors")
 
 
 def test_locate_rejects_marker_quoted_before_subagents_block() -> None:

@@ -805,19 +805,16 @@ async def list_workspaces(request: Request) -> JSONResponse:
     return JSONResponse(_workspaces_payload(config))
 
 
-def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
+def _workspace_to_dict(workspace: WorkspaceConfig, config) -> dict:
     try:
         color = coerce_workspace_color(getattr(workspace, "color", DEFAULT_WORKSPACE_COLOR))
     except ValueError:
         color = DEFAULT_WORKSPACE_COLOR
     # A stored value naming a removed backend (e.g. pre-refactor "ollama") is
-    # reported as the provider that actually runs the workspace, mirroring
-    # ``CiaoConfig.default_provider_for_workspace``. The PWA renders this into
-    # a <select> limited to ``provider_options``, so an unregistered value
-    # would show a blank dropdown and be rejected on save.
-    provider = str(getattr(workspace, "default_provider", "claude") or "claude")
-    if not provider_registry.is_provider(provider):
-        provider = "claude"
+    # reported as the provider that actually runs the workspace. The PWA
+    # renders this into a <select> limited to ``provider_options``, so an
+    # unregistered value would show a blank dropdown and be rejected on save.
+    provider = config.default_provider_for_workspace(getattr(workspace, "name", None))
     return {
         "name": getattr(workspace, "name", ""),
         "vault_root": getattr(workspace, "vault_root", ""),
@@ -838,7 +835,7 @@ def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
 
 
 def _workspaces_payload(config) -> dict:
-    workspaces = [_workspace_to_dict(workspace) for workspace in config.workspaces.values()]
+    workspaces = [_workspace_to_dict(workspace, config) for workspace in config.workspaces.values()]
     return {
         "workspaces": workspaces,
         "active": workspaces[0]["name"] if workspaces else None,
@@ -897,10 +894,9 @@ def _workspace_from_request(
         # A save that leaves the provider untouched must not be rejected
         # because the stored value names a removed backend (pre-refactor
         # "ollama"); fall back to the provider that actually runs the
-        # workspace, mirroring ``default_provider_for_workspace``.
-        stored_provider = existing.default_provider if existing else "claude"
-        requested_provider = (
-            stored_provider if provider_registry.is_provider(stored_provider) else "claude"
+        # workspace.
+        requested_provider = config.default_provider_for_workspace(
+            existing.name if existing else None
         )
     available_providers = _workspace_provider_values(config)
     if requested_provider not in available_providers:
@@ -964,7 +960,7 @@ def _persist_workspaces(config) -> None:
         return
     path = _workspaces_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = [_workspace_to_dict(workspace) for workspace in config.workspaces.values()]
+    payload = [_workspace_to_dict(workspace, config) for workspace in config.workspaces.values()]
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
