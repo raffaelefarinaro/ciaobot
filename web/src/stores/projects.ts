@@ -673,7 +673,11 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function projectIsStreaming(projectId: string): boolean {
-    return chats.value.some(c => c.project_id === projectId && isChatStreaming(c.chat_id))
+    // Same visibility rules as projectChats: a chat hidden from the sidebar
+    // (archived or remote) must never light the project header dot.
+    return chats.value.some(
+      c => c.project_id === projectId && !c.archived && c.local !== false && isChatStreaming(c.chat_id),
+    )
   }
 
   function workspaceIsStreaming(ws: WorkspaceName): boolean {

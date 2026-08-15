@@ -54,7 +54,7 @@ def test_is_session_local_claude_happy_path(tmp_path: Path, monkeypatch: pytest.
     projects_dir = tmp_path / ".claude" / "projects" / f"-{slug}"
     projects_dir.mkdir(parents=True, exist_ok=True)
     
-    session_id = "session-uuid-123"
+    session_id = "12345678-1234-4123-8123-123456789abc"
     session_file = projects_dir / f"{session_id}.jsonl"
     session_file.write_text("{}", encoding="utf-8")
     
@@ -76,7 +76,7 @@ def test_is_session_local_claude_workspace_fallback(tmp_path: Path, monkeypatch:
     other_projects_dir = tmp_path / ".claude" / "projects" / "-Users-private-user"
     other_projects_dir.mkdir(parents=True, exist_ok=True)
     
-    session_id = "session-uuid-123"
+    session_id = "12345678-1234-4123-8123-123456789abc"
     session_file = other_projects_dir / f"{session_id}.jsonl"
     session_file.write_text("{}", encoding="utf-8")
     
@@ -88,3 +88,80 @@ def test_is_session_local_claude_workspace_fallback(tmp_path: Path, monkeypatch:
     )
     # The default projects_dir won't have it, but the fallback projects search will find it
     assert pcm.is_session_local(chat) is True
+
+
+def test_is_session_local_claude_missing_session_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pcm = _make_manager(tmp_path)
+    chat = ChatInfo(
+        chat_id="chat-123",
+        project_id="proj-123",
+        session_id="12345678-1234-4123-8123-123456789abc",
+        provider="claude",
+    )
+    assert pcm.is_session_local(chat) is False
+
+
+def test_is_session_local_empty_provider_defaults_to_claude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pcm = _make_manager(tmp_path)
+    chat = ChatInfo(
+        chat_id="chat-123",
+        project_id="proj-123",
+        session_id="12345678-1234-4123-8123-123456789abc",
+        provider="",
+    )
+    assert pcm.is_session_local(chat) is False
+
+
+@pytest.mark.parametrize(
+    ("provider", "session_id"),
+    [
+        ("opencode", "ses_8aFm2kQx91LpTz"),
+        ("pi", "pi-session-1"),
+        ("codex", "0195b3c2-aaaa-bbbb-cccc-123456789abc"),
+    ],
+)
+def test_is_session_local_non_claude_providers_are_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    session_id: str,
+) -> None:
+    """Providers without a local session-file contract are always local.
+
+    Regression for #293: opencode/pi chats were probed for a Claude-style
+    ``<session>.jsonl`` that can never exist, got flagged ``local: False``,
+    and vanished from the sidebar once closed.
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pcm = _make_manager(tmp_path)
+    chat = ChatInfo(
+        chat_id="chat-123",
+        project_id="proj-123",
+        session_id=session_id,
+        provider=provider,
+    )
+    assert pcm.is_session_local(chat) is True
+
+
+def test_list_chats_dicts_marks_opencode_chats_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pcm = _make_manager(tmp_path)
+    chat = ChatInfo(
+        chat_id="chat-oc1",
+        project_id="proj-123",
+        session_id="ses_8aFm2kQx91LpTz",
+        provider="opencode",
+    )
+    pcm._chats[chat.chat_id] = chat
+
+    dicts = pcm.list_chats_dicts("proj-123")
+    by_id = {d["chat_id"]: d for d in dicts}
+    assert by_id[chat.chat_id]["local"] is True
