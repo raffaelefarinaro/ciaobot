@@ -16,6 +16,7 @@ import pytest
 
 from ciao.models import (
     AssistantTextDelta,
+    BridgeMode,
     PermissionRequestEvent,
     ThinkingEvent,
     TokenUsageEvent,
@@ -124,7 +125,7 @@ def test_mode_agents(mode, agent):
     assert mode_settings(mode)[0] == agent
 
 
-def _actions(mode: str) -> dict[str, str]:
+def _actions(mode: BridgeMode) -> dict[str, str]:
     """Flatten a ruleset to {permission: action} for readable assertions."""
     return {rule["permission"]: rule["action"] for rule in mode_settings(mode)[1]}
 
@@ -502,7 +503,9 @@ def test_permission_card_names_the_tool_and_the_command(tmp_path):
     a card that said only "run a tool" with no detail — the user could not
     tell what they were approving.
     """
-    events = _convert(_provider(tmp_path), "permission.asked", LIVE_PERMISSION)
+    provider = _provider(tmp_path)
+    provider._current_mode = "normal"  # the mode the event was captured under
+    events = _convert(provider, "permission.asked", LIVE_PERMISSION)
     assert isinstance(events[0], PermissionRequestEvent)
     assert events[0].tool_name == "bash"
     assert events[0].tool_input == "echo approved-ok"
@@ -512,13 +515,16 @@ def test_permission_card_names_the_tool_and_the_command(tmp_path):
 def test_permission_card_links_back_to_the_tool_call(tmp_path):
     """So the UI can retract the tool card when the request is refused."""
     provider = _provider(tmp_path)
+    provider._current_mode = "normal"
     _convert(provider, "permission.asked", LIVE_PERMISSION)
     assert provider.tool_use_id_for_request("per_live1") == "call_abc"
 
 
 def test_permission_card_falls_back_to_patterns_without_metadata(tmp_path):
+    provider = _provider(tmp_path)
+    provider._current_mode = "normal"
     payload = {**LIVE_PERMISSION, "metadata": {}}
-    events = _convert(_provider(tmp_path), "permission.asked", payload)
+    events = _convert(provider, "permission.asked", payload)
     assert events[0].tool_input == "echo approved-ok"
 
 
@@ -604,6 +610,136 @@ def test_question_reply_for_an_unknown_request_is_refused(tmp_path):
 
 def test_tool_use_id_for_unknown_request_is_empty(tmp_path):
     assert _provider(tmp_path).tool_use_id_for_request("nope") == ""
+
+
+# ── mode-aware auto-approval ────────────────────────────────────────────
+# The session ruleset is fixed at creation and PATCH does not apply (see
+# `_ensure_session`), so `permission.asked` is answered against the *current*
+# mode instead: bypass approves everything, auto approves verifiably
+# read-only work, every other mode surfaces the card as before.
+
+
+class _RecordingPermissionClient:
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    async def post(self, path, json=None):
+        self.calls.append((path, json))
+
+        class _Response:
+            status_code = 200
+
+        return _Response()
+
+
+async def _drain_tasks():
+    """Let the fire-and-forget reply task run to completion."""
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
+def _armed_provider(tmp_path, mode) -> tuple[OpencodeProvider, _RecordingPermissionClient]:
+    provider = _provider(tmp_path)
+    client = _RecordingPermissionClient()
+    provider._client = client  # type: ignore[assignment]
+    provider._current_mode = mode
+    return provider, client
+
+
+@pytest.mark.asyncio
+async def test_bypass_mode_approves_without_a_card(tmp_path):
+    """Bypass means bypass: even an unsafe command is approved, card-free."""
+    provider, client = _armed_provider(tmp_path, "bypass")
+    payload = {**LIVE_PERMISSION, "metadata": {"command": "rm -rf /tmp/x"}}
+    assert _convert(provider, "permission.asked", payload) == []
+    await _drain_tasks()
+    assert client.calls == [("/permission/per_live1/reply", {"reply": "once"})]
+    # Answered immediately, so nothing is left pending for the operator.
+    assert provider._permission_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_approves_a_read_only_bash_command(tmp_path, caplog):
+    provider, client = _armed_provider(tmp_path, "auto")
+    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
+        events = _convert(provider, "permission.asked", LIVE_PERMISSION)
+    assert events == []
+    await _drain_tasks()
+    # "once", never "always": the "always" reply whitelists opencode's
+    # suggested pattern for the session, which could over-approve.
+    assert client.calls == [("/permission/per_live1/reply", {"reply": "once"})]
+    # Each decision is auditable in the log.
+    logged = [record.getMessage() for record in caplog.records]
+    assert any("auto-approved bash" in line and "echo approved-ok" in line for line in logged)
+
+
+def test_auto_mode_surfaces_an_unsafe_bash_command(tmp_path):
+    provider, client = _armed_provider(tmp_path, "auto")
+    payload = {**LIVE_PERMISSION, "metadata": {"command": "git status && git push"}}
+    events = _convert(provider, "permission.asked", payload)
+    assert isinstance(events[0], PermissionRequestEvent)
+    assert "per_live1" in provider._permission_requests
+    assert client.calls == []
+
+
+def test_auto_mode_surfaces_bash_without_a_command_to_classify(tmp_path):
+    provider, client = _armed_provider(tmp_path, "auto")
+    payload = {**LIVE_PERMISSION, "metadata": {}}
+    events = _convert(provider, "permission.asked", payload)
+    assert isinstance(events[0], PermissionRequestEvent)
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_approves_a_read_only_tool_from_a_stale_ruleset(tmp_path):
+    """A chat created in `normal` keeps `{"*": ask}` forever, so even `list`
+    raises asks once the operator switches it to auto. Answer those here."""
+    provider, client = _armed_provider(tmp_path, "auto")
+    events = _convert(
+        provider,
+        "permission.asked",
+        {"id": "perm_ls", "sessionID": "ses_1", "permission": "list", "patterns": ["/workspace"]},
+    )
+    assert events == []
+    await _drain_tasks()
+    assert client.calls == [("/permission/perm_ls/reply", {"reply": "once"})]
+
+
+def test_auto_mode_still_surfaces_non_read_only_tools(tmp_path):
+    """`edit` is allowed by a fresh auto ruleset, but an *ask* for it (stale
+    session, or an opencode judgment call) is not verifiably read-only, so it
+    keeps the card."""
+    provider, client = _armed_provider(tmp_path, "auto")
+    events = _convert(
+        provider,
+        "permission.v2.asked",
+        {"id": "perm_ed", "sessionID": "ses_1", "action": "edit", "resources": ["/workspace/a.py"]},
+    )
+    assert isinstance(events[0], PermissionRequestEvent)
+    assert client.calls == []
+
+
+def test_normal_mode_surfaces_even_a_safe_command(tmp_path):
+    provider, client = _armed_provider(tmp_path, "normal")
+    events = _convert(provider, "permission.asked", LIVE_PERMISSION)
+    assert isinstance(events[0], PermissionRequestEvent)
+    assert client.calls == []
+
+
+def test_plan_mode_surfaces_even_a_safe_command(tmp_path):
+    provider, client = _armed_provider(tmp_path, "plan")
+    events = _convert(provider, "permission.asked", LIVE_PERMISSION)
+    assert isinstance(events[0], PermissionRequestEvent)
+    assert client.calls == []
+
+
+def test_auto_approval_needs_a_client_to_post_the_reply(tmp_path):
+    """Without a client the approval could not be delivered and the turn would
+    wedge with neither a card nor an answer; fail safe to the card."""
+    provider = _provider(tmp_path)
+    provider._current_mode = "bypass"
+    events = _convert(provider, "permission.asked", LIVE_PERMISSION)
+    assert isinstance(events[0], PermissionRequestEvent)
 
 
 # ── real captured stream ────────────────────────────────────────────────
@@ -1342,7 +1478,9 @@ def test_permission_events_match_the_house_convention(tmp_path):
     """Claude and Codex both emit `system` with "Approve use of X?". A different
     type plus a restated "opencode wants to use bash" rendered as an extra
     transcript line beside the approval card."""
-    events = _convert(_provider(tmp_path), "permission.asked", LIVE_PERMISSION)
+    provider = _provider(tmp_path)
+    provider._current_mode = "normal"
+    events = _convert(provider, "permission.asked", LIVE_PERMISSION)
     assert events[0].type == "system"
     assert events[0].message == "Approve use of bash?"
 
