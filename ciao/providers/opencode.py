@@ -97,6 +97,16 @@ _MODEL_CACHE_TTL = 300.0
 _EMPTY_MODEL_CACHE_TTL = 20.0
 _MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
+# Session reads (`read_thread` / `read_collab_tree`) also cost a throwaway
+# `opencode serve`, and the PWA polls the routes they back on short intervals
+# (15s status sync plus a post-turn retry ladder for /messages, 4s for
+# /subagents while a turn streams). A TTL shorter than every poll interval
+# collapses the bursts to roughly one spawn per tick without making replays
+# feel stale.
+_READ_CACHE_TTL = 3.0
+_THREAD_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_COLLAB_CACHE: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+
 _SERVER_START_TIMEOUT = 30.0
 _REQUEST_TIMEOUT = 30.0
 _SHUTDOWN_TIMEOUT = 5.0
@@ -550,8 +560,8 @@ class OpencodeProvider(BaseSDKProvider):
         # ResultEvent can carry the turn's answer (codex-style). `record_turn`
         # persists that as the durable transcript's response, so leaving it
         # empty made replayed opencode chats render blank turns (#295).
+        # Dict insertion order doubles as the part order.
         self._answer_parts: dict[str, list[str]] = {}
-        self._answer_order: list[str] = []
         # What opencode actually ran, as `providerID/modelID`. A workspace may
         # pin opencode without naming a model, in which case the request carries
         # none and only the assistant message says what was used.
@@ -565,7 +575,6 @@ class OpencodeProvider(BaseSDKProvider):
         self._usage = {}
         self._cost = None
         self._answer_parts.clear()
-        self._answer_order.clear()
         self._effective_model = ""
 
     # ---------------------------------------------------------------- server
@@ -985,16 +994,12 @@ class OpencodeProvider(BaseSDKProvider):
 
     def _note_answer(self, part_id: str, text: str) -> None:
         """Accumulate one emitted fragment of the visible reply."""
-        if part_id not in self._answer_parts:
-            self._answer_parts[part_id] = []
-            self._answer_order.append(part_id)
-        self._answer_parts[part_id].append(text)
+        self._answer_parts.setdefault(part_id, []).append(text)
 
     def _answer_text(self) -> str:
         """The turn's visible reply, joined across text parts codex-style."""
         parts = (
-            "".join(self._answer_parts[part_id]).strip()
-            for part_id in self._answer_order
+            "".join(chunks).strip() for chunks in self._answer_parts.values()
         )
         return "\n\n".join(part for part in parts if part)
 
@@ -1490,17 +1495,26 @@ class OpencodeProvider(BaseSDKProvider):
         cls, workspace_root: Path, session_id: str
     ) -> dict[str, Any]:
         """Session metadata plus its message history, for transcript replay."""
+        if not session_id:
+            return {}
+        key = (str(workspace_root), session_id)
+        cached = _THREAD_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < _READ_CACHE_TTL:
+            return cached[1]
+        thread: dict[str, Any] = {}
         async with _EphemeralServer(workspace_root) as client:
-            if client is None or not session_id:
+            if client is None:
                 return {}
             try:
                 info = await client.get(f"/session/{session_id}")
                 info.raise_for_status()
                 messages = await client.get(f"/session/{session_id}/message")
                 messages.raise_for_status()
-                return {"info": info.json(), "messages": messages.json()}
+                thread = {"info": info.json(), "messages": messages.json()}
             except (httpx.HTTPError, ValueError):
-                return {}
+                thread = {}
+        _THREAD_CACHE[key] = (time.monotonic(), thread)
+        return thread
 
     @classmethod
     async def read_collab_tree(
@@ -1512,8 +1526,25 @@ class OpencodeProvider(BaseSDKProvider):
         same shape :meth:`read_thread` returns — fetched over the one ephemeral
         server rather than a server spawn per child.
         """
+        if not session_id:
+            return []
+        key = (str(workspace_root), session_id)
+        cached = _COLLAB_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < _READ_CACHE_TTL:
+            return cached[1]
+
+        async def _child_messages(client: Any, child_id: str) -> list[Any]:
+            try:
+                messages = await client.get(f"/session/{child_id}/message")
+                messages.raise_for_status()
+                payload = messages.json()
+            except (httpx.HTTPError, ValueError):
+                return []
+            return payload if isinstance(payload, list) else []
+
+        result: list[dict[str, Any]] = []
         async with _EphemeralServer(workspace_root) as client:
-            if client is None or not session_id:
+            if client is None:
                 return []
             try:
                 response = await client.get(f"/session/{session_id}/children")
@@ -1523,21 +1554,19 @@ class OpencodeProvider(BaseSDKProvider):
                 return []
             if not isinstance(children, list):
                 return []
-            result: list[dict[str, Any]] = []
-            for child in children:
-                if not isinstance(child, dict) or not child.get("id"):
-                    continue
-                try:
-                    messages = await client.get(f"/session/{child['id']}/message")
-                    messages.raise_for_status()
-                    payload = messages.json()
-                except (httpx.HTTPError, ValueError):
-                    payload = []
-                result.append({
-                    "info": child,
-                    "messages": payload if isinstance(payload, list) else [],
-                })
-            return result
+            children = [
+                child for child in children
+                if isinstance(child, dict) and child.get("id")
+            ]
+            histories = await asyncio.gather(
+                *(_child_messages(client, str(child["id"])) for child in children)
+            )
+            result = [
+                {"info": child, "messages": messages}
+                for child, messages in zip(children, histories)
+            ]
+        _COLLAB_CACHE[key] = (time.monotonic(), result)
+        return result
 
     @classmethod
     async def delete_thread(cls, workspace_root: Path, session_id: str) -> bool:

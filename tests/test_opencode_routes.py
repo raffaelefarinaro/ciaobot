@@ -245,3 +245,109 @@ def test_opencode_subagents_read_child_sessions(
         "status": "completed",
         "turn_index": 0,
     }]
+
+
+def test_opencode_failed_write_renders_as_activity_not_filecard(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A denied/errored write reached nothing on disk: no file card, but the
+    attempt stays visible in the Activity trace (matches the live path)."""
+    pcm = _manager(tmp_path)
+    chat = _opencode_chat(pcm, "ses_failed_write")
+    thread = {
+        "info": {"id": "ses_failed_write"},
+        "messages": [
+            {
+                "info": {"role": "user"},
+                "parts": [{"type": "text", "text": "write it"}],
+            },
+            {
+                "info": {"role": "assistant"},
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "write",
+                        "state": {
+                            "status": "error",
+                            "input": {"filePath": "notes.md"},
+                            "error": "permission denied",
+                        },
+                    },
+                    {"type": "text", "text": "could not write"},
+                ],
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        OpencodeProvider, "read_thread", AsyncMock(return_value=thread)
+    )
+
+    response = asyncio.run(chat_messages(_request(
+        f"/api/chats/{chat.chat_id}/messages",
+        _app(pcm),
+        chat_id=chat.chat_id,
+    )))
+    rows = json.loads(response.body)
+
+    assert not any(row.get("tool_name") == "_filecard" for row in rows)
+    assert any(
+        row.get("tool_name") == "_activity" and "write" in row["content"]
+        for row in rows
+    )
+
+
+def test_opencode_subagents_derive_status_and_turn_index(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A child mid-turn shows as running, anchored to the parent turn that
+    was sent before the child session was created."""
+    pcm = _manager(tmp_path)
+    chat = _opencode_chat(pcm, "ses_parent")
+    chat.user_turn_timings["0"] = {"sent_at": "2026-08-15T10:00:00Z"}
+    chat.user_turn_timings["1"] = {"sent_at": "2026-08-15T10:05:00Z"}
+    pcm._save()
+    created_ms = 1786788330000  # 2026-08-15T10:05:30Z, after turn 1
+    monkeypatch.setattr(
+        OpencodeProvider,
+        "read_collab_tree",
+        AsyncMock(return_value=[{
+            "info": {
+                "id": "ses_running_child",
+                "parentID": "ses_parent",
+                "title": "Long task",
+                "time": {"created": created_ms},
+            },
+            "messages": [{
+                "info": {
+                    "role": "assistant",
+                    "time": {"created": created_ms + 1000},
+                },
+                "parts": [],
+            }],
+        }, {
+            "info": {
+                "id": "ses_failed_child",
+                "parentID": "ses_parent",
+                "title": "Broken task",
+            },
+            "messages": [{
+                "info": {
+                    "role": "assistant",
+                    "error": {"name": "UnknownError"},
+                },
+                "parts": [],
+            }],
+        }]),
+    )
+
+    response = asyncio.run(chat_subagents(_request(
+        f"/api/chats/{chat.chat_id}/subagents",
+        _app(pcm),
+        chat_id=chat.chat_id,
+    )))
+    rows = json.loads(response.body)
+
+    assert rows[0]["status"] == "running"
+    assert rows[0]["turn_index"] == 1
+    assert rows[1]["status"] == "failed"
+    assert rows[1]["turn_index"] == 0

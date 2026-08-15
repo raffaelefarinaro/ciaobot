@@ -4044,8 +4044,14 @@ export const useProjectStore = defineStore('projects', () => {
         // partial event.text discard the rest.
         let text = (event.text || '').trim()
         const st = (streamingText.value[chatId] || '').trim()
-        if (st && !text.includes(st)) {
-          if (st.includes(text)) {
+        // Containment is checked whitespace-insensitively: the provider may
+        // re-join the same streamed parts with different separators (opencode
+        // joins text parts with a blank line, while the deltas were
+        // concatenated raw), and that must not read as new content — it would
+        // append both copies and render the answer twice.
+        const squash = (s: string) => s.replace(/\s+/g, '')
+        if (st && !squash(text).includes(squash(st))) {
+          if (squash(st).includes(squash(text))) {
             text = st
           } else {
             text = text ? text + '\n\n' + st : st

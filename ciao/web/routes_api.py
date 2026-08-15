@@ -2769,11 +2769,16 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
     return result
 
 
-def _render_opencode_thread(thread: dict, chat) -> list[dict]:
+def _render_opencode_thread(thread: dict, chat, *, metadata: bool = True) -> list[dict]:
     """Render opencode session messages into the provider-neutral PWA row shape.
 
     ``thread`` is :meth:`OpencodeProvider.read_thread`'s ``{"info", "messages"}``
     payload; each message is ``{"info": {role, ...}, "parts": [...]}``.
+
+    ``metadata`` overlays ``chat``'s per-turn images/timings/unattended flags
+    onto the rows. Pass ``False`` when ``thread`` is a *child* session: its
+    turn numbering restarts at 0, so the parent chat's turn metadata does not
+    apply to it.
     """
     messages = thread.get("messages")
     if not isinstance(messages, list):
@@ -2817,14 +2822,15 @@ def _render_opencode_thread(thread: dict, chat) -> list[dict]:
                 "content": content,
                 "turn_index": user_idx,
             }
-            refs = chat.user_turn_images.get(str(user_idx))
-            if refs:
-                entry["images"] = list(refs)
-            timing = chat.user_turn_timings.get(str(user_idx)) or {}
-            if timing.get("sent_at"):
-                entry["sent_at"] = timing["sent_at"]
-            if chat.user_turn_unattended.get(str(user_idx)):
-                entry["unattended"] = True
+            if metadata:
+                refs = chat.user_turn_images.get(str(user_idx))
+                if refs:
+                    entry["images"] = list(refs)
+                timing = chat.user_turn_timings.get(str(user_idx)) or {}
+                if timing.get("sent_at"):
+                    entry["sent_at"] = timing["sent_at"]
+                if chat.user_turn_unattended.get(str(user_idx)):
+                    entry["unattended"] = True
             result.append(entry)
             user_idx += 1
             continue
@@ -2856,6 +2862,11 @@ def _render_opencode_thread(thread: dict, chat) -> list[dict]:
                 state = state if isinstance(state, dict) else {}
                 raw_input = state.get("input")
                 touches = _opencode_file_touches(tool, raw_input)
+                if str(state.get("status") or "") == "error":
+                    # A failed/denied write or edit reached nothing on disk:
+                    # match the live path (and the Claude replay path) by
+                    # rendering a plain activity row instead of a file card.
+                    touches = []
                 if touches:
                     flush_tools()
                     for touch in touches:
@@ -2874,8 +2885,60 @@ def _render_opencode_thread(thread: dict, chat) -> list[dict]:
                     line += f" {summary}"
                 pending_tools.append(line)
         flush_tools()
-    _overlay_assistant_timings(result, chat.user_turn_timings)
+    if metadata:
+        _overlay_assistant_timings(result, chat.user_turn_timings)
     return result
+
+
+def _opencode_child_status(messages: list) -> str:
+    """A child session's lifecycle state, read from its own messages.
+
+    opencode's session objects carry no status field, but the last assistant
+    message does: an ``error`` payload marks a failure, and a ``time`` record
+    without ``completed`` marks a turn still in flight.
+    """
+    last: dict | None = None
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        info = message.get("info")
+        if isinstance(info, dict) and info.get("role") == "assistant":
+            last = info
+    if last is None:
+        return "completed"
+    if last.get("error"):
+        return "failed"
+    time_info = last.get("time")
+    if (
+        isinstance(time_info, dict)
+        and time_info.get("created")
+        and not time_info.get("completed")
+    ):
+        return "running"
+    return "completed"
+
+
+def _opencode_child_turn_index(info: dict, chat) -> int:
+    """The parent turn a child belongs to: the last one sent before it began."""
+    time_info = info.get("time")
+    created_ms = time_info.get("created") if isinstance(time_info, dict) else None
+    if not isinstance(created_ms, (int, float)) or isinstance(created_ms, bool):
+        return 0
+    best = 0
+    for key, timing in (chat.user_turn_timings or {}).items():
+        sent_at = (timing or {}).get("sent_at")
+        if not sent_at:
+            continue
+        try:
+            idx = int(key)
+            sent_ms = datetime.fromisoformat(
+                str(sent_at).replace("Z", "+00:00")
+            ).timestamp() * 1000
+        except (TypeError, ValueError):
+            continue
+        if sent_ms <= created_ms and idx > best:
+            best = idx
+    return best
 
 
 def _overlay_transcript_metadata(
@@ -2958,6 +3021,13 @@ async def chat_messages(request: Request) -> JSONResponse:
     config = request.app.state.config
     provider = getattr(chat, "provider", "claude")
     if provider in ("codex", "opencode"):
+        if getattr(chat, "archived", False):
+            # An archived chat is read-only and its provider-side session may
+            # be gone; serve the vault markdown without paying a provider
+            # session read (for opencode, a throwaway server spawn) first.
+            archived = _messages_from_archived_transcript(pcm, config, chat)
+            if archived is not None:
+                return JSONResponse(handover_messages + archived)
         rendered: list[dict] = []
         if provider == "codex":
             thread = await CodexProvider.read_thread(
@@ -3300,19 +3370,22 @@ async def chat_subagents(request: Request) -> JSONResponse:
             agent_id = str(info.get("id") or "")
             if not agent_id:
                 continue
+            messages = item.get("messages")
+            messages = messages if isinstance(messages, list) else []
             opencode_entries.append({
                 "agent_id": agent_id,
                 "parent_agent_id": str(info.get("parentID") or ""),
-                "messages": _render_opencode_thread(item, chat),
+                "messages": _render_opencode_thread(item, chat, metadata=False),
                 "tool_use_id": "",
                 "description": str(info.get("title") or ""),
                 "subagent_type": "opencode",
                 "is_async": True,
-                # opencode reports no per-child lifecycle state over this API;
-                # live progress streams through the chat itself, so by the time
-                # a replay asks for children they have settled.
-                "status": "completed",
-                "turn_index": 0,
+                # opencode's session objects carry no status field, but this
+                # endpoint is polled every few seconds while a turn streams —
+                # derive the lifecycle from the child's own messages and anchor
+                # it to the parent turn sent before the child was created.
+                "status": _opencode_child_status(messages),
+                "turn_index": _opencode_child_turn_index(info, chat),
             })
         return JSONResponse(opencode_entries)
 
