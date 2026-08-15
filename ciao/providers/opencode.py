@@ -546,6 +546,12 @@ class OpencodeProvider(BaseSDKProvider):
         self._user_message_id: str = ""
         self._usage: dict[str, str] = {}
         self._cost: float | None = None
+        # Visible assistant text, accumulated per part so the terminal
+        # ResultEvent can carry the turn's answer (codex-style). `record_turn`
+        # persists that as the durable transcript's response, so leaving it
+        # empty made replayed opencode chats render blank turns (#295).
+        self._answer_parts: dict[str, list[str]] = {}
+        self._answer_order: list[str] = []
         # What opencode actually ran, as `providerID/modelID`. A workspace may
         # pin opencode without naming a model, in which case the request carries
         # none and only the assistant message says what was used.
@@ -558,6 +564,8 @@ class OpencodeProvider(BaseSDKProvider):
         self._user_message_id = ""
         self._usage = {}
         self._cost = None
+        self._answer_parts.clear()
+        self._answer_order.clear()
         self._effective_model = ""
 
     # ---------------------------------------------------------------- server
@@ -975,6 +983,21 @@ class OpencodeProvider(BaseSDKProvider):
         self._emitted[part_id] = len(text)
         return text[already:]
 
+    def _note_answer(self, part_id: str, text: str) -> None:
+        """Accumulate one emitted fragment of the visible reply."""
+        if part_id not in self._answer_parts:
+            self._answer_parts[part_id] = []
+            self._answer_order.append(part_id)
+        self._answer_parts[part_id].append(text)
+
+    def _answer_text(self) -> str:
+        """The turn's visible reply, joined across text parts codex-style."""
+        parts = (
+            "".join(self._answer_parts[part_id]).strip()
+            for part_id in self._answer_order
+        )
+        return "\n\n".join(part for part in parts if part)
+
     def _event_to_stream(self, event: Mapping[str, Any]) -> list[StreamEvent]:
         """Translate one SSE event into zero or more Ciaobot stream events.
 
@@ -997,7 +1020,10 @@ class OpencodeProvider(BaseSDKProvider):
         # Newer `session.next.*` stream, kept as a forward-compatible path.
         if kind == "session.next.text.delta":
             text = str(props.get("delta") or "")
-            return [AssistantTextDelta(type="text", text=text)] if text else []
+            if not text:
+                return []
+            self._note_answer(str(props.get("partID") or ""), text)
+            return [AssistantTextDelta(type="text", text=text)]
 
         if kind == "session.next.reasoning.delta":
             text = str(props.get("delta") or "")
@@ -1060,6 +1086,7 @@ class OpencodeProvider(BaseSDKProvider):
         # also arrives in a field called `text`.
         if self._part_types.get(part_id, "text") == "reasoning" or field == "reasoning":
             return [ThinkingEvent(type="thinking", text=delta)]
+        self._note_answer(part_id, delta)
         return [AssistantTextDelta(type="text", text=delta)]
 
     def _part_updated(self, props: Mapping[str, Any]) -> list[StreamEvent]:
@@ -1082,6 +1109,7 @@ class OpencodeProvider(BaseSDKProvider):
                 return []
             if part_type == "reasoning":
                 return [ThinkingEvent(type="thinking", text=suffix)]
+            self._note_answer(part_id, suffix)
             return [AssistantTextDelta(type="text", text=suffix)]
 
         if part_type == "tool":
@@ -1407,7 +1435,10 @@ class OpencodeProvider(BaseSDKProvider):
 
         yield ResultEvent(
             type="result",
-            result=error or "",
+            # A successful turn carries the accumulated answer (codex-style):
+            # `record_turn` persists it as the durable transcript's response,
+            # which is what the PWA replays when the session is unreadable.
+            result=error or self._answer_text(),
             session_id=session_id,
             is_error=bool(error),
             effective_model=self._effective_model or request.model,
@@ -1475,17 +1506,38 @@ class OpencodeProvider(BaseSDKProvider):
     async def read_collab_tree(
         cls, workspace_root: Path, session_id: str
     ) -> list[dict[str, Any]]:
-        """Child sessions — opencode's background subagents."""
+        """Child sessions — opencode's background subagents — with their history.
+
+        Each entry is ``{"info": <child session>, "messages": [...]}`` — the
+        same shape :meth:`read_thread` returns — fetched over the one ephemeral
+        server rather than a server spawn per child.
+        """
         async with _EphemeralServer(workspace_root) as client:
             if client is None or not session_id:
                 return []
             try:
                 response = await client.get(f"/session/{session_id}/children")
                 response.raise_for_status()
-                payload = response.json()
+                children = response.json()
             except (httpx.HTTPError, ValueError):
                 return []
-        return payload if isinstance(payload, list) else []
+            if not isinstance(children, list):
+                return []
+            result: list[dict[str, Any]] = []
+            for child in children:
+                if not isinstance(child, dict) or not child.get("id"):
+                    continue
+                try:
+                    messages = await client.get(f"/session/{child['id']}/message")
+                    messages.raise_for_status()
+                    payload = messages.json()
+                except (httpx.HTTPError, ValueError):
+                    payload = []
+                result.append({
+                    "info": child,
+                    "messages": payload if isinstance(payload, list) else [],
+                })
+            return result
 
     @classmethod
     async def delete_thread(cls, workspace_root: Path, session_id: str) -> bool:
