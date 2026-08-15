@@ -393,6 +393,118 @@ class CiaoControlPlane:
             "dismissed": True,
         })
 
+    # ---- workspaces ----------------------------------------------------
+
+    def workspaces_list(self, principal: McpPrincipal) -> dict[str, Any]:
+        """All configured logical workspaces, not just the active one."""
+        from ciao.workspaces import workspace_to_dict
+
+        return _ok(
+            {"workspaces": [workspace_to_dict(item, self.config) for item in self.config.workspaces.values()]}
+        )
+
+    def workspace_create(
+        self,
+        principal: McpPrincipal,
+        *,
+        name: str,
+        default_provider: str = "claude",
+        default_model: str = "",
+        gws_profile: str = "",
+        disallowed_tools: Any = None,
+        claude_ai_mcps: Any = None,
+        color: str = "",
+    ) -> dict[str, Any]:
+        """Register a new logical workspace under the standard vault folder."""
+        from ciao.workspaces import persist_workspaces, workspace_from_request, workspace_to_dict
+
+        data: dict[str, Any] = {
+            "name": name,
+            "default_provider": default_provider,
+            "default_model": default_model,
+            "gws_profile": gws_profile,
+        }
+        if disallowed_tools is not None:
+            data["disallowed_tools"] = disallowed_tools
+        if claude_ai_mcps is not None:
+            data["claude_ai_mcps"] = claude_ai_mcps
+        if color:
+            data["color"] = color
+        workspace = workspace_from_request(data, config=self.config)
+        self.config.workspaces[workspace.name] = workspace
+        persist_workspaces(self.config)
+        self._refresh_workspace_registry()
+        return _ok(workspace_to_dict(workspace, self.config))
+
+    def workspace_update(
+        self,
+        principal: McpPrincipal,
+        *,
+        name: str,
+        default_provider: str | None = None,
+        default_model: str | None = None,
+        gws_profile: str | None = None,
+        disallowed_tools: Any = None,
+        claude_ai_mcps: Any = None,
+        color: str = "",
+    ) -> dict[str, Any]:
+        """Update a registered workspace. Omitted fields keep their values."""
+        from ciao.workspaces import persist_workspaces, workspace_from_request, workspace_to_dict
+
+        existing = self.config.workspace(name)
+        if existing is None:
+            raise ControlPlaneError("workspace_not_found", f"Workspace '{name}' was not found.")
+        data: dict[str, Any] = {"name": name}
+        if default_provider is not None:
+            data["default_provider"] = default_provider
+        if default_model is not None:
+            data["default_model"] = default_model
+        if gws_profile is not None:
+            data["gws_profile"] = gws_profile
+        if disallowed_tools is not None:
+            data["disallowed_tools"] = disallowed_tools
+        if claude_ai_mcps is not None:
+            data["claude_ai_mcps"] = claude_ai_mcps
+        if color:
+            data["color"] = color
+        workspace = workspace_from_request(data, config=self.config, existing=existing)
+        self.config.workspaces[workspace.name] = workspace
+        persist_workspaces(self.config)
+        self._refresh_workspace_registry()
+        return _ok(workspace_to_dict(workspace, self.config))
+
+    def workspace_delete(self, principal: McpPrincipal, *, name: str) -> dict[str, Any]:
+        """Delete a registered workspace. The last workspace cannot be deleted."""
+        if self.config.workspace(name) is None:
+            raise ControlPlaneError("workspace_not_found", f"Workspace '{name}' was not found.")
+        if len(self.config.workspaces) <= 1:
+            raise ControlPlaneError(
+                "last_workspace", "Cannot delete the last workspace."
+            )
+        if name == principal.workspace:
+            # The caller lives inside the workspace being deleted; dropping it
+            # mid-turn would invalidate the calling scope, so wait until idle.
+            return self._defer_until_chat_idle(
+                principal,
+                "workspace_delete",
+                lambda: self._delete_workspace(name),
+            )
+        return _ok(self._delete_workspace(name))
+
+    def _delete_workspace(self, name: str) -> dict[str, Any]:
+        from ciao.workspaces import persist_workspaces
+
+        self.config.workspaces.pop(name, None)
+        persist_workspaces(self.config)
+        self._refresh_workspace_registry()
+        return {"deleted": name}
+
+    def _refresh_workspace_registry(self) -> None:
+        """Notify the project-chat manager after a registry mutation."""
+        refresh = getattr(self.pcm, "refresh_workspaces", None)
+        if callable(refresh):
+            refresh()
+
     # ---- vault ---------------------------------------------------------
 
     def vault_search(self, principal: McpPrincipal, query: str, limit: int = 10) -> dict[str, Any]:

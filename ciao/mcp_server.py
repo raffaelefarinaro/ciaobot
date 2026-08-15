@@ -974,6 +974,95 @@ class CiaoMcpService:
             """List files inside a project's vault folder. Omit project_id for active project."""
             return await self._invoke("project_files_list", lambda cp, p: cp.project_files_list(p, project_id))
 
+        @tool(name="workspaces_list", annotations=_READ, structured_output=True)
+        async def workspaces_list() -> dict[str, Any]:
+            """List all configured logical workspaces — names, vault roots, and
+            defaults — not just the active one."""
+            return await self._invoke("workspaces_list", lambda cp, p: cp.workspaces_list(p))
+
+        @tool(name="workspace_create", annotations=_WRITE, structured_output=True)
+        async def workspace_create(
+            name: str,
+            default_provider: str = "claude",
+            default_model: str = "",
+            gws_profile: str = "",
+            disallowed_tools: list[str] | None = None,
+            claude_ai_mcps: bool | None = None,
+            color: str = "",
+        ) -> dict[str, Any]:
+            """Create a new logical workspace.
+
+            Args:
+                name: Letters, numbers, dashes, or underscores. The vault
+                    folder is the standard one under the vault root.
+                default_provider: claude, codex, or opencode.
+                default_model: Empty inherits the app-wide default.
+                gws_profile: Linked Google Workspace profile, or empty.
+                disallowed_tools: Extra tools to deny in this workspace.
+                claude_ai_mcps: claude.ai connector toggle (null = default).
+                color: Workspace accent (pink, cyan, amber, emerald, violet).
+            """
+            return await self._invoke(
+                "workspace_create",
+                lambda cp, p: cp.workspace_create(
+                    p,
+                    name=name,
+                    default_provider=default_provider,
+                    default_model=default_model,
+                    gws_profile=gws_profile,
+                    disallowed_tools=disallowed_tools,
+                    claude_ai_mcps=claude_ai_mcps,
+                    color=color,
+                ),
+                mutating=True,
+            )
+
+        @tool(name="workspace_update", annotations=_WRITE, structured_output=True)
+        async def workspace_update(
+            name: str,
+            default_provider: str | None = None,
+            default_model: str | None = None,
+            gws_profile: str | None = None,
+            disallowed_tools: list[str] | None = None,
+            claude_ai_mcps: bool | None = None,
+            color: str = "",
+        ) -> dict[str, Any]:
+            """Update a configured workspace. Omitted fields keep their values.
+
+            Args:
+                name: The workspace to update.
+                default_provider: claude, codex, or opencode.
+                default_model: Empty inherits the app-wide default.
+                gws_profile: Linked Google Workspace profile, or empty.
+                disallowed_tools: Extra tools to deny in this workspace.
+                claude_ai_mcps: claude.ai connector toggle (null = default).
+                color: Workspace accent (pink, cyan, amber, emerald, violet).
+            """
+            return await self._invoke(
+                "workspace_update",
+                lambda cp, p: cp.workspace_update(
+                    p,
+                    name=name,
+                    default_provider=default_provider,
+                    default_model=default_model,
+                    gws_profile=gws_profile,
+                    disallowed_tools=disallowed_tools,
+                    claude_ai_mcps=claude_ai_mcps,
+                    color=color,
+                ),
+                mutating=True,
+            )
+
+        @tool(name="workspace_delete", annotations=_DESTRUCTIVE, structured_output=True)
+        async def workspace_delete(name: str) -> dict[str, Any]:
+            """Delete a configured workspace. The last workspace cannot be
+            deleted; chats keep their history but lose workspace routing."""
+            return await self._invoke(
+                "workspace_delete",
+                lambda cp, p: cp.workspace_delete(p, name=name),
+                mutating=True,
+            )
+
         @tool(name="chats_list", annotations=_READ, structured_output=True)
         async def chats_list(project_id: str = "") -> dict[str, Any]:
             """List active and archived chats in the active workspace or one project."""

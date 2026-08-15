@@ -1,0 +1,189 @@
+"""Shared workspace-registry helpers.
+
+The PWA settings routes (``ciao/web/routes_api.py``) and the MCP control
+plane (``ciao/control_plane.py``) both create, update, serialize, and
+persist logical workspaces. These helpers used to live inside the routes
+module; they are shared here so the two surfaces cannot drift apart on
+validation or serialization rules.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any, Iterable, cast
+
+from ciao import provider_registry
+from ciao.config import (
+    DEFAULT_WORKSPACE_COLOR,
+    WorkspaceConfig,
+    coerce_claude_ai_mcps,
+    coerce_workspace_color,
+)
+
+WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+# Every selectable provider is a runtime provider, so the registry is the only
+# source for labels.
+_WORKSPACE_PROVIDER_LABELS = {
+    item.id: item.label for item in provider_registry.descriptors()
+}
+
+
+def workspace_provider_options(config: Any) -> list[dict[str, str]]:
+    values = list(provider_registry.provider_ids())
+    return [
+        {"value": value, "label": _WORKSPACE_PROVIDER_LABELS[value]}
+        for value in values
+    ]
+
+
+def workspace_provider_values(config: Any) -> set[str]:
+    return {option["value"] for option in workspace_provider_options(config)}
+
+
+def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
+    try:
+        color = coerce_workspace_color(getattr(workspace, "color", DEFAULT_WORKSPACE_COLOR))
+    except ValueError:
+        color = DEFAULT_WORKSPACE_COLOR
+    # A stored value naming a removed backend (e.g. pre-refactor "ollama") is
+    # reported as the provider that actually runs the workspace. The PWA
+    # renders this into a <select> limited to the provider options, so an
+    # unregistered value would show a blank dropdown and be rejected on save.
+    provider = config.default_provider_for_workspace(getattr(workspace, "name", None))
+    return {
+        "name": getattr(workspace, "name", ""),
+        "vault_root": getattr(workspace, "vault_root", ""),
+        "default_provider": provider,
+        "default_model": getattr(workspace, "default_model", ""),
+        "disallowed_tools": (
+            list(cast(Iterable[Any], getattr(workspace, "disallowed_tools", None)))
+            if getattr(workspace, "disallowed_tools", None) is not None
+            else None
+        ),
+        # claude.ai connector MCP toggle. null = per-workspace default
+        # (personal off, else on). The effective denylist is computed by
+        # ``CiaoConfig.disallowed_tools_for_workspace``.
+        "claude_ai_mcps": getattr(workspace, "claude_ai_mcps", None),
+        "gws_profile": getattr(workspace, "gws_profile", ""),
+        "color": color,
+    }
+
+
+def parse_disallowed_tools_value(raw: object) -> list[str] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        if raw.strip().lower() == "default":
+            return None
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    raise ValueError("disallowed_tools must be a list, comma-separated string, or null")
+
+
+def workspace_from_request(
+    data: dict,
+    *,
+    config: Any,
+    existing: WorkspaceConfig | None = None,
+) -> WorkspaceConfig:
+    name = str(data.get("name", existing.name if existing else "")).strip()
+    if not WORKSPACE_NAME_RE.match(name):
+        raise ValueError("workspace name must use letters, numbers, dashes, or underscores")
+    if existing is None:
+        for configured_name in config.workspace_names():
+            if configured_name.casefold() == name.casefold():
+                raise ValueError(
+                    f"workspace name conflicts with existing workspace "
+                    f"'{configured_name}'"
+                )
+        target_root = config.canonical_workspace_vault_root(name)
+        for configured_name in config.workspace_names():
+            try:
+                configured_root = config.workspace_vault_root(configured_name)
+            except ValueError:
+                continue
+            if configured_root == target_root:
+                raise ValueError(
+                    f"workspace vault folder is already owned by "
+                    f"'{configured_name}'"
+                )
+    if "default_provider" in data:
+        requested_provider = str(data["default_provider"]).strip() or "claude"
+    else:
+        # A save that leaves the provider untouched must not be rejected
+        # because the stored value names a removed backend (pre-refactor
+        # "ollama"); fall back to the provider that actually runs the
+        # workspace.
+        requested_provider = config.default_provider_for_workspace(
+            existing.name if existing else None
+        )
+    available_providers = workspace_provider_values(config)
+    if requested_provider not in available_providers:
+        allowed = ", ".join(sorted(available_providers))
+        raise ValueError(f"default_provider must be one of: {allowed}")
+    provider = requested_provider
+    default_model = str(
+        data.get("default_model", existing.default_model if existing else "")
+    ).strip()
+    if "disallowed_tools" in data:
+        disallowed_tools = parse_disallowed_tools_value(data.get("disallowed_tools"))
+    elif existing is not None:
+        disallowed_tools = existing.disallowed_tools
+    else:
+        disallowed_tools = None
+    if "claude_ai_mcps" in data:
+        claude_ai_mcps = coerce_claude_ai_mcps(data.get("claude_ai_mcps"))
+    elif existing is not None:
+        claude_ai_mcps = existing.claude_ai_mcps
+    else:
+        claude_ai_mcps = None
+    if "color" in data:
+        color = coerce_workspace_color(data.get("color"))
+    elif existing is not None:
+        try:
+            color = coerce_workspace_color(existing.color)
+        except ValueError:
+            color = DEFAULT_WORKSPACE_COLOR
+    else:
+        color = DEFAULT_WORKSPACE_COLOR
+    return WorkspaceConfig(
+        name=name,
+        # Vault locations are not an editable Settings field. Updating a
+        # workspace must preserve setup-created/external roots exactly; a new
+        # user-named workspace always receives its standard folder beneath the
+        # configured vault. Accepting request-body paths here allowed `/` and
+        # `..` to turn one authenticated save into filesystem-wide writes and
+        # scans.
+        vault_root=(
+            existing.vault_root
+            if existing is not None
+            else config.stored_workspace_vault_root(name)
+        ),
+        default_provider=provider,
+        default_model=default_model,
+        disallowed_tools=disallowed_tools,
+        claude_ai_mcps=claude_ai_mcps,
+        gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
+        color=color,
+    )
+
+
+def _workspaces_path(config: Any) -> Path:
+    return Path(config.state_path).resolve().parent / "workspaces.json"
+
+
+def persist_workspaces(config: Any) -> None:
+    persist = getattr(config, "persist_workspace_registry", None)
+    if callable(persist):
+        persist()
+        return
+    path = _workspaces_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = [workspace_to_dict(workspace, config) for workspace in config.workspaces.values()]
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)

@@ -197,6 +197,22 @@ def is_context_overflow(exc: Exception) -> bool:
     return "too long" in text or "context window" in text or "context_length_exceeded" in text
 
 
+def is_terminal_failure(exc: Exception) -> bool:
+    """True when the provider already classified the failure as non-retriable.
+
+    ``ciao.providers.oneshot`` sets ``OneShotError.transient`` from the
+    upstream status and body: auth, subscription, quota, usage-limit and
+    bad-model rejections fail identically on a second call, and
+    ``run_oneshot`` therefore raises them without retrying internally.
+    Re-sending them from here only buys another rejected request plus the
+    30s wait, once per archive across a whole backfill run.
+
+    Read through ``getattr`` so a provider that raises a plain exception
+    (timeout, subprocess error) stays retriable, which is the safe default.
+    """
+    return getattr(exc, "transient", None) is False
+
+
 _INSIGHTS_SYSTEM_PROMPT = """\
 You are extracting durable signal from a Claude Code session transcript.
 The user is the workspace owner. Output Markdown with the exact section headers below.
@@ -735,6 +751,12 @@ async def _run_model_with_retry(
                 _max_input_chars(),
             )
             return "", str(exc).strip() or type(exc).__name__
+        if is_terminal_failure(exc):
+            # Quota / auth / bad-model. No traceback: this is an account or
+            # settings condition, not a code fault, and the detail already
+            # says which.
+            logger.error("Insights model call rejected terminally (%s); not retrying", exc)
+            return "", str(exc).strip() or type(exc).__name__
         logger.info("Insights model call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
 
     await asyncio.sleep(_RETRY_DELAY_S)
@@ -1172,6 +1194,14 @@ async def backfill_insights_task(
                     try:
                         output = await run_text_extract()
                     except Exception as exc:
+                        if is_terminal_failure(exc):
+                            logger.error(
+                                "Text fallback insights call rejected terminally (%s); "
+                                "not retrying %s",
+                                exc,
+                                archive_path,
+                            )
+                            return "error"
                         logger.info("Text fallback insights call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
                         await asyncio.sleep(_RETRY_DELAY_S)
                         try:

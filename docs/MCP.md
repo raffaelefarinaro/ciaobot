@@ -122,7 +122,7 @@ telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog contains 40 explicit tools. The MCP `tools/list` response is the
+The catalog contains 44 explicit tools. The MCP `tools/list` response is the
 live list, so clients do not need to infer it from documentation. The catalog
 holds *capabilities* — orchestration and search that a shell can't cheaply
 replicate. Plain plumbing that the managed Claude Code/Codex session can do
@@ -155,6 +155,7 @@ an in-place new session, `schedule_action`, `loop_action`).
 | Bounded memory | `memory_proposals_list`, `memory_proposal_resolve` |
 | Vault | `vault_search` |
 | Projects | `projects_list`, `project_get`, `project_create`, `project_update`, `project_complete`, `project_restore`, `project_delete`, `project_files_list` |
+| Workspaces | `workspaces_list`, `workspace_create`, `workspace_update`, `workspace_delete` |
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
 | Delegates | `delegate_spawn`, `delegates_list` |
 | Background runs | `background_run_start`, `background_run_status`, `background_run_cancel` |
@@ -176,7 +177,7 @@ app's own control plane: these are the programmatic twins of PWA buttons, scoped
 by bearer token, and visible/reversible in the UI. The `_DESTRUCTIVE` tools
 (`project_complete`, `project_delete`, `chat_delete`, `chat_stop`,
 `background_run_start`, `background_run_cancel`, `schedule_action`,
-`loop_action`) are deliberately excluded and
+`loop_action`, `workspace_delete`) are deliberately excluded and
 still prompt. Plan mode gets no allowlist at all. `tests/test_mcp_server.py`
 fails if a new tool is added without placing it on one side of that line.
 

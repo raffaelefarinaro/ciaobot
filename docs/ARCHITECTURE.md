@@ -45,6 +45,7 @@ ciao/                          Python backend (Starlette).
   provider_registry.py         Single enumeration of the runtime providers (id, labels, capabilities, auth/status/upgrade hooks).
   provider_service.py          Provider request builder and execution wrapper.
   control_plane.py             Provider-neutral, scope-enforcing application operations shared by MCP and PWA-owned managers.
+  workspaces.py                Shared logical-workspace registry rules (validation, serialization, persistence) used by the PWA routes and the control-plane workspace tools.
   mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings). HTTP endpoints live in ciao/web/routes_mcp.py.
   control_surfaces.py          Read previously promoted per-provider legacy-vs-MCP decisions for per-chat Auto.
   eval_runner.py               Reusable isolated full-chat runner and provider-neutral observation telemetry.

@@ -766,6 +766,54 @@ def test_oversized_input_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None
     assert slept == [], "must not burn the 30s retry wait on a deterministic failure"
 
 
+def test_usage_limit_rejection_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A weekly-quota 429 is terminal upstream; the second call buys nothing.
+
+    ``run_oneshot`` already classifies it (``transient=False``) and raises
+    without retrying internally. Insights must honour that flag instead of
+    sleeping 30s and re-sending, which on a backfill repeats once per archive.
+    """
+    from ciao.providers.oneshot import OneShotError
+
+    calls = 0
+
+    async def rejected(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        detail = (
+            "API Error: Request rejected (429) · you have reached your "
+            "weekly usage limit, upgrade for higher limits"
+        )
+        raise OneShotError(detail, transient=False)
+
+    monkeypatch.setattr(insights, "_call_model", rejected)
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(insights.asyncio, "sleep", fake_sleep)
+    out, err = asyncio.run(
+        insights._run_model_with_retry(
+            filtered_jsonl='{"idx":0}', model="some-model"
+        )
+    )
+    assert out == ""
+    assert "weekly usage limit" in err
+    assert calls == 1, "a terminal upstream rejection must not be retried"
+    assert slept == [], "must not burn the 30s retry wait on a terminal rejection"
+
+
+def test_terminal_failure_flag_only_trips_on_explicit_false() -> None:
+    from ciao.providers.oneshot import OneShotError
+
+    assert insights.is_terminal_failure(OneShotError("bad key", transient=False))
+    # Retryable, and anything without the flag stays retryable (safe default).
+    assert not insights.is_terminal_failure(OneShotError("empty body", transient=True))
+    assert not insights.is_terminal_failure(asyncio.TimeoutError())
+    assert not insights.is_terminal_failure(Exception("subprocess died"))
+
+
 def test_transient_failure_still_retries_once(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
 
