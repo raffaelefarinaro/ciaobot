@@ -877,3 +877,50 @@ def test_has_insights_section_ignores_quoted_marker(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert not insights._has_insights_section(archive)
+
+
+def test_locate_rejects_stamp_quoted_inside_code_fence() -> None:
+    """A stamped section pasted into a chat turn is fenced, hence quoted.
+
+    Rendered archives fence quoted transcript text; without the fence check
+    the stamp fast path would trust the quoted copy and skip extraction.
+    """
+    text = (
+        "# chat\n\n## Turn 1\n\nlook at this archive:\n\n"
+        "```text\n<!-- ciao:session-insights -->\n## Session insights\n\n"
+        "## Decisions\n- old reviewed bullet\n```\n\n"
+        "## Turn 2\n\nmore chat\n"
+    )
+    assert insights.locate_insights_section(text) is None
+
+
+def test_locate_ignores_stamp_mentioned_in_prose() -> None:
+    """A stamp in prose, not adjacent to a header, never binds to one."""
+    text = (
+        "# chat\n\n## Turn 1\n\nthe stamp is <!-- ciao:session-insights --> ok\n\n"
+        "## Turn 2\n\nbye\n\n"
+        "<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- real\n"
+    )
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert "## Errors" in text[location[1]:]
+    # The real appended stamp wins, not the prose mention.
+    assert text[location[0]:].startswith("<!-- ciao:session-insights -->\n## Session")
+
+
+def test_locate_rejects_marker_quoted_in_last_turn() -> None:
+    """A quote in the final turn is followed by trailers, not another turn."""
+    text = (
+        "# chat\n\n## Turn 1\n\nhi\n\n## Turn 2\n\nquoting:\n\n"
+        "## Session insights\n\n## Decisions\n- old bullet\n\n"
+        "### Usage\n- tokens\n"
+    )
+    assert insights.locate_insights_section(text) is None
+
+
+def test_locate_rejects_marker_quoted_before_subagents_block() -> None:
+    text = (
+        "# chat\n\n## Turn 1\n\nquoting:\n\n## Session insights\n\n- old\n\n"
+        "## Subagents\n\n#### Turn 1\n\nsub\n"
+    )
+    assert insights.locate_insights_section(text) is None

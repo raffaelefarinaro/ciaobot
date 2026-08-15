@@ -399,3 +399,59 @@ def test_proposals_from_archive_default_leaves_memory_untouched(tmp_path: Path) 
     mem_entries, _diags = mt.read_region(guide, "memory")
     assert mem_entries == []
     assert "no em dashes" in out.read_text(encoding="utf-8")
+
+
+def test_promote_holds_back_no_op_rule_clause(tmp_path: Path) -> None:
+    """'Durable rule: None.' style fillers never land in a bounded region."""
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        '- User said: "revert that" -> assistant restored the file. '
+        "Durable rule: None. [idx=4]\n"
+        '- User said: "use x" -> assistant switched the tool. '
+        "Durable rule: N/A. [idx=5]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == []
+    mem_entries, _diags = mt.read_region(guide, "memory")
+    assert mem_entries == []
+    assert sum(p.source_section == "User corrections" for p in remaining) == 2
+
+
+def test_promote_accepts_rule_containing_if_any(tmp_path: Path) -> None:
+    """A genuine rule that happens to contain 'if any' still promotes."""
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        '- User said: "do not just run everything" -> assistant asked first. '
+        "Durable rule: Ask which tests to run, if any, before starting. [idx=7]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    _remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == ["Ask which tests to run, if any, before starting."]
+
+
+def test_promote_ignores_rule_label_quoted_inside_user_text(tmp_path: Path) -> None:
+    """A lowercase in-quote 'durable rule:' fragment is not a rule clause."""
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        '- User said: "write it as a durable rule: prefer pnpm over npm" '
+        "and wanted shorter replies. [idx=8]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == []
+    assert any(p.source_section == "User corrections" for p in remaining)
+
+
+def test_durable_rule_label_matches_extraction_prompts() -> None:
+    """The prompts and the consumer regex share one label; drift must fail."""
+    from ciao import insights as insights_mod
+
+    assert mp.DURABLE_RULE_LABEL in insights_mod._INSIGHTS_SYSTEM_PROMPT
+    assert mp.DURABLE_RULE_LABEL in insights_mod._TEXT_MODE_SYSTEM_PROMPT

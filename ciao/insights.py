@@ -65,11 +65,19 @@ _INSIGHTS_HEADER = "## Session insights"
 # before the stamp existed are handled by the heuristic in
 # locate_insights_section.
 _INSIGHTS_STAMP = "<!-- ciao:session-insights -->"
-_MARKER_LINE_RE = re.compile(r"^## Session insights\s*$", re.MULTILINE)
-# Rendered archives title each transcript turn "## Turn N". The appended
-# insights section always sits after the last turn, so a turn heading after
-# a marker proves that marker is quoted transcript content.
-_TURN_HEADING_RE = re.compile(r"^## Turn \d+", re.MULTILINE)
+_MARKER_LINE_RE = re.compile(rf"^{re.escape(_INSIGHTS_HEADER)}\s*$", re.MULTILINE)
+# Rendered archives title each transcript turn "## Turn N", render subagent
+# turns as "#### Turn N" under a trailing "## Subagents" block, and close with
+# "### Usage"/"### Quota" trailers. The appended insights section always sits
+# after all of those, so any such heading after a marker proves the marker is
+# quoted transcript content.
+_TURN_HEADING_RE = re.compile(
+    r"^(?:#{2,4} Turn \d+|## Subagents\s*$|### (?:Usage|Quota)\s*$)",
+    re.MULTILINE,
+)
+# Rendered archives fence quoted transcript text in line-start ``` blocks
+# (the appended body's snippet fences are indented and do not match).
+_FENCE_LINE_RE = re.compile(r"^```", re.MULTILINE)
 _RETRY_DELAY_S = 30
 _READ_TOOL_TRUNCATE_CHARS = 200
 _KEEP_FULL_TOOLS = frozenset({"Edit", "Write", "Bash", "Task", "NotebookEdit"})
@@ -616,23 +624,42 @@ def locate_insights_section(text: str) -> tuple[int, int] | None:
     bullets. Resolution order:
 
     * A stamped section (everything written since the stamp existed) is
-      authoritative: take the header right after the last stamp.
-    * Otherwise take the last line-anchored header — the pipeline appends at
-      end of file — unless a ``## Turn N`` heading follows it, which proves
-      the marker is quoted transcript content, not an appended section.
+      authoritative — but only a stamp that sits outside any code fence and is
+      immediately followed by the header line, the exact shape
+      :func:`_append_section` writes. Rendered archives fence quoted
+      transcript text, so a stamp a curation chat quotes (or merely mentions
+      in prose) never binds to a distant header.
+    * Otherwise take the last line-anchored header outside any fence — the
+      pipeline appends at end of file — unless transcript structure (a turn
+      heading, the Subagents block, or a Usage/Quota trailer) follows it,
+      which proves the marker is quoted transcript content.
     """
-    stamp_idx = text.rfind(_INSIGHTS_STAMP)
-    if stamp_idx >= 0:
-        match = _MARKER_LINE_RE.search(text, stamp_idx)
-        if match:
-            return stamp_idx, match.end()
-    matches = list(_MARKER_LINE_RE.finditer(text))
-    if not matches:
-        return None
-    last = matches[-1]
-    if _TURN_HEADING_RE.search(text, last.end()):
-        return None
-    return last.start(), last.end()
+    search_end = len(text)
+    while True:
+        stamp_idx = text.rfind(_INSIGHTS_STAMP, 0, search_end)
+        if stamp_idx < 0:
+            break
+        if not _inside_code_fence(text, stamp_idx):
+            match = _MARKER_LINE_RE.match(text, stamp_idx + len(_INSIGHTS_STAMP) + 1)
+            if match:
+                return stamp_idx, match.end()
+        search_end = stamp_idx
+    for match in reversed(list(_MARKER_LINE_RE.finditer(text))):
+        if _inside_code_fence(text, match.start()):
+            continue
+        if _TURN_HEADING_RE.search(text, match.end()):
+            return None
+        return match.start(), match.end()
+    return None
+
+
+def _inside_code_fence(text: str, idx: int) -> bool:
+    """True when *idx* falls inside an open line-start ``` code fence.
+
+    Rendered archives quote transcript text inside ```text fences, so an odd
+    number of fence lines before a marker means it is quoted content.
+    """
+    return len(_FENCE_LINE_RE.findall(text, 0, idx)) % 2 == 1
 
 
 def _has_insights_section(path: Path) -> bool:

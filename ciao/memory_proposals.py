@@ -156,7 +156,26 @@ def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
 # "User said X -> assistant did Y" event around it — is what belongs in a
 # region: the regions are a state surface, and memory_audit flags the event
 # shape as rot for the nightly curator to remove.
-_DURABLE_RULE_RE = re.compile(r"\bDurable rule:\s*(.+)$", re.IGNORECASE)
+#
+# Both extraction prompts in ciao.insights embed this label verbatim (a test
+# asserts the link), and the regex is built from it so the producer prompts
+# and this consumer cannot drift apart silently. Case-sensitive and anchored
+# to a sentence start so a chat fragment quoted inside the bullet ("... as a
+# durable rule: ...") never matches.
+DURABLE_RULE_LABEL = "Durable rule:"
+_DURABLE_RULE_RE = re.compile(
+    rf"(?:^|[.!?]\s+){re.escape(DURABLE_RULE_LABEL)}\s*(.+)$"
+)
+
+# Contentless fillers models emit instead of omitting the clause.
+_NO_OP_RULES = frozenset({"none", "n/a", "na", "no", "-", "unknown"})
+
+
+def _is_placeholder_rule(rule: str) -> bool:
+    """An echoed template placeholder or a contentless no-op, not a rule."""
+    if "<" in rule and ">" in rule:
+        return True
+    return rule.lower() in _NO_OP_RULES
 
 
 def _promotable_text(text: str) -> str | None:
@@ -169,11 +188,14 @@ def _promotable_text(text: str) -> str | None:
     """
     from ciao.memory_audit import find_event_shaped
 
-    match = _DURABLE_RULE_RE.search(text)
-    if match:
-        rule = match.group(1).strip().rstrip(".").strip()
-        # Models sometimes echo the template placeholder for one-off fixes.
-        if rule and "if any" not in rule.lower() and not find_event_shaped("memory", [rule]):
+    matches = list(_DURABLE_RULE_RE.finditer(text))
+    if matches:
+        rule = matches[-1].group(1).strip().rstrip(".").strip()
+        if (
+            rule
+            and not _is_placeholder_rule(rule)
+            and not find_event_shaped("memory", [rule])
+        ):
             return rule + "."
         return None
     if find_event_shaped("memory", [text]):
@@ -210,13 +232,13 @@ def promote_user_corrections(
         if proposal.source_section not in _AUTO_PROMOTE_SECTIONS:
             remaining.append(proposal)
             continue
-        promotable = _promotable_text(proposal.text)
-        if promotable is None:
-            # Event-shaped and no durable rule to lift: the regions are a
-            # state surface, so leave it for the curator to rephrase.
-            remaining.append(proposal)
-            continue
         try:
+            promotable = _promotable_text(proposal.text)
+            if promotable is None:
+                # Event-shaped and no durable rule to lift: the regions are a
+                # state surface, so leave it for the curator to rephrase.
+                remaining.append(proposal)
+                continue
             region = resolve_region(proposal.target)
             entries, diags = read_region(guide_path, region)
             if diags:
