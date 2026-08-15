@@ -1199,7 +1199,7 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
-import type { AgentAssetsResponse, CommandsResponse, Loop, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, Loop, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1242,11 +1242,8 @@ import { useThinkingPreference } from '../composables/useThinkingPreference'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 import {
   clearPlanReturnMode,
-  includeBuiltinPlanCommand,
-  planCommandTargetMode,
   rememberPlanReturnMode,
   restorePlanReturnMode,
-  type SlashCommand,
 } from '../lib/planCommand'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
@@ -1439,9 +1436,8 @@ function primaryAction() {
   send()
 }
 
-// Slash-command picker: populated once on mount from /api/commands, with
-// UI-owned commands added even when they have no disk-backed asset.
-const slashCommands = ref<SlashCommand[]>(includeBuiltinPlanCommand([]))
+// Slash-command picker: populated once on mount from /api/commands.
+const slashCommands = ref<SlashCommand[]>([])
 const commandHighlightIdx = ref(0)
 
 interface SlashCommandTrigger {
@@ -1482,13 +1478,13 @@ async function loadSlashCommands(): Promise<void> {
   try {
     const provider = encodeURIComponent(chat.value.provider || '')
     const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}`)
-    slashCommands.value = includeBuiltinPlanCommand([
+    slashCommands.value = [
       ...(response.commands || []),
       ...(response.skills || []),
-    ])
+    ]
   } catch {
-    // Keep the built-in /plan entry available when asset discovery is offline.
-    slashCommands.value = includeBuiltinPlanCommand([])
+    // Asset discovery is offline: leave the picker empty rather than stale.
+    slashCommands.value = []
   }
 }
 
@@ -1646,29 +1642,6 @@ async function selectMode(target: string): Promise<void> {
   } finally {
     modeChipSaving.value = false
   }
-}
-
-async function handlePlanCommand(
-  action: 'enter' | 'exit',
-  originChatId: string,
-  returnMode: string,
-  submittedText: string,
-  submittedRevision: number,
-): Promise<void> {
-  const changed = await togglePlanMode(action, originChatId, returnMode)
-  if (!changed) return
-  const composerUnchanged =
-    inputRevision.value === submittedRevision
-    && inputText.value === submittedText
-  if (!composerUnchanged) return
-
-  // The command itself is consumed, but pending images/comments belong to the
-  // next user turn and must remain staged. Persist against the originating
-  // chat even if the active chat changed while the PATCH was in flight.
-  writeChatDraft(originChatId, '')
-  inputText.value = ''
-  await nextTick()
-  autoResize()
 }
 
 // Inline editing state for queued messages. Keyed by queue entry id.
@@ -3871,16 +3844,6 @@ function send() {
   const text = inputText.value.trim()
   const hasAttachments = store.pendingImages.length > 0 || store.pendingComments.length > 0 || store.pendingChatComments.length > 0
   if (!text && !hasAttachments) return
-  const planTargetMode = planCommandTargetMode(text, chat.value.mode)
-  if (planTargetMode) {
-    const originChatId = chat.value.chat_id
-    const returnMode = chat.value.mode
-    const submittedText = inputText.value
-    const submittedRevision = inputRevision.value
-    const action = planTargetMode === 'plan' ? 'enter' : 'exit'
-    void handlePlanCommand(action, originChatId, returnMode, submittedText, submittedRevision)
-    return
-  }
   if (text) recordSentPrompt(chat.value.chat_id, inputText.value)
   // Always "queue": when a response is in flight the backend buffers and
   // flushes on turn end; for a fresh turn this starts it.
