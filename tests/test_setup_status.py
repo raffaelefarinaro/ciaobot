@@ -1017,3 +1017,63 @@ def test_discover_claude_system_skills_filters_enabled_and_caches(monkeypatch) -
     assert setup_status.discover_claude_system_skills() == ["skill-creator"]
     assert setup_status.discover_claude_system_skills() == ["skill-creator"]
     assert calls["n"] == 1
+
+
+# ── Claude MCP discovery cache ──────────────────────────────────────────
+# `claude mcp list` measures ~12s on a real install and sits on the
+# Settings -> Providers load path, so the cache decides whether that tab is
+# usable. A plain TTL made every visit past the window pay it again.
+
+
+def test_expired_mcp_cache_serves_stale_and_refreshes_in_background(monkeypatch):
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    done = threading.Event()
+
+    def slow_discovery(**kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            done.set()
+        return [f"mcp-{len(calls)}"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_discovery)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+
+    # First call has nothing to serve, so it waits.
+    assert ss.discover_claude_mcps(None) == ["mcp-1"]
+    assert len(calls) == 1
+
+    # Expire the entry; the next call must return the stale value immediately
+    # rather than paying the discovery again.
+    stamp, ws_key, value = ss._claude_mcps_cache
+    monkeypatch.setattr(
+        ss, "_claude_mcps_cache", (stamp - ss._CLAUDE_DISCOVERY_TTL_SECONDS - 1, ws_key, value)
+    )
+    assert ss.discover_claude_mcps(None) == ["mcp-1"]
+
+    # ...and a refresh runs behind it.
+    assert done.wait(timeout=5), "background refresh never ran"
+    deadline = _time.monotonic() + 5
+    while ss._claude_mcps_cache[2] != ("mcp-2",) and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert ss._claude_mcps_cache[2] == ("mcp-2",)
+
+
+def test_a_fresh_mcp_cache_does_not_refresh(monkeypatch):
+    from ciao import setup_status as ss
+
+    calls = []
+    monkeypatch.setattr(
+        ss, "_discover_claude_mcps_uncached", lambda **kw: calls.append(1) or ["a"]
+    )
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+
+    ss.discover_claude_mcps(None)
+    ss.discover_claude_mcps(None)
+    assert len(calls) == 1, "a fresh entry must not spawn a discovery"

@@ -8,11 +8,13 @@ with the command the user can run next.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import json
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -25,8 +27,12 @@ from ciao.providers.codex import codex_login_status
 
 # Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
 # stay responsive without freezing status until process restart.
-_CLAUDE_DISCOVERY_TTL_SECONDS = 60.0
+_CLAUDE_DISCOVERY_TTL_SECONDS = 300.0
+logger = logging.getLogger(__name__)
+
 _claude_mcps_cache: tuple[float, str, tuple[str, ...]] | None = None
+_claude_mcps_refreshing = False
+_claude_mcps_lock = threading.Lock()
 _claude_skills_cache: tuple[float, tuple[str, ...]] | None = None
 
 
@@ -242,16 +248,26 @@ def discover_claude_mcps(
     ``claude mcp list`` reports health (Connected) even for connectors disabled
     in the per-project ``/mcp`` panel. Those disables live in
     ``~/.claude.json`` → ``projects.<path>.disabledMcpServers``.
+
+    Served stale-while-revalidate: ``claude mcp list`` measures ~12s on a real
+    install, and it is on the Settings -> Providers load path, so a plain TTL
+    made every visit after the window pay the full cost. An expired entry is
+    returned immediately and refreshed on a background thread, so only the first
+    call after startup ever waits.
     """
     global _claude_mcps_cache
     now = time.monotonic()
     ws_key = str(_resolve_root(workspace_root)) if workspace_root else ""
-    if (
-        _claude_mcps_cache is not None
-        and now - _claude_mcps_cache[0] < _CLAUDE_DISCOVERY_TTL_SECONDS
-        and _claude_mcps_cache[1] == ws_key
-    ):
-        return list(_claude_mcps_cache[2])
+    cached = _claude_mcps_cache
+    fresh = (
+        cached is not None
+        and now - cached[0] < _CLAUDE_DISCOVERY_TTL_SECONDS
+        and cached[1] == ws_key
+    )
+    if cached is not None and cached[1] == ws_key:
+        if not fresh:
+            _refresh_claude_mcps_async(ws_key, config_path)
+        return list(cached[2])
 
     connected = _discover_claude_mcps_uncached(
         workspace_root=Path(ws_key) if ws_key else None,
@@ -259,6 +275,35 @@ def discover_claude_mcps(
     )
     _claude_mcps_cache = (now, ws_key, tuple(connected))
     return connected
+
+
+def _refresh_claude_mcps_async(ws_key: str, config_path: Path | None) -> None:
+    """Re-discover in the background, at most one refresh in flight.
+
+    Failures are swallowed on purpose: the stale list already went out to the
+    caller, and a discovery error must not surface as a broken Settings page.
+    """
+    global _claude_mcps_refreshing
+    with _claude_mcps_lock:
+        if _claude_mcps_refreshing:
+            return
+        _claude_mcps_refreshing = True
+
+    def run() -> None:
+        global _claude_mcps_cache, _claude_mcps_refreshing
+        try:
+            connected = _discover_claude_mcps_uncached(
+                workspace_root=Path(ws_key) if ws_key else None,
+                config_path=config_path,
+            )
+            _claude_mcps_cache = (time.monotonic(), ws_key, tuple(connected))
+        except Exception:  # noqa: BLE001 - a stale list is already serving
+            logger.debug("background Claude MCP discovery failed", exc_info=True)
+        finally:
+            with _claude_mcps_lock:
+                _claude_mcps_refreshing = False
+
+    threading.Thread(target=run, name="claude-mcp-refresh", daemon=True).start()
 
 
 def _short_claude_mcp_name(name: str) -> str:

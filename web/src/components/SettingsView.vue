@@ -4480,10 +4480,10 @@ async function fetchWorkspacesList() {
   }
 }
 
-// `force` bypasses the provider catalog caches. Opening Settings is exactly the
-// moment a user has just connected a provider elsewhere, so the tab pays the
-// refresh; a save-triggered refetch does not, since it only needs the pins we
-// just wrote and a forced call re-spawns a provider process.
+// `force` bypasses the provider catalog caches, which costs a provider process
+// spawn. Opening Settings is exactly the moment a user has just connected a
+// provider elsewhere, so the tab does refresh -- but it renders from cache first
+// and lets the forced fetch land after, rather than holding the page on it.
 async function fetchWorkspaceModels(force = false) {
   try {
     workspaceModels.value = await api.get<ModelsResponse>(
@@ -4587,7 +4587,8 @@ onMounted(async () => {
   fetchProviderKeys()
   fetchMcpStatus()
   fetchMcpUsage()
-  fetchWorkspaceModels(true)
+  // Render from cache immediately, then pick up anything connected elsewhere.
+  fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()
   fetchWorkspacesList()
   pushSupportedFlag.value = pushSupported()
