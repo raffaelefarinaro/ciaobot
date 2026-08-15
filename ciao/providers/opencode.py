@@ -59,6 +59,7 @@ from ciao.providers.base import (
     build_runtime_context,
 )
 from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
+from ciao.providers.safe_commands import is_read_only_command
 from ciao.tool_path import resolve_tool
 
 logger = logging.getLogger(__name__)
@@ -122,8 +123,9 @@ _MODE_AGENTS: dict[str, str] = {
 # Resolution is last-match-wins, so the wildcard goes first and the specific
 # grants follow. Read-only tools are always allowed; `edit` is what separates
 # auto from normal. Shell stays on the wildcard in every non-bypass mode, so a
-# command still needs approval even in auto.
-_READ_ONLY_TOOLS = ("read", "glob", "grep")
+# command reaches `_permission_event` even in auto, where the read-only
+# classifier decides whether the operator has to see it.
+_READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
 
 
 def _rules(*entries: tuple[str, str]) -> list[dict[str, str]]:
@@ -400,6 +402,26 @@ def mode_settings(mode: BridgeMode) -> tuple[str, list[dict[str, str]]]:
     if key != "plan":
         rules.extend(control_plane_permission_rules())
     return _MODE_AGENTS[key], rules
+
+
+def auto_approves_permission(mode: BridgeMode, permission: str, command: str) -> bool:
+    """Whether a surfaced permission request is answerable without the operator.
+
+    A session's permission ruleset is fixed at creation and `PATCH` does not
+    apply (see ``_ensure_session``), so a chat created under another mode keeps
+    raising asks forever — and even a fresh auto session deliberately keeps
+    shell on the wildcard. Deciding here, on the *current* mode of the turn, is
+    what makes Auto automatic: bypass approves everything, auto approves
+    verifiably read-only work, and every other mode (or anything the
+    classifier cannot verify) still puts a card in front of the operator.
+    """
+    if mode == "bypass":
+        return True
+    if mode != "auto":
+        return False
+    if permission == "bash":
+        return bool(command) and is_read_only_command(command)
+    return permission in _READ_ONLY_TOOLS
 
 
 def split_model(model: str) -> tuple[str, str]:
@@ -869,6 +891,18 @@ class OpencodeProvider(BaseSDKProvider):
             logger.debug("opencode permission reply failed", exc_info=True)
             return False
 
+    async def _auto_approve(self, pending: _PendingRequest) -> None:
+        """Approve a request the mode has already decided, without a card.
+
+        Replies "once" rather than "always": "always" whitelists opencode's
+        suggested pattern for the rest of the session, which could over-approve
+        (e.g. `git *` from one `git status`). Each request is re-judged.
+        """
+        if not await self._reply_permission(pending, "once"):
+            logger.warning(
+                "opencode auto-approval reply failed for %s", pending.request_id
+            )
+
     def send_permission_response(self, request_id: str, approved: bool) -> bool:
         pending = self._permission_requests.pop(request_id, None)
         if pending is None or self._client is None:
@@ -1143,8 +1177,12 @@ class OpencodeProvider(BaseSDKProvider):
         # v1 names the tool in `permission`; v2 names it in `action`.
         tool_name = str(props.get("permission") or props.get("action") or "").strip()
         detail = ""
+        command = ""
         metadata = props.get("metadata")
         if isinstance(metadata, Mapping):
+            raw_command = metadata.get("command")
+            if isinstance(raw_command, str):
+                command = raw_command.strip()
             for key in ("command", "filePath", "path", "url", "pattern"):
                 value = metadata.get(key)
                 if isinstance(value, str) and value.strip():
@@ -1160,12 +1198,24 @@ class OpencodeProvider(BaseSDKProvider):
 
         tool = props.get("tool")
         call_id = str(tool.get("callID") or "") if isinstance(tool, Mapping) else ""
-        self._permission_requests[request_id] = _PendingRequest(
+        pending = _PendingRequest(
             request_id=request_id,
             session_id=str(props.get("sessionID") or ""),
             tool_use_id=call_id,
         )
         label = tool_name or "a tool"
+        # Without a client the approval could not be posted, so fall through
+        # to the card (only reachable in tests and teardown races).
+        if self._client is not None and auto_approves_permission(
+            self._current_mode, tool_name, command
+        ):
+            logger.info(
+                "opencode auto-approved %s in %s mode: %s",
+                label, self._current_mode, detail or "(no detail)",
+            )
+            asyncio.create_task(self._auto_approve(pending))
+            return []
+        self._permission_requests[request_id] = pending
         return [PermissionRequestEvent(
             # `system`, and "Approve use of X?", to match the Claude and Codex
             # providers. A different type and a restated "opencode wants to
