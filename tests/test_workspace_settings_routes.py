@@ -294,6 +294,73 @@ def test_workspace_provider_options_are_the_runtime_providers(tmp_path):
     assert resp.json()["workspaces"][-1]["default_provider"] == "opencode"
 
 
+def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
+    """A registry written by a pre-refactor release (provider "ollama", legacy
+    ``model_bucket`` key) must list with a registered provider — the PWA
+    renders it into a <select> limited to ``provider_options`` — and a PATCH
+    must round-trip instead of 400ing on the stale stored value."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "personal",
+                    "vault_root": "memory-vault/personal",
+                    "default_provider": "ollama",
+                    "default_model": "qwen3:latest",
+                    "model_bucket": "big",
+                    "gws_profile": "personal",
+                },
+                {
+                    "name": "work",
+                    "vault_root": "memory-vault/work",
+                    "default_provider": "claude",
+                    "gws_profile": "work",
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    client, config, _pcm = _client(tmp_path)
+    assert config.workspace("personal").default_provider == "ollama"
+
+    listed = client.get("/api/workspaces").json()
+    personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
+    option_values = {option["value"] for option in listed["provider_options"]}
+    # Coerced to the effective provider, mirroring default_provider_for_workspace.
+    assert personal["default_provider"] == "claude"
+    assert personal["default_provider"] in option_values
+
+    # A save that omits the provider keeps working despite the stale record.
+    untouched = client.patch(
+        "/api/workspaces/personal",
+        json={"default_model": "sonnet"},
+    )
+    assert untouched.status_code == 200
+
+    # Saving the coerced value back round-trips and rewrites a clean record.
+    resp = client.patch(
+        "/api/workspaces/personal",
+        json={"default_provider": personal["default_provider"]},
+    )
+    assert resp.status_code == 200
+    assert config.workspace("personal").default_provider == "claude"
+
+    stored = json.loads((runtime / "workspaces.json").read_text())
+    personal_stored = next(w for w in stored if w["name"] == "personal")
+    assert personal_stored["default_provider"] == "claude"
+    assert "model_bucket" not in personal_stored
+
+    # Explicitly invalid writes are still rejected.
+    bad = client.patch(
+        "/api/workspaces/personal",
+        json={"default_provider": "ollama"},
+    )
+    assert bad.status_code == 400
+
+
 def test_claude_ai_mcps_toggle_persists_and_resolves(tmp_path):
     """The claude.ai MCPs toggle is persisted on the workspace and drives the
     connector portion of the effective denylist (union with extras)."""

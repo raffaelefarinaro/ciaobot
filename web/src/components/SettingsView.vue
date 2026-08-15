@@ -1063,7 +1063,7 @@
                     />
                   </div>
                 </div>
-                <label class="settings-field"><span class="ws-label">Provider</span>
+                <label class="settings-field"><span class="ws-label">Agent CLI</span>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
                     <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                       {{ provider.label }}
@@ -1185,7 +1185,7 @@
                       />
                     </div>
                   </div>
-                  <label class="settings-field"><span class="ws-label">Provider</span>
+                  <label class="settings-field"><span class="ws-label">Agent CLI</span>
                     <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                         {{ provider.label }}
@@ -4336,10 +4336,17 @@ function blankWorkspaceForm(): WorkspaceForm {
 
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
   const mcps = ws.claude_ai_mcps
+  // A stored provider outside the current options (a removed backend id like
+  // the pre-refactor "ollama") would render the select blank and make every
+  // save 400. Snap it to a valid option, like the new-workspace form does.
+  const storedProvider = ws.default_provider || 'claude'
+  const provider = projectStore.workspaceProviderOptions.some((option) => option.value === storedProvider)
+    ? storedProvider
+    : defaultWorkspaceProvider()
   return {
     name: ws.name,
     vault_root: ws.vault_root || '',
-    default_provider: ws.default_provider || 'claude',
+    default_provider: provider,
     default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
@@ -4557,6 +4564,7 @@ async function saveWorkspace(name: string) {
     await fetchWorkspacesList()
   } catch (e) {
     workspacesResult.value = `Error: ${errorMessage(e)}`
+    notifyFailed(`Workspace "${name}" not saved`, errorMessage(e))
   } finally {
     workspacesSaving.value = null
   }
@@ -4588,6 +4596,7 @@ async function createNewWorkspace() {
     await fetchWorkspacesList()
   } catch (e) {
     workspacesResult.value = `Error: ${errorMessage(e)}`
+    notifyFailed(`Workspace "${form.name.trim()}" not created`, errorMessage(e))
   } finally {
     workspacesSaving.value = null
   }

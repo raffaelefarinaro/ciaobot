@@ -810,10 +810,18 @@ def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
         color = coerce_workspace_color(getattr(workspace, "color", DEFAULT_WORKSPACE_COLOR))
     except ValueError:
         color = DEFAULT_WORKSPACE_COLOR
+    # A stored value naming a removed backend (e.g. pre-refactor "ollama") is
+    # reported as the provider that actually runs the workspace, mirroring
+    # ``CiaoConfig.default_provider_for_workspace``. The PWA renders this into
+    # a <select> limited to ``provider_options``, so an unregistered value
+    # would show a blank dropdown and be rejected on save.
+    provider = str(getattr(workspace, "default_provider", "claude") or "claude")
+    if not provider_registry.is_provider(provider):
+        provider = "claude"
     return {
         "name": getattr(workspace, "name", ""),
         "vault_root": getattr(workspace, "vault_root", ""),
-        "default_provider": getattr(workspace, "default_provider", "claude"),
+        "default_provider": provider,
         "default_model": getattr(workspace, "default_model", ""),
         "disallowed_tools": (
             list(cast(Iterable[Any], getattr(workspace, "disallowed_tools", None)))
@@ -883,12 +891,17 @@ def _workspace_from_request(
                     f"workspace vault folder is already owned by "
                     f"'{configured_name}'"
                 )
-    requested_provider = str(
-        data.get(
-            "default_provider",
-            existing.default_provider if existing else "claude",
+    if "default_provider" in data:
+        requested_provider = str(data["default_provider"]).strip() or "claude"
+    else:
+        # A save that leaves the provider untouched must not be rejected
+        # because the stored value names a removed backend (pre-refactor
+        # "ollama"); fall back to the provider that actually runs the
+        # workspace, mirroring ``default_provider_for_workspace``.
+        stored_provider = existing.default_provider if existing else "claude"
+        requested_provider = (
+            stored_provider if provider_registry.is_provider(stored_provider) else "claude"
         )
-    ).strip() or "claude"
     available_providers = _workspace_provider_values(config)
     if requested_provider not in available_providers:
         allowed = ", ".join(sorted(available_providers))
