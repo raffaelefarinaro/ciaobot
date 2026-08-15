@@ -15,6 +15,16 @@ from ciao.config import CiaoConfig
 from ciao.web.routes_api import settings_routines
 
 
+@pytest.fixture(autouse=True)
+def reset_apple_beta_flag():
+    """Keep the module-level beta flag from leaking between route tests."""
+    from ciao import native_sidecar
+
+    native_sidecar.reset_probe_cache()
+    yield
+    native_sidecar.reset_probe_cache()
+
+
 def _make_client(tmp_path, env_extra: dict[str, str] | None = None):
     env = {
         "PWA_AUTH_TOKEN": "t",
@@ -248,3 +258,35 @@ def test_patch_persists_the_voice_locale_and_voice(tmp_path):
     assert config.tts_local_voice == "com.apple.voice.x"
     assert not hasattr(config, "transcription_engine")
     assert not hasattr(config, "tts_engine")
+
+
+def test_apple_intelligence_is_beta_and_off_by_default(tmp_path):
+    """GET reports the flag plus the beta marker, with the option unavailable."""
+    client, config = _make_client(tmp_path)
+    data = client.get("/api/settings/routines").json()
+    assert data["apple_intelligence_beta"] is True
+    assert data["apple_intelligence_enabled"] is False
+    assert config.apple_intelligence_enabled is False
+
+
+def test_patch_enables_apple_intelligence_and_syncs_the_sidecar(tmp_path):
+    from ciao import native_sidecar
+
+    native_sidecar.set_apple_intelligence_enabled(False)
+    client, config = _make_client(tmp_path)
+    resp = client.patch("/api/settings/routines", json={"apple_intelligence_enabled": True})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["apple_intelligence_enabled"] is True
+    # Live config updated and the sidecar latch follows it, no restart needed.
+    assert config.apple_intelligence_enabled is True
+    assert native_sidecar.apple_intelligence_enabled() is True
+    # Persisted: a fresh store sees the toggle.
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.apple_intelligence_enabled is True
+
+
+def test_patch_rejects_a_non_boolean_apple_toggle(tmp_path):
+    client, _config = _make_client(tmp_path)
+    resp = client.patch("/api/settings/routines", json={"apple_intelligence_enabled": "yes"})
+    assert resp.status_code == 400

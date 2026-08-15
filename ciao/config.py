@@ -368,6 +368,12 @@ class CiaoConfig:
     # Models tab (runtime settings store) or ``CIAO_TITLE_MODEL_OVERRIDE``.
     # Empty = automatic routing: the workspace's haiku-tier model.
     title_model_override: str = ""
+    # Apple Intelligence (the "Local (free)" on-device model) is a beta feature,
+    # off by default. Opt-in from Settings → Models, or an operator can flip the
+    # default from the env with ``CIAO_APPLE_INTELLIGENCE=1``. When off, the
+    # "apple" sentinel is treated as an unavailable backend and every routine
+    # falls back to its cloud model.
+    apple_intelligence_enabled: bool = False
     # BCP-47 language for the on-device voice engines. Dictation needs a
     # matching language installed in System Settings → Keyboard → Dictation;
     # the synthesizer uses it to choose a voice.
@@ -1024,6 +1030,10 @@ class CiaoConfig:
             ),
             title_model=source.get("CIAO_TITLE_MODEL", "").strip() or "haiku",
             title_model_override=source.get("CIAO_TITLE_MODEL_OVERRIDE", "").strip(),
+            apple_intelligence_enabled=source.get(
+                "CIAO_APPLE_INTELLIGENCE", "false"
+            ).strip().lower()
+            in {"1", "true", "yes", "on"},
             transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
             or "en-US",
             tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),

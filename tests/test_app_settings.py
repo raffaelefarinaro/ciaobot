@@ -17,6 +17,8 @@ class FakeConfig:
         self.title_model_override = ""
         self.insights_model_override = ""
         self.insights_model = "sonnet"
+        # Beta feature, off by default (the env default here is False).
+        self.apple_intelligence_enabled = False
 
         self.transcription_locale = "en-US"
         self.tts_local_voice = "af_heart"
@@ -67,6 +69,59 @@ def test_update_rejects_a_non_string_value(tmp_path):
     # what is left.
     with pytest.raises(ValueError):
         store.update({"title_model": 3})
+
+
+def test_apple_intelligence_defaults_to_unset_and_off(tmp_path):
+    # No override persisted and no env default: applying leaves it off.
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+    store.apply_to_config(config)
+    assert store.settings.apple_intelligence_enabled is None
+    assert config.apple_intelligence_enabled is False
+    # And nothing was written just by applying.
+    assert not (tmp_path / "app_settings.json").exists()
+
+
+def test_apple_intelligence_toggle_persists_and_roundtrips(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    store.update({"apple_intelligence_enabled": True})
+    assert json.loads((tmp_path / "app_settings.json").read_text()) == {
+        "apple_intelligence_enabled": True
+    }
+    assert AppSettingsStore(tmp_path / "app_settings.json").settings.apple_intelligence_enabled is True
+
+    store.update({"apple_intelligence_enabled": False})
+    assert AppSettingsStore(tmp_path / "app_settings.json").settings.apple_intelligence_enabled is False
+
+
+def test_apple_intelligence_update_rejects_a_non_boolean(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    with pytest.raises(ValueError):
+        store.update({"apple_intelligence_enabled": "yes"})
+
+
+def test_apple_intelligence_apply_respects_explicit_toggle(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+
+    store.update({"apple_intelligence_enabled": True})
+    store.apply_to_config(config)
+    assert config.apple_intelligence_enabled is True
+
+    # Explicit False wins over the (False) env default — and also lets an
+    # operator force it off when the env default is on.
+    store.update({"apple_intelligence_enabled": False})
+    store.apply_to_config(config)
+    assert config.apple_intelligence_enabled is False
+
+
+def test_apple_intelligence_apply_uses_env_default_when_not_toggled(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+    config.apple_intelligence_enabled = True  # e.g. CIAO_APPLE_INTELLIGENCE=1
+
+    store.apply_to_config(config)
+    assert config.apple_intelligence_enabled is True
 
 
 def test_apply_overlays_and_clear_restores_defaults(tmp_path):

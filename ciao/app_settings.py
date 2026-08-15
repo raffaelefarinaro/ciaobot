@@ -39,6 +39,17 @@ def _clean_tier_routes(raw: object) -> dict[str, dict[str, str]]:
     }
 
 
+def _coerce_bool(raw: object) -> bool | None:
+    """Read a stored boolean toggle, tolerating hand-edited truthy strings."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(raw, int) and raw in (0, 1):
+        return bool(raw)
+    return None
+
+
 def _tier_settings(config: object, descriptor: object) -> Any:
     """This provider's per-tier settings dataclass on ``config``, if present.
 
@@ -90,6 +101,11 @@ class AppSettings:
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
 
+    # Apple Intelligence (the on-device "Local (free)" model) is a beta feature,
+    # off by default. None = "no override, use the config/env default" (false);
+    # True enables it, False disables it even when the env default is on.
+    apple_intelligence_enabled: bool | None = None
+
     # BCP-47 language for the on-device voice engines.
     transcription_locale: str = ""
     # macOS voice identifier for read-aloud; empty means the sidecar picks the
@@ -136,6 +152,10 @@ class AppSettingsStore:
         for key, value in raw.items():
             if key in string_fields and isinstance(value, str):
                 setattr(settings, key, value.strip())
+        if "apple_intelligence_enabled" in raw:
+            settings.apple_intelligence_enabled = _coerce_bool(
+                raw["apple_intelligence_enabled"]
+            )
         provider_routing = _merge_legacy_tier_pins(
             raw, _clean_tier_routes(raw.get("provider_routing"))
         )
@@ -144,7 +164,15 @@ class AppSettingsStore:
         return settings
 
     def _save(self) -> None:
-        payload = {k: v for k, v in asdict(self.settings).items() if v}
+        payload = {}
+        for key, value in asdict(self.settings).items():
+            if key == "apple_intelligence_enabled":
+                # A tri-state bool: persist only an explicit override so the
+                # env default keeps working when the field is left untouched.
+                if value is not None:
+                    payload[key] = value
+            elif value:
+                payload[key] = value
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
             json.dumps(payload, indent=2) + "\n", encoding="utf-8"
@@ -182,6 +210,13 @@ class AppSettingsStore:
             self.settings.provider_routing = merged
         for key, value in changes.items():
             if key not in known:
+                continue
+            if key == "apple_intelligence_enabled":
+                # The one boolean knob: the PWA sends true/false; anything
+                # else is a client bug, not a value to persist.
+                if not isinstance(value, bool):
+                    raise ValueError("apple_intelligence_enabled must be a boolean")
+                setattr(self.settings, key, value)
                 continue
             if key == "provider_routing":
                 if not isinstance(value, dict):
@@ -229,6 +264,7 @@ class AppSettingsStore:
             self._defaults = {
                 "title_model_override": config.title_model_override,
                 "insights_model_override": config.insights_model_override,
+                "apple_intelligence_enabled": config.apple_intelligence_enabled,
 
                 "transcription_locale": config.transcription_locale,
                 "tts_local_voice": config.tts_local_voice,
@@ -248,6 +284,18 @@ class AppSettingsStore:
         s = self.settings
         config.title_model_override = s.title_model or d["title_model_override"]
         config.insights_model_override = s.insights_model or d["insights_model_override"]
+
+        # Beta feature, off by default: the env default, unless the operator
+        # has explicitly toggled it in Settings. Mirror it onto the sidecar so
+        # availability checks and `respond` agree without threading config.
+        config.apple_intelligence_enabled = (
+            s.apple_intelligence_enabled
+            if s.apple_intelligence_enabled is not None
+            else d["apple_intelligence_enabled"]
+        )
+        from ciao import native_sidecar
+
+        native_sidecar.set_apple_intelligence_enabled(config.apple_intelligence_enabled)
 
         config.transcription_locale = (
             s.transcription_locale or d["transcription_locale"]

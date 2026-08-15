@@ -5054,6 +5054,11 @@ def _routines_payload(config, app_settings) -> dict:
         # prerequisite is missing instead of silently hiding the option.
         "apple_model_available": native_sidecar.apple_model_available(),
         "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
+        # Apple Intelligence is a beta feature, off by default. The toggle in
+        # Settings → Models PATCHes apple_intelligence_enabled; when off, the
+        # "apple" sentinel above reports unavailable and routines fall back.
+        "apple_intelligence_enabled": bool(config.apple_intelligence_enabled),
+        "apple_intelligence_beta": native_sidecar.APPLE_INTELLIGENCE_BETA,
         "transcription": {
             "locale": config.transcription_locale,
             # On-device dictation needs macOS 26+, the installed app, and a

@@ -477,6 +477,41 @@
           <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
         </template>
         <template v-else-if="routines">
+          <!-- Apple Intelligence (beta, off by default) -->
+          <div class="card">
+            <div class="settings-card-header settings-card-header--split">
+              <div>
+                <p class="section-title">
+                  Apple Intelligence
+                  <span v-if="routines?.apple_intelligence_beta" class="badge badge--warn">beta</span>
+                </p>
+                <p class="hint">
+                  Experimental on-device models for chat titles, Session insights, and re-entry
+                  summaries. Off by default. Requires macOS 26+, the Ciaobot desktop app, and
+                  Apple Intelligence switched on in System Settings. While it is off, the
+                  "Local (free)" options below are unavailable and routines use a cloud model.
+                </p>
+              </div>
+              <div class="settings-control">
+                <label class="settings-checkbox-hit">
+                  <input
+                    type="checkbox"
+                    class="settings-checkbox"
+                    :checked="appleIntelligenceEnabled"
+                    :disabled="routinesSaving"
+                    @change="toggleAppleIntelligence"
+                  />
+                </label>
+              </div>
+            </div>
+            <p
+              v-if="appleIntelligenceEnabled && routines?.apple_model_available === false"
+              class="hint hint--warn"
+            >
+              Enabled, but unusable on this machine: {{ routines?.apple_model_unavailable_reason }}
+            </p>
+          </div>
+
           <!-- Internal routines -->
           <div class="card">
             <div class="settings-card-header">
@@ -515,7 +550,7 @@
                   @change="saveRoutineProvider('title_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option value="automatic">Automatic</option>
-                  <option value="apple">Local (free)</option>
+                  <option value="apple">Local (free) · beta</option>
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
@@ -607,7 +642,7 @@
                   @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option value="automatic">Automatic</option>
-                  <option value="apple">Local (free)</option>
+                  <option value="apple">Local (free) · beta</option>
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
@@ -948,10 +983,7 @@
                   />
                 </label>
               </div>
-              <p v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
-                OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; pick a model above to pin a tier. A pin falls back to the automatic mapping if its model disappears from the account.
-              </p>
-              <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
+              <p v-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
                 {{ tierProviderUnavailableHint }}
               </p>
             </div>
@@ -2816,6 +2848,15 @@ async function saveRoutines(patch: Record<string, unknown>) {
   }
 }
 
+// Apple Intelligence is a beta feature, off by default; this toggle is the
+// opt-in. While it is off, the "Local (free)" option below reports unavailable
+// and titles/insights fall back to their cloud model.
+const appleIntelligenceEnabled = computed(() => routines.value?.apple_intelligence_enabled === true)
+
+async function toggleAppleIntelligence(event: Event) {
+  await saveRoutines({ apple_intelligence_enabled: (event.target as HTMLInputElement).checked })
+}
+
 async function compareAppleInsights() {
   insightsComparisonPending.value = true
   insightsComparison.value = null
@@ -3215,7 +3256,7 @@ function routineModelSummary(key: RoutineModelKey): string {
     }
     return `Automatic: ${routineEffectiveModel(key) || 'default'}`
   }
-  if (provider === 'apple') return 'Local (free)'
+  if (provider === 'apple') return 'Local (free) · beta'
   if (provider === 'custom') return `Custom: ${routineCustomModel(key)}`
   const tier = routineTierValue(key)
   const model = tierModelForProvider(provider, tier)
