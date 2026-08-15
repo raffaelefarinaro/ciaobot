@@ -59,6 +59,25 @@ def resolve_insights_model(config: CiaoConfig, workspace: str | None = None) -> 
 
 
 _INSIGHTS_HEADER = "## Session insights"
+# Written by _append_section immediately before the header so the real
+# appended section is distinguishable from a transcript that merely quotes
+# the header text (curation chats do this routinely). Archives written
+# before the stamp existed are handled by the heuristic in
+# locate_insights_section.
+_INSIGHTS_STAMP = "<!-- ciao:session-insights -->"
+_MARKER_LINE_RE = re.compile(rf"^{re.escape(_INSIGHTS_HEADER)}\s*$", re.MULTILINE)
+# Rendered archives title each transcript turn "## Turn N", render subagent
+# turns as "#### Turn N" under a trailing "## Subagents" block, and close with
+# "### Usage"/"### Quota" trailers. The appended insights section always sits
+# after all of those, so any such heading after a marker proves the marker is
+# quoted transcript content.
+_TURN_HEADING_RE = re.compile(
+    r"^(?:#{2,4} Turn \d+|## Subagents\s*$|### (?:Usage|Quota)\s*$)",
+    re.MULTILINE,
+)
+# Rendered archives fence quoted transcript text in line-start ``` blocks
+# (the appended body's snippet fences are indented and do not match).
+_FENCE_LINE_RE = re.compile(r"^```", re.MULTILINE)
 _RETRY_DELAY_S = 30
 _READ_TOOL_TRUNCATE_CHARS = 200
 _KEEP_FULL_TOOLS = frozenset({"Edit", "Write", "Bash", "Task", "NotebookEdit"})
@@ -190,6 +209,9 @@ Rules:
 - Skip anything obvious from user/assistant text alone.
 - "Errors" = tool/model/system failure, not just things the user disliked.
 - "User corrections" = the user pushed back, redirected, or rejected an approach.
+  Append the "Durable rule:" sentence only when the correction implies a
+  preference that should hold in future sessions, phrased as a present-tense
+  standing rule; omit it for one-off fixes.
 - "New entities" = people/projects/places/products mentioned for the first time, not generic nouns.
 - When citing wikilinks, use bare [[Target]] or [[Target|Display]] syntax. Do NOT wrap wikilinks in backticks, quotes, or other formatting.
 - Be terse. One line per item where possible.
@@ -201,7 +223,7 @@ Rules:
 - Tried <approach>; blocked by <reason>; switched to <alternative>. [idx=N]
 
 ## User corrections
-- User said: "<short quote>" -> assistant changed <what>. [idx=N]
+- User said: "<short quote>" -> assistant changed <what>. Durable rule: <present-tense standing preference, if any>. [idx=N]
 
 ## New entities
 - <type>: <name> - <one-line context>. [idx=N]
@@ -588,9 +610,61 @@ async def extract_and_append(
             )
 
 
+def locate_insights_section(text: str) -> tuple[int, int] | None:
+    """Locate the real appended Session-insights section of an archive.
+
+    Returns ``(section_start, body_start)`` — the offset where the section
+    (stamp included) begins, and the offset just past the header line — or
+    ``None`` when the archive carries no appended section.
+
+    A plain substring match is not enough: chats that *discuss* insights
+    (nightly curation, meta work on the pipeline) quote the header verbatim
+    inside their transcript, which made the old check skip extraction for
+    those archives and let the proposal parser re-ingest already-reviewed
+    bullets. Resolution order:
+
+    * A stamped section (everything written since the stamp existed) is
+      authoritative — but only a stamp that sits outside any code fence and is
+      immediately followed by the header line, the exact shape
+      :func:`_append_section` writes. Rendered archives fence quoted
+      transcript text, so a stamp a curation chat quotes (or merely mentions
+      in prose) never binds to a distant header.
+    * Otherwise take the last line-anchored header outside any fence — the
+      pipeline appends at end of file — unless transcript structure (a turn
+      heading, the Subagents block, or a Usage/Quota trailer) follows it,
+      which proves the marker is quoted transcript content.
+    """
+    search_end = len(text)
+    while True:
+        stamp_idx = text.rfind(_INSIGHTS_STAMP, 0, search_end)
+        if stamp_idx < 0:
+            break
+        if not _inside_code_fence(text, stamp_idx):
+            match = _MARKER_LINE_RE.match(text, stamp_idx + len(_INSIGHTS_STAMP) + 1)
+            if match:
+                return stamp_idx, match.end()
+        search_end = stamp_idx
+    for match in reversed(list(_MARKER_LINE_RE.finditer(text))):
+        if _inside_code_fence(text, match.start()):
+            continue
+        if _TURN_HEADING_RE.search(text, match.end()):
+            return None
+        return match.start(), match.end()
+    return None
+
+
+def _inside_code_fence(text: str, idx: int) -> bool:
+    """True when *idx* falls inside an open line-start ``` code fence.
+
+    Rendered archives quote transcript text inside ```text fences, so an odd
+    number of fence lines before a marker means it is quoted content.
+    """
+    return len(_FENCE_LINE_RE.findall(text, 0, idx)) % 2 == 1
+
+
 def _has_insights_section(path: Path) -> bool:
     try:
-        return _INSIGHTS_HEADER in path.read_text(encoding="utf-8")
+        return locate_insights_section(path.read_text(encoding="utf-8")) is not None
     except OSError:
         return False
 
@@ -600,7 +674,7 @@ def _append_section(path: Path, body: str) -> None:
     if not text:
         return
     with path.open("a", encoding="utf-8") as f:
-        f.write(f"\n\n{_INSIGHTS_HEADER}\n\n{text}\n")
+        f.write(f"\n\n{_INSIGHTS_STAMP}\n{_INSIGHTS_HEADER}\n\n{text}\n")
 
 
 async def _run_model_with_retry(
@@ -755,6 +829,8 @@ transcript itself.
 Rules:
 - Skip anything obvious from the transcript prose alone.
 - "User corrections" = the user pushed back, redirected, or rejected an approach.
+  Append the "Durable rule:" sentence only when the correction implies a
+  present-tense standing preference; omit it for one-off fixes.
 - "New entities" = people/projects/places/products mentioned for the first time.
 - Be terse. One line per item where possible.
 
@@ -762,7 +838,7 @@ Your entire response must be Markdown using only the section headers below. Neve
 return JSON, a code-fenced transcript, session metadata, or a generic recap.
 
 ## User corrections
-- User said: "<short quote>" -> assistant changed <what>.
+- User said: "<short quote>" -> assistant changed <what>. Durable rule: <present-tense standing preference, if any>.
 
 ## New entities
 - <type>: <name> - <one-line context>.
@@ -852,7 +928,11 @@ async def compare_apple_insights(config, *, limit: int = 2) -> dict[str, Any]:
     for archive in archives:
         try:
             body = await asyncio.to_thread(archive.read_text, encoding="utf-8")
-            transcript, existing = body.split(_INSIGHTS_HEADER, 1)
+            location = locate_insights_section(body)
+            if location is None:
+                continue
+            section_start, body_start = location
+            transcript, existing = body[:section_start], body[body_start:]
             transcript, dropped = native_sidecar.fit_apple_input(transcript.strip())
             if dropped:
                 logger.info(
