@@ -88,6 +88,23 @@ def _parse_title(text: str, filename_stem: str) -> str:
     return filename_stem
 
 
+def _public_snippet(raw: str) -> str:
+    """Keep only FTS-highlighted lines in a returned search snippet.
+
+    FTS5 can include unrelated adjacent lines when a short note fits inside
+    the snippet token budget. Vault search is model-facing, so returning only
+    lines containing a matched term avoids leaking nearby private metadata.
+    """
+    lines = raw.splitlines()
+    highlighted = [line.strip() for line in lines if "<<<" in line or ">>>" in line]
+    selected = highlighted or lines
+    return " ".join(
+        line.replace("<<<", "").replace(">>>", "").strip()
+        for line in selected
+        if line.strip()
+    )
+
+
 def _index_directory(
     conn: sqlite3.Connection,
     root_dir: Path,
@@ -279,7 +296,7 @@ def search(
         {
             "path": row[0],
             "title": row[1],
-            "snippet": row[2].replace("\n", " ").strip() if row[2] else "",
+            "snippet": _public_snippet(row[2]) if row[2] else "",
             "rank": f"{row[3]:.4f}",
         }
         for row in rows
