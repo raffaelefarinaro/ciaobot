@@ -146,6 +146,8 @@ def test_system_prompt_includes_native_memory_and_vault_routing() -> None:
     assert "ciao:memory" in append
     assert "ciao:profile" in append
     assert "vault_search" in append
+    assert "private working evidence" in append
+    assert "internal sentinels" in append
     assert "memory_update" in append
     assert "ciao memory" not in append
     assert "ciao vault-search" not in append

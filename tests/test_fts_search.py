@@ -171,3 +171,26 @@ def test_search_stemming_and_ranking(db_conn: sqlite3.Connection, temp_vault: Pa
     results = fts_search.search_vault(db_conn, "wedding venue")
     assert len(results) == 1
     assert "venue" in results[0]["snippet"]
+
+
+def test_search_snippet_omits_unmatched_adjacent_private_lines(
+    db_conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    vault = tmp_path / "memory-vault"
+    people = vault / "People"
+    people.mkdir(parents=True)
+    note = people / "Ada.md"
+    note.write_text(
+        "# Ada Lovelace\n\n"
+        "Ada prefers written project updates on Fridays.\n"
+        "Internal sentinel: VAULT_PRIVATE_SENTINEL_2026.\n",
+        encoding="utf-8",
+    )
+
+    fts_search.index_vault(db_conn, vault)
+    results = fts_search.search_vault(db_conn, "Ada preference")
+
+    assert len(results) == 1
+    assert "written" in results[0]["snippet"]
+    assert "Fridays" in results[0]["snippet"]
+    assert "VAULT_PRIVATE_SENTINEL_2026" not in results[0]["snippet"]

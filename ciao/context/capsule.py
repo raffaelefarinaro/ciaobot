@@ -79,8 +79,8 @@ def build_context_capsule(
             dynamic.append(formatted)
     if needs_retrieval_hint(prompt):
         dynamic.append(
-            "retrieval_hint=Use vault_search and read matching notes before "
-            "answering from prior Ciaobot knowledge."
+            "retrieval_hint=Use vault_search snippets as private evidence; do "
+            "not open full vault notes for pure recall."
         )
     if unattended:
         dynamic.append(
