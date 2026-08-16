@@ -297,14 +297,6 @@
               </div>
               <p class="hint">The routine inherits this workspace's provider and default model.</p>
             </div>
-            <details v-else class="prop-adv">
-              <summary>Advanced</summary>
-              <dl class="prop-rows">
-                <div class="prop-row">
-                  <dt>Archive</dt><dd>{{ archiveLabel(schedule.archive_policy) }}</dd>
-                </div>
-              </dl>
-            </details>
           </template>
 
           <div v-else class="card-form">
@@ -326,20 +318,6 @@
                 </optgroup>
               </select>
             </div>
-            <details class="prop-adv" open>
-              <summary>Advanced</summary>
-              <div class="form-group">
-                <label>Archive behavior</label>
-                <select v-model="editData.archive_policy">
-                  <option value="manual">Manual, keep as normal chat</option>
-                  <option value="auto">Automatically archive routine results</option>
-                </select>
-              </div>
-              <p class="hint">
-                Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or
-                anything useful for the user to judge, the chat stays visible.
-              </p>
-            </details>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
@@ -383,6 +361,46 @@
               />
             </div>
             <p class="hint">Leave empty to inherit the workspace default.</p>
+            <div class="card-actions">
+              <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
+              <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
+              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Advanced -->
+        <section v-if="schedule.scope !== 'system'" class="prop-card" :class="{ 'card-editing': editingCard === 'advanced' }">
+          <div class="prop-card-head">
+            <span class="prop-card-name">Advanced</span>
+            <span v-if="editingCard === 'advanced'" class="esc-hint"><kbd>Esc</kbd> cancels</span>
+            <button
+              v-else-if="canEditSchedule && !editingCard"
+              type="button"
+              class="card-edit"
+              :aria-label="'Edit advanced settings'"
+              @click="startCardEdit('advanced')"
+            >Edit</button>
+          </div>
+
+          <dl v-if="editingCard !== 'advanced'" class="prop-rows">
+            <div class="prop-row">
+              <dt>Archive</dt><dd>{{ archiveLabel(schedule.archive_policy) }}</dd>
+            </div>
+          </dl>
+
+          <div v-else class="card-form">
+            <div class="form-group">
+              <label>Archive behavior</label>
+              <select v-model="editData.archive_policy">
+                <option value="manual">Manual, keep as normal chat</option>
+                <option value="auto">Automatically archive routine results</option>
+              </select>
+            </div>
+            <p class="hint">
+              Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or
+              anything useful for the user to judge, the chat stays visible.
+            </p>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
@@ -676,7 +694,7 @@ const projectStore = useProjectStore()
 const allDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
 // Properties are edited one card at a time ('' = nothing being edited), so the
 // rest of the panel stays readable and the way out is always on screen.
-type EditCard = '' | 'schedule' | 'delivery' | 'engine' | 'content'
+type EditCard = '' | 'schedule' | 'delivery' | 'engine' | 'advanced' | 'content'
 const editingCard = ref<EditCard>('')
 // Serialised editData as it looked when the card opened, for the dirty check.
 const editBaseline = ref('')
@@ -1591,19 +1609,6 @@ function closeSchedule() {
   overflow-wrap: anywhere;
 }
 .prop-highlight { color: var(--success); font-weight: 600; }
-
-.prop-adv { margin-top: var(--space-2); border-top: 1px solid var(--border); padding-top: var(--space-2); }
-.prop-adv > summary {
-  cursor: pointer;
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  list-style: none;
-}
-.prop-adv > summary::marker, .prop-adv > summary::-webkit-details-marker { display: none; }
-.prop-adv > summary::before { content: '▸ '; }
-.prop-adv[open] > summary::before { content: '▾ '; }
-.prop-adv > summary:hover { color: var(--fg2); }
-.prop-adv > *:not(summary) { margin-top: var(--space-2); }
 
 /* System routines keep their inline workspace switcher, but inside a card it
    drops the full-width divider and side-by-side layout it uses standalone. */

@@ -100,10 +100,10 @@ describe('SchedulePanel property cards', () => {
     while (mounted.length) mounted.pop()?.unmount()
   })
 
-  it('groups the properties into Schedule, Delivery and Engine cards', async () => {
+  it('groups the properties into Schedule, Delivery, Engine and Advanced cards', async () => {
     const wrapper = await mountPanel()
     const names = wrapper.findAll('.prop-card-name').map(n => n.text())
-    expect(names).toEqual(['Schedule', 'Delivery', 'Engine'])
+    expect(names).toEqual(['Schedule', 'Delivery', 'Engine', 'Advanced'])
   })
 
   it('keeps the other cards readable while one card is being edited', async () => {
@@ -124,6 +124,21 @@ describe('SchedulePanel property cards', () => {
     const actions = card(wrapper, 'Engine').find('.card-actions')
     expect(actions.exists()).toBe(true)
     expect(actions.text()).toContain('Cancel')
+  })
+
+  it('keeps archive behavior editable in the Advanced card', async () => {
+    const wrapper = await mountPanel()
+    await card(wrapper, 'Advanced').find('.card-edit').trigger('click')
+
+    await card(wrapper, 'Advanced').find('select').setValue('manual')
+    expect(card(wrapper, 'Advanced').find('.card-actions .btn-primary').attributes('disabled')).toBeUndefined()
+    await card(wrapper, 'Advanced').find('.card-actions .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(useTaskStore().updateSchedule).toHaveBeenCalledWith(
+      'sched-1',
+      expect.objectContaining({ archive_policy: 'manual' }),
+    )
   })
 
   it('keeps the header actions in place while editing', async () => {
@@ -198,7 +213,7 @@ describe('SchedulePanel property cards', () => {
 
   it('withdraws the other edit entry points while one card is open', async () => {
     const wrapper = await mountPanel()
-    expect(wrapper.findAll('.card-edit')).toHaveLength(3)
+    expect(wrapper.findAll('.card-edit')).toHaveLength(4)
 
     await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
 
@@ -209,7 +224,7 @@ describe('SchedulePanel property cards', () => {
 
     await card(wrapper, 'Schedule').find('.card-actions .btn-chip').trigger('click')
     await flushPromises()
-    expect(wrapper.findAll('.card-edit')).toHaveLength(3)
+    expect(wrapper.findAll('.card-edit')).toHaveLength(4)
   })
 
   it('hides the per-card edit buttons on system routines', async () => {
