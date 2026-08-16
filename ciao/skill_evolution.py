@@ -661,8 +661,13 @@ async def _process_skill_dag(
         semantic_verdict = "PRESERVED" if semantic_ok else "DRIFTED"
 
     # The DAG gates on cached results. Each gate gets a job_runs row.
-    def proposal_present(ctx: dict[str, Any]) -> tuple[bool, str]:
-        return (proposal is not None), "proposal" if proposal else "no-proposal"
+    def proposal_present(ctx: dict[str, Any]) -> tuple[bool, str, bool]:
+        if proposal is not None:
+            return True, "proposal", False
+        # This is a valid model outcome, not a failed skill-evolution run.
+        # Keep ok=False so the DAG selects the write_stub fail edge, while
+        # marking the branch as non-error for job-run/debug reporting.
+        return False, "no-proposal", True
 
     def semantic_passed(ctx: dict[str, Any]) -> tuple[bool, str]:
         return semantic_ok, semantic_verdict or "skipped"

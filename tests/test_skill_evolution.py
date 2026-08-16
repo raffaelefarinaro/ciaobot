@@ -12,6 +12,7 @@ import pytest
 
 from ciao import skill_evolution as se
 from ciao import trajectory_builder as tb
+from ciao.debug_report import recent_job_failures
 
 
 def test_default_proposals_dir_uses_the_active_workspace_registry(
@@ -351,6 +352,9 @@ def test_run_evolution_pass_writes_stub_for_undercap_no_proposal(
     assert "No clear improvement found" in body
     # The stub records the trajectory refs so next week's pass is comparable.
     assert "trajectories: 1" in body
+    # The intentional has_proposal branch must not create a runtime failure.
+    runs = recent_job_failures()
+    assert runs == []
 
 
 # ── semantic-drift gate ─────────────────────────────────────────────────

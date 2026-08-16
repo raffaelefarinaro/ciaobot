@@ -337,6 +337,36 @@ def test_non_raising_failed_noderesult_marks_job_run_error(
     assert "drift detected" in (gate.get("error") or "")
 
 
+def test_expected_failed_noderesult_routes_without_marking_job_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit negative branch remains false for DAG routing but is
+    recorded as a successful node when it is a benign expected outcome."""
+
+    def no_proposal(node, ctx):
+        return NodeResult(
+            ok=False,
+            output="no-proposal",
+            expected_failure=True,
+        )
+
+    monkeypatch.setitem(dag_mod._EXECUTORS, "expected-fail", no_proposal)
+    dag = [
+        Node(id="check", kind="expected-fail"),
+        Node(id="stub", kind="bash", payload={"cmd": "echo stub"}),
+    ]
+    edges = [Edge(src="check", dst="stub", when="fail")]
+
+    ctx = run(dag, edges, job="unit", label="expected-fail")
+
+    assert ctx["check"].ok is False
+    assert ctx["stub"].ok is True
+    rows = _job_runs(tmp_path)
+    check = next(r for r in rows if r["extra"]["node_id"] == "check")
+    assert check["status"] == "ok"
+    assert check["error"] is None
+
+
 def test_failed_gate_records_output_as_error(tmp_path: Path) -> None:
     """A gate returning ``(False, reason)`` carries its reason in
     ``output``, not ``error``. The recorded job_run must surface that

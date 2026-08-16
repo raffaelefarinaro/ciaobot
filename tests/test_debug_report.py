@@ -101,6 +101,39 @@ def test_triage_own_run_excluded_when_requested(tmp_path: Path) -> None:
     assert all("Triage Summary" not in e for e in errors)
 
 
+def test_legacy_skill_evolution_no_proposal_is_not_a_runtime_issue(
+    tmp_path: Path,
+) -> None:
+    job_runs.record_run(JobRun(
+        job="skill_evolution", label="skillevo:small-skill:has_proposal",
+        started_at="2026-07-20T21:21:49+00:00",
+        ended_at="2026-07-20T21:21:50+00:00",
+        status="error", error="no-proposal",
+        extra={
+            "dag": "skillevo:small-skill",
+            "node_id": "has_proposal",
+            "kind": "gate",
+        },
+    ))
+    job_runs.record_run(JobRun(
+        job="skill_evolution", label="skillevo:small-skill:semantic",
+        started_at="2026-07-20T21:22:49+00:00",
+        ended_at="2026-07-20T21:22:50+00:00",
+        status="error", error="model returned drifted",
+        extra={
+            "dag": "skillevo:small-skill",
+            "node_id": "semantic",
+            "kind": "gate",
+        },
+    ))
+
+    failures = recent_job_failures()
+
+    assert [failure["error"] for failure in failures] == [
+        "model returned drifted",
+    ]
+
+
 def test_format_report_only_errors_no_jobs(tmp_path: Path) -> None:
     _write_error_log(tmp_path, "ERROR a\nERROR b\n")
     report = build_issue_report(tmp_path)
