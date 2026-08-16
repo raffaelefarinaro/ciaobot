@@ -405,7 +405,6 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
                     move |chunk, total| {
                         let percent = total
                             .map(|total| {
-                                let total = total as u64;
                                 if total == 0 {
                                     72
                                 } else {
@@ -713,7 +712,7 @@ fn emit_update_progress(
         "status": status,
     });
     if let Some(window) = app.get_webview_window("update") {
-        let _ = window.eval(&browser_event_script("ciao:update-progress", &detail));
+        let _ = window.eval(browser_event_script("ciao:update-progress", &detail));
     }
 }
 
