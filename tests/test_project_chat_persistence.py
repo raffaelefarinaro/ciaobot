@@ -41,6 +41,37 @@ def _persisted_chats(tmp_path: Path) -> dict[str, dict]:
     return payload["chats"]
 
 
+def test_existing_vault_onboarding_uses_current_layout_and_workspace_name(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
+    manager = _make_manager(tmp_path)
+
+    onboarding = next(
+        chat for chat in manager._chats.values()
+        if chat.title == "Connect Existing Vault 👋"
+    )
+    prompt = onboarding.handover_messages[0]["content"]
+
+    assert "logical workspace **personal**" in prompt
+    assert "projects/active/" in prompt
+    assert "Workspace/Memory-Proposals.md" in prompt
+    assert "`Templates/` and `personal/`/`work/` are not required" in prompt
+    assert "Create Directory Structure" not in prompt
+
+    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
+    fresh_manager = _make_manager(tmp_path / "fresh")
+    fresh_onboarding = next(
+        chat for chat in fresh_manager._chats.values()
+        if chat.title == "Welcome to Ciaobot! 👋"
+    )
+    fresh_prompt = fresh_onboarding.handover_messages[0]["content"]
+    assert "logical workspace **personal**" in fresh_prompt
+    assert "projects/active/" in fresh_prompt
+    assert "Do not create `personal/`, `work/`, or `Templates/`" in fresh_prompt
+    assert "Create Directory Structure" not in fresh_prompt
+
+
 def test_stale_manager_does_not_drop_chat_created_by_other_process(tmp_path: Path) -> None:
     first = _make_manager(tmp_path)
     project = first.create_project("Shared", workspace="work")

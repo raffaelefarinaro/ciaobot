@@ -1999,6 +1999,7 @@ class ProjectChatManager:
         import os
         vault_mode = os.environ.get("CIAO_VAULT_MODE", "scratch").strip().lower()
         project = self._projects.get(project_id)
+        workspace_name = project.workspace if project is not None else "personal"
         vault_root = str(
             self._workspace_vault_root(project.workspace)
             if project is not None
@@ -2011,21 +2012,23 @@ class ProjectChatManager:
                 f"Welcome to Ciaobot. You are Ciaobot, the user's personal agentic assistant.\n\n"
                 f"The user has completed setup and pointed me to an **existing notes folder** at:\n"
                 f"`{vault_root}`\n\n"
-                f"Your task is to onboard the user and adapt this existing folder into what Ciaobot requires:\n"
-                f"1. **Analyze Folder**: Scan the existing vault directory to see what directories and files are present.\n"
-                f"2. **Structure Verification**: Check if the standard directories (`personal/`, `work/`, `Templates/`) exist. If not, plan to create them.\n"
-                f"3. **Hygiene & Scaffolding**: Verify if `CLAUDE.md` (defining identity, memory, styles) and `MEMORY.md` exist. If missing, plan to create them using clean Markdown structures (no em-dashes, no horizontal rules `---` as section dividers). `CLAUDE.md` MUST contain both bounded memory regions with their exact fenced markers: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`. They are mandatory, not optional — add any that are missing.\n"
-                f"4. **Workspace Git Check**: Verify the workspace is a git repository with a `.gitignore` covering `.env` and `.runtime/`, and that the vault is inside a git repo (the workspace repo by default, or its own when it lives elsewhere). If not, fix it (`git init`, append the missing entries) and report what you did.\n"
-                f"5. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, their role/work context, key people, and active projects) to populate `CLAUDE.md` and `MEMORY.md` correctly. Identity and communication-style answers go into the `ciao:profile` region of `CLAUDE.md`; cross-project environment facts and lessons learned go into the `ciao:memory` region.\n"
-                f"6. **Capabilities Tour**: Once the interview is done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
+                f"Your task is to onboard the user and adapt this existing folder into the current Ciaobot vault layout:\n"
+                f"1. **Inventory first**: Scan the vault and report its top-level files and folders, separating user notes from Ciaobot-managed files (`.env`, `.runtime/`, `.claude/`, `CLAUDE.md`, `AGENTS.md`). Do not assume an unfamiliar folder is disposable.\n"
+                f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout.\n"
+                f"3. **Preserve before reorganizing**: Existing files and content are the source of truth. Never delete or overwrite them. Reorganize only when the classification is clear: active projects go under `projects/active/<slug>/`, completed projects under `projects/completed/<slug>/`, people under `People/`, and reusable cross-project lessons under `Workspace/Learnings.md`. Leave ambiguous or unsupported material in place and report it. Use the existing Git history as the rollback point and keep a concise curation summary.\n"
+                f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `CLAUDE.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
+                f"5. **Initial memory curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then run an initial curation in this chat: search for duplicates, update the relevant project canonical docs, create durable person/entity notes only for confirmed facts, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
+                f"6. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
+                f"7. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
             )
             assistant_msg = (
                 f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
-                f"I've initialized our session and connected to your existing folder at `{vault_root}`. "
-                f"I'm ready to inspect your vault, organize it into Ciaobot's structure, and bootstrap our core notes. "
+                f"I've connected workspace **{workspace_name}** to your existing folder at `{vault_root}`. "
+                f"I'll first inspect what is already there, then help curate the clear, durable knowledge into Ciaobot's current structure while preserving the rest. "
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
-                f"To get started, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
+                f"To get started, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
         else:
             title = "Welcome to Ciaobot! 👋"

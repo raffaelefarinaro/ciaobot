@@ -164,10 +164,11 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.find('input[type="radio"][value="existing"]').exists()).toBe(false)
     expect(wrapper.find('input[type="radio"][value="scratch"]').exists()).toBe(false)
     expect(wrapper.text()).toContain("detects what's inside and adjusts automatically")
-    // the first logical workspace is named here, defaulting to "personal"
+    // The logical workspace name is chosen here, defaulting to "personal".
     const nameInput = wrapper.find('#setup-workspace-name')
     expect(nameInput.exists()).toBe(true)
     expect((nameInput.element as HTMLInputElement).value).toBe('personal')
+    expect(wrapper.text()).toContain('Logical Workspace Name')
   })
 
   it('hides the "First Workspace" field and shows chips when the folder already has nested workspaces', async () => {
