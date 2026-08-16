@@ -962,6 +962,28 @@ def test_locate_rejects_marker_quoted_in_last_turn() -> None:
     assert insights.locate_insights_section(text) is None
 
 
+def test_locate_requires_stamped_marker_to_be_line_anchored() -> None:
+    """A prose stamp cannot bind to a following legacy-looking heading."""
+    text = (
+        "# chat\n\n## Turn 1\n\nquoted stamp: "
+        "<!-- ciao:session-insights -->\n## Session insights\n\n"
+        "## Decisions\n- quoted\n\n## Turn 2\n\nmore chat\n"
+    )
+    assert insights.locate_insights_section(text) is None
+
+
+def test_locate_accepts_stamped_crlf_archive() -> None:
+    """Archives written on Windows retain the same marker semantics."""
+    text = (
+        "# chat\r\n\r\n## Turn 1\r\n\r\nhi\r\n\r\n"
+        "<!-- ciao:session-insights -->\r\n## Session insights  \r\n\r\n"
+        "## Errors\r\n- real\r\n"
+    )
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert text[location[1]:].lstrip().startswith("## Errors")
+
+
 def test_locate_survives_unbalanced_fence_in_transcript() -> None:
     """A stray line-start ``` inside a quoted turn must not hide the section.
 

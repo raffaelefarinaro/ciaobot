@@ -35,7 +35,15 @@ EXCERPT_CHARS = 160
 # asserted on every turn. Kept narrow on purpose: "User prefers X" and "User
 # runs Ubuntu" are durable state and must not match.
 _EVENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("quoted-user-turn", re.compile(r"\bUser\s+(?:said|asked|wrote|replied)\b", re.IGNORECASE)),
+    (
+        "quoted-user-turn",
+        re.compile(
+            r"\b(?:the\s+)?User\s+(?:said|asked|wrote|replied|requested|"
+            r"corrected|redirected|rejected|objected|pushed\s+back|"
+            r"insisted|clarified|told)\b",
+            re.IGNORECASE,
+        ),
+    ),
     ("quoted-user-turn", re.compile(r"\bUser\s*:\s*[\"“'']")),
     # Only real arrows. An em dash or `--` before "assistant" is ordinary prose
     # punctuation — "Prefers terse replies — assistant should skip preamble" is
@@ -47,7 +55,9 @@ _EVENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "assistant-action",
         re.compile(
             r"\bassistant\s+(?:then\s+)?(?:corrected|confirmed|bumped|changed|"
-            r"switched|fixed|updated|replied|noted|clarified)\b",
+            r"switched|fixed|updated|replied|noted|clarified|applied|"
+            r"implemented|reformatted|rephrased|rewrote|restored|replaced|"
+            r"removed|added|responded|accepted|declined)\b",
             re.IGNORECASE,
         ),
     ),

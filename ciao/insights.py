@@ -65,7 +65,18 @@ _INSIGHTS_HEADER = "## Session insights"
 # before the stamp existed are handled by the heuristic in
 # locate_insights_section.
 _INSIGHTS_STAMP = "<!-- ciao:session-insights -->"
-_MARKER_LINE_RE = re.compile(rf"^{re.escape(_INSIGHTS_HEADER)}\s*$", re.MULTILINE)
+_MARKER_LINE_RE = re.compile(
+    rf"^{re.escape(_INSIGHTS_HEADER)}[ \t]*(?=\r?$)", re.MULTILINE
+)
+# The stamp is part of the archive format too: require it at the beginning of
+# its own line before binding it to the following heading. Without that
+# anchor, a transcript sentence ending in the stamp could bind to a heading
+# on the next line and make the quoted text look like extracted insights.
+_STAMPED_MARKER_RE = re.compile(
+    rf"^{re.escape(_INSIGHTS_STAMP)}\r?\n"
+    rf"{re.escape(_INSIGHTS_HEADER)}[ \t]*(?=\r?$)",
+    re.MULTILINE,
+)
 # Rendered archives title each transcript turn "## Turn N", render subagent
 # turns as "#### Turn N" under a trailing "## Subagents" block, and close with
 # "### Usage"/"### Quota" trailers. The appended insights section always sits
@@ -653,20 +664,15 @@ def locate_insights_section(text: str) -> tuple[int, int] | None:
     * Otherwise take the last line-anchored header, under the same
       forward-looking rule.
     """
-    search_end = len(text)
-    while True:
-        stamp_idx = text.rfind(_INSIGHTS_STAMP, 0, search_end)
-        if stamp_idx < 0:
-            break
-        match = _MARKER_LINE_RE.match(text, stamp_idx + len(_INSIGHTS_STAMP) + 1)
-        if match:
-            # The real stamp is always the last stamp+header pair; if this
-            # one is followed by transcript structure it is quoted content,
-            # and every earlier pair sits even deeper in the transcript.
-            if _is_appended_tail(text, match.end()):
-                return stamp_idx, match.end()
-            return None
-        search_end = stamp_idx
+    stamped_matches = list(_STAMPED_MARKER_RE.finditer(text))
+    if stamped_matches:
+        # The real stamp is always the last stamp+header pair; if this one is
+        # followed by transcript structure it is quoted content, and every
+        # earlier pair sits even deeper in the transcript.
+        stamped = stamped_matches[-1]
+        if _is_appended_tail(text, stamped.end()):
+            return stamped.start(), stamped.end()
+        return None
     matches = list(_MARKER_LINE_RE.finditer(text))
     if matches and _is_appended_tail(text, matches[-1].end()):
         return matches[-1].start(), matches[-1].end()

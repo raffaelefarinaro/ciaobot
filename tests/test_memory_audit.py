@@ -35,6 +35,20 @@ def test_event_shaped_flags_transcript_citation() -> None:
     assert [f["markers"] for f in findings] == [["transcript-citation"]]
 
 
+def test_event_shaped_flags_explicit_correction_language() -> None:
+    findings = find_event_shaped(
+        "memory",
+        [
+            "The user requested terse output; the assistant reformatted the answer.",
+            "The user pushed back on the draft, and the assistant rewrote it.",
+        ],
+    )
+
+    assert len(findings) == 2
+    assert all("quoted-user-turn" in finding["markers"] for finding in findings)
+    assert all("assistant-action" in finding["markers"] for finding in findings)
+
+
 def test_event_shaped_flags_em_dash_assistant_correction() -> None:
     findings = find_event_shaped(
         "memory", ["Re the stale docstring — assistant confirmed it is an example."]
@@ -71,6 +85,7 @@ def test_event_shaped_ignores_durable_state() -> None:
             "The user runs macOS 27 with Homebrew at /opt/homebrew.",
             "Raffa is a PM at Scandit and owns SparkScan.",
             "Assistant behaviour is configured through skills, not prompts.",
+            "The assistant uses concise language for code reviews.",
         ],
     )
 
