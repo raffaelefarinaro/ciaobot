@@ -83,6 +83,7 @@ from ciao.providers.codex import (
     CodexProvider,
     codex_collab_tree_counts,
 )
+from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
@@ -3760,7 +3761,7 @@ class ProjectChatManager:
         chat.handover_context_pending = False
         self._save()
 
-    def _reclaim_provider_sessions(
+    async def _reclaim_provider_sessions_async(
         self,
         chat: ChatInfo,
         session_ids: list[str] | None = None,
@@ -3768,16 +3769,84 @@ class ProjectChatManager:
         """Drop provider-side session blobs/threads for abandoned chats.
 
         Claude deletes the SDK JSONL blob. Codex calls ``thread/delete`` so
-        rollouts under ``~/.codex/sessions`` are reclaimed the same way. Failures
-        are logged inside the provider helpers and never block archive/delete.
+        rollouts under ``~/.codex/sessions`` are reclaimed the same way.
+        OpenCode deletes its persisted session through ``DELETE /session/{id}``.
+        Provider cleanup is fail-open: the Ciaobot archive remains durable even
+        when an external provider is unavailable.
         """
-        raw_ids = session_ids if session_ids is not None else [chat.session_id]
+        raw_ids = (
+            session_ids
+            if session_ids is not None
+            else [*chat.previous_session_ids, chat.session_id]
+        )
         workspace = self._config.workspace_root
-        for sid in filter(None, raw_ids):
-            if chat.provider == "claude":
-                self._transcripts.delete_sdk_session_blob(workspace, sid)
-            elif chat.provider == "codex":
-                asyncio.ensure_future(CodexProvider.delete_thread(workspace, sid))
+        seen: set[str] = set()
+        for sid in raw_ids:
+            sid = str(sid or "")
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            try:
+                if chat.provider == "claude":
+                    deleted = self._transcripts.delete_sdk_session_blob(workspace, sid)
+                elif chat.provider == "codex":
+                    deleted = await CodexProvider.delete_thread(workspace, sid)
+                elif chat.provider == "opencode":
+                    deleted = await OpencodeProvider.delete_thread(workspace, sid)
+                else:
+                    continue
+            except Exception:  # noqa: BLE001 — provider cleanup is fail-open
+                logger.exception(
+                    "Failed to reclaim %s session %s for chat %s",
+                    chat.provider,
+                    sid,
+                    chat.chat_id,
+                )
+                continue
+            if chat.provider in {"codex", "opencode"} and not deleted:
+                logger.warning(
+                    "Provider returned no cleanup confirmation for %s session %s "
+                    "(chat %s)",
+                    chat.provider,
+                    sid,
+                    chat.chat_id,
+                )
+
+    async def _disconnect_provider(
+        self, chat_id: str, provider: ProviderService | None
+    ) -> None:
+        """Close a chat's provider before deleting its provider-side session."""
+
+        if provider is None:
+            return
+        try:
+            await provider.disconnect()
+        except Exception:  # noqa: BLE001 — cleanup must not block lifecycle writes
+            logger.exception("Failed to disconnect provider for chat %s", chat_id)
+
+    def _schedule_provider_cleanup(
+        self,
+        chat: ChatInfo,
+        provider: ProviderService | None,
+        session_ids: list[str] | None = None,
+    ) -> None:
+        """Disconnect then reclaim provider storage for sync lifecycle calls."""
+
+        if provider is None and not any(
+            str(session_id or "")
+            for session_id in (
+                session_ids
+                if session_ids is not None
+                else [*chat.previous_session_ids, chat.session_id]
+            )
+        ):
+            return
+
+        async def cleanup() -> None:
+            await self._disconnect_provider(chat.chat_id, provider)
+            await self._reclaim_provider_sessions_async(chat, session_ids)
+
+        asyncio.ensure_future(cleanup())
 
     def delete_chat(self, chat_id: str) -> bool:
         chat = self._chats.pop(chat_id, None)
@@ -3791,9 +3860,7 @@ class ProjectChatManager:
         self._cancel_between_turns_drain(chat_id)
         self._last_drain_result.pop(chat_id, None)
         provider = self._providers.pop(chat_id, None)
-        if provider:
-            asyncio.ensure_future(provider.disconnect())
-        self._reclaim_provider_sessions(chat)
+        self._schedule_provider_cleanup(chat, provider)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
         self._state.delete_context(ctx)
@@ -4049,9 +4116,8 @@ class ProjectChatManager:
         self._cancel_pending_push(chat_id)
         self._cancel_between_turns_drain(chat_id)
         provider = self._providers.pop(chat_id, None)
-        if provider:
-            asyncio.ensure_future(provider.disconnect())
-        self._reclaim_provider_sessions(chat)
+        await self._disconnect_provider(chat_id, provider)
+        await self._reclaim_provider_sessions_async(chat)
         self._unlink_chat_images(chat)
         chat.archived = True
         if result is not None:
@@ -4362,9 +4428,7 @@ class ProjectChatManager:
         # Reclaim provider sessions for the archived transcript, plus any
         # earlier ones this chat rotated through (autocompact/resume-fallback)
         # before this reset — they're all being abandoned together.
-        self._reclaim_provider_sessions(
-            chat, [*chat.previous_session_ids, chat.session_id]
-        )
+        session_ids = [*chat.previous_session_ids, chat.session_id]
         # Drop attached images: they belong to the archived transcript.
         self._unlink_chat_images(chat)
         # Reset session
@@ -4385,8 +4449,7 @@ class ProjectChatManager:
         # Disconnect old provider so a fresh one is created
         self._cancel_between_turns_drain(chat_id)
         provider = self._providers.pop(chat_id, None)
-        if provider:
-            asyncio.ensure_future(provider.disconnect())
+        self._schedule_provider_cleanup(chat, provider, session_ids)
         self._save()
         return chat
 
