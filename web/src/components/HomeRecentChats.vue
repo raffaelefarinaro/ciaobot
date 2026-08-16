@@ -1,5 +1,5 @@
 <template>
-  <div v-if="store.activeChatsAll.length" class="home-recent">
+  <div v-if="hasHomeActivity" class="home-recent">
     <h2 class="home-recent-label">jump back in</h2>
     <div ref="lanesEl" class="home-lanes">
       <section
@@ -188,6 +188,9 @@ const emit = defineEmits<{
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
+const hasHomeActivity = computed(() => (
+  store.activeChatsAll.length > 0 || store.postprocessingChats().length > 0
+))
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
 const openProjectLane = ref<string | null>(null)

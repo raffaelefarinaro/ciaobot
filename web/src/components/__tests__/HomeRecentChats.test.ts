@@ -169,6 +169,26 @@ describe('HomeRecentChats lanes and tiers', () => {
     wrapper.unmount()
   })
 
+  it('keeps the tidying section visible when no active chats remain', async () => {
+    const store = seedChats(false)
+    store.chats = [{
+      chat_id: 'only-tidy', project_id: 'work-project', title: 'Archived work chat',
+      created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
+      archived: true, local: true, archive_path: 'archive/only-tidy.md',
+      postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+    }] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    expect(wrapper.find('.home-recent').exists()).toBe(true)
+    const workLane = wrapper.find('[data-lane-key="work"]')
+    expect(workLane.find('.home-tier--tidying').exists()).toBe(true)
+    expect(workLane.find('.home-tier--tidying .home-chat-title').text()).toBe('Archived work chat')
+    expect(workLane.find('.home-chat-tidy-note').text()).toContain('extracting insights')
+    wrapper.unmount()
+  })
+
   it('keeps vertical motion within a lane and horizontal motion across lanes', async () => {
     const wrapper = await mountHome()
     const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
