@@ -3,22 +3,163 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Starting Ciaobot</title>
+    <title>Ciaobot</title>
     <link rel="stylesheet" href="/src/desktop.css" />
   </head>
   <body data-window="startup">
-    <main class="startup">
-      <div class="startup-mark" aria-hidden="true">›</div>
-      <p class="eyebrow">Ciaobot</p>
-      <h1>Waiting for the engine</h1>
-      <p>
-        Ciaobot will open automatically when the local engine is ready.
-      </p>
-      <p class="hint">
-        If this screen remains, update the Ciaobot engine and choose
-        <strong>Start Engine</strong> from the menu-bar icon.
-      </p>
-      <div class="startup-progress" aria-label="Waiting for engine"></div>
+    <main class="startup" id="startup-screen">
+      <section class="startup-state startup-state--waiting" id="waiting-state">
+        <div class="startup-mark" aria-hidden="true">›</div>
+        <p class="eyebrow">Ciaobot</p>
+        <h1>Waiting for the engine</h1>
+        <p>Ciaobot will open automatically when the local engine is ready.</p>
+        <p class="hint">
+          If this screen remains, update the Ciaobot engine and choose
+          <strong>Start Engine</strong> from the menu-bar icon.
+        </p>
+        <div class="startup-progress" aria-label="Waiting for engine"></div>
+      </section>
+
+      <section class="startup-state startup-state--update" id="update-state" hidden aria-live="polite">
+        <div class="update-brand" aria-label="Ciaobot">
+          <div class="update-wordmark"><span>›</span>ciao</div>
+          <p class="eyebrow" id="update-eyebrow">Update in progress</p>
+        </div>
+
+        <div class="update-status">
+          <div class="update-spinner" aria-hidden="true"></div>
+          <h1 id="update-title">Updating Ciaobot…</h1>
+          <p class="update-subtitle" id="update-subtitle">
+            This may take a few minutes. You can keep an eye on the details below.
+          </p>
+
+          <div class="update-progress-summary">
+            <span class="update-progress-value" id="update-percent">0%</span>
+            <span class="update-progress-message" id="update-message">getting ready</span>
+          </div>
+          <div
+            class="update-progress-track"
+            role="progressbar"
+            aria-label="Update progress"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+            id="update-progress"
+          >
+            <span class="update-progress-fill" id="update-fill"></span>
+          </div>
+
+          <p class="update-language-line">
+            <span aria-hidden="true">✦</span>
+            <strong id="update-language">ciao</strong>
+            <span id="update-language-copy">in Italian</span>
+            <span class="update-language-extra" id="update-language-extra">· buongiorno</span>
+          </p>
+        </div>
+
+        <div class="update-details">
+          <button
+            class="update-details-toggle"
+            id="update-details-toggle"
+            type="button"
+            aria-expanded="true"
+            aria-controls="update-terminal"
+          >
+            Hide update details <span aria-hidden="true">⌃</span>
+          </button>
+          <div class="update-terminal" id="update-terminal">
+            <div class="update-terminal-head">
+              <span>terminal</span>
+              <span>● live output</span>
+            </div>
+            <pre id="update-log" role="log" aria-live="polite"></pre>
+          </div>
+        </div>
+      </section>
     </main>
+
+    <script>
+      const waitingState = document.querySelector('#waiting-state')
+      const updateState = document.querySelector('#update-state')
+      const updateEyebrow = document.querySelector('#update-eyebrow')
+      const updateTitle = document.querySelector('#update-title')
+      const updateSubtitle = document.querySelector('#update-subtitle')
+      const updatePercent = document.querySelector('#update-percent')
+      const updateMessage = document.querySelector('#update-message')
+      const updateProgress = document.querySelector('#update-progress')
+      const updateFill = document.querySelector('#update-fill')
+      const updateLanguage = document.querySelector('#update-language')
+      const updateLanguageCopy = document.querySelector('#update-language-copy')
+      const updateLanguageExtra = document.querySelector('#update-language-extra')
+      const updateLog = document.querySelector('#update-log')
+      const updateDetailsToggle = document.querySelector('#update-details-toggle')
+      const updateTerminal = document.querySelector('#update-terminal')
+
+      const languages = [
+        ['ciao', 'Italian', 'buongiorno'],
+        ['hello', 'English', 'good morning'],
+        ['hola', 'Spanish', 'buenos días'],
+        ['salut', 'French', 'bonjour'],
+        ['hallo', 'German', 'guten Morgen'],
+        ['olá', 'Portuguese', 'bom dia'],
+        ['こんにちは', 'Japanese', 'おはよう'],
+        ['안녕하세요', 'Korean', '좋은 아침'],
+        ['مرحبا', 'Arabic', 'صباح الخير'],
+      ]
+      let languageIndex = 0
+
+      function renderLanguage() {
+        const [greeting, language, extra] = languages[languageIndex]
+        updateLanguage.textContent = greeting
+        updateLanguageCopy.textContent = `in ${language}`
+        updateLanguageExtra.textContent = `· ${extra}`
+      }
+
+      function renderDetailsLabel() {
+        const action = updateTerminal.hidden ? 'Show' : 'Hide'
+        updateDetailsToggle.innerHTML = `${action} update details <span aria-hidden="true">⌃</span>`
+        updateDetailsToggle.setAttribute('aria-expanded', String(!updateTerminal.hidden))
+      }
+
+      function renderUpdate(detail) {
+        const percent = Math.max(0, Math.min(100, Number(detail.percent) || 0))
+        const lines = Array.isArray(detail.lines) ? detail.lines : []
+        const failed = detail.status === 'error'
+        waitingState.hidden = true
+        updateState.hidden = false
+        updateEyebrow.textContent = failed ? 'Update needs attention' : 'Update in progress'
+        updateTitle.textContent = failed ? 'Ciaobot could not update' : (detail.title || 'Updating Ciaobot…')
+        updateSubtitle.textContent = detail.subtitle || (
+          failed
+            ? 'The existing installation is still available. Close this window and try again.'
+            : 'This may take a few minutes. You can keep an eye on the details below.'
+        )
+        updatePercent.textContent = `${percent}%`
+        updateMessage.textContent = detail.message || (failed ? 'update stopped' : 'working on it')
+        updateFill.style.width = `${percent}%`
+        updateProgress.setAttribute('aria-valuenow', String(percent))
+        updateProgress.setAttribute('aria-label', failed ? 'Update failed' : 'Update progress')
+        updateLog.textContent = lines.join('\n')
+        updateState.dataset.status = failed ? 'error' : 'running'
+        renderLanguage()
+      }
+
+      updateDetailsToggle.addEventListener('click', () => {
+        updateTerminal.hidden = !updateTerminal.hidden
+        renderDetailsLabel()
+      })
+
+      window.addEventListener('ciao:update-progress', (event) => {
+        renderUpdate(event.detail || {})
+      })
+
+      window.setInterval(() => {
+        if (updateState.hidden || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+        languageIndex = (languageIndex + 1) % languages.length
+        renderLanguage()
+      }, 2200)
+
+      renderDetailsLabel()
+    </script>
   </body>
 </html>

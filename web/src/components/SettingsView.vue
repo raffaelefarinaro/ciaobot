@@ -1,5 +1,9 @@
 <template>
   <div class="settings-pane">
+    <UpdateProgressView
+      v-if="packageUpdating"
+      :version="packageStatus?.latest_version"
+    />
     <PaneHeader page-tag="settings" @open-sidebar="emit('open-sidebar')" />
     <div class="pane-body">
 
@@ -2317,6 +2321,7 @@ import { askConfirm } from '../lib/confirm'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import PaneHeader from './PaneHeader.vue'
+import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
 import { providerModelBadges, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'

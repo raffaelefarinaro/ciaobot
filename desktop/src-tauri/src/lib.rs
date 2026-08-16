@@ -368,17 +368,82 @@ fn restart_engine_after_app_update(app: &AppHandle) -> Result<(), String> {
     }
 }
 
-// Second half of the unified update. There is no bundled window left to emit
-// progress to, so failures surface as a dialog. Only restart when something
-// actually changed — otherwise "Update…" would bounce a healthy app for nothing.
+// Second half of the unified update. The dedicated update window stays visible
+// while the engine and app halves move together, then the process restarts.
+// Only restart when something actually changed — otherwise "Update…" would
+// bounce a healthy app for nothing.
 async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), String> {
+    emit_update_progress(
+        &app,
+        54,
+        "checking the latest Ciaobot release",
+        vec![
+            "[ciao] local engine checked ....................... ok".into(),
+            "[ciao] checking the latest signed app release ...... in progress".into(),
+        ],
+        "running",
+    );
     let updater = app.updater().map_err(|error| error.to_string())?;
     let update = updater.check().await.map_err(|error| error.to_string())?;
     match update {
         Some(update) => {
             let version = update.version.clone();
+            emit_update_progress(
+                &app,
+                60,
+                &format!("downloading Ciaobot {version}"),
+                vec![
+                    "[ciao] local engine checked ....................... ok".into(),
+                    format!("[ciao] downloading signed Ciaobot {version} ........ in progress"),
+                ],
+                "running",
+            );
+            let download_app = app.clone();
+            let download_version = version.clone();
             update
-                .download_and_install(|_, _| {}, || {})
+                .download_and_install(
+                    move |chunk, total| {
+                        let percent = total
+                            .map(|total| {
+                                let total = total as u64;
+                                if total == 0 {
+                                    72
+                                } else {
+                                    (60 + ((chunk as u64).saturating_mul(28) / total).min(28)) as u8
+                                }
+                            })
+                            .unwrap_or(70);
+                        emit_update_progress(
+                            &download_app,
+                            percent,
+                            &format!("downloading Ciaobot {download_version}"),
+                            vec![
+                                "[ciao] local engine checked ....................... ok".into(),
+                                format!(
+                                    "[ciao] downloading signed Ciaobot {download_version} ........ {percent}%"
+                                ),
+                            ],
+                            "running",
+                        );
+                    },
+                    {
+                        let install_app = app.clone();
+                        let install_version = version.clone();
+                        move || {
+                            emit_update_progress(
+                                &install_app,
+                                90,
+                                "installing the signed app bundle",
+                                vec![
+                                    "[ciao] local engine checked ....................... ok".into(),
+                                    format!("[ciao] downloaded signed Ciaobot {install_version} ........ ok"),
+                                    "[ciao] installing the signed app bundle ........... in progress".into(),
+                                ],
+                                "running",
+                            );
+                        }
+                    },
+                )
                 .await
                 .map_err(|error| format!("Update {version} could not be installed: {error}"))?;
             // The bundle has already been swapped on disk at this point, so the
@@ -408,11 +473,36 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
                     ),
                 );
             }
+            emit_update_progress(
+                &app,
+                98,
+                "restarting Ciaobot with the latest version",
+                vec![
+                    "[ciao] local engine checked ....................... ok".into(),
+                    format!("[ciao] downloaded signed Ciaobot {version} ........ ok"),
+                    "[ciao] installed app bundle ........................ ok".into(),
+                    "[ciao] restarting Ciaobot .......................... in progress".into(),
+                ],
+                "running",
+            );
             app.restart()
         }
         // The engine moved but the app did not: restart so both halves come
         // back on the version the engine is now running.
-        None if engine_updated => app.restart(),
+        None if engine_updated => {
+            emit_update_progress(
+                &app,
+                98,
+                "restarting Ciaobot with the updated engine",
+                vec![
+                    "[ciao] local engine updated ....................... ok".into(),
+                    "[ciao] no newer app bundle was needed ................ ok".into(),
+                    "[ciao] restarting Ciaobot .......................... in progress".into(),
+                ],
+                "running",
+            );
+            app.restart()
+        }
         None => Ok(()),
     }
 }
@@ -421,7 +511,18 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
 // without the other is what produces an opaque desktop-service mismatch.
 fn run_full_update(app: AppHandle, force: bool) {
     thread::spawn(move || {
+        show_update_screen(
+            &app,
+            4,
+            "checking active work before updating",
+            vec![
+                "[ciao] opening the update flow ..................... ok".into(),
+                "[ciao] checking active chats ........................ in progress".into(),
+            ],
+        );
         let Some(binary) = service::resolve_ciao(env::var("PATH").ok().as_deref()) else {
+            hide_update_window(&app);
+            show_window(&app, "main");
             show_error(
                 &app,
                 "Ciaobot engine unavailable",
@@ -429,25 +530,64 @@ fn run_full_update(app: AppHandle, force: bool) {
             );
             return;
         };
-        for window in app.webview_windows().values() {
+        if let Some(window) = app.get_webview_window("main") {
             let _ = window.hide();
         }
-        hide_dock_unless_pinned(&app);
+        emit_update_progress(
+            &app,
+            12,
+            "updating the local engine",
+            vec![
+                "[ciao] opening the update flow ..................... ok".into(),
+                "[ciao] active chats checked ........................ ok".into(),
+                "[ciao] updating the local engine ................... in progress".into(),
+            ],
+            "running",
+        );
         let extra = if force { &["--force"][..] } else { &[][..] };
         let engine_updated = match service::invoke(&binary, "update-engine", extra) {
-            Ok(result) if result.ok => true,
-            Ok(result) if engine_already_current(&result) => false,
+            Ok(result) if result.ok => {
+                emit_update_progress(
+                    &app,
+                    48,
+                    "local engine updated; checking the app release",
+                    vec![
+                        "[ciao] active chats checked ........................ ok".into(),
+                        "[ciao] local engine updated ....................... ok".into(),
+                        "[ciao] checking the signed app release ............ in progress".into(),
+                    ],
+                    "running",
+                );
+                true
+            }
+            Ok(result) if engine_already_current(&result) => {
+                emit_update_progress(
+                    &app,
+                    48,
+                    "local engine is current; checking the app release",
+                    vec![
+                        "[ciao] active chats checked ........................ ok".into(),
+                        "[ciao] local engine is already current ............ ok".into(),
+                        "[ciao] checking the signed app release ............ in progress".into(),
+                    ],
+                    "running",
+                );
+                false
+            }
             Ok(result) if !force && requires_confirmation(&result) => {
+                hide_update_window(&app);
                 show_window(&app, "main");
                 prompt_forced_update(app.clone(), &result);
                 return;
             }
             Ok(result) => {
+                hide_update_window(&app);
                 show_window(&app, "main");
                 show_error(&app, "Could not update Ciaobot", result.message);
                 return;
             }
             Err(error) => {
+                hide_update_window(&app);
                 show_window(&app, "main");
                 show_error(&app, "Could not update Ciaobot", error);
                 return;
@@ -459,6 +599,7 @@ fn run_full_update(app: AppHandle, force: bool) {
                 // Nothing was installed and there is no restart coming, so put
                 // back the window the update hid on the way in.
                 Ok(()) => {
+                    hide_update_window(&updater_app);
                     show_window(&updater_app, "main");
                     show_info(
                         &updater_app,
@@ -467,6 +608,16 @@ fn run_full_update(app: AppHandle, force: bool) {
                     );
                 }
                 Err(error) => {
+                    emit_update_progress(
+                        &updater_app,
+                        60,
+                        "update failed",
+                        vec![format!(
+                            "[ciao] update failed ............................. {error}"
+                        )],
+                        "error",
+                    );
+                    hide_update_window(&updater_app);
                     show_window(&updater_app, "main");
                     show_error(&updater_app, "Could not update Ciaobot", error);
                 }
@@ -540,6 +691,35 @@ fn show_window(app: &AppHandle, label: &str) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn hide_update_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("update") {
+        let _ = window.hide();
+    }
+}
+
+fn emit_update_progress(
+    app: &AppHandle,
+    percent: u8,
+    message: &str,
+    lines: Vec<String>,
+    status: &str,
+) {
+    let detail = serde_json::json!({
+        "percent": percent,
+        "message": message,
+        "lines": lines,
+        "status": status,
+    });
+    if let Some(window) = app.get_webview_window("update") {
+        let _ = window.eval(&browser_event_script("ciao:update-progress", &detail));
+    }
+}
+
+fn show_update_screen(app: &AppHandle, percent: u8, message: &str, lines: Vec<String>) {
+    show_window(app, "update");
+    emit_update_progress(app, percent, message, lines, "running");
 }
 
 fn url_with_segments(runtime: &RuntimeConfig, segments: &[&str]) -> Result<url::Url, String> {
@@ -803,6 +983,28 @@ fn build_windows(
                     hide_dock_unless_pinned(&window.app_handle().clone());
                 }
                 _ => {}
+            }
+        }
+    });
+
+    // Keep a native startup-style window ready for updates. The main webview
+    // loads the remote PWA, while this local page remains available even when
+    // the engine is being replaced or the PWA is no longer reachable.
+    let update = WebviewWindowBuilder::new(app, "update", WebviewUrl::App("startup.html".into()))
+        .title("Updating Ciaobot")
+        .inner_size(1180.0, 780.0)
+        .min_inner_size(760.0, 560.0)
+        .visible(false)
+        .build()?;
+    update.on_window_event({
+        let window = update.clone();
+        move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // The update cannot be cancelled safely after the bundle swap
+                // begins. Closing the window only hides the progress surface;
+                // the tray operation continues and the app will restart.
+                api.prevent_close();
+                let _ = window.hide();
             }
         }
     });

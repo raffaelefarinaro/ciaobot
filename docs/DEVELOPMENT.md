@@ -65,8 +65,10 @@ published native verifier, and installs the bundled runtime into `Ciaobot.app`.
 When a configured workspace is already referenced by the LaunchAgent, it
 preserves that workspace and password; on a clean machine it leaves setup to
 the app's bootstrap onboarding rather than generating a hidden password. It
-does not require Python, Homebrew, or sudo. A DMG is intentionally not built or
-attached to releases.
+does not require Python, Homebrew, or sudo. The installer prints milestone
+percentages, verification status, and a short multilingual Ciao greeting
+sequence; `--dry-run` shows the same terminal treatment without changing files.
+A DMG is intentionally not built or attached to releases.
 
 The source template is `scripts/install.sh`. The release workflow substitutes
 the verifier checksum and attaches `install.sh`, the verifier, the signed app
@@ -160,13 +162,16 @@ npm run tauri build -- --target universal-apple-darwin
 The main webview loads the live localhost PWA and must never be added to a
 Tauri capability. While the engine is unreachable it loads the bundled
 `startup.html` recovery page and automatically navigates to the PWA after
-recovery; test both states when changing desktop startup or service lifecycle
+recovery; the same local page is reused by a hidden update window that the tray
+shows immediately when an update starts. The update window receives native
+progress events and offers a collapsed/expanded terminal detail view. Test both
+startup and update states when changing desktop startup or service lifecycle
 code. The shell's IPC surface is deliberately tiny: exactly two Tauri commands
 (`check_permission` / `request_permission`, backing the PWA's push-notification
-permission flow, declared in the `main` capability) — everything else about the
-desktop experience is driven from the tray in Rust, so remote page content has
-no other IPC surface to reach. Keep it that way — adding a command means
-re-introducing a bundled window to own it. Release builds require `TAURI_SIGNING_PRIVATE_KEY` and
+permission flow, declared for the main/update capability) — everything else
+about the desktop experience is driven from the tray in Rust, so remote page
+content has no other IPC surface to reach. Keep it that way — adding a command
+means re-introducing a bundled window to own it. Release builds require `TAURI_SIGNING_PRIVATE_KEY` and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; Apple signing remains ad-hoc.
 The main window keeps Tauri's native drag/drop handler enabled so Finder paths
 are preserved. Rust creates a short-lived, single-use grant under the runtime
