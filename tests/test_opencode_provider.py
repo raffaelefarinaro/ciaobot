@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from ciao.models import (
+    AgentRequest,
     AssistantTextDelta,
     BridgeMode,
     PermissionRequestEvent,
@@ -969,6 +970,40 @@ async def test_success_result_carries_the_accumulated_answer(tmp_path, monkeypat
     assert result.result == _joined(events, "text").strip()
     assert "DONE" in result.result
     assert _joined(events, "thinking") not in result.result
+
+
+@pytest.mark.asyncio
+async def test_current_mode_is_set_before_session_setup(tmp_path, monkeypatch):
+    """A resumed session must classify setup-time permission events by this turn."""
+    provider = _provider(tmp_path)
+    lines = [
+        f"data: {line}"
+        for line in (FIXTURES / "turn_with_tool.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+    client = _FakeServerClient(lines)
+
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        assert provider._current_mode == "bypass"
+        return "ses_current_mode"
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    request = AgentRequest(
+        prompt="hi", model="", mode="bypass", provider="opencode"
+    )
+
+    events = [
+        event
+        async for event in provider.run_streaming(request, lambda _handle: None)
+    ]
+
+    assert events[-1].type == "result"
 
 
 @pytest.mark.asyncio
