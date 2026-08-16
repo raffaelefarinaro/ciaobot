@@ -100,7 +100,7 @@
               <span>Decrease the font size</span>
             </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
-            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
+            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats; stacked workspaces use up/down between lanes</span></li>
             <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
           </ul>
         </div>

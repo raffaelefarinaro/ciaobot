@@ -497,8 +497,10 @@ function focusElement(element: HTMLElement) {
   element.scrollIntoView({ block: 'nearest' })
 }
 
-// ChatLayout owns the global keydown. The model is intentionally 2-D: vertical
-// motion stays in a lane, while horizontal motion moves between lanes.
+// ChatLayout owns the global keydown. The model is intentionally 2-D, but its
+// axes follow the rendered lane layout: vertical motion moves between lanes
+// when they are stacked, while horizontal motion moves between lanes when they
+// sit side by side. The other axis always moves within the current lane.
 function onArrow(key: string): boolean {
   const model = focusableLanes()
   const available = model.some(lane => lane.length)
@@ -517,17 +519,24 @@ function onArrow(key: string): boolean {
     itemIndex = -1
   }
 
-  if (key === 'ArrowUp' || key === 'ArrowDown') {
-    const delta = key === 'ArrowDown' ? 1 : -1
+  const lanesAreStacked = laneAxis() === 'vertical'
+  const laneKey = lanesAreStacked
+    ? key === 'ArrowUp' || key === 'ArrowDown'
+    : key === 'ArrowLeft' || key === 'ArrowRight'
+  const itemKey = lanesAreStacked
+    ? key === 'ArrowLeft' || key === 'ArrowRight'
+    : key === 'ArrowUp' || key === 'ArrowDown'
+
+  if (itemKey) {
+    const delta = key === 'ArrowRight' || key === 'ArrowDown' ? 1 : -1
     const nextIndex = itemIndex < 0 ? 0 : clamp(itemIndex + delta, 0, model[laneIndex].length - 1)
     if (nextIndex === itemIndex && itemIndex >= 0) return true
     focusElement(model[laneIndex][nextIndex])
     return true
   }
 
-  if (key !== 'ArrowLeft' && key !== 'ArrowRight') return false
-
-  const delta = key === 'ArrowRight' ? 1 : -1
+  if (!laneKey) return false
+  const delta = key === 'ArrowRight' || key === 'ArrowDown' ? 1 : -1
   if (itemIndex < 0) {
     focusElement(model[laneIndex][0])
     return true
@@ -538,6 +547,25 @@ function onArrow(key: string): boolean {
   const nextIndex = clamp(itemIndex, 0, model[nextLane].length - 1)
   focusElement(model[nextLane][nextIndex])
   return true
+}
+
+// CSS switches `.home-lanes` from a two-column grid to a single stacked
+// column based on the component's own width. Read the first rendered lane
+// transition instead of duplicating that breakpoint here; the sidebar is
+// resizable and can make the same viewport either layout. In jsdom the boxes
+// have no geometry, so the historical side-by-side mapping remains the safe
+// fallback for unit tests and non-layout environments.
+function laneAxis(): 'horizontal' | 'vertical' {
+  const lanes = Array.from(lanesEl.value?.querySelectorAll<HTMLElement>('.home-lane') ?? [])
+  for (let index = 1; index < lanes.length; index += 1) {
+    const previous = lanes[index - 1].getBoundingClientRect()
+    const current = lanes[index].getBoundingClientRect()
+    const horizontalDistance = Math.abs(current.left - previous.left)
+    const verticalDistance = Math.abs(current.top - previous.top)
+    if (horizontalDistance <= 1 && verticalDistance <= 1) continue
+    return verticalDistance > horizontalDistance ? 'vertical' : 'horizontal'
+  }
+  return 'horizontal'
 }
 
 function clamp(value: number, lower: number, upper: number): number {

@@ -46,7 +46,10 @@ are pruned; `opencode.json` tracks Ciaobot-owned server names in
 opencode has no API for injecting a message into a running turn, so Ciaobot
 declares `steer=false` for it: a message sent mid-turn queues for the next turn
 instead of interrupting. Fork, abort, tool approvals, structured questions, and
-background subagents (real child sessions) are all native.
+background subagents (real child sessions) are all native. When a chat is
+archived, deleted, or reset, Ciaobot disconnects its server and then calls
+`DELETE /session/{id}` to reclaim the persisted opencode session; cleanup is
+fail-open if the provider is unavailable.
 
 ### Live eval provider access
 

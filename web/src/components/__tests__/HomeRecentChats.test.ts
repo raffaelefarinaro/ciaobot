@@ -186,6 +186,41 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(document.activeElement).toBe(cards[0].element)
   })
 
+  it('follows the vertical workspace order when lanes are stacked', async () => {
+    const wrapper = await mountHome()
+    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
+    const lanes = wrapper.findAll('.home-lane')
+    const laneRects = [
+      { top: 0, left: 0, width: 600, height: 300 },
+      { top: 320, left: 0, width: 600, height: 300 },
+    ]
+
+    lanes.forEach((lane, index) => {
+      vi.spyOn(lane.element, 'getBoundingClientRect').mockReturnValue({
+        ...laneRects[index],
+        right: laneRects[index].left + laneRects[index].width,
+        bottom: laneRects[index].top + laneRects[index].height,
+        x: laneRects[index].left,
+        y: laneRects[index].top,
+        toJSON: () => ({}),
+      })
+    })
+
+    const personalCards = lanes[0].findAll('.home-chat-item')
+    const workCards = lanes[1].findAll('.home-chat-item')
+
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    expect(document.activeElement).toBe(personalCards[0].element)
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    expect(document.activeElement).toBe(workCards[0].element)
+    expect(vm.onArrow('ArrowRight')).toBe(true)
+    expect(document.activeElement).toBe(workCards[1].element)
+    expect(vm.onArrow('ArrowLeft')).toBe(true)
+    expect(document.activeElement).toBe(workCards[0].element)
+    expect(vm.onArrow('ArrowUp')).toBe(true)
+    expect(document.activeElement).toBe(personalCards[0].element)
+  })
+
   it('consumes arrow keys at edges and reports no navigation without chats', async () => {
     const wrapper = await mountHome()
     const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
