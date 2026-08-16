@@ -8,17 +8,18 @@ Two regions mirror the former ``~/.ciao/memory.md`` / ``user.md`` pair:
   Default cap: 1375 chars.
 
 Entries are separated by the ``§`` section sign on its own line. The agent
-edits the regions with ``Edit`` like any other file; there is no memory CLI
-or control-plane write surface. Caps and hygiene are advisory, reported by
-``os_audit`` and acted on by the nightly curation routine.
+can edit the regions with ``Edit`` like any other file, or use the typed
+``memory_update`` control-plane helper. Caps are enforced by that typed path
+and reported by ``memory_status``/``os_audit``; direct human edits remain
+supported.
 
-``write_region`` exists only for the one-time startup migration from the
-legacy ``~/.ciao/*.md`` files and archive-time auto-promotion. It is not
-exposed to the agent as a command.
+``write_region`` also supports the one-time startup migration from legacy
+``~/.ciao/*.md`` files and archive-time promotion.
 """
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 import re
@@ -105,6 +106,10 @@ _REGION_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 
+_EXPIRATION_TAG_RE = re.compile(r"\[expires:\s*([^\]]*)\]", re.IGNORECASE)
+_EXPIRATION_TAG_PREFIX_RE = re.compile(r"\[expires\s*:", re.IGNORECASE)
+_EXPIRATION_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
 
 # ── Legacy paths (one-release migration tolerance) ─────────────────────────
 
@@ -149,6 +154,42 @@ def serialize_entries(entries: list[str]) -> str:
 def total_chars(entries: list[str]) -> int:
     """Char count of the serialized form, used for the soft cap."""
     return len(serialize_entries(entries))
+
+
+def entry_expiration_date(entry: str) -> datetime.date | None:
+    """Return the single valid ``[expires: YYYY-MM-DD]`` date in *entry*."""
+    if expiration_tag_error(entry) is not None:
+        return None
+    match = _EXPIRATION_TAG_RE.search(entry)
+    if not match:
+        return None
+    return datetime.date.fromisoformat(match.group(1).strip())
+
+
+def expiration_tag_error(entry: str) -> str | None:
+    """Return a validation message for a malformed expiration tag."""
+    matches = list(_EXPIRATION_TAG_RE.finditer(entry))
+    prefixes = list(_EXPIRATION_TAG_PREFIX_RE.finditer(entry))
+    if len(prefixes) > len(matches):
+        return "malformed expiration tag; expected a closing ']'"
+    if not matches:
+        return None
+    if len(matches) > 1:
+        return "multiple expiration tags are not allowed on one entry"
+    raw = matches[0].group(1).strip()
+    if _EXPIRATION_DATE_RE.fullmatch(raw) is None:
+        return f"invalid expiration date {raw!r}; expected YYYY-MM-DD"
+    try:
+        datetime.date.fromisoformat(raw)
+    except ValueError:
+        return f"invalid expiration date {raw!r}; expected YYYY-MM-DD"
+    return None
+
+
+def is_entry_expired(entry: str, today: datetime.date | None = None) -> bool:
+    """Check whether an entry's valid expiration date has passed."""
+    exp_date = entry_expiration_date(entry)
+    return exp_date is not None and (today or datetime.date.today()) > exp_date
 
 
 def contains_invisible_unicode(text: str) -> bool:
@@ -332,6 +373,184 @@ def write_region(guide: Path, region: str, entries: list[str]) -> None:
         text[: start.end()] + body + text[end.start() :],
         encoding="utf-8",
     )
+
+
+def _write_text_atomically(path: Path, text: str) -> None:
+    """Replace a guide without exposing a half-written memory file."""
+    import tempfile
+
+    mode = path.stat().st_mode if path.exists() else None
+    fd, raw_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary = Path(raw_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if mode is not None:
+            os.chmod(path, mode)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _guide_lock(guide: Path):
+    """Return a best-effort process lock for read/merge/write operations."""
+    import fcntl
+
+    lock = guide.with_name(f"{guide.name}.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock.open("a+", encoding="utf-8")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def memory_status(
+    guide: Path,
+    *,
+    memory_char_limit: int = DEFAULT_MEMORY_CHAR_LIMIT,
+    user_char_limit: int = DEFAULT_USER_CHAR_LIMIT,
+) -> dict[str, Any]:
+    """Return bounded-memory health and usage without rendering it to a prompt."""
+    regions: dict[str, Any] = {}
+    diagnostics: list[dict[str, str]] = []
+    for region, limit in (("memory", memory_char_limit), ("profile", user_char_limit)):
+        entries, diags = read_region(guide, region)
+        diagnostics.extend({"region": d.region, "code": d.code, "message": d.message} for d in diags)
+        regions[region] = {
+            **region_usage(entries, limit),
+            "expired_count": sum(1 for entry in entries if is_entry_expired(entry)),
+            "malformed_expiration_count": sum(
+                1 for entry in entries if expiration_tag_error(entry) is not None
+            ),
+        }
+    return {
+        "guide": str(guide),
+        "healthy": not diagnostics,
+        "regions": regions,
+        "diagnostics": diagnostics,
+    }
+
+
+def prune_expired_entries(
+    guide: Path,
+    *,
+    today: datetime.date | None = None,
+) -> dict[str, Any]:
+    """Remove only valid, expired entries from the guide's bounded regions.
+
+    The operation is fail-safe: malformed expiration tags are retained for
+    human review, and a malformed/missing region is reported rather than
+    rewritten. The file is locked and replaced atomically when anything
+    changes, so provider startup can safely call this on every turn.
+    """
+    if not guide.exists():
+        return {"ok": True, "removed": {"memory": 0, "profile": 0}, "guide": str(guide)}
+    lock = _guide_lock(guide)
+    try:
+        text = guide.read_text(encoding="utf-8")
+        filtered: dict[MemoryRegion, list[str]] = {}
+        removed: dict[str, int] = {"memory": 0, "profile": 0}
+        diagnostics: list[dict[str, str]] = []
+        for region in REGIONS:
+            entries, diags = read_region(guide, region)
+            if diags:
+                diagnostics.extend({"region": d.region, "code": d.code, "message": d.message} for d in diags)
+                continue
+            active = [entry for entry in entries if not is_entry_expired(entry, today)]
+            removed[region] = len(entries) - len(active)
+            filtered[region] = active
+        if diagnostics:
+            return {"ok": False, "removed": removed, "diagnostics": diagnostics, "guide": str(guide)}
+
+        updated = text
+        for region in REGIONS:
+            starts, ends = _find_marker_spans(updated, region)
+            start, end = starts[0], ends[0]
+            meta = _REGION_META[region]
+            body = f"\n{meta['heading']}\n\n"
+            serialized = serialize_entries(filtered[region])
+            if serialized:
+                body += serialized
+            else:
+                body += "\n"
+            updated = updated[: start.end()] + body + updated[end.start() :]
+        if updated != text:
+            _write_text_atomically(guide, updated)
+        return {"ok": True, "removed": removed, "guide": str(guide)}
+    finally:
+        import fcntl
+
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+
+
+def update_region(
+    guide: Path,
+    region: str,
+    *,
+    action: Literal["add", "replace", "remove"],
+    entry: str = "",
+    match: str = "",
+    char_limit: int | None = None,
+) -> dict[str, Any]:
+    """Apply one bounded-memory edit while keeping storage in ``CLAUDE.md``.
+
+    Direct ``Edit`` remains supported. This helper is the typed control-plane
+    equivalent for agents that cannot reliably express a file edit, and never
+    creates a second memory database.
+    """
+    canonical = resolve_region(region)
+    normalized_entry = _normalize(entry)
+    needle = _normalize(match)
+    if action in {"add", "replace"} and not normalized_entry:
+        raise ValueError("entry is required for add and replace")
+    if action in {"replace", "remove"} and not needle:
+        raise ValueError("match is required for replace and remove")
+    lock = _guide_lock(guide)
+    try:
+        entries, diagnostics = read_region(guide, canonical)
+        if diagnostics:
+            raise ValueError("; ".join(d.message for d in diagnostics))
+        if action == "add":
+            if normalized_entry in entries:
+                return {"ok": True, "changed": False, "action": action, "region": canonical}
+            candidate = [*entries, normalized_entry]
+        else:
+            matches = [index for index, value in enumerate(entries) if needle.casefold() in value.casefold()]
+            if not matches:
+                raise ValueError("no memory entry matched the requested text")
+            if len(matches) > 1:
+                raise ValueError("the requested text matched more than one memory entry")
+            candidate = list(entries)
+            index = matches[0]
+            if action == "remove":
+                del candidate[index]
+            else:
+                candidate[index] = normalized_entry
+        if char_limit is not None and total_chars(candidate) > char_limit:
+            raise ValueError(
+                f"{canonical} region would exceed its {char_limit}-character limit"
+            )
+        write_region(guide, canonical, candidate)
+        return {
+            "ok": True,
+            "changed": True,
+            "action": action,
+            "region": canonical,
+            "entry_count": len(candidate),
+            "used_chars": total_chars(candidate),
+        }
+    finally:
+        import fcntl
+
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
 
 
 def _empty_region_block(region: MemoryRegion) -> str:

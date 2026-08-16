@@ -142,6 +142,11 @@ ninth workspace in the sidebar's displayed order; the sidebar shows the assigned
 number on each workspace button. Number keys remain available for normal typing
 inside text fields.
 
+On the home screen, arrow-key navigation follows the visible lane layout: when
+workspace lanes are stacked vertically, up/down moves between workspaces and
+left/right moves between chats in the current workspace; side-by-side lanes use
+the corresponding horizontal/vertical mapping.
+
 The sidebar's project and delegate-subchat disclosure state is local UI state;
 it has no integration, environment variable, or cross-device synchronization
 setting.
@@ -384,6 +389,7 @@ Ciaobot runs on macOS under launchd.
 - `ciao setup --workspace <path> --load-launchd` renders and loads the LaunchAgent.
 - The packaged launchd template is `ciao/stock/deploy/com.ciao.server.plist.tmpl`.
 - The `Ciaobot.app` menu bar shows `Start at Login: On/Off` and toggles `com.ciao.server` with `launchctl enable/disable`. Its status section also offers `Start Server` when the local server is unreachable and `Restart Server` when it is live. The unread badge counts every unread chat even though the quick-open list remains limited to the ten most recent chats.
+- Selecting `Update` from the menu-bar tray opens the bundled update window immediately. It reports engine/app milestones with a percentage and expandable terminal details, then restarts the app only after both halves are ready. The PWA's non-bundled package-update actions use the same visual progress surface while their restart is pending.
 - Stop: `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
 - In client mode, non-image files dropped into chat are uploaded through the

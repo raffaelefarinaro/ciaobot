@@ -149,6 +149,21 @@ def test_compose_system_is_empty_when_both_halves_are():
     assert compose_system("   ", "\n") == ""
 
 
+def test_normal_opencode_chat_uses_core_without_memory_duplication(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    request = AgentRequest(
+        prompt="hello",
+        model="",
+        mode="auto",
+        provider="opencode",
+        control_surface="mcp",
+    )
+    instructions = provider._chat_system_instructions(request)
+    assert "Ciaobot core instructions" in instructions
+    assert "native workspace guide" in instructions
+    assert "MEMORY (your personal notes)" not in instructions
+
+
 def test_permission_rules_use_the_api_shape_not_the_config_map():
     """`POST /session` wants a list of rules; the `{"*": "ask"}` map 400s.
 

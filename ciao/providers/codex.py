@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ciao.context.entity_tagger import find_entities, format_entities
-from ciao.memory_injector import build_memory_block, system_prompt_payload
+from ciao.memory_injector import system_prompt_payload
 from ciao.model_tiers import MODEL_TIERS, canonical_tier, codex_tier_models, is_tier
 from ciao.models import (
     AgentRequest,
@@ -778,19 +778,8 @@ class CodexProvider(BaseSDKProvider):
     def _memory_instructions(self, request: AgentRequest | None = None) -> str:
         if self._developer_instructions is not None:
             return self._developer_instructions
-        cfg = self.config
-        memory = ""
-        try:
-            memory = build_memory_block(
-                guide_path=self.workspace_root / "CLAUDE.md",
-                memory_char_limit=int(getattr(cfg, "memory_char_limit", 2200)),
-                user_char_limit=int(getattr(cfg, "user_char_limit", 1375)),
-            )
-        except Exception:  # noqa: BLE001 — never block a chat on memory wiring
-            logger.exception("memory block failed; continuing without it")
-            memory = ""
         payload = system_prompt_payload(
-            memory,
+            "",
             control_surface=request.control_surface if request is not None else "legacy",
         ) or {}
         return str(payload.get("append") or "")
@@ -824,12 +813,11 @@ class CodexProvider(BaseSDKProvider):
         return "\n".join(sections)
 
     def _prompt_text(self, request: AgentRequest) -> str:
-        prompt = build_prompt(request)
-        context = self._runtime_context(request)
-        marker = "[CIAO_CONTEXT_END]"
-        if prompt.startswith("[CIAO_CONTEXT_BEGIN]\n") and marker in prompt:
-            return prompt.replace(marker, context + "\n" + marker, 1)
-        return f"[CIAO_CONTEXT_BEGIN]\n{context}\n{marker}\n\n{prompt}"
+        # ProjectChatManager supplies one provider-neutral context capsule in
+        # the request prompt. Codex's developer instructions are static, so
+        # injecting a second runtime/entity block here only duplicates context
+        # and makes the native AGENTS.md guidance less cacheable.
+        return build_prompt(request)
 
     async def _ensure_peer(self, request: AgentRequest) -> StdioJsonRpcPeer:
         if (

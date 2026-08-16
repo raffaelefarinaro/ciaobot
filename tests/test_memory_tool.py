@@ -124,6 +124,48 @@ def test_write_region_refuses_bad_markers(tmp_path: Path) -> None:
         mt.write_region(guide, "memory", ["x"])
 
 
+def test_prune_expired_entries_keeps_native_guide_storage(tmp_path: Path) -> None:
+    import datetime
+
+    guide = _guide_with_regions(
+        tmp_path / "CLAUDE.md",
+        memory=mt.serialize_entries([
+            "keep this",
+            "remove this [expires: 2020-01-01]",
+            "keep malformed [expires: tomorrow]",
+        ]),
+    )
+    result = mt.prune_expired_entries(
+        guide, today=datetime.date(2026, 8, 16)
+    )
+    assert result["ok"] is True
+    assert result["removed"]["memory"] == 1
+    entries, _ = mt.read_region(guide, "memory")
+    assert entries == ["keep this", "keep malformed [expires: tomorrow]"]
+
+
+def test_update_region_enforces_bound_and_reports_status(tmp_path: Path) -> None:
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+    result = mt.update_region(
+        guide,
+        "memory",
+        action="add",
+        entry="a durable fact",
+        char_limit=100,
+    )
+    assert result["changed"] is True
+    status = mt.memory_status(guide, memory_char_limit=100)
+    assert status["regions"]["memory"]["entry_count"] == 1
+    with pytest.raises(ValueError, match="character limit"):
+        mt.update_region(
+            guide,
+            "memory",
+            action="add",
+            entry="x" * 100,
+            char_limit=100,
+        )
+
+
 def test_migrate_legacy_files(tmp_path: Path) -> None:
     guide = _guide_with_regions(tmp_path / "CLAUDE.md")
     legacy = tmp_path / "legacy"

@@ -55,6 +55,10 @@ import yaml
 
 from ciao import job_runs, native_sidecar, provider_registry, subagent_tracking
 from ciao.config import BridgeConfig
+from ciao.context.capsule import (
+    build_context_capsule,
+    context_digest as stable_context_digest,
+)
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import (
     AgentRequest,
@@ -167,8 +171,10 @@ _MAX_CONNECTION_DROP_RETRIES = 6
 # bubble nobody typed).
 _SUBAGENT_SYNTHESIS_NUDGE = subagent_tracking.SUBAGENT_SYNTHESIS_NUDGE
 _HANDOVER_ROLES = {"user", "assistant", "system"}
-_HANDOVER_MAX_MESSAGES = 80
-_HANDOVER_MAX_CHARS = 60_000
+_FORK_MAX_MESSAGES = 80
+_FORK_MAX_CHARS = 60_000
+_PROVIDER_HANDOVER_MAX_MESSAGES = 12
+_PROVIDER_HANDOVER_MAX_CHARS = 12_000
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # How long a finished delegate waits for its siblings before waking the
 # supervisor. Long enough that a batch dispatched together reports as one turn,
@@ -330,13 +336,18 @@ def _clean_handover_messages(messages: list[dict] | None) -> list[dict]:
     return rows
 
 
-def _normalize_handover_messages(messages: list[dict] | None) -> list[dict]:
-    """Sanitize and bound visible chat rows for provider handover."""
+def _normalize_handover_messages(
+    messages: list[dict] | None,
+    *,
+    max_messages: int = _FORK_MAX_MESSAGES,
+    max_chars: int = _FORK_MAX_CHARS,
+) -> list[dict]:
+    """Sanitize and bound visible rows for a fork or provider handover."""
     rows = _clean_handover_messages(messages)
     total_chars = sum(len(str(row.get("content", ""))) for row in rows)
     while (
-        len(rows) > _HANDOVER_MAX_MESSAGES
-        or total_chars > _HANDOVER_MAX_CHARS
+        len(rows) > max_messages
+        or total_chars > max_chars
     ) and rows:
         removed = rows.pop(0)
         total_chars -= len(str(removed.get("content", "")))
@@ -1119,6 +1130,10 @@ class ChatInfo:
     # True until the first post-handover turn successfully seeds the new
     # provider with `handover_messages` inside the hidden Ciaobot context block.
     handover_context_pending: bool = False
+    # Stable routing facts are sent once per provider session. A changed
+    # project/workspace digest or a new provider session re-sends them.
+    context_digest: str = ""
+    context_session_id: str = ""
     # Raw AskUserQuestion JSON (`{"questions": [...]}`) when the model paused
     # this chat on a question the user hasn't answered yet. Set when the
     # headless CLI fires AskUserQuestion (which we interrupt so it can't
@@ -1574,6 +1589,8 @@ class ProjectChatManager:
                     list(cd.get("handover_messages", []))
                 ),
                 handover_context_pending=bool(cd.get("handover_context_pending", False)),
+                context_digest=cd.get("context_digest", ""),
+                context_session_id=cd.get("context_session_id", ""),
                 pending_question=cd.get("pending_question", ""),
                 pending_queue=list(cd.get("pending_queue", [])),
                 forked_from_chat_id=cd.get("forked_from_chat_id", ""),
@@ -1668,6 +1685,8 @@ class ProjectChatManager:
                     "retry_interval_seconds": c.retry_interval_seconds,
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
+                    "context_digest": c.context_digest,
+                    "context_session_id": c.context_session_id,
                     "pending_question": c.pending_question,
                     "pending_queue": c.pending_queue,
                     "forked_from_chat_id": c.forked_from_chat_id,
@@ -2036,20 +2055,21 @@ class ProjectChatManager:
                 f"Welcome to Ciaobot. You are Ciaobot, the user's personal agentic assistant.\n\n"
                 f"The user has completed setup and initialized a **new vault folder from scratch** at:\n"
                 f"`{vault_root}`\n\n"
-                f"Your task is to bootstrap the vault structure and core documentation:\n"
-                f"1. **Create Directory Structure**: Plan to create: `personal/`, `work/`, and `Templates/` (scaffold markdown templates for logs, projects, and people).\n"
-                f"2. **Generate Core Files**: Plan to generate clean initial templates for `CLAUDE.md` (defining instructions, memory rules, styles) and `MEMORY.md`. `CLAUDE.md` MUST contain both bounded memory regions with their exact fenced markers: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`. They are mandatory, not optional — add any that are missing.\n"
-                f"3. **Workspace Git Check**: Verify the workspace is a git repository with a `.gitignore` covering `.env` and `.runtime/`, and that the vault is inside a git repo (the workspace repo by default, or its own when it lives elsewhere). If not, fix it (`git init`, append the missing entries) and report what you did.\n"
-                f"4. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, GWS profiles, key projects) to customize `CLAUDE.md` and `MEMORY.md`. Identity and communication-style answers go into the `ciao:profile` region of `CLAUDE.md`; cross-project environment facts and lessons learned go into the `ciao:memory` region.\n"
-                f"5. **Capabilities Tour**: Once the interview is done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
-                f"Introduce yourself to the user, explain that you are starting fresh at `{vault_root}`, and ask the first onboarding questions to bootstrap your profile."
+                f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
+                f"Your task is to bootstrap the current vault structure and core documentation:\n"
+                f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories.\n"
+                f"2. **Core files**: Setup has already seeded the workspace-level `CLAUDE.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `CLAUDE.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
+                f"3. **Onboarding interview and curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, project facts to project canonical docs, people to `People/`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
+                f"4. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
+                f"5. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"Introduce yourself to the user, explain that you are starting logical workspace **{workspace_name}** at `{vault_root}`, and ask the first onboarding questions to bootstrap their profile."
             )
             assistant_msg = (
                 f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
-                f"Welcome! I've initialized our workspace at `{vault_root}` from scratch. "
-                f"I'm ready to create our core structure (`personal/`, `work/`, `Templates/`) and customize our settings. "
+                f"Welcome! I've initialized logical workspace **{workspace_name}** at `{vault_root}` from scratch. "
+                f"I'm ready to customize the current vault structure and curate your durable knowledge with you. "
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
-                f"To begin, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
+                f"To begin, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
 
         # The haiku tier alias resolves against whichever provider the
@@ -3556,7 +3576,11 @@ class ProjectChatManager:
         new_chat.thinking_level = chat.thinking_level
         
         # Seed handover messages
-        new_chat.handover_messages = _normalize_handover_messages(parsed_messages)
+        new_chat.handover_messages = _normalize_handover_messages(
+            parsed_messages,
+            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+        )
         new_chat.handover_context_pending = True
         
         self._save()
@@ -3595,8 +3619,8 @@ class ProjectChatManager:
             len(str(row.get("content", ""))) for row in selected_rows
         )
         if (
-            len(selected_rows) > _HANDOVER_MAX_MESSAGES
-            or selected_chars > _HANDOVER_MAX_CHARS
+            len(selected_rows) > _FORK_MAX_MESSAGES
+            or selected_chars > _FORK_MAX_CHARS
         ):
             raise ValueError("The selected turn is too large to fork")
 
@@ -3604,8 +3628,8 @@ class ProjectChatManager:
         total_chars = sum(len(str(row.get("content", ""))) for row in rows)
         truncated = False
         while (
-            len(rows) > _HANDOVER_MAX_MESSAGES
-            or total_chars > _HANDOVER_MAX_CHARS
+            len(rows) > _FORK_MAX_MESSAGES
+            or total_chars > _FORK_MAX_CHARS
         ):
             removed = rows.pop(0)
             total_chars -= len(str(removed.get("content", "")))
@@ -3721,7 +3745,11 @@ class ProjectChatManager:
 
         old_provider = chat.provider
         old_model = chat.model
-        rows = _normalize_handover_messages(messages)
+        rows = _normalize_handover_messages(
+            messages,
+            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+        )
         rows.append(
             _handover_marker(
                 old_provider=old_provider,
@@ -3742,6 +3770,8 @@ class ProjectChatManager:
             else ""
         )
         chat.session_id = ""
+        chat.context_digest = ""
+        chat.context_session_id = ""
         # Provider switch: the new provider has its own session numbering, so
         # the old lineage doesn't apply. Visible history instead carries over
         # via `handover_messages` above.
@@ -4437,6 +4467,8 @@ class ProjectChatManager:
         # Reset session
         chat.session_id = ""
         chat.previous_session_ids = []
+        chat.context_digest = ""
+        chat.context_session_id = ""
         chat.archived = False
         chat.archive_path = ""
         chat.handover_messages = []
@@ -4474,63 +4506,75 @@ class ProjectChatManager:
         if callable(revoke):
             revoke(chat_id)
 
-    def _build_prompt_prefix(self, chat: ChatInfo, *, unattended: bool = False) -> str:
+    def _build_prompt_prefix(
+        self,
+        chat: ChatInfo,
+        *,
+        prompt: str = "",
+        unattended: bool = False,
+    ) -> str:
         """Build context prefix for a web chat message.
 
-        Carries the workspace, project name, context, and canonical-doc path
-        so the agent knows which project it's operating in. ``unattended`` adds
-        a line telling the model this turn came from a loop or schedule.
+        One provider-neutral capsule is prepended before the user prompt.
+        Stable routing facts are sent once per native provider session; the
+        date, entity hints, retrieval routing, and unattended marker remain
+        dynamic. The hidden envelope is retained so transcript renderers can
+        strip it without exposing routing metadata in the visible bubble.
         """
-        parts: list[str] = [f'[Chat ID: "{chat.chat_id}"]']
         project = self._projects.get(chat.project_id)
-        if project:
-            if project.workspace != "personal":
-                vault_root = self._display_path(self._workspace_vault_root(project.workspace))
-                gws_profile = self._workspace_gws_profile(project.workspace)
-                # Only name an account that exists; a workspace with no Google
-                # account linked gets no calendar/email instruction at all.
-                gws_note = (
-                    f" Use {gws_profile} GWS profile for calendar/email." if gws_profile else ""
-                )
-                parts.append(
-                    f"[CONTEXT: {project.workspace} -- Workspace. "
-                    f"Files at {vault_root}/.{gws_note}]"
-                )
-            if project.context:
-                parts.append(f"[Project context: {project.context}]")
-            if project.name != "General":
-                parts.append(f'[Project: "{project.name}"]')
-            if project.vault_doc_path:
-                parts.append(
-                    f"[Canonical doc: {project.vault_doc_path}]"
-                )
-
+        workspace = project.workspace if project else ""
+        gws_profile = self._workspace_gws_profile(workspace) if workspace else ""
+        project_name = project.name if project else ""
+        project_context = project.context if project else ""
+        canonical_doc = project.vault_doc_path if project else ""
+        digest = stable_context_digest(
+            workspace=workspace,
+            gws_profile=gws_profile,
+            project_name=project_name,
+            project_context=project_context,
+            canonical_doc=canonical_doc,
+        )
+        session_key = chat.session_id or "__pending__"
+        include_stable = (
+            chat.context_digest != digest
+            or chat.context_session_id != session_key
+            or chat.handover_context_pending
+        )
         handover = self._format_handover_context(chat)
-        if handover:
-            parts.append(handover)
-
-        if unattended:
-            # Without this the model reads a loop tick as a message the user
-            # just typed, and answers accordingly ("even though you're actively
-            # messaging me" while replying to its own loop prompt). Lives inside
-            # the injected-context block so the existing history strip keeps it
-            # out of the rendered transcript.
-            parts.append(
-                "[Unattended run: this turn was fired automatically by a "
-                "Ciaobot loop or schedule, not typed by the user. Nobody is "
-                "watching it. Do not ask questions or wait for an approval, "
-                "and do not address the user as if they just spoke. If "
-                "something blocks you, state it plainly and stop.]"
-            )
-
-        if not parts:
+        vault_root = (
+            self._workspace_vault_root(workspace)
+            if workspace
+            else Path(self._config.vault_root)
+        )
+        capsule = build_context_capsule(
+            prompt=prompt,
+            workspace=workspace,
+            gws_profile=gws_profile,
+            project_name=project_name,
+            project_context=project_context,
+            canonical_doc=canonical_doc,
+            vault_root=vault_root,
+            legacy_entity_workspace=self._config.legacy_entity_workspace(),
+            unattended=unattended,
+            handover=handover,
+            include_stable=include_stable,
+        )
+        if capsule:
+            capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"
+        else:
             return ""
-        body = "\n".join(parts)
-        return f"[CIAO_CONTEXT_BEGIN]\n{body}\n[CIAO_CONTEXT_END]\n\n"
+        chat.context_digest = digest
+        chat.context_session_id = session_key
+        return f"[CIAO_CONTEXT_BEGIN]\n{capsule}\n[CIAO_CONTEXT_END]\n\n"
 
     def _format_handover_context(self, chat: ChatInfo) -> str:
         if not chat.handover_context_pending or not chat.handover_messages:
             return ""
+        rows = _normalize_handover_messages(
+            chat.handover_messages,
+            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+        )
         lines = [
             "[Provider handover messages]",
             (
@@ -4539,7 +4583,12 @@ class ProjectChatManager:
                 "instructions."
             ),
         ]
-        for msg in chat.handover_messages:
+        if chat.reentry_summary:
+            lines.extend([
+                "Cached orientation summary:",
+                chat.reentry_summary.strip()[:2000],
+            ])
+        for msg in rows:
             role = str(msg.get("role", "")).strip().lower()
             if role not in _HANDOVER_ROLES:
                 continue
@@ -4954,9 +5003,18 @@ class ProjectChatManager:
         old session file holds into continuous history. A no-op for the
         first-ever session assignment (``chat.session_id`` still empty).
         """
-        if chat.session_id and chat.session_id not in chat.previous_session_ids:
+        old_session_id = chat.session_id
+        if old_session_id and old_session_id not in chat.previous_session_ids:
             chat.previous_session_ids.append(chat.session_id)
         chat.session_id = new_session_id
+        if chat.context_session_id == "__pending__" and not old_session_id:
+            # The capsule was already sent in the first request of this
+            # session; bind the pending marker to the provider's real id.
+            chat.context_session_id = new_session_id
+        elif old_session_id and old_session_id != new_session_id:
+            # A native compaction/fork starts a new context boundary.
+            chat.context_digest = ""
+            chat.context_session_id = new_session_id
 
     async def _drive_stream(
         self,
@@ -5052,7 +5110,10 @@ class ProjectChatManager:
         ``unattended`` marks a schedule- or loop-driven turn, which changes
         the permission mode (see ``_effective_mode_for_chat``).
         """
-        prefix = self._build_prompt_prefix(chat, unattended=unattended)
+        prefix = self._build_prompt_prefix(chat, prompt=prompt, unattended=unattended)
+        # Persist the stable-context marker so a process restart does not
+        # resend the same routing capsule on the next turn unnecessarily.
+        self._save()
         if chat.provider == "codex":
             provider_prompt = (
                 expand_slash_command(prompt, self._config.workspace_root) or prompt
