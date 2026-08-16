@@ -197,6 +197,16 @@ def test_installer_starts_and_persists_the_menu_bar_agent() -> None:
     assert 'launchctl kickstart "gui/$uid/Ciaobot"' in script
 
 
+def test_installer_does_not_swallow_existing_workspace_setup_failure() -> None:
+    script = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+
+    setup_block = script[script.index('if [ -n "$workspace" ]; then') :]
+    assert '"$engine" setup' in setup_block
+    assert "--load-launchd" in setup_block
+    assert '"$engine" setup \\\n            --workspace "$workspace"' in setup_block
+    assert '>/dev/null || true' not in setup_block
+
+
 def test_installer_retries_until_the_menu_bar_agent_names_the_new_app() -> None:
     # bootout is asynchronous, so a bootstrap issued immediately after it can
     # fail outright, or appear to succeed while launchd still holds the stale

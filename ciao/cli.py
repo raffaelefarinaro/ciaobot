@@ -1028,16 +1028,13 @@ def _setup_command(args: argparse.Namespace) -> int:
             subprocess.run(
                 ["launchctl", "unload", str(plist)],
                 check=False,
-                stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            # The load's status is what matters and is returned below; its raw
-            # stderr only duplicates that in a less actionable form.
+            # Keep a real load failure visible to the installer and preserve
+            # its status as the setup result.
             rc = subprocess.run(
                 ["launchctl", "load", "-w", str(plist)],
                 check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
             ).returncode or rc
         _print_setup_summary(root, args.port)
         return rc
