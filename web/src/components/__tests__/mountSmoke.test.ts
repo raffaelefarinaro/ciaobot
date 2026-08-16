@@ -440,8 +440,12 @@ vi.mock('../../lib/api', () => {
     }
     return Promise.resolve({})
   })
+  const setResponse = (path: string, value: unknown) => {
+    responses[path] = value
+  }
+  const getResponse = (path: string) => responses[path]
   return {
-    api: { get, post, patch, del: vi.fn(() => Promise.resolve({})) },
+    api: { get, post, patch, del: vi.fn(() => Promise.resolve({})), setResponse, getResponse },
   }
 })
 
@@ -786,12 +790,116 @@ describe('component mount smoke', () => {
 
     expect(wrapper.find('[aria-label="Claude.ai MCPs"]').exists()).toBe(true)
     const providerField = wrapper.findAll('label.settings-field')
-      .find((field) => field.find('.ws-label').text() === 'Provider')
+      .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
     expect(providerField).toBeTruthy()
     await providerField!.find('select').setValue('codex')
     await nextTick()
     expect(wrapper.find('[aria-label="Claude.ai MCPs"]').exists()).toBe(false)
     wrapper.unmount()
+  })
+
+  it('keeps a legacy workspace provider on a valid registry selection', async () => {
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const originalWorkspaces = testApi.getResponse('/api/workspaces')
+    testApi.setResponse('/api/workspaces', {
+      workspaces: [{
+        name: 'legacy',
+        vault_root: 'memory-vault/legacy',
+        default_provider: 'ollama',
+        default_model: 'qwen3:latest',
+        gws_profile: '',
+      }],
+      active: 'legacy',
+      provider_options: [
+        { value: 'claude', label: 'Anthropic (via Claude Code)' },
+        { value: 'codex', label: 'OpenAI (via Codex)' },
+        { value: 'opencode', label: 'opencode' },
+      ],
+    })
+
+    const router = makeRouter()
+    await router.push('/settings/workspaces')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    try {
+      const providerField = wrapper.findAll('label.settings-field')
+        .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
+      expect(providerField).toBeTruthy()
+      const providerSelect = providerField!.find('select')
+      expect((providerSelect.element as HTMLSelectElement).value).toBe('claude')
+      expect(providerSelect.findAll('option').map((option) => option.attributes('value')))
+        .toContain('claude')
+      expect(providerSelect.text()).toContain('Anthropic (via Claude Code)')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/workspaces', originalWorkspaces)
+    }
+  })
+
+  it('shows the API explanation for a failed workspace save', async () => {
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const originalWorkspaces = testApi.getResponse('/api/workspaces')
+    testApi.setResponse('/api/workspaces', {
+      workspaces: [{
+        name: 'personal',
+        vault_root: 'memory-vault/personal',
+        default_provider: 'claude',
+        default_model: '',
+        gws_profile: '',
+      }],
+      active: 'personal',
+      provider_options: [
+        { value: 'claude', label: 'Anthropic (via Claude Code)' },
+        { value: 'codex', label: 'OpenAI (via Codex)' },
+        { value: 'opencode', label: 'opencode' },
+      ],
+    })
+
+    const patchSpy = vi.spyOn(api, 'patch').mockRejectedValueOnce(Object.assign(
+      new Error('HTTP 400'),
+      { payload: { error: 'default_provider must be one of: claude, codex, opencode' } },
+    ))
+    const router = makeRouter()
+    await router.push('/settings/workspaces')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    try {
+      await wrapper.find('.workspace-actions .btn-small').trigger('click')
+      await flushPromises()
+
+      const result = wrapper.find('.action-result[role="alert"]')
+      expect(result.exists()).toBe(true)
+      expect(result.classes()).toContain('action-result--error')
+      expect(result.text()).toContain('default_provider must be one of: claude, codex, opencode')
+      const store = (await import('../../stores/projects')).useProjectStore()
+      expect(store.toasts).toContainEqual(expect.objectContaining({
+        title: 'Workspace "personal" not saved',
+        body: 'default_provider must be one of: claude, codex, opencode',
+        variant: 'error',
+      }))
+    } finally {
+      wrapper.unmount()
+      patchSpy.mockRestore()
+      testApi.setResponse('/api/workspaces', originalWorkspaces)
+    }
   })
 
   it('SettingsView labels every provider connection from the backend registry', async () => {
