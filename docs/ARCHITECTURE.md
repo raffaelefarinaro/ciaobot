@@ -18,7 +18,7 @@ ciao/                          Python backend (Starlette).
   setup_status.py              Bootstrap/setup readiness API and wizard finish handler.
   dev.py                       Local dev runner: backend on :8543 plus Vite frontend on :5173. CLI: `ciao dev`.
   config.py                    Env var loading, workspace config.
-  providers/                   Claude Agent SDK, Codex app-server, opencode HTTP server, custom endpoint providers, and routing helpers.
+  providers/                   Claude Agent SDK, Codex app-server, opencode HTTP server, and routing helpers.
     stdio_rpc.py               Async JSON-lines RPC process transport used by CLI app-server adapters.
     codex.py                   Persistent Codex app-server adapter, model/account discovery, approvals, questions, history.
     opencode.py                opencode provider over per-chat `opencode serve` (ephemeral loopback port, scoped MCP token, OpenAPI-fail-closed readiness, `steer=false`).
