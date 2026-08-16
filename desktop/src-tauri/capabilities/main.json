@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Core permissions for the Ciaobot main window",
-  "windows": ["main"],
+  "description": "Core permissions for the Ciaobot main and update windows",
+  "windows": ["main", "update"],
   "remote": {
     "urls": ["http://localhost:*"]
   },

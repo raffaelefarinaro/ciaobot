@@ -5770,9 +5770,10 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
 
     Returns the inferred vault mode ("scratch" vs "existing"), the resolved
     vault root, and any nested workspace directories the folder already
-    contains (e.g. ``memory-vault/personal/``, ``memory-vault/work/``). The
-    wizard uses this to decide whether to ask for a "first workspace" name
-    (scratch) or show the existing ones as read-only chips (existing).
+    contains (e.g. legacy ``memory-vault/personal/`` and
+    ``memory-vault/work/``). The wizard uses this to show existing workspace
+    chips when they are present; otherwise it asks for the logical workspace
+    name that will be assigned to the selected folder.
     """
     from ciao.cli import detect_vault_mode
     from ciao.setup_status import detect_nested_workspaces

@@ -46,7 +46,10 @@ are pruned; `opencode.json` tracks Ciaobot-owned server names in
 opencode has no API for injecting a message into a running turn, so Ciaobot
 declares `steer=false` for it: a message sent mid-turn queues for the next turn
 instead of interrupting. Fork, abort, tool approvals, structured questions, and
-background subagents (real child sessions) are all native.
+background subagents (real child sessions) are all native. When a chat is
+archived, deleted, or reset, Ciaobot disconnects its server and then calls
+`DELETE /session/{id}` to reclaim the persisted opencode session; cleanup is
+fail-open if the provider is unavailable.
 
 ### Live eval provider access
 
@@ -138,6 +141,11 @@ chat and automations views, unmodified `1`–`9` keys select the first through
 ninth workspace in the sidebar's displayed order; the sidebar shows the assigned
 number on each workspace button. Number keys remain available for normal typing
 inside text fields.
+
+On the home screen, arrow-key navigation follows the visible lane layout: when
+workspace lanes are stacked vertically, up/down moves between workspaces and
+left/right moves between chats in the current workspace; side-by-side lanes use
+the corresponding horizontal/vertical mapping.
 
 The sidebar's project and delegate-subchat disclosure state is local UI state;
 it has no integration, environment variable, or cross-device synchronization
@@ -294,7 +302,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_ALLOWED_ORIGINS`: comma-separated extra hostnames/origins accepted for state-changing HTTP and WebSocket handshakes when the app is reached under a host it doesn't bind to (reverse proxy, tunnel, or host alias). Without it, such setups get their `/ws/*` upgrades rejected (403) and live updates stall. A proxy-supplied `X-Forwarded-Host` is honored automatically. Example: `app.example.com,ciao.tailnet.ts.net`.
 - `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button), the `/api/debug/issues` report, and the desktop-app rebuild step in Settings → Restart.
 - `CIAO_APP_REPO`: absolute path to the Ciaobot source checkout for developer-mode Deploy/Restart actions. Packaged apps update through the signed Tauri updater and do not resolve a checkout, Homebrew, or PyPI installation.
-- `CIAO_VAULT_MODE`: onboarding mode for memory-vault folders. Either `scratch` (create folders and documentation from scratch) or `existing` (connect and adapt existing markdown folders).
+- `CIAO_VAULT_MODE`: onboarding mode for vault folders. Either `scratch` (initialize the current vault layout) or `existing` (preserve the selected notes folder and start an initial inventory/curation chat; clear material may be reorganized, ambiguous material is left in place).
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
 - `CIAO_WORKSPACE`: filesystem workspace root for operational state, `.runtime/`, `.env`, `.claude/`, `.agents/skills/`, `CLAUDE.md`, and `AGENTS.md`. Default `.`.
@@ -381,6 +389,7 @@ Ciaobot runs on macOS under launchd.
 - `ciao setup --workspace <path> --load-launchd` renders and loads the LaunchAgent.
 - The packaged launchd template is `ciao/stock/deploy/com.ciao.server.plist.tmpl`.
 - The `Ciaobot.app` menu bar shows `Start at Login: On/Off` and toggles `com.ciao.server` with `launchctl enable/disable`. Its status section also offers `Start Server` when the local server is unreachable and `Restart Server` when it is live. The unread badge counts every unread chat even though the quick-open list remains limited to the ten most recent chats.
+- Selecting `Update` from the menu-bar tray opens the bundled update window immediately. It reports engine/app milestones with a percentage and expandable terminal details, then restarts the app only after both halves are ready. The PWA's non-bundled package-update actions use the same visual progress surface while their restart is pending.
 - Stop: `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
 - In client mode, non-image files dropped into chat are uploaded through the

@@ -175,7 +175,8 @@ def test_agent_assets_lists_bounded_memory_and_splits_system_prompt(
     assert "name: Alice" in by_id["ciaobot-user"]["content"]
     assert by_id["ciaobot-memory"]["editable"] is True
     assert "prefers bullet lists" not in by_id["ciaobot-system-prompt"]["content"]
-    assert "Ciaobot System Instructions" in by_id["ciaobot-system-prompt"]["content"]
+    assert "Ciaobot core instructions" in by_id["ciaobot-system-prompt"]["content"]
+    assert "Native CLAUDE.md/AGENTS.md" in by_id["ciaobot-system-prompt"]["description"]
 
 
 def test_agent_assets_lists_memory_proposals(tmp_path: Path) -> None:

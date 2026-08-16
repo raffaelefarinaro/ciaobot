@@ -247,6 +247,8 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
 
     assert {
         "context_get",
+        "memory_status",
+        "memory_update",
         "vault_search",
         "project_create",
         "workspace_create",

@@ -55,6 +55,10 @@ import yaml
 
 from ciao import job_runs, native_sidecar, provider_registry, subagent_tracking
 from ciao.config import BridgeConfig
+from ciao.context.capsule import (
+    build_context_capsule,
+    context_digest as stable_context_digest,
+)
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import (
     AgentRequest,
@@ -83,6 +87,7 @@ from ciao.providers.codex import (
     CodexProvider,
     codex_collab_tree_counts,
 )
+from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
@@ -166,8 +171,10 @@ _MAX_CONNECTION_DROP_RETRIES = 6
 # bubble nobody typed).
 _SUBAGENT_SYNTHESIS_NUDGE = subagent_tracking.SUBAGENT_SYNTHESIS_NUDGE
 _HANDOVER_ROLES = {"user", "assistant", "system"}
-_HANDOVER_MAX_MESSAGES = 80
-_HANDOVER_MAX_CHARS = 60_000
+_FORK_MAX_MESSAGES = 80
+_FORK_MAX_CHARS = 60_000
+_PROVIDER_HANDOVER_MAX_MESSAGES = 12
+_PROVIDER_HANDOVER_MAX_CHARS = 12_000
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # How long a finished delegate waits for its siblings before waking the
 # supervisor. Long enough that a batch dispatched together reports as one turn,
@@ -329,13 +336,18 @@ def _clean_handover_messages(messages: list[dict] | None) -> list[dict]:
     return rows
 
 
-def _normalize_handover_messages(messages: list[dict] | None) -> list[dict]:
-    """Sanitize and bound visible chat rows for provider handover."""
+def _normalize_handover_messages(
+    messages: list[dict] | None,
+    *,
+    max_messages: int = _FORK_MAX_MESSAGES,
+    max_chars: int = _FORK_MAX_CHARS,
+) -> list[dict]:
+    """Sanitize and bound visible rows for a fork or provider handover."""
     rows = _clean_handover_messages(messages)
     total_chars = sum(len(str(row.get("content", ""))) for row in rows)
     while (
-        len(rows) > _HANDOVER_MAX_MESSAGES
-        or total_chars > _HANDOVER_MAX_CHARS
+        len(rows) > max_messages
+        or total_chars > max_chars
     ) and rows:
         removed = rows.pop(0)
         total_chars -= len(str(removed.get("content", "")))
@@ -1118,6 +1130,10 @@ class ChatInfo:
     # True until the first post-handover turn successfully seeds the new
     # provider with `handover_messages` inside the hidden Ciaobot context block.
     handover_context_pending: bool = False
+    # Stable routing facts are sent once per provider session. A changed
+    # project/workspace digest or a new provider session re-sends them.
+    context_digest: str = ""
+    context_session_id: str = ""
     # Raw AskUserQuestion JSON (`{"questions": [...]}`) when the model paused
     # this chat on a question the user hasn't answered yet. Set when the
     # headless CLI fires AskUserQuestion (which we interrupt so it can't
@@ -1573,6 +1589,8 @@ class ProjectChatManager:
                     list(cd.get("handover_messages", []))
                 ),
                 handover_context_pending=bool(cd.get("handover_context_pending", False)),
+                context_digest=cd.get("context_digest", ""),
+                context_session_id=cd.get("context_session_id", ""),
                 pending_question=cd.get("pending_question", ""),
                 pending_queue=list(cd.get("pending_queue", [])),
                 forked_from_chat_id=cd.get("forked_from_chat_id", ""),
@@ -1667,6 +1685,8 @@ class ProjectChatManager:
                     "retry_interval_seconds": c.retry_interval_seconds,
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
+                    "context_digest": c.context_digest,
+                    "context_session_id": c.context_session_id,
                     "pending_question": c.pending_question,
                     "pending_queue": c.pending_queue,
                     "forked_from_chat_id": c.forked_from_chat_id,
@@ -1998,6 +2018,7 @@ class ProjectChatManager:
         import os
         vault_mode = os.environ.get("CIAO_VAULT_MODE", "scratch").strip().lower()
         project = self._projects.get(project_id)
+        workspace_name = project.workspace if project is not None else "personal"
         vault_root = str(
             self._workspace_vault_root(project.workspace)
             if project is not None
@@ -2010,21 +2031,23 @@ class ProjectChatManager:
                 f"Welcome to Ciaobot. You are Ciaobot, the user's personal agentic assistant.\n\n"
                 f"The user has completed setup and pointed me to an **existing notes folder** at:\n"
                 f"`{vault_root}`\n\n"
-                f"Your task is to onboard the user and adapt this existing folder into what Ciaobot requires:\n"
-                f"1. **Analyze Folder**: Scan the existing vault directory to see what directories and files are present.\n"
-                f"2. **Structure Verification**: Check if the standard directories (`personal/`, `work/`, `Templates/`) exist. If not, plan to create them.\n"
-                f"3. **Hygiene & Scaffolding**: Verify if `CLAUDE.md` (defining identity, memory, styles) and `MEMORY.md` exist. If missing, plan to create them using clean Markdown structures (no em-dashes, no horizontal rules `---` as section dividers). `CLAUDE.md` MUST contain both bounded memory regions with their exact fenced markers: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`. They are mandatory, not optional — add any that are missing.\n"
-                f"4. **Workspace Git Check**: Verify the workspace is a git repository with a `.gitignore` covering `.env` and `.runtime/`, and that the vault is inside a git repo (the workspace repo by default, or its own when it lives elsewhere). If not, fix it (`git init`, append the missing entries) and report what you did.\n"
-                f"5. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, their role/work context, key people, and active projects) to populate `CLAUDE.md` and `MEMORY.md` correctly. Identity and communication-style answers go into the `ciao:profile` region of `CLAUDE.md`; cross-project environment facts and lessons learned go into the `ciao:memory` region.\n"
-                f"6. **Capabilities Tour**: Once the interview is done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
+                f"Your task is to onboard the user and adapt this existing folder into the current Ciaobot vault layout:\n"
+                f"1. **Inventory first**: Scan the vault and report its top-level files and folders, separating user notes from Ciaobot-managed files (`.env`, `.runtime/`, `.claude/`, `CLAUDE.md`, `AGENTS.md`). Do not assume an unfamiliar folder is disposable.\n"
+                f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout.\n"
+                f"3. **Preserve before reorganizing**: Existing files and content are the source of truth. Never delete or overwrite them. Reorganize only when the classification is clear: active projects go under `projects/active/<slug>/`, completed projects under `projects/completed/<slug>/`, people under `People/`, and reusable cross-project lessons under `Workspace/Learnings.md`. Leave ambiguous or unsupported material in place and report it. Use the existing Git history as the rollback point and keep a concise curation summary.\n"
+                f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `CLAUDE.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
+                f"5. **Initial memory curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then run an initial curation in this chat: search for duplicates, update the relevant project canonical docs, create durable person/entity notes only for confirmed facts, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
+                f"6. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
+                f"7. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
             )
             assistant_msg = (
                 f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
-                f"I've initialized our session and connected to your existing folder at `{vault_root}`. "
-                f"I'm ready to inspect your vault, organize it into Ciaobot's structure, and bootstrap our core notes. "
+                f"I've connected workspace **{workspace_name}** to your existing folder at `{vault_root}`. "
+                f"I'll first inspect what is already there, then help curate the clear, durable knowledge into Ciaobot's current structure while preserving the rest. "
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
-                f"To get started, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
+                f"To get started, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
         else:
             title = "Welcome to Ciaobot! 👋"
@@ -2032,20 +2055,21 @@ class ProjectChatManager:
                 f"Welcome to Ciaobot. You are Ciaobot, the user's personal agentic assistant.\n\n"
                 f"The user has completed setup and initialized a **new vault folder from scratch** at:\n"
                 f"`{vault_root}`\n\n"
-                f"Your task is to bootstrap the vault structure and core documentation:\n"
-                f"1. **Create Directory Structure**: Plan to create: `personal/`, `work/`, and `Templates/` (scaffold markdown templates for logs, projects, and people).\n"
-                f"2. **Generate Core Files**: Plan to generate clean initial templates for `CLAUDE.md` (defining instructions, memory rules, styles) and `MEMORY.md`. `CLAUDE.md` MUST contain both bounded memory regions with their exact fenced markers: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`. They are mandatory, not optional — add any that are missing.\n"
-                f"3. **Workspace Git Check**: Verify the workspace is a git repository with a `.gitignore` covering `.env` and `.runtime/`, and that the vault is inside a git repo (the workspace repo by default, or its own when it lives elsewhere). If not, fix it (`git init`, append the missing entries) and report what you did.\n"
-                f"4. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, GWS profiles, key projects) to customize `CLAUDE.md` and `MEMORY.md`. Identity and communication-style answers go into the `ciao:profile` region of `CLAUDE.md`; cross-project environment facts and lessons learned go into the `ciao:memory` region.\n"
-                f"5. **Capabilities Tour**: Once the interview is done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
-                f"Introduce yourself to the user, explain that you are starting fresh at `{vault_root}`, and ask the first onboarding questions to bootstrap your profile."
+                f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
+                f"Your task is to bootstrap the current vault structure and core documentation:\n"
+                f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories.\n"
+                f"2. **Core files**: Setup has already seeded the workspace-level `CLAUDE.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `CLAUDE.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
+                f"3. **Onboarding interview and curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, project facts to project canonical docs, people to `People/`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
+                f"4. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
+                f"5. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"Introduce yourself to the user, explain that you are starting logical workspace **{workspace_name}** at `{vault_root}`, and ask the first onboarding questions to bootstrap their profile."
             )
             assistant_msg = (
                 f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
-                f"Welcome! I've initialized our workspace at `{vault_root}` from scratch. "
-                f"I'm ready to create our core structure (`personal/`, `work/`, `Templates/`) and customize our settings. "
+                f"Welcome! I've initialized logical workspace **{workspace_name}** at `{vault_root}` from scratch. "
+                f"I'm ready to customize the current vault structure and curate your durable knowledge with you. "
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
-                f"To begin, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
+                f"To begin, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
 
         # The haiku tier alias resolves against whichever provider the
@@ -3552,7 +3576,11 @@ class ProjectChatManager:
         new_chat.thinking_level = chat.thinking_level
         
         # Seed handover messages
-        new_chat.handover_messages = _normalize_handover_messages(parsed_messages)
+        new_chat.handover_messages = _normalize_handover_messages(
+            parsed_messages,
+            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+        )
         new_chat.handover_context_pending = True
         
         self._save()
@@ -3591,8 +3619,8 @@ class ProjectChatManager:
             len(str(row.get("content", ""))) for row in selected_rows
         )
         if (
-            len(selected_rows) > _HANDOVER_MAX_MESSAGES
-            or selected_chars > _HANDOVER_MAX_CHARS
+            len(selected_rows) > _FORK_MAX_MESSAGES
+            or selected_chars > _FORK_MAX_CHARS
         ):
             raise ValueError("The selected turn is too large to fork")
 
@@ -3600,8 +3628,8 @@ class ProjectChatManager:
         total_chars = sum(len(str(row.get("content", ""))) for row in rows)
         truncated = False
         while (
-            len(rows) > _HANDOVER_MAX_MESSAGES
-            or total_chars > _HANDOVER_MAX_CHARS
+            len(rows) > _FORK_MAX_MESSAGES
+            or total_chars > _FORK_MAX_CHARS
         ):
             removed = rows.pop(0)
             total_chars -= len(str(removed.get("content", "")))
@@ -3717,7 +3745,11 @@ class ProjectChatManager:
 
         old_provider = chat.provider
         old_model = chat.model
-        rows = _normalize_handover_messages(messages)
+        rows = _normalize_handover_messages(
+            messages,
+            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+        )
         rows.append(
             _handover_marker(
                 old_provider=old_provider,
@@ -3738,6 +3770,8 @@ class ProjectChatManager:
             else ""
         )
         chat.session_id = ""
+        chat.context_digest = ""
+        chat.context_session_id = ""
         # Provider switch: the new provider has its own session numbering, so
         # the old lineage doesn't apply. Visible history instead carries over
         # via `handover_messages` above.
@@ -3760,7 +3794,7 @@ class ProjectChatManager:
         chat.handover_context_pending = False
         self._save()
 
-    def _reclaim_provider_sessions(
+    async def _reclaim_provider_sessions_async(
         self,
         chat: ChatInfo,
         session_ids: list[str] | None = None,
@@ -3768,16 +3802,84 @@ class ProjectChatManager:
         """Drop provider-side session blobs/threads for abandoned chats.
 
         Claude deletes the SDK JSONL blob. Codex calls ``thread/delete`` so
-        rollouts under ``~/.codex/sessions`` are reclaimed the same way. Failures
-        are logged inside the provider helpers and never block archive/delete.
+        rollouts under ``~/.codex/sessions`` are reclaimed the same way.
+        OpenCode deletes its persisted session through ``DELETE /session/{id}``.
+        Provider cleanup is fail-open: the Ciaobot archive remains durable even
+        when an external provider is unavailable.
         """
-        raw_ids = session_ids if session_ids is not None else [chat.session_id]
+        raw_ids = (
+            session_ids
+            if session_ids is not None
+            else [*chat.previous_session_ids, chat.session_id]
+        )
         workspace = self._config.workspace_root
-        for sid in filter(None, raw_ids):
-            if chat.provider == "claude":
-                self._transcripts.delete_sdk_session_blob(workspace, sid)
-            elif chat.provider == "codex":
-                asyncio.ensure_future(CodexProvider.delete_thread(workspace, sid))
+        seen: set[str] = set()
+        for sid in raw_ids:
+            sid = str(sid or "")
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            try:
+                if chat.provider == "claude":
+                    deleted = self._transcripts.delete_sdk_session_blob(workspace, sid)
+                elif chat.provider == "codex":
+                    deleted = await CodexProvider.delete_thread(workspace, sid)
+                elif chat.provider == "opencode":
+                    deleted = await OpencodeProvider.delete_thread(workspace, sid)
+                else:
+                    continue
+            except Exception:  # noqa: BLE001 — provider cleanup is fail-open
+                logger.exception(
+                    "Failed to reclaim %s session %s for chat %s",
+                    chat.provider,
+                    sid,
+                    chat.chat_id,
+                )
+                continue
+            if chat.provider in {"codex", "opencode"} and not deleted:
+                logger.warning(
+                    "Provider returned no cleanup confirmation for %s session %s "
+                    "(chat %s)",
+                    chat.provider,
+                    sid,
+                    chat.chat_id,
+                )
+
+    async def _disconnect_provider(
+        self, chat_id: str, provider: ProviderService | None
+    ) -> None:
+        """Close a chat's provider before deleting its provider-side session."""
+
+        if provider is None:
+            return
+        try:
+            await provider.disconnect()
+        except Exception:  # noqa: BLE001 — cleanup must not block lifecycle writes
+            logger.exception("Failed to disconnect provider for chat %s", chat_id)
+
+    def _schedule_provider_cleanup(
+        self,
+        chat: ChatInfo,
+        provider: ProviderService | None,
+        session_ids: list[str] | None = None,
+    ) -> None:
+        """Disconnect then reclaim provider storage for sync lifecycle calls."""
+
+        if provider is None and not any(
+            str(session_id or "")
+            for session_id in (
+                session_ids
+                if session_ids is not None
+                else [*chat.previous_session_ids, chat.session_id]
+            )
+        ):
+            return
+
+        async def cleanup() -> None:
+            await self._disconnect_provider(chat.chat_id, provider)
+            await self._reclaim_provider_sessions_async(chat, session_ids)
+
+        asyncio.ensure_future(cleanup())
 
     def delete_chat(self, chat_id: str) -> bool:
         chat = self._chats.pop(chat_id, None)
@@ -3791,9 +3893,7 @@ class ProjectChatManager:
         self._cancel_between_turns_drain(chat_id)
         self._last_drain_result.pop(chat_id, None)
         provider = self._providers.pop(chat_id, None)
-        if provider:
-            asyncio.ensure_future(provider.disconnect())
-        self._reclaim_provider_sessions(chat)
+        self._schedule_provider_cleanup(chat, provider)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
         self._state.delete_context(ctx)
@@ -4049,9 +4149,8 @@ class ProjectChatManager:
         self._cancel_pending_push(chat_id)
         self._cancel_between_turns_drain(chat_id)
         provider = self._providers.pop(chat_id, None)
-        if provider:
-            asyncio.ensure_future(provider.disconnect())
-        self._reclaim_provider_sessions(chat)
+        await self._disconnect_provider(chat_id, provider)
+        await self._reclaim_provider_sessions_async(chat)
         self._unlink_chat_images(chat)
         chat.archived = True
         if result is not None:
@@ -4362,14 +4461,14 @@ class ProjectChatManager:
         # Reclaim provider sessions for the archived transcript, plus any
         # earlier ones this chat rotated through (autocompact/resume-fallback)
         # before this reset — they're all being abandoned together.
-        self._reclaim_provider_sessions(
-            chat, [*chat.previous_session_ids, chat.session_id]
-        )
+        session_ids = [*chat.previous_session_ids, chat.session_id]
         # Drop attached images: they belong to the archived transcript.
         self._unlink_chat_images(chat)
         # Reset session
         chat.session_id = ""
         chat.previous_session_ids = []
+        chat.context_digest = ""
+        chat.context_session_id = ""
         chat.archived = False
         chat.archive_path = ""
         chat.handover_messages = []
@@ -4385,8 +4484,7 @@ class ProjectChatManager:
         # Disconnect old provider so a fresh one is created
         self._cancel_between_turns_drain(chat_id)
         provider = self._providers.pop(chat_id, None)
-        if provider:
-            asyncio.ensure_future(provider.disconnect())
+        self._schedule_provider_cleanup(chat, provider, session_ids)
         self._save()
         return chat
 
@@ -4408,63 +4506,75 @@ class ProjectChatManager:
         if callable(revoke):
             revoke(chat_id)
 
-    def _build_prompt_prefix(self, chat: ChatInfo, *, unattended: bool = False) -> str:
+    def _build_prompt_prefix(
+        self,
+        chat: ChatInfo,
+        *,
+        prompt: str = "",
+        unattended: bool = False,
+    ) -> str:
         """Build context prefix for a web chat message.
 
-        Carries the workspace, project name, context, and canonical-doc path
-        so the agent knows which project it's operating in. ``unattended`` adds
-        a line telling the model this turn came from a loop or schedule.
+        One provider-neutral capsule is prepended before the user prompt.
+        Stable routing facts are sent once per native provider session; the
+        date, entity hints, retrieval routing, and unattended marker remain
+        dynamic. The hidden envelope is retained so transcript renderers can
+        strip it without exposing routing metadata in the visible bubble.
         """
-        parts: list[str] = [f'[Chat ID: "{chat.chat_id}"]']
         project = self._projects.get(chat.project_id)
-        if project:
-            if project.workspace != "personal":
-                vault_root = self._display_path(self._workspace_vault_root(project.workspace))
-                gws_profile = self._workspace_gws_profile(project.workspace)
-                # Only name an account that exists; a workspace with no Google
-                # account linked gets no calendar/email instruction at all.
-                gws_note = (
-                    f" Use {gws_profile} GWS profile for calendar/email." if gws_profile else ""
-                )
-                parts.append(
-                    f"[CONTEXT: {project.workspace} -- Workspace. "
-                    f"Files at {vault_root}/.{gws_note}]"
-                )
-            if project.context:
-                parts.append(f"[Project context: {project.context}]")
-            if project.name != "General":
-                parts.append(f'[Project: "{project.name}"]')
-            if project.vault_doc_path:
-                parts.append(
-                    f"[Canonical doc: {project.vault_doc_path}]"
-                )
-
+        workspace = project.workspace if project else ""
+        gws_profile = self._workspace_gws_profile(workspace) if workspace else ""
+        project_name = project.name if project else ""
+        project_context = project.context if project else ""
+        canonical_doc = project.vault_doc_path if project else ""
+        digest = stable_context_digest(
+            workspace=workspace,
+            gws_profile=gws_profile,
+            project_name=project_name,
+            project_context=project_context,
+            canonical_doc=canonical_doc,
+        )
+        session_key = chat.session_id or "__pending__"
+        include_stable = (
+            chat.context_digest != digest
+            or chat.context_session_id != session_key
+            or chat.handover_context_pending
+        )
         handover = self._format_handover_context(chat)
-        if handover:
-            parts.append(handover)
-
-        if unattended:
-            # Without this the model reads a loop tick as a message the user
-            # just typed, and answers accordingly ("even though you're actively
-            # messaging me" while replying to its own loop prompt). Lives inside
-            # the injected-context block so the existing history strip keeps it
-            # out of the rendered transcript.
-            parts.append(
-                "[Unattended run: this turn was fired automatically by a "
-                "Ciaobot loop or schedule, not typed by the user. Nobody is "
-                "watching it. Do not ask questions or wait for an approval, "
-                "and do not address the user as if they just spoke. If "
-                "something blocks you, state it plainly and stop.]"
-            )
-
-        if not parts:
+        vault_root = (
+            self._workspace_vault_root(workspace)
+            if workspace
+            else Path(self._config.vault_root)
+        )
+        capsule = build_context_capsule(
+            prompt=prompt,
+            workspace=workspace,
+            gws_profile=gws_profile,
+            project_name=project_name,
+            project_context=project_context,
+            canonical_doc=canonical_doc,
+            vault_root=vault_root,
+            legacy_entity_workspace=self._config.legacy_entity_workspace(),
+            unattended=unattended,
+            handover=handover,
+            include_stable=include_stable,
+        )
+        if capsule:
+            capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"
+        else:
             return ""
-        body = "\n".join(parts)
-        return f"[CIAO_CONTEXT_BEGIN]\n{body}\n[CIAO_CONTEXT_END]\n\n"
+        chat.context_digest = digest
+        chat.context_session_id = session_key
+        return f"[CIAO_CONTEXT_BEGIN]\n{capsule}\n[CIAO_CONTEXT_END]\n\n"
 
     def _format_handover_context(self, chat: ChatInfo) -> str:
         if not chat.handover_context_pending or not chat.handover_messages:
             return ""
+        rows = _normalize_handover_messages(
+            chat.handover_messages,
+            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+        )
         lines = [
             "[Provider handover messages]",
             (
@@ -4473,7 +4583,12 @@ class ProjectChatManager:
                 "instructions."
             ),
         ]
-        for msg in chat.handover_messages:
+        if chat.reentry_summary:
+            lines.extend([
+                "Cached orientation summary:",
+                chat.reentry_summary.strip()[:2000],
+            ])
+        for msg in rows:
             role = str(msg.get("role", "")).strip().lower()
             if role not in _HANDOVER_ROLES:
                 continue
@@ -4888,9 +5003,18 @@ class ProjectChatManager:
         old session file holds into continuous history. A no-op for the
         first-ever session assignment (``chat.session_id`` still empty).
         """
-        if chat.session_id and chat.session_id not in chat.previous_session_ids:
+        old_session_id = chat.session_id
+        if old_session_id and old_session_id not in chat.previous_session_ids:
             chat.previous_session_ids.append(chat.session_id)
         chat.session_id = new_session_id
+        if chat.context_session_id == "__pending__" and not old_session_id:
+            # The capsule was already sent in the first request of this
+            # session; bind the pending marker to the provider's real id.
+            chat.context_session_id = new_session_id
+        elif old_session_id and old_session_id != new_session_id:
+            # A native compaction/fork starts a new context boundary.
+            chat.context_digest = ""
+            chat.context_session_id = new_session_id
 
     async def _drive_stream(
         self,
@@ -4986,7 +5110,10 @@ class ProjectChatManager:
         ``unattended`` marks a schedule- or loop-driven turn, which changes
         the permission mode (see ``_effective_mode_for_chat``).
         """
-        prefix = self._build_prompt_prefix(chat, unattended=unattended)
+        prefix = self._build_prompt_prefix(chat, prompt=prompt, unattended=unattended)
+        # Persist the stable-context marker so a process restart does not
+        # resend the same routing capsule on the next turn unnecessarily.
+        self._save()
         if chat.provider == "codex":
             provider_prompt = (
                 expand_slash_command(prompt, self._config.workspace_root) or prompt

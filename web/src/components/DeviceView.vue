@@ -1,5 +1,9 @@
 <template>
   <div class="page device-page">
+    <UpdateProgressView
+      v-if="updating"
+      :version="packageStatus?.latest_version"
+    />
     <header class="page-header device-header">
       <div>
         <h2>this device</h2>
@@ -256,6 +260,7 @@ import { computed, onMounted, ref } from 'vue'
 import ConnectedClients from './ConnectedClients.vue'
 import { errorMessage, apiErrorMessage, errorPayload } from '../lib/errorMessage'
 import NodeAddresses from './NodeAddresses.vue'
+import UpdateProgressView from './UpdateProgressView.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import type { NodeStatus, PackageStatus, PackageChangelog, PackageUpdateResult, ActionResult } from '../lib/types'

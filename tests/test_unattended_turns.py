@@ -46,10 +46,11 @@ def test_unattended_prefix_tells_the_model_nobody_is_watching(tmp_path: Path) ->
     assert "[Unattended run:" not in interactive
 
     tick = pcm._build_prompt_prefix(chat, unattended=True)
-    assert "[Unattended run:" in tick
+    assert "unattended=true" in tick
+    assert "Do not ask questions" in tick
     # Must land inside the block the history renderer strips, so the marker
     # never shows up in the transcript the user reads.
-    assert tick.index("[Unattended run:") < tick.index("[CIAO_CONTEXT_END]")
+    assert tick.index("unattended=true") < tick.index("[CIAO_CONTEXT_END]")
 
 
 def test_unattended_turn_runs_in_bypass(tmp_path: Path) -> None:

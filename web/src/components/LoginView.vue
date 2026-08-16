@@ -94,7 +94,8 @@
           <span class="hint">Type a path, or press <strong>Browse…</strong> to pick an existing folder or
             create a new one. Either a brand-new folder or the notes folder you already have works —
             Ciaobot detects what's inside and adjusts automatically: an empty folder gets a fresh
-            second brain; existing notes are adapted in place into its structure.</span>
+            second brain; existing notes are preserved, then an initial curation chat adapts clear
+            material into its structure.</span>
         </div>
 
         <div class="form-group">
@@ -120,7 +121,7 @@
             </p>
           </div>
           <template v-else>
-            <label for="setup-workspace-name">First Workspace</label>
+            <label for="setup-workspace-name">Logical Workspace Name</label>
             <input
               id="setup-workspace-name"
               v-model="workspaceName"
@@ -129,8 +130,8 @@
               placeholder="personal"
               :disabled="loading"
             />
-            <span class="hint">A workspace is a life area — personal, work, a client. You start with
-              one and can add more later in Settings → Workspaces.</span>
+            <span class="hint">Choose the logical name for this folder — for example personal, work,
+              journal, or a client. You can add more later in Settings → Workspaces.</span>
           </template>
         </div>
 

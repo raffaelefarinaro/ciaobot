@@ -23,7 +23,8 @@ from ciao import vault_index
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
 from ciao.loops import publish_loops_changed
-from ciao.memory_tool import resolve_region
+from ciao.memory_tool import memory_status as memory_status_payload
+from ciao.memory_tool import resolve_region, update_region
 from ciao.models import ControlSurface
 from ciao.web.project_chats import UnknownModelError, _MAX_ACTIVE_DELEGATES
 from ciao.schedules import ScheduleEntry, compute_next_run
@@ -324,6 +325,49 @@ class CiaoControlPlane:
             "active_chat_ids": self.pcm.active_chat_ids(),
             "startup": self.startup_tracker.to_dict() if self.startup_tracker else None,
         })
+
+    def memory_status(self, principal: McpPrincipal) -> dict[str, Any]:
+        """Report native guide memory usage without copying its contents."""
+        self._workspace(principal)
+        guide = Path(self.config.workspace_root) / "CLAUDE.md"
+        return _ok(memory_status_payload(
+            guide,
+            memory_char_limit=int(getattr(self.config, "memory_char_limit", 2200)),
+            user_char_limit=int(getattr(self.config, "user_char_limit", 1375)),
+        ))
+
+    def memory_update(
+        self,
+        principal: McpPrincipal,
+        region: str,
+        *,
+        action: Literal["add", "replace", "remove"],
+        entry: str = "",
+        match: str = "",
+    ) -> dict[str, Any]:
+        """Apply one bounded edit to the native ``CLAUDE.md`` memory region."""
+        self._workspace(principal)
+        if action not in {"add", "replace", "remove"}:
+            raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
+        canonical = resolve_region(region)
+        limit = (
+            int(getattr(self.config, "memory_char_limit", 2200))
+            if canonical == "memory"
+            else int(getattr(self.config, "user_char_limit", 1375))
+        )
+        guide = Path(self.config.workspace_root) / "CLAUDE.md"
+        try:
+            result = update_region(
+                guide,
+                canonical,
+                action=action,
+                entry=entry,
+                match=match,
+                char_limit=limit,
+            )
+        except ValueError as exc:
+            raise ControlPlaneError("memory_update_invalid", str(exc)) from exc
+        return _ok(result)
 
     # ---- memory proposals ----------------------------------------------
 
@@ -1628,4 +1672,3 @@ class CiaoControlPlane:
             record["status"] = "failed"
             record["error"] = str(exc)
             record["completed_at"] = datetime.now(UTC).isoformat()
-

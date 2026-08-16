@@ -118,7 +118,9 @@ and needs-input signals, and per-lane "+ new" project entry. One lane holds
 chats that carry a needs-your-input question or decision; an explicit unread
 lane sits between the working and quiet tiers; long-idle chats fade into the
 quiet lane rather than disappearing. Lanes collapse into a single stacked
-column under ~760px. Signals are shape-and-text-first (tier labels, badges,
+column under ~760px; arrow-key navigation follows that visual order, using
+up/down between stacked workspace lanes and left/right within a lane. Signals
+are shape-and-text-first (tier labels, badges,
 weight, dots) so no lane relies on color alone.
 
 `Ciaobot.app` owns the macOS Dock window, native menu-bar item, and

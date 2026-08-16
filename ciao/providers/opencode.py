@@ -40,6 +40,7 @@ from typing import Any
 import httpx
 
 from ciao.model_tiers import MODEL_TIERS, canonical_tier
+from ciao.memory_injector import system_prompt_payload
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -518,16 +519,15 @@ class OpencodeProvider(BaseSDKProvider):
         workspace_root: Path,
         *,
         config: object | None = None,
-        developer_instructions: str = "",
+        developer_instructions: str | None = None,
     ) -> None:
         super().__init__(workspace_root, config=config)
-        # Caller-supplied system prompt, prepended to the per-request runtime
-        # context in the prompt body's `system` field. Chats leave this empty
-        # and let opencode's own agent config supply the system prompt; the
-        # one-shot path (titles, insights, critique) sets it because those
-        # calls are defined by their instructions. Mirrors CodexProvider's
-        # `developer_instructions`.
-        self._developer_instructions = developer_instructions.strip()
+        # ``None`` means a normal Ciaobot chat and receives the compact shared
+        # core below. A supplied string is an explicit one-shot instruction
+        # (titles, insights, critique) and remains isolated from chat policy.
+        self._developer_instructions = (
+            None if developer_instructions is None else developer_instructions.strip()
+        )
         self._process: asyncio.subprocess.Process | None = None
         # Reads the server's stderr for its whole life; see
         # `_start_stderr_reader` for why leaving the pipe unread is not an option.
@@ -587,6 +587,13 @@ class OpencodeProvider(BaseSDKProvider):
     def can_drain(self) -> bool:
         """opencode has no between-turns event source to drain."""
         return False
+
+    def _chat_system_instructions(self, request: AgentRequest) -> str:
+        """Return the compact core for normal chats, never bounded memory."""
+        payload = system_prompt_payload(
+            "", control_surface=request.control_surface
+        ) or {}
+        return str(payload.get("append") or "")
 
     async def _ensure_server(self, request: AgentRequest) -> httpx.AsyncClient:
         """Start (or reuse) this chat's server and return its HTTP client.
@@ -1370,9 +1377,13 @@ class OpencodeProvider(BaseSDKProvider):
         # Reasoning effort rides beside the model, not inside it, on prompts.
         if request.thinking_level:
             body["variant"] = request.thinking_level
-        system = compose_system(
-            self._developer_instructions, build_runtime_context(request)
-        )
+        if self._developer_instructions is None:
+            instructions = self._chat_system_instructions(request)
+            runtime = ""
+        else:
+            instructions = self._developer_instructions
+            runtime = build_runtime_context(request)
+        system = compose_system(instructions, runtime)
         if system:
             body["system"] = system
 

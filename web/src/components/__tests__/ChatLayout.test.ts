@@ -131,19 +131,10 @@ describe('ChatLayout', () => {
       name: 'General',
       workspace: 'personal',
     }] as unknown as typeof store.projects
-    // The status line renders next to the compact face; the tidied chat is
-    // archived, so it counts neither as attention nor as a working agent —
-    // only in the muted tidying fragment. A quiet active chat keeps the
-    // compact header on screen (the big mascot is the true first-run state).
+    // The status line renders next to the compact face even when the tidied
+    // chat is the only chat left. It counts neither as attention nor as a
+    // working agent — only in the muted tidying fragment.
     store.chats = [{
-      chat_id: 'quiet-chat',
-      project_id: 'project-1',
-      title: 'Quiet chat',
-      archived: false,
-      local: true,
-      last_activity_at: '2026-08-12T10:00:00Z',
-      last_read_at: '2026-08-12T10:00:00Z',
-    }, {
       chat_id: 'tidy-chat',
       project_id: 'project-1',
       title: 'Archived chat',
