@@ -1080,7 +1080,7 @@
                     />
                   </div>
                 </div>
-                <label class="settings-field"><span class="ws-label">Agent CLI</span>
+                <label class="settings-field"><span class="ws-label">{{ workspaceProviderFieldLabel }}</span>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
                     <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                       {{ provider.label }}
@@ -1202,7 +1202,7 @@
                       />
                     </div>
                   </div>
-                  <label class="settings-field"><span class="ws-label">Agent CLI</span>
+                  <label class="settings-field"><span class="ws-label">{{ workspaceProviderFieldLabel }}</span>
                     <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                         {{ provider.label }}
@@ -1269,7 +1269,7 @@
               </div>
             </div>
 
-            <div v-if="workspacesResult" class="action-result">{{ workspacesResult }}</div>
+            <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
           </div>
 
           <!-- Google Workspace integration -->
@@ -4379,6 +4379,7 @@ function notifySaved(body: string, title = 'settings') {
 function notifyFailed(title: string, detail: string) {
   projectStore.pushErrorToast(title, detail)
 }
+const workspaceProviderFieldLabel = 'Agent CLI/Runtime'
 const workspacesLoaded = ref(false)
 const workspacesError = ref('')
 const workspacesSaving = ref<string | null>(null)
@@ -4414,19 +4415,22 @@ function blankWorkspaceForm(): WorkspaceForm {
   }
 }
 
-function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
-  const mcps = ws.claude_ai_mcps
-  // A stored provider outside the current options (a removed backend id like
-  // the pre-refactor "ollama") would render the select blank and make every
-  // save 400. Snap it to a valid option, like the new-workspace form does.
-  const storedProvider = ws.default_provider || 'claude'
-  const provider = projectStore.workspaceProviderOptions.some((option) => option.value === storedProvider)
+function normalizeWorkspaceProvider(value: unknown): WorkspaceProvider {
+  // A stored provider outside the current registry (for example the removed
+  // pre-refactor "ollama") would render a native select with no selected
+  // option. Keep the form on a registry value so it can be saved cleanly.
+  const storedProvider = typeof value === 'string' ? value.trim() : ''
+  return projectStore.workspaceProviderOptions.some((option) => option.value === storedProvider)
     ? storedProvider
     : defaultWorkspaceProvider()
+}
+
+function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
+  const mcps = ws.claude_ai_mcps
   return {
     name: ws.name,
     vault_root: ws.vault_root || '',
-    default_provider: provider,
+    default_provider: normalizeWorkspaceProvider(ws.default_provider),
     default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
@@ -4598,9 +4602,7 @@ async function fetchWorkspacesList() {
   try {
     await projectStore.fetchWorkspaces()
     workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
-    if (!workspaceProviderOptions.value.some((provider) => provider.value === newWorkspaceForm.value.default_provider)) {
-      newWorkspaceForm.value.default_provider = defaultWorkspaceProvider()
-    }
+    newWorkspaceForm.value.default_provider = normalizeWorkspaceProvider(newWorkspaceForm.value.default_provider)
   } catch (e) {
     workspacesError.value = `Failed to load workspaces: ${errorMessage(e)}`
   } finally {
@@ -4643,8 +4645,9 @@ async function saveWorkspace(name: string) {
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
     await fetchWorkspacesList()
   } catch (e) {
-    workspacesResult.value = `Error: ${errorMessage(e)}`
-    notifyFailed(`Workspace "${name}" not saved`, errorMessage(e))
+    const detail = apiErrorMessage(e, 'The workspace could not be saved.')
+    workspacesResult.value = `Error: ${detail}`
+    notifyFailed(`Workspace "${name}" not saved`, detail)
   } finally {
     workspacesSaving.value = null
   }
@@ -4675,8 +4678,9 @@ async function createNewWorkspace() {
     newWorkspaceForm.value = blankWorkspaceForm()
     await fetchWorkspacesList()
   } catch (e) {
-    workspacesResult.value = `Error: ${errorMessage(e)}`
-    notifyFailed(`Workspace "${form.name.trim()}" not created`, errorMessage(e))
+    const detail = apiErrorMessage(e, 'The workspace could not be created.')
+    workspacesResult.value = `Error: ${detail}`
+    notifyFailed(`Workspace "${form.name.trim()}" not created`, detail)
   } finally {
     workspacesSaving.value = null
   }
@@ -4695,7 +4699,7 @@ async function removeWorkspace(name: string) {
     notifySaved(`Workspace "${name}" deleted.`, 'Workspaces')
     await fetchWorkspacesList()
   } catch (e) {
-    workspacesResult.value = `Error: ${errorMessage(e)}`
+    workspacesResult.value = `Error: ${apiErrorMessage(e, 'The workspace could not be deleted.')}`
   } finally {
     workspacesSaving.value = null
   }
