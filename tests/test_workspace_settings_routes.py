@@ -361,6 +361,32 @@ def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
     assert bad.status_code == 400
 
 
+def test_persist_workspace_registry_normalizes_stale_provider(tmp_path):
+    """Direct config persistence must not resurrect a removed provider."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{
+            "name": "personal",
+            "vault_root": "memory-vault/personal",
+            "default_provider": "ollama",
+        }]) + "\n",
+        encoding="utf-8",
+    )
+
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "t",
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(runtime),
+    })
+    assert config.workspace("personal").default_provider == "ollama"
+
+    config.persist_workspace_registry()
+
+    stored = json.loads((runtime / "workspaces.json").read_text())
+    assert stored[0]["default_provider"] == "claude"
+
+
 def test_claude_ai_mcps_toggle_persists_and_resolves(tmp_path):
     """The claude.ai MCPs toggle is persisted on the workspace and drives the
     connector portion of the effective denylist (union with extras)."""

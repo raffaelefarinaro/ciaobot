@@ -1354,8 +1354,11 @@ class OpencodeProvider(BaseSDKProvider):
         register_handle: Callable[[ActiveHandle | None], None],
     ) -> AsyncGenerator[StreamEvent, None]:
         client = await self._ensure_server(request)
-        session_id = await self._ensure_session(request)
+        # Permission requests can arrive while session setup is in flight.
+        # Keep the live mode aligned with this turn before any setup work so a
+        # resumed session cannot consult the previous turn's mode (#291).
         self._remember_settings(request)
+        session_id = await self._ensure_session(request)
         self._reset_turn_state()
         register_handle(OpencodeActiveHandle(self, session_id))
 

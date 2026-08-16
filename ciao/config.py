@@ -767,7 +767,14 @@ class CiaoConfig:
             {
                 "name": workspace.name,
                 "vault_root": workspace.vault_root,
-                "default_provider": workspace.default_provider,
+                # Persist the effective provider, not a stale registry value
+                # left behind after a provider was removed.  The route layer
+                # already serializes this way; keeping the config registry
+                # consistent prevents the next restart from resurrecting the
+                # invalid id (#292).
+                "default_provider": self.default_provider_for_workspace(
+                    workspace.name
+                ),
                 "default_model": workspace.default_model,
                 "disallowed_tools": workspace.disallowed_tools,
                 "claude_ai_mcps": workspace.claude_ai_mcps,
