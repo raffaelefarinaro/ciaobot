@@ -23,6 +23,22 @@ logger = logging.getLogger(__name__)
 
 _TIERS = ("haiku", "sonnet", "opus", "fable")
 
+_MODES = ("auto", "bypass", "normal", "plan")
+
+
+def _clean_default_modes(raw: object) -> dict[str, str]:
+    """Normalize a ``{provider: mode}`` map, dropping junk and bad modes."""
+    if not isinstance(raw, dict):
+        return {}
+    known = set(provider_registry.provider_ids())
+    return {
+        str(provider_id): str(mode).strip()
+        for provider_id, mode in raw.items()
+        if str(provider_id) in known
+        and isinstance(mode, str)
+        and mode.strip() in _MODES
+    }
+
 
 def _clean_tier_routes(raw: object) -> dict[str, dict[str, str]]:
     """Normalize a ``{provider: {tier: model}}`` map, dropping junk."""
@@ -123,6 +139,12 @@ class AppSettings:
     # settings route and the PWA.
     provider_routing: dict[str, dict[str, str]] | None = None
 
+    # Per-provider default execution mode for new chats. Missing entry =
+    # built-in default: ``bypass`` for opencode (its "auto" only passes
+    # verifiably read-only commands), otherwise the env-backed
+    # ``claude_mode``. Same nested-map rationale as ``provider_routing``.
+    provider_default_modes: dict[str, str] | None = None
+
 
 class AppSettingsStore:
     """JSON-file-backed store for :class:`AppSettings`."""
@@ -142,7 +164,7 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
-        nested_fields = {"provider_routing"}
+        nested_fields = {"provider_routing", "provider_default_modes"}
         string_fields = {
             field.name
             for field in fields(AppSettings)
@@ -161,6 +183,9 @@ class AppSettingsStore:
         )
         if provider_routing:
             settings.provider_routing = provider_routing
+        provider_default_modes = _clean_default_modes(raw.get("provider_default_modes"))
+        if provider_default_modes:
+            settings.provider_default_modes = provider_default_modes
         return settings
 
     def _save(self) -> None:
@@ -224,6 +249,21 @@ class AppSettingsStore:
                 if any(not isinstance(routes, dict) for routes in value.values()):
                     raise ValueError(f"{key} entries must be objects")
                 setattr(self.settings, key, _clean_tier_routes(value))
+                continue
+            if key == "provider_default_modes":
+                if not isinstance(value, dict):
+                    raise ValueError(f"{key} must be an object")
+                unknown = sorted(
+                    str(mode)
+                    for mode in value.values()
+                    if not isinstance(mode, str)
+                    or (mode.strip() and mode.strip() not in _MODES)
+                )
+                if unknown:
+                    raise ValueError(
+                        f"{key} entries must be one of {', '.join(_MODES)}"
+                    )
+                setattr(self.settings, key, _clean_default_modes(value))
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
@@ -302,6 +342,9 @@ class AppSettingsStore:
         )
         config.tts_local_voice = s.tts_local_voice or d["tts_local_voice"]
         config.critique_models = s.critique_models or d["critique_models"]
+        # Per-provider default modes have no env-backed default; absence means
+        # "use the built-in default" (opencode -> bypass, else claude_mode).
+        config.provider_default_modes = dict(s.provider_default_modes or {})
         routing = s.provider_routing or {}
         for descriptor in provider_registry.descriptors():
             current = _tier_settings(config, descriptor)

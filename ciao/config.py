@@ -9,6 +9,7 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import cast
 
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, normalize_claude_mode
 from ciao.models import BridgeMode
@@ -407,6 +408,11 @@ class CiaoConfig:
         init=False, default=False, repr=False
     )
     claude_mode: BridgeMode = "auto"
+    # Per-provider default execution mode for new chats, set from the PWA
+    # Settings → Providers tab (runtime settings store). A missing entry uses
+    # the built-in default: bypass for opencode (its "auto" only passes
+    # verifiably read-only commands), otherwise ``claude_mode``.
+    provider_default_modes: dict[str, str] = field(default_factory=dict)
     restart_exit_code: int = 75
     auto_sync_on_start: bool = False
     auto_vault_index: bool = True
@@ -431,7 +437,7 @@ class CiaoConfig:
     # Fallback when session insights run without workspace context (e.g.
     # ``scripts/backfill_insights.py``). Live archives use
     # :func:`ciao.insights.resolve_insights_model` instead.
-    insights_model: str = "deepseek-v4-flash:0731-cloud"
+    insights_model: str = "sonnet"
     # Operator override for the insights model, set from the PWA Settings →
     # Models tab (runtime settings store) or ``CIAO_INSIGHTS_MODEL``.
     # Empty = automatic routing: the workspace's sonnet-tier model.
@@ -823,6 +829,23 @@ class CiaoConfig:
         ):
             return workspace_config.default_provider
         return "claude"
+
+    def default_mode_for_provider(self, provider: str) -> BridgeMode:
+        """The default execution mode for new chats on ``provider``.
+
+        An operator pin (Settings → Providers → default mode) wins. Otherwise
+        the built-in default: opencode runs in bypass because its "auto" only
+        passes verifiably read-only shell commands and every other command
+        raises an approval card — the operator-facing default for a chat
+        provider is no prompts. Every other provider falls back to
+        ``claude_mode``.
+        """
+        mode = (self.provider_default_modes or {}).get(provider, "")
+        if mode in {"normal", "plan", "auto", "bypass"}:
+            return cast(BridgeMode, mode)
+        if provider == "opencode":
+            return "bypass"
+        return self.claude_mode
 
     def claude_ai_mcps_for_workspace(self, workspace: str | None) -> bool:
         """Whether claude.ai connector MCPs are exposed in this workspace.

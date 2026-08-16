@@ -3256,6 +3256,18 @@ class ProjectChatManager:
         chat_model = self._resolve_and_validate_chat_model(
             chat_model, chat_provider, project_id
         )
+        # A bare tier alias becomes the operator's pinned model for that tier
+        # (Settings -> Providers -> model routing), so the new chat is created
+        # with the model that will actually run, and the header badge shows it
+        # from the start instead of only after the first dispatch.
+        chat_model = self._apply_tier_pin(chat_model, chat_provider)
+        # An empty workspace default ("let the provider pick") still honors
+        # model routing: an operator who pinned tiers expects new chats to
+        # start on the pinned default-tier model rather than whatever the
+        # provider's own default happens to be. Providers without pins keep
+        # the empty default and the provider picks.
+        if not chat_model:
+            chat_model = self._tier_pin(chat_provider, "sonnet")
         # Sweep any other empty chats only after all model and routing-bucket
         # validation has succeeded. Opening a fresh "New Chat" signals the
         # user has moved on from whatever they had open and never sent, so we
@@ -3269,7 +3281,7 @@ class ProjectChatManager:
             title=title,
             model=chat_model,
             provider=chat_provider,
-            mode=cast(BridgeMode, mode or self._config.claude_mode),
+            mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider)),
             control_surface=control_surface or "",
             created_at=_now_iso(),
             spawned_from_chat_id=spawned_from_chat_id,
@@ -4727,6 +4739,33 @@ class ProjectChatManager:
             resolved_model = canonical_tier(resolved_model)
         self._validate_configured_model(resolved_model, provider)
         return resolved_model
+
+    def _tier_pin(self, provider: str, tier: str) -> str:
+        """The operator's pinned model for a tier, or ``""`` when there is none.
+
+        Applies to providers with operator-settable tier pins (Codex,
+        opencode). ``tier`` may be a bare alias or already canonical.
+        """
+        if not is_tier(tier):
+            return ""
+        descriptor = provider_registry.get(provider)
+        if descriptor is None or not descriptor.tier_settings_attr:
+            return ""
+        settings = getattr(self._config, descriptor.tier_settings_attr, None)
+        if settings is None:
+            return ""
+        return getattr(settings, f"{canonical_tier(tier)}_model", "") or ""
+
+    def _apply_tier_pin(self, model: str, provider: str) -> str:
+        """Substitute the operator's tier pin for a bare alias.
+
+        At chat creation only: the pin is the model the user picked for that
+        tier, so the chat is stamped with it directly. An empty model (let
+        the provider pick) and a provider without pins pass through.
+        """
+        if not is_tier(model):
+            return model
+        return self._tier_pin(provider, canonical_tier(model)) or model
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""

@@ -486,6 +486,10 @@ const homeStatus = computed(() => {
   const working = chats.filter(chat =>
     store.isChatStreaming(chat.chat_id) || store.chatHasBackgroundAgents(chat.chat_id),
   ).length
+  // Post-archive tidying is background work too, just quieter: it never needs
+  // the user, so it reports itself in the same muted register as the lane
+  // headers' "N tidying up" fragment.
+  const tidying = store.postprocessingChats().length
   const needVerb = needs === 1 ? 'needs' : 'need'
   const needText = needs
     ? `${needs} chat${needs === 1 ? '' : 's'} ${needVerb} your attention`
@@ -493,7 +497,10 @@ const homeStatus = computed(() => {
   const workingText = working
     ? `${working} agent${working === 1 ? '' : 's'} still working`
     : 'no agents working'
-  return `${needText}. ${workingText}.`
+  const tidyingText = tidying
+    ? `${tidying} chat${tidying === 1 ? '' : 's'} tidying up`
+    : ''
+  return [needText, workingText, tidyingText].filter(Boolean).join('. ') + '.'
 })
 
 function workspaceLabel(name: string): string {

@@ -63,9 +63,13 @@ Output goes to `ciao/web/static/`, which the runtime build pip-installs as packa
 ### 3. Build the embedded runtime
 
 ```bash
+set -a                # export the pinned vars; the env file does not export them itself
 . scripts/pinned-python-runtime.env
+set +a
 ./scripts/build-bundled-runtime.sh desktop/runtime
 ```
+
+The env file only *sets* variables, it doesn't export them, and the build script runs as a child process — without `set -a` (or explicit exports) it dies at the `CIAO_PYTHON_ARM64_URL is required` guard. (CI avoids this by passing the values via job `env:` instead.)
 
 This downloads both python-build-standalone archives, verifies their SHA-256 against the pinned env, and pip-installs the current repo (backend + PWA assets) into both arch runtimes under `desktop/runtime/`. It is the expensive step; it is also the step that makes the install test the **current** `ciao/` code. It is only skippable when the change being tested touches `desktop/` alone — ask the user before skipping, because a backend or PWA change will not reach the installed app without it.
 
@@ -118,7 +122,11 @@ done
 
 rm -rf "$app_dir/.Ciaobot.app.previous"
 mv "$app_dir/Ciaobot.app" "$app_dir/.Ciaobot.app.previous"
-ditto "$bundle" "$app_dir/Ciaobot.app"
+ditto --noextattr "$bundle" "$app_dir/Ciaobot.app" \
+  || { echo "copy of the new bundle failed; restoring the previous one" >&2
+       rm -rf "$app_dir/Ciaobot.app"
+       mv "$app_dir/.Ciaobot.app.previous" "$app_dir/Ciaobot.app"
+       exit 1; }
 rm -rf "$app_dir/.Ciaobot.app.previous"
 
 engine="$app_dir/Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao"
@@ -194,6 +202,7 @@ Summarize: built commit (`git rev-parse --short HEAD`), install path, workspace 
 ## Notes and traps
 
 - **Never `rm -rf` the installed app before the new one is in place** — use the rename-aside swap; a failed delete can leave a gutted `Ciaobot.app`.
+- **`ditto` needs `--noextattr`** — files in a Tauri bundle carry a `com.apple.provenance` xattr that plain `ditto` cannot re-set, so the copy fails with "Operation not permitted" on hundreds of files (including `Contents/Info.plist`), leaving a half-copied, unlaunchable bundle while the script goes on to delete the `.previous` backup. The snippet above both skips xattrs and checks the copy before removing the backup; if it ever fails mid-swap, the previous bundle is at `$app_dir/.Ciaobot.app.previous` — restore it by renaming it back.
 - **`tauri-plugin-single-instance` makes `open` focus the running instance** — the quit must happen before the swap, or the new binary never launches.
 - **Freshness checks in `ciao/desktop_build.py` do not apply here** — this skill builds unconditionally (it is the point). For shell-only tweaks under `desktop/`, Settings → Restart with `CIAO_DEV_MODE=true` rebuilds just the shell instead; say so when relevant.
 - **The bundle's engine resolution is pinned** (`desktop/src-tauri/src/service.rs`): it prefers `Contents/Resources/ciao-runtime/bin/ciao` over everything else, so a `PATH` `ciao` can never shadow the installed engine — no extra config needed after the swap.

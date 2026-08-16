@@ -5136,6 +5136,13 @@ def _routines_payload(config, app_settings) -> dict:
         # Canonical shape: {provider_id: {tier: model}} for every runtime
         # provider with operator-settable tier pins.
         "provider_routing": s.provider_routing or {},
+        # Per-provider default execution mode for new chats, as stored
+        # (missing = built-in default). Effective defaults below.
+        "provider_default_modes": s.provider_default_modes or {},
+        "provider_default_modes_effective": {
+            item.id: config.default_mode_for_provider(item.id)
+            for item in provider_registry.descriptors()
+        },
         # Flat mirror of the same pins, kept so a client written against the
         # pre-map settings API keeps rendering. PATCH accepts either shape.
         **{

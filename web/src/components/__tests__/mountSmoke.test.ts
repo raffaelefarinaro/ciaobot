@@ -30,6 +30,12 @@ vi.mock('../../lib/api', () => {
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
+    // Built-in defaults: opencode runs in bypass, everyone else auto.
+    provider_default_modes_effective: {
+      claude: 'auto',
+      codex: 'auto',
+      opencode: 'bypass',
+    },
 
     transcription: {
       engine: 'local',
@@ -850,6 +856,7 @@ describe('component mount smoke', () => {
     expect(providerSelect.exists()).toBe(true)
     expect(providerSelect.classes()).toContain('routine-select')
     expect(providerSelect.findAll('option').map((option) => option.text())).toEqual([
+      'Anthropic (via Claude Code)',
       'OpenAI (via Codex)',
       // Registered but with no authenticated backend in this fixture.
       'opencode (not configured)',
@@ -878,6 +885,43 @@ describe('component mount smoke', () => {
       provider_routing: { codex: { haiku: 'gpt-5.6-terra' } },
     })
     expect(wrapper.find('.routing-model-catalog').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('SettingsView saves a per-provider default mode from the routing card', async () => {
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    // The routing card carries a "Default mode" row; the automatic option
+    // names the effective default (opencode -> bypass from the backend).
+    const modeSelect = wrapper.find('.tier-provider-section .routine-select:not(.alias-provider-select)')
+    expect(modeSelect.exists()).toBe(true)
+    const options = modeSelect.findAll('option').map((option) => option.text())
+    expect(options[0]).toBe('Automatic (Auto)')
+
+    await modeSelect.setValue('bypass')
+    await flushPromises()
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      provider_default_modes: { codex: 'bypass' },
+    })
+
+    // Claude joins the provider list with read-only tier inputs, so its
+    // default mode is settable even though its models cannot be re-pinned.
+    const providerSelect = wrapper.find('.alias-provider-select')
+    await providerSelect.setValue('claude')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.findAll('.tier-provider-section .routing-model-input').length).toBe(4)
+    const claudeMode = wrapper.find('.tier-provider-section .routine-select:not(.alias-provider-select)')
+    expect(claudeMode.findAll('option').map((option) => option.text())[0]).toBe('Automatic (Auto)')
 
     wrapper.unmount()
   })

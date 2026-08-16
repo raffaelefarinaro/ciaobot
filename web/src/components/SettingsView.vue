@@ -982,6 +982,23 @@
                     disabled
                   />
                 </label>
+                <label class="settings-field">
+                  <span class="ws-label">Default mode</span>
+                  <select
+                    class="routine-select"
+                    :value="providerModeSelectorValue(selectedTierProviderSection.key)"
+                    :disabled="routinesSaving"
+                    @change="saveProviderMode(selectedTierProviderSection.key, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <option
+                      v-for="option in providerModeOptions(selectedTierProviderSection.key)"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </label>
               </div>
               <p v-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
                 {{ tierProviderUnavailableHint }}
@@ -2792,8 +2809,11 @@ const insightsComparison = ref<InsightsComparison | null>(null)
 
 // Every provider with models or tier pins is a runtime provider now.
 type AliasProviderKey = RuntimeProvider
-type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
-type RoutingProviderKey = Exclude<AliasProviderKey, 'claude'>
+// The Providers tab routing card shows every runtime provider; Claude is
+// included so its default-mode selector lives next to the others, even
+// though its tiers are the aliases themselves and cannot be re-pinned.
+type TierProviderKey = AliasProviderKey
+type RoutingProviderKey = AliasProviderKey
 type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
 type RoutineModelKey = 'title_model' | 'insights_model'
 type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
@@ -2992,6 +3012,15 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
   ).join(','))
   return [
     {
+      key: 'claude',
+      label: 'Anthropic (via Claude Code)',
+      // Claude's tiers are the aliases themselves; nothing to pin. The
+      // section exists so the default-mode selector covers every provider.
+      options: [],
+      configurable: false,
+      available: true,
+    },
+    {
       key: 'codex',
       label: 'OpenAI (via Codex)',
       options: codexModels,
@@ -3110,6 +3139,57 @@ async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: st
   // Effective tiers live in /api/models; refresh so the badges and
   // "Automatic (…)" labels reflect the new pin immediately.
   await fetchWorkspaceModels()
+}
+
+// Per-provider default execution mode for new chats. The stored override
+// lives in RoutineSettings.provider_default_modes; a missing entry falls
+// back to the effective default reported by the backend (opencode → bypass,
+// everyone else → auto). Bypass is what opencode users want from a new chat:
+// its "auto" only passes verifiably read-only shell commands and raises a
+// card for everything else.
+const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
+
+const MODE_LABELS: Record<string, string> = {
+  auto: 'Auto',
+  bypass: 'Bypass',
+  normal: 'Manual',
+  plan: 'Plan',
+}
+
+function providerModeOverride(provider: AliasProviderKey): string {
+  return routines.value?.provider_default_modes?.[provider] || ''
+}
+
+function providerModeEffective(provider: AliasProviderKey): string {
+  return routines.value?.provider_default_modes_effective?.[provider] || 'auto'
+}
+
+function providerModeSelectorValue(provider: AliasProviderKey): string {
+  return providerModeOverride(provider) || DEFAULT_MODE_SELECTION
+}
+
+function providerModeOptions(provider: AliasProviderKey): { value: string; label: string }[] {
+  const effective = providerModeEffective(provider)
+  return [
+    {
+      value: DEFAULT_MODE_SELECTION,
+      label: `Automatic (${MODE_LABELS[effective] || effective})`,
+    },
+    { value: 'auto', label: 'Auto — fewer prompts, classifier approves safe actions' },
+    { value: 'bypass', label: 'Bypass — skip all checks (use in containers only)' },
+    { value: 'normal', label: 'Manual — approve each tool call' },
+    { value: 'plan', label: 'Plan — read-only, propose without acting' },
+  ]
+}
+
+async function saveProviderMode(provider: AliasProviderKey, value: string) {
+  const selected = value === DEFAULT_MODE_SELECTION ? '' : value
+  const modes = JSON.parse(
+    JSON.stringify(routines.value?.provider_default_modes || {}),
+  ) as Record<string, string>
+  if (selected) modes[provider] = selected
+  else delete modes[provider]
+  await saveRoutines({ provider_default_modes: modes })
 }
 
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {

@@ -133,6 +133,36 @@
             </div>
 
           </template>
+
+          <!-- Archived chats the workspace is still tidying up. They are not
+               part of the priority tiers (jump back in means active chats), but
+               the lane header's "N tidying up" count should have rows behind
+               it: opening a row shows the archived transcript, where the same
+               pipeline keeps reporting its live step. -->
+          <div v-if="lane.tidyChats.length" class="home-tier home-tier--tidying">
+            <div class="home-tier-label"><span>tidying up</span></div>
+            <button
+              v-for="chat in lane.tidyChats"
+              :key="`tidy-${chat.chat_id}`"
+              type="button"
+              class="home-chat-item home-chat-item--tidying"
+              :data-workspace-color="colorOf(chat)"
+              :disabled="!chat.archive_path"
+              :title="chat.archive_path ? 'Open the archived transcript' : chat.title"
+              @click="chat.archive_path && fileViewer.open(chat.archive_path)"
+            >
+              <span class="home-chat-heading">
+                <span class="home-chat-title">{{ chat.title }}</span>
+              </span>
+              <span class="home-chat-meta">
+                <span class="home-chat-tidy-note">
+                  <span class="home-chat-tidy-dot" aria-hidden="true" />
+                  {{ postprocessLabel(store.chatPostprocess(chat.chat_id)) }}…
+                </span>
+                <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
+              </span>
+            </button>
+          </div>
         </div>
       </section>
     </div>
@@ -144,9 +174,10 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo, WorkspaceName } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
-import { tidyingSummary } from '../lib/postprocessView'
+import { postprocessLabel, tidyingSummary } from '../lib/postprocessView'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
+import { useFileViewerStore } from '../stores/fileViewer'
 import ChatSignals from './ChatSignals.vue'
 
 type NewWorkspaceChatAction = { workspace: string; projectId: string; isCreating: boolean }
@@ -156,6 +187,7 @@ const emit = defineEmits<{
 }>()
 
 const store = useProjectStore()
+const fileViewer = useFileViewerStore()
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
 const openProjectLane = ref<string | null>(null)
@@ -181,6 +213,7 @@ interface HomeLane {
   newAction: NewWorkspaceChatAction | null
   projects: ProjectInfo[]
   tiers: HomeTiers
+  tidyChats: ChatInfo[]
 }
 
 const lanes = computed<HomeLane[]>(() => {
@@ -252,6 +285,11 @@ function makeLane(
       chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
+    tidyChats: workspace && workspace !== 'unknown'
+      ? store.postprocessingChats().filter(
+          chat => store.projectFor(chat.chat_id)?.workspace === workspace,
+        )
+      : [],
   }
 }
 
@@ -303,11 +341,11 @@ function laneSummaryRest(lane: HomeLane): string {
   return parts.join(' · ')
 }
 
-// Chats this workspace is still tidying up after archiving them. Deliberately
-// only a count: the chats themselves are archived and must not reappear in
-// "jump back in", or archiving would stop meaning anything. Counted from the
-// store rather than the lane's tiers for exactly that reason — the lane holds
-// active chats only.
+// Chats this workspace is still tidying up after archiving them. The chats
+// themselves stay out of the priority tiers — archiving must keep meaning —
+// but they are listed in the lane's own "tidying up" tier below quiet, so the
+// count always has rows behind it. Counted from the store rather than the
+// lane's tiers for exactly that reason: the lane holds active chats only.
 function laneTidyCount(lane: HomeLane): number {
   if (!lane.workspace || lane.workspace === 'unknown') return 0
   return store.workspacePostprocessingCount(lane.workspace as WorkspaceName)
@@ -689,7 +727,8 @@ watch(() => store.activeWorkspace, async () => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .home-lane-tidy-dot { animation: none; opacity: 0.75; }
+  .home-lane-tidy-dot,
+  .home-chat-tidy-dot { animation: none; opacity: 0.75; }
 }
 
 .home-lane-new {
@@ -899,7 +938,8 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-chat-item--unread,
 .home-chat-item--quiet,
-.home-chat-item--older {
+.home-chat-item--older,
+.home-chat-item--tidying {
   flex-direction: row;
   align-items: center;
   gap: 8px;
@@ -914,7 +954,8 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-chat-item--unread:hover,
 .home-chat-item--quiet:hover,
-.home-chat-item--older:hover {
+.home-chat-item--older:hover,
+.home-chat-item--tidying:hover {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
@@ -930,7 +971,8 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-chat-item--unread .home-chat-heading,
 .home-chat-item--quiet .home-chat-heading,
-.home-chat-item--older .home-chat-heading {
+.home-chat-item--older .home-chat-heading,
+.home-chat-item--tidying .home-chat-heading {
   flex: 1;
   align-items: center;
 }
@@ -955,7 +997,8 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-chat-item--unread .home-chat-title,
 .home-chat-item--quiet .home-chat-title,
-.home-chat-item--older .home-chat-title {
+.home-chat-item--older .home-chat-title,
+.home-chat-item--tidying .home-chat-title {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1007,6 +1050,28 @@ watch(() => store.activeWorkspace, async () => {
   color: var(--fg3);
   font-family: var(--font-mono);
   white-space: nowrap;
+}
+
+/* Live step of a post-archive pipeline ("extracting insights…"). Muted like
+   the lane header's tidy fragment: this is background work, never a demand. */
+.home-chat-tidy-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-chat-tidy-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--fg3);
+  vertical-align: middle;
+  animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
 }
 
 .remote-chip {

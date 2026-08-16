@@ -2581,18 +2581,13 @@ const showThinkingLevels = computed(() => {
   return !isFableSelection(chat.value?.model, chat.value?.thinking_level)
 })
 
-// Thinking level for the header chip. An empty thinking_level is a real,
-// selectable state — the picker renders it as "auto" (let the provider decide)
-// — so the chip has to name it too. Omitting the segment made "no level set"
-// indistinguishable from "the chip doesn't report levels". Blank only when the
-// model exposes no levels at all (e.g. Fable), where the segment is noise; a
-// level that is somehow set is always shown even then.
+// Thinking level for the header chip. An empty thinking_level means the user
+// left it at the provider default ("auto"), which the chip does not report —
+// only an explicitly chosen level gets a segment. "think:" keeps this segment
+// apart from the mode segment, whose default value is also "auto".
 const chipThinkingLabel = computed(() => {
   const level = chat.value?.thinking_level || ''
-  // "think:" keeps this segment apart from the mode segment, whose default
-  // value is also "auto".
-  if (level) return `think:${level}`
-  return showThinkingLevels.value ? 'think:auto' : ''
+  return level ? `think:${level}` : ''
 })
 
 // The permission mode (auto/bypass/manual/plan) decides whether tool calls

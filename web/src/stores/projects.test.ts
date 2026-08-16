@@ -1920,6 +1920,19 @@ describe('background agents indicator', () => {
   })
 })
 
+describe('postprocessingChats (home tidying list)', () => {
+  test('lists only chats whose pipeline is still running, newest archive first', () => {
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'c-done', project_id: 'p1', title: 'Settled', archived: true, postprocess: { state: 'done', step: 'insights', steps: {} } },
+      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'insights', expected: [], steps: {} } },
+      { chat_id: 'c-fresher', project_id: 'p1', title: 'Fresher', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'running', step: 'memory_proposals', expected: [], steps: {} } },
+      { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
+    ] as unknown as typeof store.chats
+    expect(store.postprocessingChats().map(c => c.chat_id)).toEqual(['c-fresher', 'c-running'])
+  })
+})
+
 describe('chat_streaming_done clears stale streaming for inactive chats', () => {
   test('an inactive chat finishing clears its orphaned local streaming flag', () => {
     apiGet.mockResolvedValue([])

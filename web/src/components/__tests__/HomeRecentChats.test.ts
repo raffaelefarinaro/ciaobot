@@ -6,6 +6,7 @@ import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import { useFileViewerStore } from '../../stores/fileViewer'
 
 function timestamp(secondsAgo: number): string {
   return new Date(Date.now() - secondsAgo * 1000).toISOString()
@@ -110,6 +111,62 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(labels).toContain('needs you')
     expect(labels).toContain('working')
     expect(labels.some(l => l === l.toUpperCase() && /[A-Z]/.test(l))).toBe(false)
+  })
+
+  it('lists archived chats being tidied in their lane with the live step', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'tidy', project_id: 'work-project', title: 'Archived work chat',
+        created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
+        archived: true, local: true, archive_path: 'archive/tidy.md',
+        postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+      },
+      {
+        chat_id: 'tidy-no-file', project_id: 'personal-project', title: 'Archived without file',
+        created_at: timestamp(600), last_activity_at: timestamp(600), last_read_at: timestamp(600),
+        archived: true, local: true,
+        postprocess: { state: 'running', step: 'project_doc_update', expected: [], steps: {} },
+      },
+    ] as unknown as typeof store.chats
+    const viewer = useFileViewerStore()
+    const openSpy = vi.spyOn(viewer, 'open').mockResolvedValue(true)
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    // Each lane carries its own tidying tier, and the header count has rows
+    // behind it.
+    const workLane = wrapper.find('[data-lane-key="work"]')
+    const tidyRows = workLane.findAll('.home-tier--tidying .home-chat-item')
+    expect(tidyRows).toHaveLength(1)
+    expect(workLane.find('.home-tier--tidying .home-tier-label').text()).toBe('tidying up')
+    expect(tidyRows[0].find('.home-chat-title').text()).toBe('Archived work chat')
+    expect(tidyRows[0].text()).toContain('extracting insights')
+    expect(workLane.find('.home-lane-summary').text()).toContain('1 tidying up')
+
+    const personalLane = wrapper.find('[data-lane-key="personal"]')
+    const noFileRow = personalLane.find('.home-tier--tidying .home-chat-item')
+    expect(noFileRow.exists()).toBe(true)
+    expect(noFileRow.text()).toContain('folding into project doc')
+    // A tidying chat without an archive file has nothing to open.
+    expect((noFileRow.element as HTMLButtonElement).disabled).toBe(true)
+
+    // Archived chats stay out of the priority tiers; the tidying row lives
+    // only under the lane's own tidying tier.
+    const priorityTitles = wrapper.findAll(
+      '.home-tier--needsYou .home-chat-title, .home-tier--working .home-chat-title, .home-tier--unread .home-chat-title, .home-tier--quiet .home-chat-title',
+    ).map(n => n.text())
+    expect(priorityTitles).not.toContain('Archived work chat')
+    expect(priorityTitles).not.toContain('Archived without file')
+
+    // Clicking a row opens the archived transcript in the file viewer.
+    await tidyRows[0].trigger('click')
+    expect(openSpy).toHaveBeenCalledWith('archive/tidy.md')
+    wrapper.unmount()
   })
 
   it('keeps vertical motion within a lane and horizontal motion across lanes', async () => {

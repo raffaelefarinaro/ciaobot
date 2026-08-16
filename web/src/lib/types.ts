@@ -547,6 +547,11 @@ export interface RoutineSettings {
   // rather than the flat keys below. Effective values come from /api/models
   // (alias_tiers.<provider>).
   provider_routing?: Record<string, Record<string, string>>
+  // Per-provider default execution mode for new chats (Settings → Providers).
+  // Missing entry = built-in default (opencode → bypass, others → auto).
+  provider_default_modes?: Record<string, string>
+  // Resolved effective default mode per provider, after built-in defaults.
+  provider_default_modes_effective?: Record<string, string>
   // Flat mirror of the same Codex pins, still emitted and accepted for
   // clients written before provider_routing existed.
   codex_haiku_model: string

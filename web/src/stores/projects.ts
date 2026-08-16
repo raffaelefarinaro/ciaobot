@@ -650,6 +650,18 @@ export const useProjectStore = defineStore('projects', () => {
     ).length
   }
 
+  // Archived chats still being tidied, newest archive first. Same predicate as
+  // workspacePostprocessingCount so the lane rows always add up to the lane's
+  // "N tidying up" count. Archived chats are excluded from activeChatsAll, so
+  // this is the one path that surfaces them while the pipeline runs.
+  function postprocessingChats(): ChatInfo[] {
+    return chats.value
+      .filter(c => isPostprocessing(c.postprocess))
+      .sort((a, b) =>
+        (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at),
+      )
+  }
+
   function projectPostprocessingCount(projectId: string): number {
     return chats.value.filter(
       c => c.project_id === projectId && isPostprocessing(c.postprocess),
@@ -4307,7 +4319,7 @@ export const useProjectStore = defineStore('projects', () => {
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
     chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, clearUnread, markRead, markAllRead,
     recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
-    chatPostprocess, chatIsPostprocessing, workspacePostprocessingCount, projectPostprocessingCount,
+    chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
