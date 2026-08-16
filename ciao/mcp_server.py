@@ -892,8 +892,39 @@ class CiaoMcpService:
 
             return await self._invoke("context_get", _op)
 
-        # Bounded memory is edited in CLAUDE.md regions; MCP only keeps the
-        # proposal-review flow (dismiss after the agent Edits the region).
+        # Bounded memory remains in CLAUDE.md. These tools expose usage and a
+        # small typed edit path for providers that cannot reliably express an
+        # in-file edit; they never create a second memory store.
+        @tool(name="memory_status", annotations=_READ, structured_output=True)
+        async def memory_status() -> dict[str, Any]:
+            """Report bounded native-guide memory usage and diagnostics."""
+            return await self._invoke("memory_status", lambda cp, p: cp.memory_status(p))
+
+        @tool(name="memory_update", annotations=_WRITE, structured_output=True)
+        async def memory_update(
+            region: str,
+            action: str,
+            entry: str = "",
+            match: str = "",
+        ) -> dict[str, Any]:
+            """Add, replace, or remove one entry in native CLAUDE.md memory.
+
+            ``region`` is ``memory`` or ``profile``. Use ``match`` for
+            replace/remove; use ``entry`` for add/replace. The operation
+            enforces the configured bounded-region limit.
+            """
+            return await self._invoke(
+                "memory_update",
+                lambda cp, p: cp.memory_update(
+                    p,
+                    region,
+                    action=action,  # type: ignore[arg-type]
+                    entry=entry,
+                    match=match,
+                ),
+                mutating=True,
+            )
+
         @tool(name="memory_proposals_list", annotations=_READ, structured_output=True)
         async def memory_proposals_list() -> dict[str, Any]:
             """List reviewable memory proposals produced from archived chats."""

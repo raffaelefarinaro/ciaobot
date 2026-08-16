@@ -463,6 +463,7 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
         json={
             "password": "wizard-pass",
             "workspace": str(ws),
+            "workspace_name": "journal",
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
             "app_dir": str(tmp_path / "Applications"),
         },
@@ -476,6 +477,7 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
     registry = json.loads(
         (ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
     )
+    assert registry[0]["name"] == "journal"
     assert registry[0]["vault_root"] == "."
 
     loaded = CiaoConfig.from_env(
@@ -483,11 +485,14 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
             "PWA_AUTH_TOKEN": "test-token",
             "CIAO_WORKSPACE": str(ws),
             "CIAO_VAULT_ROOT": ".",
+            "CIAO_WORKSPACES": json.dumps(
+                [{"name": "journal", "vault_root": "."}]
+            ),
             "CIAO_RUNTIME_ROOT": str(ws / ".runtime"),
             "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
         }
     )
-    assert loaded.workspace_vault_root("personal") == ws
+    assert loaded.workspace_vault_root("journal") == ws
 
 
 def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:

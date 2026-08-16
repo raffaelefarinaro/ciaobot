@@ -46,14 +46,14 @@
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
-            <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
+            <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
               <div class="empty-home-header">
-                <!-- With chats on screen the mark is decoration beside a status line, so it
+                <!-- With active chats or post-archive work on screen the mark is decoration beside a status line, so it
                      is a plain image: no button, no hover handlers, no greeting bubble. The
                      bubble belongs to the big first-run face below, where it is the only
                      thing on the screen and has room to be a greeting. Next to a sentence
                      that already reads "nothing needs you" it just collided with it. -->
-                <template v-if="store.activeChatsAll.length">
+                <template v-if="hasHomeActivity">
                   <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
                   <span class="empty-status-text">{{ homeStatus }}</span>
                 </template>
@@ -132,14 +132,14 @@
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
           <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
-          <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
+          <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
             <div class="empty-home-header">
-              <!-- With chats on screen the mark is decoration beside a status line, so it
+              <!-- With active chats or post-archive work on screen the mark is decoration beside a status line, so it
                    is a plain image: no button, no hover handlers, no greeting bubble. The
                    bubble belongs to the big first-run face below, where it is the only
                    thing on the screen and has room to be a greeting. Next to a sentence
                    that already reads "nothing needs you" it just collided with it. -->
-              <template v-if="store.activeChatsAll.length">
+              <template v-if="hasHomeActivity">
                 <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
                 <span class="empty-status-text">{{ homeStatus }}</span>
               </template>
@@ -457,6 +457,13 @@ const currentProjectId = computed(() => {
 // spent on something non-blocking, which the design system reserves for
 // "needs the user".
 const showGlobalNewChatActions = computed(() => !store.activeChatsAll.length)
+
+// Keep Home visibly alive while an archived chat is still being processed.
+// Post-archive work is not part of activeChatsAll, but it is still something
+// the home surface should report before the user starts a new chat.
+const hasHomeActivity = computed(() => (
+  store.activeChatsAll.length > 0 || store.postprocessingChats().length > 0
+))
 
 const generalWorkspaceActions = computed(() => {
   return store.workspaceOptions

@@ -114,6 +114,8 @@ MCP_SERVER_NAME = "ciaobot"
 
 AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "context_get",
+    "memory_status",
+    "memory_update",
     "memory_proposals_list",
     "memory_proposal_resolve",
     "vault_search",

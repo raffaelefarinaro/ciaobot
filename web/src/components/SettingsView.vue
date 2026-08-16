@@ -1,5 +1,9 @@
 <template>
   <div class="settings-pane">
+    <UpdateProgressView
+      v-if="packageUpdating"
+      :version="packageStatus?.latest_version"
+    />
     <PaneHeader page-tag="settings" @open-sidebar="emit('open-sidebar')" />
     <div class="pane-body">
 
@@ -100,7 +104,7 @@
               <span>Decrease the font size</span>
             </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
-            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
+            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats; stacked workspaces use up/down between lanes</span></li>
             <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
           </ul>
         </div>
@@ -2317,6 +2321,7 @@ import { askConfirm } from '../lib/confirm'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import PaneHeader from './PaneHeader.vue'
+import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
 import { providerModelBadges, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'

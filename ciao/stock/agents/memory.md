@@ -23,10 +23,10 @@ Routing — where a durable fact belongs (decide by scope, not convenience):
 
 When consolidating, MOVE any project-scoped entry you find in a region out to its owning project's canonical doc rather than deleting it.
 
-Regions are char-capped (~2200 memory / ~1375 profile) because they are injected into every Claude/Codex system prompt — keep them small and high-signal:
-- Each injected section header already carries `used/limit/pct`. That is the only usage signal; there is no memory command.
+Regions are char-capped (~2200 memory / ~1375 profile) because native provider guide loaders read them at session start — keep them small and high-signal:
+- Check usage with `memory_status` (or the Settings context view); the native guide is the source of truth and memory is not copied into a second prompt database.
 - At/above ~85%, consolidate BEFORE adding: merge related entries and drop stale one-off corrections with no reuse value.
-- Edit regions with `Edit`. Nothing enforces the cap at write time — the cap is your responsibility.
+- Edit regions with `Edit`, or use the typed `memory_update` tool. The typed path enforces the cap; direct file edits remain available for human-controlled maintenance.
 - Never drop a durable fact because a region is full — make room by consolidating, or leave it in the proposals queue.
 - When promoting from proposals: edit the region first, then dismiss with `memory_proposal_resolve` (the reverse can lose the fact).
 - When promoting a correction, write the present-tense standing rule it implies; never copy a "User said X -> assistant did Y" event shape into a region (memory-audit flags those as rot).

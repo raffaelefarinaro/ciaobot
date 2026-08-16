@@ -38,3 +38,14 @@ Use plain, factual engineering notes in commits and pull requests.
   gh issue create --repo raffaelefarinaro/ciaobot --title "[Agent] Brief summary of the issue" --body "Detailed description of the problem, reproducing steps, relevant code locations, and logs."
   ```
 - This helps maintain a continuous loop of improvements for the open-source repository.
+
+
+<!-- ciao:memory:start cap=2200 -->
+## Agent memory
+
+<!-- ciao:memory:end -->
+
+<!-- ciao:profile:start cap=1375 -->
+## User profile
+
+<!-- ciao:profile:end -->

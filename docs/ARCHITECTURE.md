@@ -6,7 +6,7 @@ Orientation doc for the codebase. Read this before making any change in `ciao/`,
 
 ```
 README.md                      Product intro, quickstart, doc index.
-CLAUDE.md / AGENTS.md          Contributor guide for coding agents. Loaded every prompt.
+CLAUDE.md / AGENTS.md          Contributor guide for coding agents. Native providers load it at session start.
 INTEGRATIONS.md                Operator config (env vars, OAuth, MCP connectors, server runtime knobs).
 PWA_API.md                     PWA API reference (endpoints, auth flow, state path).
 CONTRIBUTING.md                Contribution guide.
@@ -23,8 +23,8 @@ ciao/                          Python backend (Starlette).
     codex.py                   Persistent Codex app-server adapter, model/account discovery, approvals, questions, history.
     opencode.py                opencode provider over per-chat `opencode serve` (ephemeral loopback port, scoped MCP token, OpenAPI-fail-closed readiness, `steer=false`).
     oneshot.py                 Single-turn provider call (max_turns=1, no tools). Used by critique.py and routine-model automations.
-  context/                     Per-turn context injection (workspace, project, vault hints).
-  observability/               Hooks: PreToolUse (keep Claude Bash jobs in the active turn) and UserPromptSubmit (runtime context + vault entity tags). Plus logging, transcript capture.
+  context/                     Provider-neutral per-turn context capsule (workspace, project, vault hints, retrieval routing).
+  observability/               Hooks: PreToolUse keeps Claude Bash jobs in the active turn. Runtime/entity context is built once in the request capsule.
   schedules.py                 Cron-style schedule dispatch.
   loops.py                     In-chat loops: re-dispatch a prompt into a fixed chat every N minutes.
   background.py                Background command runs: one command per run in a tracked subprocess (`create_subprocess_exec`, never a shell), output to a rotating `.runtime/background/<run_id>.log`, registry in `.runtime/background/state.json`. Backs the `background_run_*` MCP tools; completions wake the owning chat through `ProjectChatManager`.
@@ -78,8 +78,8 @@ ciao/                          Python backend (Starlette).
   skills_sync.py               Change-detect upstream skills in skills-lock.json so `ciao sync-skills` updates only moved repos. CLI: `ciao skills-sync`.
   cleanup_sdk_blobs.py         Maintenance: drop archived Claude SDK JSONL blobs. CLI: `ciao cleanup-sdk-blobs`.
   label_hygiene.py             Audit open GitHub issue labels against the title-prefix convention in `ciao/system_prompt.md` and add missing classification labels. Pure decision function (`plan_label_actions`) separated from the `gh`-shelling side-effecting layer; only ever adds a label, never removes one; idempotent. `[Agent]` and unrecognized/retired prefixes (e.g. `[Report]`) are reported for human decision, not auto-labeled. CLI: `ciao label-hygiene` (dry-run by default, `--apply` writes, `--json` for automation). Not yet wired to a schedule or loop.
-  memory_injector.py           Read the fenced `ciao:memory` / `ciao:profile` regions from the workspace CLAUDE.md at session start, render as a system-prompt block; also injects the baseline Ciaobot system instructions into every chat.
-  memory_tool.py               Bounded memory regions: locate/read/diagnose the fenced markers in CLAUDE.md, and the one-time legacy `~/.ciao/*.md` migration. No CLI or control-plane write surface; the agent edits regions with `Edit`.
+  memory_injector.py           Loads the compact Ciaobot core for provider system prompts; native Claude/Codex/OpenCode guide loaders remain the sole source of bounded memory.
+  memory_tool.py               Bounded memory regions: locate/read/diagnose, atomically prune expired entries, report usage, and apply typed bounded edits in CLAUDE.md; also owns one-time legacy migration.
   memory_proposals.py          Scan archived `## Session insights` sections, propose memory entries to the vault's Workspace/Memory-Proposals.md.
   project_doc_update.py        Archive-time canonical project doc updates from session insights (Decisions and Open loops).
   public_release.py            Public extraction allowlist, export copier, and private-data preflight scanner. CLI: `ciao public-preflight export <src> <dest>` then `ciao public-preflight scan <export-root> --private-patterns <file>`.
@@ -195,7 +195,10 @@ bytes into the active project on the host. This does not add a native command
 or general filesystem capability to the remote page. If the engine is unavailable
 at launch, the main window shows a bundled, capability-free recovery page,
 requests a service start through `ciao desktop-service`, and navigates to the
-PWA after the tray health poll observes recovery. `ciao/instance_lock.py`
+PWA after the tray health poll observes recovery. A second bundled
+`startup.html` window is kept hidden for the native update flow: the tray shows
+it before replacing the engine/app, then streams milestone progress and
+collapsible terminal details through a local browser event. `ciao/instance_lock.py`
 holds `.runtime/server.lock` for the engine process lifetime, so a normal
 server and `ciao dev` cannot run against the same registry concurrently.
 Project/chat writes use a short-lived registry lock, merge field-level local
@@ -208,7 +211,7 @@ when a surviving provider session or a non-deleted audit record proves they
 were active. Explicit deletion clears provider state, normalized transcripts,
 and session state so recovery cannot revive it.
 
-Chat transcripts are streamed via WebSocket and archived to `Logs/Chats/<chat-id>/<provider>/` under the vault root (`transcripts.py`). Archive, delete, and new-session reclaim provider-side storage: Claude SDK JSONL blobs via `delete_session`, Codex threads via app-server `thread/delete` (fail-open). Archived `/messages` falls back to the vault markdown when the provider session is gone. The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
+Chat transcripts are streamed via WebSocket and archived to `Logs/Chats/<chat-id>/<provider>/` under the vault root (`transcripts.py`). Archive, delete, and new-session reclaim provider-side storage: Claude SDK JSONL blobs via `delete_session`, Codex threads via app-server `thread/delete`, and OpenCode sessions via `DELETE /session/{id}` (all fail-open so a provider outage cannot prevent the durable Ciaobot archive). Archive cleanup disconnects the live provider before reclaiming its session and includes prior session IDs created by rotation. Archived `/messages` falls back to the vault markdown when the provider session is gone. The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
 
 The same server embeds a Streamable HTTP MCP endpoint at `/mcp/`.
 `CiaoControlPlane` wraps the existing project/chat, schedule, loop,
@@ -290,7 +293,23 @@ In the same archive hook, `ciao/trajectory_builder.py` writes a structured traje
 
 Each session injects a bounded memory layer at the top of the system prompt for Claude and Codex: the fenced `ciao:memory` and `ciao:profile` regions in the workspace `CLAUDE.md` are rendered as a labeled block by `ciao/memory_injector.py`. Caps are advisory (`CIAO_MEMORY_CHAR_LIMIT` / `CIAO_USER_CHAR_LIMIT`); `os_audit` reports over-cap, oversize, duplicate, and invisible-Unicode issues, and nightly curation consolidates. There is no `ciao memory` CLI and no control-plane memory CRUD — the agent edits the regions with `Edit`. The embedded Ciaobot MCP surface only lists and dismisses reviewable proposals (`memory_proposals_list`, `memory_proposal_resolve`); promotion is an explicit region Edit first, then dismiss. A bounded entry tagged `[expires: YYYY-MM-DD]` remains active through that date, then is omitted from later prompt snapshots. The stored entry still counts against its region's character budget until daily memory curation removes it. Curation removes only entries with valid, passed dates and reports malformed tags instead of guessing. `ciao/memory_proposals.py` mines archived `## Session insights` into the vault's `Workspace/Memory-Proposals.md` for human or next-session promotion (rare "User corrections" auto-promote into the matching region at archive time — only state-shaped text is written: the extraction prompt's "Durable rule:" clause or a bullet that passes the event-shape audit; event-shaped bullets stay queued for the curator). Daily memory curation also appends durable learnings to the vault's `Workspace/Learnings.md`. Startup `ensure_regions` + legacy `~/.ciao/memory.md`/`user.md` migration folds old files into the regions once. Region contents are git-tracked with the workspace.
 
-The server registers Claude SDK hooks in `ciao/observability/hooks.py`. `UserPromptSubmit` injects today's date, the per-turn `CIAO_ACTIVE_WORKSPACE`, GWS profile, and any vault entities mentioned in the prompt; entity matching is index-backed via `INDEX.md` under the vault root and is scoped to the active workspace plus `shared/...` roots. A `PreToolUse` hook rewrites only Claude `Bash` calls with `run_in_background: true` to run in the foreground. The managed SDK CLI owns background shell processes and stops them when the turn ends, while their terminal notification is delayed until a later turn resumes the session. Keeping these calls in the active turn makes the real shell result part of the same streamed response.
+The current provider-memory contract supersedes the older description above:
+the workspace `CLAUDE.md`/`AGENTS.md` guide is loaded natively by each provider
+and is the only bounded-memory source. `memory_injector.py` supplies only the
+compact Ciaobot core; it does not render `ciao:memory` or `ciao:profile` into a
+second prompt block. `provider_service.py` prunes valid expired entries before
+provider startup, and the typed MCP `memory_status`/`memory_update` operations
+write the same guide rather than maintaining a parallel store.
+
+The server registers a Claude `PreToolUse` hook in `ciao/observability/hooks.py`.
+It rewrites only Claude `Bash` calls with `run_in_background: true` to run in
+the foreground. Runtime, workspace, project, retrieval, and vault-entity
+context is built once by `ciao/context/capsule.py` and prepended to the request
+for all three providers; a second Claude `UserPromptSubmit` injection is
+intentionally not installed. The managed SDK CLI owns background shell
+processes and stops them when the turn ends, while their terminal notification
+is delayed until a later turn resumes the session. Keeping these calls in the
+active turn makes the real shell result part of the same streamed response.
 
 ## Schedules and background automation
 
@@ -322,7 +341,7 @@ Anything the three providers do not serve directly is reached through opencode, 
 
 `web/` is a Vue 3 + Vite + Pinia + TypeScript PWA. The hierarchy is workspace → project → chat. Configured logical workspaces live in `CiaoConfig.workspaces` (loaded from `CIAO_WORKSPACES`, `.runtime/workspaces.json`, or legacy personal/work defaults) and are exposed through `GET /api/workspaces`. Each workspace may set an optional `color` accent preset (`pink` default, plus `cyan` / `amber` / `emerald` / `violet`); the PWA applies it as accents only when that workspace is active. The Pinia project store loads that endpoint; the sidebar workspace switcher and empty-state General chat buttons render from the configured workspace list. Backend project discovery, completion, restore, schedule routing, spawned-agent `GWS_PROFILE`, and `CIAO_ACTIVE_WORKSPACE` also read from the workspace registry. The model picker has one section per provider: Anthropic (via Claude Code), OpenAI Codex, and opencode.
 
-Primary navigation uses native button/link semantics with visible keyboard focus, and mobile controls keep a 44px minimum target. Browser zoom remains enabled; Settings font scaling is an additional preference rather than a replacement for platform accessibility controls. In ChatLayout, unmodified number keys `1`–`9` switch to the corresponding workspace in the sidebar's displayed order; the shortcut is ignored while typing and the workspace buttons show their assigned key. The sidebar independently discloses each supervisor's delegate subchats inside an expanded project, while selecting a delegate reopens its parent group. Automation details preserve their title on narrow screens by moving secondary actions into an overflow menu, collapse long prompt previews, and explain stale project/chat targets without exposing raw runtime IDs.
+Primary navigation uses native button/link semantics with visible keyboard focus, and mobile controls keep a 44px minimum target. Browser zoom remains enabled; Settings font scaling is an additional preference rather than a replacement for platform accessibility controls. In ChatLayout, unmodified number keys `1`–`9` switch to the corresponding workspace in the sidebar's displayed order; the shortcut is ignored while typing and the workspace buttons show their assigned key. On the home screen, arrow navigation follows the rendered lane layout: stacked workspace lanes use up/down between lanes and left/right within a lane, while side-by-side lanes use the corresponding horizontal/vertical mapping. The sidebar independently discloses each supervisor's delegate subchats inside an expanded project, while selecting a delegate reopens its parent group. Automation details preserve their title on narrow screens by moving secondary actions into an overflow menu, collapse long prompt previews, and explain stale project/chat targets without exposing raw runtime IDs.
 
 Each workspace has a "General" project plus auto-discovered projects from its configured `vault_root/projects/active/`. Chats stream over WebSocket; voice recording captures audio and previews before transcribing; image uploads and pending comments are scoped to the active chat, then attached to that chat's next prompt. Closing an unused new chat deletes its server-side draft; closing a completed chat disconnects it, and reopening it requests an ephemeral Apple Intelligence orientation summary that disappears on the first new send. A non-image file dropped into a host chat uses a desktop-exposed absolute path when available; a client drop (or a sandboxed host browser without that path) uploads into the active project folder on the host and inserts the returned absolute host path. Pinned files are scoped per-chat (persisted in local storage, falling back to project scope if no active chat exists) and render in a split layout sidebar. Commenting in that sidebar stays open while a turn streams — the comment simply rides on the next message — and the panel's auto-reload at turn end is deferred while a text edit or comment draft is open, then applied once the user saves or cancels.
 

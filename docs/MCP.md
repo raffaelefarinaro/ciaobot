@@ -122,13 +122,13 @@ telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog contains 44 explicit tools. The MCP `tools/list` response is the
+The catalog contains 46 explicit tools. The MCP `tools/list` response is the
 live list, so clients do not need to infer it from documentation. The catalog
 holds *capabilities* — orchestration and search that a shell can't cheaply
 replicate. Plain plumbing that the managed Claude Code/Codex session can do
 with its own shell and filesystem is not duplicated as an MCP tool:
 
-- **Bounded memory** → Edit the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. MCP only lists/dismisses proposals (`memory_proposals_list`, `memory_proposal_resolve`).
+- **Bounded memory** → The native source remains the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. Use `memory_status` for usage, `memory_update` for a typed bounded edit, and the proposal tools for review/dismissal.
 - **Vault maintenance** → `ciao index` (index refresh) and `ciao lint`.
   `vault_search` stays — it wraps a maintained FTS5 index a file tool can't
   replicate.
@@ -152,7 +152,7 @@ an in-place new session, `schedule_action`, `loop_action`).
 | Domain | Tools |
 |---|---|
 | Context | `context_get` (includes `system` status) |
-| Bounded memory | `memory_proposals_list`, `memory_proposal_resolve` |
+| Bounded memory | `memory_status`, `memory_update`, `memory_proposals_list`, `memory_proposal_resolve` |
 | Vault | `vault_search` |
 | Projects | `projects_list`, `project_get`, `project_create`, `project_update`, `project_complete`, `project_restore`, `project_delete`, `project_files_list` |
 | Workspaces | `workspaces_list`, `workspace_create`, `workspace_update`, `workspace_delete` |
@@ -221,15 +221,11 @@ MCP replaces transport recipes, not behavioral knowledge.
 - Provider and integration skills—Google Workspace, research, document
   authoring, role/persona workflows—remain useful because MCP does not encode
   those domain decisions.
-- The legacy CLI/curl/direct-JSON recipes have been removed from the default
-  generated prompt and the Ciaobot-owned skills. They now survive only in the
-  base `ciao/system_prompt.md`, which feeds the hidden legacy fallback, so the
-  fallback path still carries CLI references. They can be deleted entirely only
-  after every supported provider has a decisive MCP result and the rollback
-  window has passed.
-- A minimal system prompt always remains: security/approval rules, workspace
-  identity, memory semantics, project context, and cross-provider behavior are
-  application policy rather than tool descriptions.
+- The default generated prompt is intentionally compact. Provider-native guides
+  still load from `CLAUDE.md`/`AGENTS.md`; the Ciaobot core carries only
+  security/approval, workspace routing, memory semantics, retrieval, and
+  cross-provider behavior. Detailed URL, GWS, issue, and artifact procedures
+  live in skills, while the typed MCP catalog owns application operations.
 
 ## Validation status
 

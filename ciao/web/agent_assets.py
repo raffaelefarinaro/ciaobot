@@ -710,8 +710,9 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
         id="ciaobot-system-prompt",
         title="Ciaobot system prompt append",
         description=(
-            "Generated Ciaobot instructions appended at session start (all providers). "
-            "Bounded memory files are listed separately below."
+            "Generated compact Ciaobot core shared by Claude, Codex, and OpenCode. "
+            "Native CLAUDE.md/AGENTS.md instructions and memory are loaded by each "
+            "provider separately; bounded memory files are listed below."
         ),
         source="generated",
         path=_relative_or_absolute(system_prompt_path, root),
