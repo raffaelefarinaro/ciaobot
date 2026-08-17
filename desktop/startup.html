@@ -8,158 +8,144 @@
   </head>
   <body data-window="startup">
     <main class="startup" id="startup-screen">
+      <!-- Engine unreachable: boot-style waiting state. -->
       <section class="startup-state startup-state--waiting" id="waiting-state">
-        <div class="startup-mark" aria-hidden="true">›</div>
-        <p class="eyebrow">Ciaobot</p>
-        <h1>Waiting for the engine</h1>
-        <p>Ciaobot will open automatically when the local engine is ready.</p>
-        <p class="hint">
+        <div class="startup-head">
+          <span class="wordmark" aria-label="Ciaobot">ciaobot</span>
+          <span class="startup-version">waiting · engine</span>
+        </div>
+
+        <div class="startup-progress" aria-label="Waiting for the engine">
+          <span class="startup-progress-track">░░░░░░░░░░░░░░░░░░░░░░░░░░░░</span>
+          <span class="startup-progress-pct">…</span>
+        </div>
+
+        <p class="startup-hint">
+          Ciaobot will open automatically when the local engine is ready.
           If this screen remains, update the Ciaobot engine and choose
           <strong>Start Engine</strong> from the menu-bar icon.
         </p>
-        <div class="startup-progress" aria-label="Waiting for engine"></div>
+
+        <div class="startup-foot">
+          <span class="startup-prompt">$</span>
+          <span class="startup-prompt-text">waiting</span>
+          <span class="caret" aria-hidden="true"></span>
+        </div>
       </section>
 
+      <!-- Update in progress: boot-style progress + log rows. -->
       <section class="startup-state startup-state--update" id="update-state" hidden aria-live="polite">
-        <div class="update-brand" aria-label="Ciaobot">
-          <div class="update-wordmark"><span>›</span>ciao</div>
-          <p class="eyebrow" id="update-eyebrow">Update in progress</p>
+        <div class="startup-head">
+          <span class="wordmark" aria-label="Ciaobot">ciaobot</span>
+          <span class="startup-version" id="update-eyebrow">update · in progress</span>
         </div>
 
-        <div class="update-status">
-          <div class="update-spinner" aria-hidden="true"></div>
-          <h1 id="update-title">Updating Ciaobot…</h1>
-          <p class="update-subtitle" id="update-subtitle">
-            This may take a few minutes. You can keep an eye on the details below.
-          </p>
-
-          <div class="update-progress-summary">
-            <span class="update-progress-value" id="update-percent">0%</span>
-            <span class="update-progress-message" id="update-message">getting ready</span>
-          </div>
-          <div
-            class="update-progress-track"
-            role="progressbar"
-            aria-label="Update progress"
-            aria-valuemin="0"
-            aria-valuemax="100"
-            aria-valuenow="0"
-            id="update-progress"
-          >
-            <span class="update-progress-fill" id="update-fill"></span>
-          </div>
-
-          <p class="update-language-line">
-            <span aria-hidden="true">✦</span>
-            <strong id="update-language">ciao</strong>
-            <span id="update-language-copy">in Italian</span>
-            <span class="update-language-extra" id="update-language-extra">· buongiorno</span>
-          </p>
+        <div
+          class="startup-progress"
+          role="progressbar"
+          aria-label="Update progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          id="update-progress"
+        >
+          <span class="startup-progress-track" id="update-track"></span>
+          <span class="startup-progress-pct" id="update-percent">000%</span>
         </div>
 
-        <div class="update-details">
-          <button
-            class="update-details-toggle"
-            id="update-details-toggle"
-            type="button"
-            aria-expanded="true"
-            aria-controls="update-terminal"
-          >
-            Hide update details <span aria-hidden="true">⌃</span>
-          </button>
-          <div class="update-terminal" id="update-terminal">
-            <div class="update-terminal-head">
-              <span>terminal</span>
-              <span>● live output</span>
-            </div>
-            <pre id="update-log" role="log" aria-live="polite"></pre>
-          </div>
+        <ul class="startup-log" id="update-log" role="log"></ul>
+
+        <div class="startup-foot" id="update-foot">
+          <span class="startup-prompt" id="update-prompt">$</span>
+          <span class="startup-prompt-text" id="update-prompt-text">updating</span>
+          <span class="caret" aria-hidden="true"></span>
         </div>
       </section>
     </main>
 
     <script>
+      const PROGRESS_WIDTH = 28
+
       const waitingState = document.querySelector('#waiting-state')
       const updateState = document.querySelector('#update-state')
       const updateEyebrow = document.querySelector('#update-eyebrow')
-      const updateTitle = document.querySelector('#update-title')
-      const updateSubtitle = document.querySelector('#update-subtitle')
+      const updateTrack = document.querySelector('#update-track')
       const updatePercent = document.querySelector('#update-percent')
-      const updateMessage = document.querySelector('#update-message')
       const updateProgress = document.querySelector('#update-progress')
-      const updateFill = document.querySelector('#update-fill')
-      const updateLanguage = document.querySelector('#update-language')
-      const updateLanguageCopy = document.querySelector('#update-language-copy')
-      const updateLanguageExtra = document.querySelector('#update-language-extra')
       const updateLog = document.querySelector('#update-log')
-      const updateDetailsToggle = document.querySelector('#update-details-toggle')
-      const updateTerminal = document.querySelector('#update-terminal')
+      const updatePrompt = document.querySelector('#update-prompt')
+      const updatePromptText = document.querySelector('#update-prompt-text')
+      const updateFoot = document.querySelector('#update-foot')
 
-      const languages = [
-        ['ciao', 'Italian', 'buongiorno'],
-        ['hello', 'English', 'good morning'],
-        ['hola', 'Spanish', 'buenos días'],
-        ['salut', 'French', 'bonjour'],
-        ['hallo', 'German', 'guten Morgen'],
-        ['olá', 'Portuguese', 'bom dia'],
-        ['こんにちは', 'Japanese', 'おはよう'],
-        ['안녕하세요', 'Korean', '좋은 아침'],
-        ['مرحبا', 'Arabic', 'صباح الخير'],
-      ]
-      let languageIndex = 0
-
-      function renderLanguage() {
-        const [greeting, language, extra] = languages[languageIndex]
-        updateLanguage.textContent = greeting
-        updateLanguageCopy.textContent = `in ${language}`
-        updateLanguageExtra.textContent = `· ${extra}`
+      // A Rust progress line looks like
+      // "[ciao] local engine checked ....................... ok".
+      // Split it into the boot screen's columns: name, dots, status.
+      function parseLine(line) {
+        const stripped = String(line).replace(/^\[ciao\]\s*/, '')
+        const m = stripped.match(/^(.*?)\s+(\.{3,})\s+(.*)$/)
+        if (!m) return { name: stripped, dots: '', status: 'wait' }
+        const [, name, dots, tail] = m
+        let status = 'wait'
+        if (tail === 'ok') status = 'done'
+        else if (tail === 'in progress') status = 'in_progress'
+        else if (/^\d+%$/.test(tail)) status = 'in_progress'
+        else status = 'failed'
+        return { name, dots, status }
       }
 
-      function renderDetailsLabel() {
-        const action = updateTerminal.hidden ? 'Show' : 'Hide'
-        updateDetailsToggle.innerHTML = `${action} update details <span aria-hidden="true">⌃</span>`
-        updateDetailsToggle.setAttribute('aria-expanded', String(!updateTerminal.hidden))
+      function renderRow(row) {
+        const li = document.createElement('li')
+        li.className = 'startup-log-row is-' + row.status
+        const ts = document.createElement('span')
+        ts.className = 'startup-log-ts'
+        ts.textContent = '[ciao]'
+        const name = document.createElement('span')
+        name.className = 'startup-log-name'
+        name.textContent = row.name
+        const dots = document.createElement('span')
+        dots.className = 'startup-log-dots'
+        dots.textContent = row.dots
+        const status = document.createElement('span')
+        status.className = 'startup-log-status'
+        status.textContent =
+          row.status === 'done' ? 'ok' :
+          row.status === 'in_progress' ? '…' : 'fail'
+        li.append(ts, name, dots, status)
+        return li
       }
 
       function renderUpdate(detail) {
         const percent = Math.max(0, Math.min(100, Number(detail.percent) || 0))
         const lines = Array.isArray(detail.lines) ? detail.lines : []
         const failed = detail.status === 'error'
+
         waitingState.hidden = true
         updateState.hidden = false
-        updateEyebrow.textContent = failed ? 'Update needs attention' : 'Update in progress'
-        updateTitle.textContent = failed ? 'Ciaobot could not update' : (detail.title || 'Updating Ciaobot…')
-        updateSubtitle.textContent = detail.subtitle || (
-          failed
-            ? 'The existing installation is still available. Close this window and try again.'
-            : 'This may take a few minutes. You can keep an eye on the details below.'
-        )
-        updatePercent.textContent = `${percent}%`
-        updateMessage.textContent = detail.message || (failed ? 'update stopped' : 'working on it')
-        updateFill.style.width = `${percent}%`
-        updateProgress.setAttribute('aria-valuenow', String(percent))
-        updateProgress.setAttribute('aria-label', failed ? 'Update failed' : 'Update progress')
-        updateLog.textContent = lines.join('\n')
-        updateState.dataset.status = failed ? 'error' : 'running'
-        renderLanguage()
-      }
 
-      updateDetailsToggle.addEventListener('click', () => {
-        updateTerminal.hidden = !updateTerminal.hidden
-        renderDetailsLabel()
-      })
+        updateEyebrow.textContent = failed ? 'update · needs attention' : 'update · in progress'
+
+        const filled = Math.round((percent / 100) * PROGRESS_WIDTH)
+        updateTrack.textContent = '█'.repeat(filled) + '░'.repeat(PROGRESS_WIDTH - filled)
+        updatePercent.textContent = String(percent).padStart(3, ' ') + '%'
+        updateProgress.setAttribute('aria-label', failed ? 'Update failed' : 'Update progress')
+        updateProgress.setAttribute('aria-valuenow', String(percent))
+
+        updateLog.replaceChildren(...lines.map(parseLine).map(renderRow))
+
+        if (failed) {
+          updatePrompt.textContent = '[fail]'
+          updatePromptText.textContent = 'update stopped — the current installation is still available'
+          updateFoot.classList.add('is-failed')
+        } else {
+          updatePrompt.textContent = '$'
+          updatePromptText.textContent = 'updating'
+          updateFoot.classList.remove('is-failed')
+        }
+        updateState.dataset.status = failed ? 'error' : 'running'
+      }
 
       window.addEventListener('ciao:update-progress', (event) => {
         renderUpdate(event.detail || {})
       })
-
-      window.setInterval(() => {
-        if (updateState.hidden || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-        languageIndex = (languageIndex + 1) % languages.length
-        renderLanguage()
-      }, 2200)
-
-      renderDetailsLabel()
     </script>
   </body>
 </html>

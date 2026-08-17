@@ -86,7 +86,7 @@ CSS custom properties live in `App.vue` as `:root` declarations. The system is o
 - **Type**: Monospace stack (SF Mono, Fira Code, Cascadia Code). Scale: 11/12/13/15px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
 - **Geometry**: 10/6/14px radii (`--radius`, `--radius-sm`, `--radius-lg`). Spacing scale `--space-1` through `--space-6`.
 - **Motion**: `--ease: cubic-bezier(0.2, 0.8, 0.2, 1)`.
-- **Wordmark**: `.wordmark` (with size modifier `--lg|--md|--sm`) renders `› word` with a pink chevron prefix. Used in StartupView, LoginView, ProjectSidebar brand, and empty states.
+- **Wordmark**: `.wordmark` (with size modifier `--lg|--md|--sm`) renders `› word` with a pink chevron prefix. Used in StartupView, UpdateProgressView, LoginView, ProjectSidebar brand, and empty states.
 - **Caret**: `.caret` is a blinking pink terminal caret. Pair it with the wordmark for "live" surfaces (login prompt, idle empty state).
 - **Body**: carries a 2.5% SVG noise overlay via `body::before` for subtle CRT grain.
 

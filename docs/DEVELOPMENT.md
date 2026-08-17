@@ -166,7 +166,8 @@ Tauri capability. While the engine is unreachable it loads the bundled
 `startup.html` recovery page and automatically navigates to the PWA after
 recovery; the same local page is reused by a hidden update window that the tray
 shows immediately when an update starts. The update window receives native
-progress events and offers a collapsed/expanded terminal detail view. Test both
+progress events and renders them as boot-screen-style log rows (no interactive
+toggle; the log is always visible). Test both
 startup and update states when changing desktop startup or service lifecycle
 code. The shell's IPC surface is deliberately tiny: exactly two Tauri commands
 (`check_permission` / `request_permission`, backing the PWA's push-notification

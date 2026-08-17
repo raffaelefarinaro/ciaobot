@@ -158,6 +158,74 @@ verifier_name=${CIAO_VERIFIER_NAME:-ciaobot-installer-verify_universal}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
+# The archive is hundreds of MB; a silent fetch froze the step line at its
+# checkpoint percentage with nothing on screen moving. On a TTY, poll the
+# partial file against the Content-Length and redraw the step line with a
+# live percentage, size, and rate. Piped output keeps the quiet -fsSL form
+# so logs and CI don't fill with bar redraws.
+download_live() {
+    url=$1
+    target=$2
+    percent=$3
+    message=$4
+    total=
+    total=$(curl -fsSI -L --connect-timeout 15 "$url" 2>/dev/null |
+        awk 'tolower($1) == "content-length:" { gsub("\r", "", $2); print $2; exit }')
+    curl -fsSL --retry 3 --connect-timeout 15 "$url" -o "$target" &
+    pid=$!
+    last_size=0
+    last_epoch=0
+    while kill -0 "$pid" 2>/dev/null; do
+        size=0
+        if [ -e "$target" ]; then
+            size=$(wc -c < "$target" 2>/dev/null || echo 0)
+        fi
+        if [ "$size" -ne "$last_size" ]; then
+            epoch=$(date +%s)
+            rate=0
+            if [ "$epoch" -gt "$last_epoch" ] && [ "$last_epoch" -gt 0 ]; then
+                rate=$(((size - last_size) / (epoch - last_epoch)))
+            fi
+            last_size=$size
+            last_epoch=$epoch
+            redraw_download "$size" "$rate" "$total" "$percent" "$message"
+        fi
+        sleep 0.2
+    done
+    wait "$pid"
+    status=$?
+    size=0
+    if [ -e "$target" ]; then
+        size=$(wc -c < "$target" 2>/dev/null || echo 0)
+    fi
+    redraw_download "$size" 0 "$total" "$percent" "$message"
+    return "$status"
+}
+
+redraw_download() {
+    size=$1
+    rate=$2
+    total=$3
+    percent_label=$4
+    message=$5
+    if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null; then
+        percent=$((size * 100 / total))
+        [ "$percent" -gt 100 ] && percent=100
+        rate_mib=$(awk -v rate="$rate" 'BEGIN { printf "%.1f", rate / 1048576 }')
+        printf '\r  %s[%3d%%]%s %s%s%s %s(%d MiB of %d MiB · %s MiB/s)%s\033[K' \
+            "$installer_accent" "$percent" "$installer_reset" \
+            "$installer_soft" "$message" "$installer_reset" \
+            "$installer_muted" "$((size / 1048576))" "$((total / 1048576))" \
+            "$rate_mib" "$installer_reset"
+    else
+        rate_mib=$(awk -v rate="$rate" 'BEGIN { printf "%.1f", rate / 1048576 }')
+        printf '\r  %s[%3d%%]%s %s%s%s %s(%d MiB · %s MiB/s)%s\033[K' \
+            "$installer_accent" "$percent_label" "$installer_reset" \
+            "$installer_soft" "$message" "$installer_reset" \
+            "$installer_muted" "$((size / 1048576))" "$rate_mib" "$installer_reset"
+    fi
+}
+
 download() {
     curl -fsSL --retry 3 --connect-timeout 15 "$1" -o "$2"
 }
@@ -193,7 +261,12 @@ installer_header
 installer_step 8 "checking macOS and architecture"
 installer_done
 installer_step 25 "downloading the signed release"
-download "$base/$archive_name" "$archive" || fail "could not download $archive_name"
+if [ "$terminal_output" -eq 1 ]; then
+    download_live "$base/$archive_name" "$archive" 25 "downloading the signed release" \
+        || fail "could not download $archive_name"
+else
+    download "$base/$archive_name" "$archive" || fail "could not download $archive_name"
+fi
 installer_done
 installer_step 32 "downloading the release signature"
 download "$base/$signature_name" "$signature" || fail "could not download $signature_name"
@@ -218,7 +291,10 @@ installer_step 66 "unpacking the bundled runtime"
 mkdir -p "$app_dir"
 destination="$app_dir/Ciaobot.app"
 stage="$app_dir/.Ciaobot.app.new.$$"
-backup="$app_dir/.Ciaobot.app.previous"
+# Older installers preserved the previous bundle as .Ciaobot.app.previous.
+# Nothing restores it anymore, and a leftover copy would keep ~350 MB of the
+# user's disk forever, so clear it whenever it shows up.
+rm -rf "$app_dir/.Ciaobot.app.previous"
 rm -rf "$stage"
 mkdir "$stage"
 tar -xzf "$archive" -C "$stage" || fail "could not extract the release archive"
@@ -233,7 +309,9 @@ if [ -e "$destination" ]; then
     # A manually launched app is not necessarily owned by the LaunchAgent, so
     # booting that agent out alone would leave the old single-instance process
     # alive across the bundle swap. Ask the app to quit, then wait for the
-    # executable to disappear before moving the old bundle aside.
+    # executable to disappear before replacing the old bundle. The previous
+    # version is not preserved: keeping a full .previous copy would double the
+    # ~350 MB disk cost of every update for a rollback nothing ever performs.
     if command -v osascript >/dev/null 2>&1; then
         osascript -e 'tell application id "local.ciaobot.app" to quit' \
             >/dev/null 2>&1 || true
@@ -246,13 +324,11 @@ if [ -e "$destination" ]; then
         [ "$attempts" -lt 30 ] || fail "Ciaobot is still running; quit it and retry"
         sleep 1
     done
-    rm -rf "$backup"
-    mv "$destination" "$backup" || fail "could not move the existing Ciaobot.app aside"
+    rm -rf "$destination"
 fi
 installer_step 82 "installing Ciaobot.app"
 if ! mv "$extracted" "$destination"; then
     [ ! -e "$destination" ] || rm -rf "$destination"
-    [ ! -e "$backup" ] || mv "$backup" "$destination"
     fail "could not install Ciaobot.app"
 fi
 rm -rf "$stage"
@@ -356,7 +432,4 @@ if [ -n "$workspace" ]; then
     echo "Workspace: $workspace"
 else
     echo "Workspace: first-run onboarding will ask where to create or adopt one"
-fi
-if [ -e "$backup" ]; then
-    echo "Previous app preserved at $backup"
 fi

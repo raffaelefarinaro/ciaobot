@@ -128,12 +128,15 @@ notifications. Desktop preferences live in the tray itself rather than a
 separate settings window, so the shell has no bundled interactive UI. The tray
 is not a miniature copy of the PWA: preserve platform menu conventions and use
 it for glanceable status, navigation, unread/input/working state, and server
-recovery. The one bundled page (`startup.html`) uses a warm, compact neutral
-surface; the remotely loaded PWA retains its own design system and receives no
-native capabilities. Finder file drops pass through the main webview to the
-PWA's standard composer drop target rather than becoming a separate native
-attachment surface. When the engine is
-unavailable, the main window uses the same warm native surface for a concise
+recovery. The one bundled page (`startup.html`) and the PWA's update overlay
+mirror the boot screen's terminal aesthetic (indigo canvas, pink accent,
+monospace progress bar and log rows), so the waiting/update states in the
+native window, the PWA update overlay, and the PWA boot screen read as one
+consistent surface; the remotely loaded PWA retains its own design system and
+receives no native capabilities. Finder file drops pass through the main
+webview to the PWA's standard composer drop target rather than becoming a
+separate native attachment surface. When the engine is
+unavailable, the main window uses the same boot-style surface for a concise
 waiting/recovery state instead of showing a blank webview; it transitions to
 the PWA automatically when the engine becomes reachable.
 

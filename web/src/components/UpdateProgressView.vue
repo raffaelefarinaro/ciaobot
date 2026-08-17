@@ -1,60 +1,42 @@
 <template>
-  <div class="update-progress-overlay" role="status" aria-live="polite">
+  <div class="update-progress-overlay">
     <div class="update-progress-content">
-      <div class="update-brand" aria-label="Ciaobot">
-        <div class="update-wordmark"><span>›</span>ciao</div>
-        <p class="update-eyebrow">Update in progress</p>
+      <div class="update-progress-head">
+        <span class="wordmark wordmark--lg">ciaobot</span>
+        <span class="update-progress-version">update · v{{ version || '…' }}</span>
       </div>
 
-      <div class="update-status">
-        <div class="update-spinner" aria-hidden="true"></div>
-        <h2>Updating Ciaobot&hellip;</h2>
-        <p class="update-subtitle">
-          <template v-if="version">Moving to {{ version }}. </template>
-          This may take a few minutes. You can keep an eye on the details below.
-        </p>
-
-        <div class="update-progress-summary">
-          <span class="update-progress-value">{{ progress }}%</span>
-          <span class="update-progress-message">{{ message }}</span>
-        </div>
-        <div
-          class="update-progress-track"
-          role="progressbar"
-          aria-label="Update progress"
-          aria-valuemin="0"
-          aria-valuemax="100"
-          :aria-valuenow="progress"
-        >
-          <span class="update-progress-fill" :style="{ width: `${progress}%` }"></span>
-        </div>
-
-        <p class="update-language-line">
-          <span aria-hidden="true">✦</span>
-          <strong>{{ greeting[0] }}</strong>
-          <span>in {{ greeting[1] }}</span>
-          <span class="update-language-extra">· {{ greeting[2] }}</span>
-        </p>
+      <!-- Mono progress bar: filled █, empty ░ -->
+      <div class="update-progress" :aria-label="`Updating ${progressPercent} percent`">
+        <span class="update-progress-track">{{ progressTrack }}</span>
+        <span class="update-progress-pct">{{ progressPercent.toString().padStart(3, ' ') }}%</span>
       </div>
 
-      <div class="update-details">
-        <button
-          class="update-details-toggle"
-          type="button"
-          :aria-expanded="detailsOpen"
-          aria-controls="update-terminal"
-          @click="detailsOpen = !detailsOpen"
+      <!-- Log lines, one per stage -->
+      <ul class="update-progress-log" role="log">
+        <li
+          v-for="row in rows"
+          :key="row.name"
+          class="update-progress-log-row"
+          :class="'is-' + row.status"
         >
-          {{ detailsOpen ? 'Hide' : 'Show' }} update details
-          <span aria-hidden="true">⌃</span>
-        </button>
-        <div v-if="detailsOpen" id="update-terminal" class="update-terminal">
-          <div class="update-terminal-head">
-            <span>terminal</span>
-            <span>● live output</span>
-          </div>
-          <pre role="log" aria-live="polite">{{ logLines.join('\n') }}</pre>
-        </div>
+          <span class="update-progress-log-ts">[{{ row.ts }}]</span>
+          <span class="update-progress-log-name">{{ row.name }}</span>
+          <span class="update-progress-log-dots">{{ row.dots }}</span>
+          <span class="update-progress-log-status">{{ row.statusLabel }}</span>
+        </li>
+      </ul>
+
+      <!-- Footer: blinking cursor while updating, ready line when done -->
+      <div class="update-progress-foot">
+        <template v-if="finishing">
+          <span class="update-progress-ready">[ok] ciaobot is up to date.</span>
+        </template>
+        <template v-else>
+          <span class="update-progress-prompt">$</span>
+          <span class="update-progress-prompt-text">updating</span>
+          <span class="caret"></span>
+        </template>
       </div>
     </div>
   </div>
@@ -68,209 +50,245 @@ const props = defineProps<{
   finishing?: boolean
 }>()
 
-const progress = ref(8)
-const message = ref('checking the current Ciaobot version')
-const logLines = ref([
-  '[ciao] opening the update flow ..................... ok',
-  '[ciao] checking the current Ciaobot version ........ in progress',
-])
-const detailsOpen = ref(true)
-const languageIndex = ref(0)
-let progressTimer: number | null = null
-let languageTimer: number | null = null
-
-const stages = [
-  [8, 'checking the current Ciaobot version', 'checking the current Ciaobot version ........ in progress'],
-  [22, 'preparing the local engine', 'preparing the local engine ..................... in progress'],
-  [42, 'checking the signed release', 'checking the signed release ..................... in progress'],
-  [58, 'downloading the next hello', 'downloading the signed Ciaobot release .......... in progress'],
-  [76, 'installing the updated runtime', 'installing the updated runtime .................. in progress'],
-  [88, 'getting ready to restart', 'getting ready to restart ........................ in progress'],
+const STAGES = [
+  'checking the current Ciaobot version',
+  'preparing the local engine',
+  'checking the signed release',
+  'downloading the next hello',
+  'installing the updated runtime',
+  'getting ready to restart',
 ] as const
 
-const languages = [
-  ['ciao', 'Italian', 'buongiorno'],
-  ['hello', 'English', 'good morning'],
-  ['hola', 'Spanish', 'buenos días'],
-  ['salut', 'French', 'bonjour'],
-  ['hallo', 'German', 'guten Morgen'],
-  ['olá', 'Portuguese', 'bom dia'],
-  ['こんにちは', 'Japanese', 'おはよう'],
-  ['안녕하세요', 'Korean', '좋은 아침'],
-  ['مرحبا', 'Arabic', 'صباح الخير'],
-] as const
+const PROGRESS_WIDTH = 28
+const DOTS_TARGET = 28
 
-const greeting = computed(() => languages[languageIndex.value])
+interface Row {
+  name: string
+  ts: string
+  dots: string
+  status: 'pending' | 'in_progress' | 'done'
+  statusLabel: string
+}
 
-function advanceStage(index: number) {
-  if (props.finishing) {
-    progress.value = 100
-    message.value = 'restarting Ciaobot with the latest version'
-    logLines.value = [
-      '[ciao] updated runtime ............................ ok',
-      '[ciao] restarting Ciaobot .......................... in progress',
-    ]
-    return
+const activeIndex = ref(0)
+const startedAt = ref<Record<string, string>>({})
+let stageTimer: number | null = null
+
+const progressPercent = computed(() => {
+  const finished = Math.min(activeIndex.value, STAGES.length)
+  return Math.round((finished / STAGES.length) * 100)
+})
+
+const progressTrack = computed(() => {
+  const filled = Math.round((progressPercent.value / 100) * PROGRESS_WIDTH)
+  return '█'.repeat(filled) + '░'.repeat(PROGRESS_WIDTH - filled)
+})
+
+function pad(n: number): string {
+  return n.toString().padStart(2, '0')
+}
+
+// Prefer the activation clock; fall back to a synthesized t+offset so
+// pending stages still show something, like the boot screen.
+function timestampFor(name: string): string {
+  const iso = startedAt.value[name]
+  if (iso) {
+    const d = new Date(iso)
+    if (!Number.isNaN(d.getTime())) {
+      return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+    }
   }
-  const stage = stages[index]
-  if (!stage) return
-  progress.value = stage[0]
-  message.value = stage[1]
-  logLines.value = [
-    '[ciao] opening the update flow ..................... ok',
-    `[ciao] ${stage[2]}`,
-  ]
-  progressTimer = window.setTimeout(() => advanceStage(index + 1), 900)
+  const index = STAGES.indexOf(name as (typeof STAGES)[number])
+  return `t+${index.toString().padStart(2, '0')}`
+}
+
+const rows = computed<Row[]>(() =>
+  STAGES.map((name, i) => {
+    const status = i < activeIndex.value ? 'done' : i === activeIndex.value ? 'in_progress' : 'pending'
+    const statusLabel = status === 'done' ? 'ok' : status === 'in_progress' ? '…' : 'wait'
+    const dots = ' ' + '.'.repeat(Math.max(3, DOTS_TARGET - name.length))
+    return { name, ts: timestampFor(name), dots, status, statusLabel }
+  }),
+)
+
+function advance() {
+  if (props.finishing || activeIndex.value >= STAGES.length) return
+  const name = STAGES[activeIndex.value]
+  startedAt.value = { ...startedAt.value, [name]: new Date().toISOString() }
+  activeIndex.value += 1
+  stageTimer = window.setTimeout(advance, 900)
 }
 
 watch(() => props.finishing, (finishing) => {
-  if (finishing) {
-    if (progressTimer) window.clearTimeout(progressTimer)
-    advanceStage(0)
-  }
+  if (!finishing) return
+  if (stageTimer) window.clearTimeout(stageTimer)
+  activeIndex.value = STAGES.length
 })
 
 onMounted(() => {
-  advanceStage(1)
-  languageTimer = window.setInterval(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-    languageIndex.value = (languageIndex.value + 1) % languages.length
-  }, 2200)
+  advance()
 })
 
 onUnmounted(() => {
-  if (progressTimer) window.clearTimeout(progressTimer)
-  if (languageTimer) window.clearInterval(languageTimer)
+  if (stageTimer) window.clearTimeout(stageTimer)
 })
 </script>
 
 <style scoped>
 .update-progress-overlay {
   position: fixed;
-  z-index: 300;
   inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 32px 20px;
-  overflow-y: auto;
-  background: #101010;
-  color: #f2ede8;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+  padding: var(--space-4);
+  /* Same faint scanline texture as the boot overlay. */
+  background-image:
+    linear-gradient(180deg, rgba(255, 77, 109, 0.04) 0%, transparent 60%),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.012) 0 1px, transparent 1px 3px);
 }
 
 .update-progress-content {
-  display: grid;
-  justify-items: center;
-  width: min(720px, 100%);
-  text-align: center;
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
-.update-brand { display: grid; justify-items: center; gap: 12px; }
-.update-wordmark {
-  color: #f2ede8;
-  font: 700 clamp(42px, 6vw, 64px)/1 var(--font-mono);
-  letter-spacing: -.08em;
-}
-.update-wordmark span { margin-right: 8px; color: #d85a35; }
-.update-eyebrow {
-  margin: 0;
-  color: #f0a084;
-  font: 600 11px/1.3 var(--font-mono);
-  letter-spacing: .14em;
-  text-transform: uppercase;
-}
-
-.update-status { width: min(600px, 100%); margin-top: 52px; }
-.update-spinner {
-  width: 28px;
-  height: 28px;
-  margin: 0 auto 18px;
-  border: 3px solid #4b403a;
-  border-top-color: #d85a35;
-  border-radius: 50%;
-  animation: update-spin 1s linear infinite;
-}
-@keyframes update-spin { to { transform: rotate(360deg); } }
-.update-status h2 { margin: 0; color: #f2ede8; font-size: clamp(20px, 3vw, 26px); }
-.update-subtitle { margin: 10px auto 0; color: #9e9690; font-size: 15px; }
-
-.update-progress-summary {
+.update-progress-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
-  margin-top: 30px;
-  color: #9e9690;
-  font: 11px/1.3 var(--font-mono);
-  text-align: left;
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px dashed var(--border);
 }
-.update-progress-value { color: #f2ede8; font-size: 16px; font-weight: 700; }
-.update-progress-message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.update-progress-track {
-  height: 7px;
-  margin-top: 10px;
-  overflow: hidden;
-  border-radius: 99px;
-  background: #3a302b;
-}
-.update-progress-fill {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #d85a35, #f0a084);
-  transition: width 320ms ease;
-}
-.update-language-line { min-height: 22px; margin: 20px 0 0; color: #9e9690; font-size: 13px; }
-.update-language-line > span:first-child { color: #f0a084; }
-.update-language-line strong { margin: 0 4px; color: #f2ede8; font-weight: 650; }
-.update-language-extra { color: #6f6964; font: 11px/1.3 var(--font-mono); }
-
-.update-details { width: 100%; margin-top: 32px; }
-.update-details-toggle {
-  min-height: 44px;
-  padding: 8px 12px;
-  border: 0;
-  background: transparent;
-  color: #9e9690;
-  cursor: pointer;
-  font-size: 13px;
-}
-.update-details-toggle:hover { color: #f2ede8; }
-.update-details-toggle span { margin-left: 7px; color: #f0a084; }
-.update-terminal {
-  overflow: hidden;
-  border: 1px solid #34312e;
-  border-radius: 12px;
-  background: #0d0d0d;
-  text-align: left;
-}
-.update-terminal-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  border-bottom: 1px solid #292622;
-  color: #6f6964;
-  font: 600 10px/1.2 var(--font-mono);
-  letter-spacing: .08em;
+.update-progress-version {
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  letter-spacing: 0.5px;
   text-transform: uppercase;
 }
-.update-terminal-head span:last-child { color: #77c08a; }
-.update-terminal pre {
-  min-height: 154px;
-  max-height: 190px;
-  margin: 0;
-  overflow: auto;
-  padding: 16px;
-  color: #bcb5ae;
-  font: 12px/1.75 var(--font-mono);
-  white-space: pre-wrap;
+
+/* Progress row: monospace bar + numeric percent on the right */
+.update-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 14px;
+  line-height: 1;
+}
+.update-progress-track {
+  color: var(--accent);
+  letter-spacing: -1px;
+  flex: 1;
+}
+.update-progress-pct {
+  color: var(--fg2);
+  font-variant-numeric: tabular-nums;
+  min-width: 4ch;
+  text-align: right;
 }
 
-@media (max-width: 620px) {
-  .update-progress-overlay { padding: 24px 16px; }
-  .update-status { margin-top: 40px; }
+/* Log */
+.update-progress-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-sm);
+  line-height: 1.5;
 }
-@media (prefers-reduced-motion: reduce) {
-  .update-spinner, .update-progress-fill { animation: none; transition: none; }
+.update-progress-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  white-space: nowrap;
+  overflow: hidden;
+  color: var(--fg3);
+  opacity: 0.55;
+  transition: opacity 200ms var(--ease), color 200ms var(--ease);
+}
+.update-progress-log-row.is-in_progress {
+  color: var(--fg2);
+  opacity: 1;
+}
+.update-progress-log-row.is-done {
+  color: var(--fg2);
+  opacity: 1;
+}
+.update-progress-log-ts {
+  color: var(--fg3);
+  flex-shrink: 0;
+}
+.update-progress-log-name {
+  color: var(--fg);
+  flex-shrink: 0;
+}
+.update-progress-log-row.is-pending .update-progress-log-name { color: var(--fg3); }
+.update-progress-log-dots {
+  color: var(--fg3);
+  opacity: 0.5;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: clip;
+  letter-spacing: 1px;
+}
+.update-progress-log-status {
+  flex-shrink: 0;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  font-size: var(--text-xs);
+}
+.update-progress-log-row.is-done .update-progress-log-status { color: var(--success); }
+.update-progress-log-row.is-in_progress .update-progress-log-status { color: var(--accent); }
+.update-progress-log-row.is-in_progress .update-progress-log-status::after {
+  content: "";
+  display: inline-block;
+  width: 0.4em;
+  height: 0.9em;
+  background: var(--accent);
+  margin-left: 0.2em;
+  vertical-align: text-bottom;
+  animation: caret-blink 0.9s steps(2, end) infinite;
+}
+
+/* Footer */
+.update-progress-foot {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-base);
+  color: var(--fg2);
+}
+.update-progress-prompt {
+  color: var(--accent);
+  font-weight: 700;
+}
+.update-progress-prompt-text {
+  color: var(--fg2);
+}
+.update-progress-ready {
+  color: var(--success);
+  font-weight: 600;
+  animation: update-fade-in 500ms var(--ease);
+}
+
+@keyframes update-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 600px) {
+  .update-progress-log { font-size: var(--text-xs); }
+  .update-progress { font-size: 12px; }
 }
 </style>
