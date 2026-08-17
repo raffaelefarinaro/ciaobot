@@ -87,6 +87,11 @@ export const useProjectStore = defineStore('projects', () => {
   // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
   const messages = ref<Record<string, ChatMessage[]>>({})
+  // History is loaded independently after a chat becomes active. Keep this
+  // separate from `messages` so cached text can render immediately while the
+  // authoritative session history is still on the way.
+  const loadingMessages = ref<Record<string, boolean>>({})
+  const messageLoadGenerations = new Map<string, number>()
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and
   // after each streaming turn (subagents can be spawned mid-turn).
   const subagents = ref<Record<string, SubagentTranscript[]>>({})
@@ -466,6 +471,10 @@ export const useProjectStore = defineStore('projects', () => {
 
   const activeMessages = computed(() =>
     messages.value[activeChatId.value || ''] || []
+  )
+
+  const messageHistoryLoading = computed(() =>
+    Boolean(loadingMessages.value[activeChatId.value || ''])
   )
 
   const activeSubagents = computed<SubagentTranscript[]>(() =>
@@ -2000,6 +2009,23 @@ export const useProjectStore = defineStore('projects', () => {
   // ── Message loading from server ──────────────────────────────────────
 
   async function loadMessages(chatId: string) {
+    const generation = (messageLoadGenerations.get(chatId) || 0) + 1
+    messageLoadGenerations.set(chatId, generation)
+    loadingMessages.value[chatId] = true
+    try {
+      await loadMessagesFromServer(chatId)
+    } finally {
+      // A refresh can overlap a chat switch or a reconnect. Only the newest
+      // request owns the loading flag, otherwise an older response can hide
+      // the indicator while the current history is still pending.
+      if (messageLoadGenerations.get(chatId) === generation) {
+        delete loadingMessages.value[chatId]
+        messageLoadGenerations.delete(chatId)
+      }
+    }
+  }
+
+  async function loadMessagesFromServer(chatId: string) {
     // Restore the AskUserQuestion picker before touching history. Runs on every
     // chat open / reconnect, so a reloaded chat paused on a question shows the
     // interactive picker again instead of the dead trace row. Independent of
@@ -4321,7 +4347,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, unread, reentrySummaries,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,

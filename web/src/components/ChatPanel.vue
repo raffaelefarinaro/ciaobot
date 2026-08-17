@@ -307,8 +307,34 @@
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" ref="messagesEl" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
+    <div class="messages" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
+      <Transition name="history-loading">
+        <div
+          v-if="store.messageHistoryLoading && !renderItems.length && !store.isStreaming"
+          class="history-loading-card"
+          role="status"
+          aria-live="polite"
+        >
+          <div class="history-loading-heading">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading conversation</span>
+          </div>
+          <div class="history-skeleton history-skeleton--user" aria-hidden="true">
+            <span class="history-skeleton-line history-skeleton-line--wide"></span>
+            <span class="history-skeleton-line history-skeleton-line--short"></span>
+          </div>
+          <div class="history-skeleton history-skeleton--assistant" aria-hidden="true">
+            <span class="history-skeleton-line history-skeleton-line--long"></span>
+            <span class="history-skeleton-line history-skeleton-line--medium"></span>
+            <span class="history-skeleton-line history-skeleton-line--short"></span>
+          </div>
+        </div>
+      </Transition>
+      <div v-if="store.messageHistoryLoading && renderItems.length" class="history-loading-inline" role="status" aria-live="polite">
+        <span class="history-loading-spinner" aria-hidden="true"></span>
+        <span>Updating conversation…</span>
+      </div>
       <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
@@ -4763,6 +4789,116 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
      against `.messages` (no explicit height) to 0 in some engines and left
      short/streaming chats stuck at the top with dead space below. */
   margin-top: auto;
+}
+
+.history-loading-card {
+  width: min(100%, 620px);
+  margin: auto 0 8px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg2) 82%, transparent);
+  animation: history-loading-enter 220ms ease-out both;
+}
+
+.history-loading-heading,
+.history-loading-inline {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+
+.history-loading-heading {
+  margin-bottom: 14px;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.history-loading-inline {
+  align-self: center;
+  padding: 4px 10px 2px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+
+.history-loading-spinner {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: history-loading-spin 0.8s linear infinite;
+}
+
+.history-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 78%;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg3) 70%, transparent);
+}
+
+.history-skeleton + .history-skeleton {
+  width: 88%;
+  margin-top: 10px;
+}
+
+.history-skeleton--user {
+  margin-left: auto;
+  border-radius: 14px 14px 2px 14px;
+}
+
+.history-skeleton-line {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: history-skeleton-sweep 1.4s ease-in-out infinite;
+}
+
+.history-skeleton-line--wide { width: 84%; }
+.history-skeleton-line--long { width: 92%; }
+.history-skeleton-line--medium { width: 68%; }
+.history-skeleton-line--short { width: 42%; }
+
+.history-loading-enter-active,
+.history-loading-leave-active {
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.history-loading-enter-from,
+.history-loading-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+@keyframes history-loading-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes history-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes history-skeleton-sweep {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .history-loading-card,
+  .history-loading-spinner,
+  .history-skeleton-line {
+    animation: none;
+  }
+  .history-loading-card { opacity: 0.9; }
 }
 
 .message-wrap {
