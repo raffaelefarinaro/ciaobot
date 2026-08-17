@@ -227,6 +227,11 @@ def _fake_opencode(captured: dict, events: list[object]):
             captured["workspace_root"] = workspace_root
             captured["developer_instructions"] = developer_instructions
             captured["disconnected"] = False
+            captured["deleted"] = False
+
+        @property
+        def current_session_id(self):
+            return "one-shot-session"
 
         async def run_streaming(self, request, register_handle):
             captured["request"] = request
@@ -236,6 +241,10 @@ def _fake_opencode(captured: dict, events: list[object]):
 
         async def disconnect(self):
             captured["disconnected"] = True
+
+        async def delete_current_session(self):
+            captured["deleted"] = True
+            return True
 
     return FakeOpencodeProvider
 
@@ -297,6 +306,7 @@ async def test_run_oneshot_opencode_always_disconnects(monkeypatch, tmp_path) ->
     # error is terminal -- retrying would double-charge for the same failure.
     assert excinfo.value.transient is False
     assert captured["disconnected"] is True
+    assert captured["deleted"] is True
 
 
 @pytest.mark.asyncio

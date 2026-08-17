@@ -251,6 +251,39 @@ async def test_archive_postprocess_runs_insights_for_multiturn_chats(
     assert bool(calls) is expected
 
 
+@pytest.mark.asyncio
+async def test_codex_archive_uses_configured_insights_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    pcm._config.insights_model_override = "opencode:vendor/insights-model"
+    project = pcm.create_project("insights-codex-project", workspace="work")
+    chat = pcm.create_chat(
+        project.project_id, title="codex insights", provider="codex", model="gpt-chat"
+    )
+    calls: list[dict] = []
+
+    async def fake_extract_and_append(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+
+    pcm.run_archive_postprocess(
+        chat.chat_id,
+        ArchiveOutcome(
+            path=tmp_path / "archive.md",
+            session_id="session-1",
+            turn_count=2,
+            filtered_jsonl="filtered transcript",
+        ),
+        chat,
+        project,
+    )
+    await asyncio.sleep(0)
+
+    assert calls[0]["model"] == "opencode:vendor/insights-model"
+
+
 # ── Empty-chat cleanup ──────────────────────────────────────────────────
 
 

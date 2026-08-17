@@ -4361,11 +4361,7 @@ class ProjectChatManager:
             from ciao.insights import extract_and_append, resolve_insights_model
 
             workspace = project_meta.workspace if project_meta else None
-            insights_model = (
-                chat_meta.model
-                if chat_meta is not None and chat_meta.provider == "codex"
-                else resolve_insights_model(config, workspace)
-            )
+            insights_model = resolve_insights_model(config, workspace)
             # Auto projects (General, Claude Code CLI) are catch-alls whose
             # docs would become junk drawers; only real projects get the
             # archive-time canonical-doc update.
@@ -7890,20 +7886,27 @@ class ProjectChatManager:
 
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
-        requested = (
-            chat.model if chat.provider == "codex"
-            else resolve_title_model(self._config, workspace)
-        )
-        # A "<provider>:<model>" override routes titles through that provider's
-        # CLI for any chat, not just chats already on it
-        # (Settings -> Chat titles -> OpenAI / opencode).
-        title_env: dict[str, str] | None = None
+        configured = resolve_title_model(self._config, workspace)
         override_provider = ""
         for candidate in ("codex", "opencode"):
-            if chat.provider != candidate and requested.startswith(f"{candidate}:"):
+            if configured.startswith(f"{candidate}:"):
                 override_provider = candidate
                 break
-        if chat.provider == "codex":
+        # Explicit provider-qualified settings win even when the chat runs on
+        # another provider. Without this precedence, the same-provider branch
+        # below hides cross-provider title overrides.
+        requested = configured if override_provider else (
+            chat.model if chat.provider == "codex" else configured
+        )
+        title_env: dict[str, str] | None = None
+        if override_provider:
+            title_provider = override_provider
+            title_model = requested[len(override_provider) + 1:] or "haiku"
+            if title_provider == "opencode":
+                title_model = await _resolve_opencode_title_model(
+                    self._config, title_model
+                )
+        elif chat.provider == "codex":
             title_provider = "codex"
             title_model = requested
             title_env = self._build_extra_env(chat)
@@ -7912,13 +7915,6 @@ class ProjectChatManager:
             title_model = await _resolve_opencode_title_model(
                 self._config, requested
             )
-        elif override_provider:
-            title_provider = override_provider
-            title_model = requested[len(override_provider) + 1:] or "haiku"
-            if title_provider == "opencode":
-                title_model = await _resolve_opencode_title_model(
-                    self._config, title_model
-                )
         else:
             title_provider = "claude"
             title_model, note = native_sidecar.resolve_model_or_fallback(

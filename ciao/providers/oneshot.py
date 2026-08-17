@@ -261,6 +261,7 @@ async def _run_opencode_oneshot(
                 return event.result
         return ""
     finally:
+        await opencode.delete_current_session()
         await opencode.disconnect()
 
 
