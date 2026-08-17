@@ -719,24 +719,26 @@ class BackgroundRunner:
 
     async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
         """SIGTERM the run's process group, then SIGKILL after the grace."""
-        if proc.returncode is not None:
-            return
+        deadline = asyncio.get_running_loop().time() + CANCEL_GRACE_SECONDS
         self._signal_group(proc, signal.SIGTERM)
         try:
             await asyncio.wait_for(proc.wait(), CANCEL_GRACE_SECONDS)
-            return
         except TimeoutError:
             pass
         except Exception:  # noqa: BLE001 — already-reaped or transport churn
-            return
+            pass
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        # The process-group leader may already have exited. The descendants
+        # still share its group, so signal the group independently of the
+        # leader's return code before declaring the run terminated.
         self._signal_group(proc, signal.SIGKILL)
         with contextlib.suppress(Exception):
             await asyncio.wait_for(proc.wait(), CANCEL_GRACE_SECONDS)
 
     @staticmethod
     def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:
-        if proc.returncode is not None:
-            return
         try:
             # start_new_session made the child a process-group leader, so its
             # pid is the pgid: this reaches the whole tree it spawned.
