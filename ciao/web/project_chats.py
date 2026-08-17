@@ -8633,6 +8633,11 @@ class ProjectChatManager:
         if wanted:
             match = self.find_project(wanted, workspace)
             if match is not None:
+                # The caller persists this same ScheduleEntry after preparing
+                # the run. Repairing the id here prevents every later tick
+                # from repeating the name lookup and keeps the editor from
+                # showing the old instance-local id.
+                setattr(entry, "web_project_id", match.project_id)
                 logger.info(
                     "Re-homed schedule from stale project %s to %s (%s/%s)",
                     stale_id, match.project_id, workspace, match.name,

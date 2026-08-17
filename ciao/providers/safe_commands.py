@@ -85,8 +85,10 @@ def _git_is_safe(args: list[str]) -> bool:
         return all(arg in _SAFE_GIT_BRANCH_FLAGS for arg in rest)
     if subcommand not in _SAFE_GIT_SUBCOMMANDS:
         return False
-    # `git log --output=<file>` (and =-less form) writes a file.
-    return not any(arg.startswith("--output") for arg in rest)
+    # `--output` writes a file; `--ext-diff` and `--textconv` can invoke
+    # repository-configured external helpers even on read-only subcommands.
+    unsafe_prefixes = ("--output", "--ext-diff", "--textconv")
+    return not any(arg.startswith(unsafe_prefixes) for arg in rest)
 
 
 def _segment_is_safe(tokens: list[str]) -> bool:
