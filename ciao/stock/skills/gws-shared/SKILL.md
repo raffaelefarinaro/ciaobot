@@ -19,9 +19,9 @@ Run every Google API call through the profile wrapper — never bare `gws`:
 scripts/gws-profile.sh "$GWS_PROFILE" <service> <subcommand> [flags]
 ```
 
-Use the chat's `GWS_PROFILE` unless the user asks otherwise. The wrapper routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
+`GWS_PROFILE` names the Google account linked to this chat's workspace; pass a different account name only if the user asks for one. The wrapper routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
 
-OAuth setup: Settings → Workspaces (Google Workspace card). Config dirs: `secrets/gws-personal/` (personal), `secrets/gws/` (work).
+OAuth setup: Settings → Workspaces (Google Workspace card). Credentials live in `secrets/gws-<account>/` (the pre-existing `personal` and `work` accounts use `secrets/gws-personal/` and `secrets/gws/`).
 
 ## Global Flags
 
