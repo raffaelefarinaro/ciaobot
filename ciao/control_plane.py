@@ -32,9 +32,9 @@ from ciao.schedules import ScheduleEntry, compute_next_run
 logger = logging.getLogger(__name__)
 
 # MCP needs to distinguish an omitted optional field from an explicit JSON
-# null. ``None`` is a meaningful reset for workspace connector settings and
-# denylists, so a normal ``= None`` default loses information before the
-# control plane sees it.
+# null. ``None`` is a meaningful reset for workspace denylist settings, so a
+# normal ``= None`` default loses information before the control plane sees
+# it.
 _UNSET = object()
 
 # One grammar for a proposal bullet, shared by the list and dismiss paths. The
@@ -483,7 +483,6 @@ class CiaoControlPlane:
         default_model: str = "",
         gws_profile: str = "",
         disallowed_tools: Any = _UNSET,
-        claude_ai_mcps: Any = _UNSET,
         color: str = "",
     ) -> dict[str, Any]:
         """Register a new logical workspace under the standard vault folder."""
@@ -497,8 +496,6 @@ class CiaoControlPlane:
         }
         if disallowed_tools is not _UNSET:
             data["disallowed_tools"] = disallowed_tools
-        if claude_ai_mcps is not _UNSET:
-            data["claude_ai_mcps"] = claude_ai_mcps
         if color:
             data["color"] = color
         workspace = workspace_from_request(data, config=self.config)
@@ -516,7 +513,6 @@ class CiaoControlPlane:
         default_model: str | None = None,
         gws_profile: str | None = None,
         disallowed_tools: Any = _UNSET,
-        claude_ai_mcps: Any = _UNSET,
         color: str = "",
     ) -> dict[str, Any]:
         """Update a registered workspace. Omitted fields keep their values."""
@@ -534,8 +530,6 @@ class CiaoControlPlane:
             data["gws_profile"] = gws_profile
         if disallowed_tools is not _UNSET:
             data["disallowed_tools"] = disallowed_tools
-        if claude_ai_mcps is not _UNSET:
-            data["claude_ai_mcps"] = claude_ai_mcps
         if color:
             data["color"] = color
         workspace = workspace_from_request(data, config=self.config, existing=existing)

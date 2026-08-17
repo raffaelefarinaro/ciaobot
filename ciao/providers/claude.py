@@ -528,8 +528,8 @@ class ClaudeProvider(BaseSDKProvider):
             # stream. See _SDK_MAX_BUFFER_BYTES and issue #137.
             max_buffer_size=_SDK_MAX_BUFFER_BYTES,
             env=request.extra_env or {},
-            # Per-workspace tool denylist (e.g. block claude.ai connector
-            # MCPs for personal chats). Empty list = no denylist applied.
+            # Per-workspace tool denylist (e.g. the default harness set, or
+            # ``Bash``). Empty list = no denylist applied.
             disallowed_tools=list(request.disallowed_tools or []),
             # Agents are discovered from .claude/agents/ via setting_sources
             # below. No manual frontmatter parsing needed.
@@ -589,10 +589,9 @@ class ClaudeProvider(BaseSDKProvider):
             # ciaobot) and ignores every other MCP source — which includes the
             # account's claude.ai connector MCPs (``mcp__claude_ai_*``). Those
             # are fetched from the claude.ai login, not declared in
-            # ``mcp_servers``, so strict mode silently suppressed all of them
-            # (see the ``claude_ai_mcps`` / ``disallowed_tools`` gating in
-            # ciao/config.py and the contract in docs/MCP.md). Connectors must
-            # stay loaded so the per-workspace denylist can gate them; the
+            # ``mcp_servers``, so strict mode silently suppressed all of them.
+            # Connectors are always allowed (Ciaobot no longer ships an opinion
+            # on them); they must stay loaded so they remain reachable. The
             # ciaobot server is still injected above, and a server that is
             # unavailable at spawn time already degrades to the legacy surface
             # in ProjectChatManager. ``request.mcp_required`` is still honored

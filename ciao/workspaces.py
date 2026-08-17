@@ -18,7 +18,6 @@ from ciao import provider_registry
 from ciao.config import (
     DEFAULT_WORKSPACE_COLOR,
     WorkspaceConfig,
-    coerce_claude_ai_mcps,
     coerce_workspace_color,
 )
 
@@ -63,10 +62,6 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
             if getattr(workspace, "disallowed_tools", None) is not None
             else None
         ),
-        # claude.ai connector MCP toggle. null = per-workspace default
-        # (personal off, else on). The effective denylist is computed by
-        # ``CiaoConfig.disallowed_tools_for_workspace``.
-        "claude_ai_mcps": getattr(workspace, "claude_ai_mcps", None),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
     }
@@ -135,12 +130,6 @@ def workspace_from_request(
         disallowed_tools = existing.disallowed_tools
     else:
         disallowed_tools = None
-    if "claude_ai_mcps" in data:
-        claude_ai_mcps = coerce_claude_ai_mcps(data.get("claude_ai_mcps"))
-    elif existing is not None:
-        claude_ai_mcps = existing.claude_ai_mcps
-    else:
-        claude_ai_mcps = None
     if "color" in data:
         color = coerce_workspace_color(data.get("color"))
     elif existing is not None:
@@ -166,7 +155,6 @@ def workspace_from_request(
         default_provider=provider,
         default_model=default_model,
         disallowed_tools=disallowed_tools,
-        claude_ai_mcps=claude_ai_mcps,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
         color=color,
     )

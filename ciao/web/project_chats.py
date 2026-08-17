@@ -4797,12 +4797,9 @@ class ProjectChatManager:
     def disallowed_tools_for_chat(self, chat: ChatInfo) -> list[str]:
         """Per-workspace tool denylist for a chat's spawned CLI.
 
-        With the ``claude_ai_mcps`` toggle at its default (on), the claude.ai
-        connector MCPs are allowed in both workspaces: personal chats deny only
-        the self-hosted n8n MCP, work chats deny nothing. Flip the toggle off
-        (``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``_WORK`` / the PWA switch) to add
-        the connector set to the denylist; extras are overridable via
-        ``CIAO_DISALLOWED_TOOLS_PERSONAL`` / ``CIAO_DISALLOWED_TOOLS_WORK``.
+        Applies the default harness set plus any workspace "extra disallowed
+        tools" (``CIAO_DISALLOWED_TOOLS_PERSONAL`` / ``_WORK`` or the PWA
+        field). claude.ai connector MCPs are always allowed.
         """
         if chat.provider != "claude":
             return []
@@ -5045,8 +5042,8 @@ class ProjectChatManager:
         authorization for these turns happened when the user created the
         schedule or loop, which is the same trade every cron runner makes.
         Deny rules still apply — they are evaluated before the callback — so
-        the per-workspace denylist (claude.ai connectors, `Skill(schedule)`,
-        harness tools) is not weakened by this.
+        the per-workspace denylist (`Skill(schedule)`, harness tools) is not
+        weakened by this.
 
         Auto mode relies on Anthropic's server-side classifier to decide
         which tool calls run silently and which escalate, which the Claude

@@ -58,10 +58,6 @@ export interface WorkspaceInfo {
   default_provider: WorkspaceProvider
   default_model: string
   disallowed_tools?: string[] | null
-  // claude.ai connector MCP toggle. null = per-workspace default
-  // (personal off, else on). When off, the connector set is added to the
-  // effective denylist; disallowed_tools covers the extra tools.
-  claude_ai_mcps?: boolean | null
   gws_profile: string
   // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
   color?: string
@@ -73,8 +69,6 @@ export interface WorkspacesResponse {
   // App-wide fallback model used when a workspace's default_model is empty.
   app_default_model?: string
   provider_options?: WorkspaceProviderOption[]
-  // claude.ai connector MCP names the per-workspace toggle controls.
-  claude_ai_connectors?: string[]
 }
 
 export interface McpEnvKey {

@@ -17,21 +17,6 @@ from ciao.providers.codex import CodexSettings
 from ciao.providers.opencode import OpencodeSettings
 
 
-# claude.ai account-OAuth connector MCPs (Airtable, Atlassian, Slack, Asana,
-# BigQuery, incident.io, Salesforce, Sentry). These are gated per workspace
-# by the ``claude_ai_mcps`` toggle on ``WorkspaceConfig`` (default on). The
-# toggle expands to this set in ``CiaoConfig.disallowed_tools_for_workspace``.
-CLAUDE_AI_CONNECTORS: tuple[str, ...] = (
-    "mcp__claude_ai_Airtable",
-    "mcp__claude_ai_Asana",
-    "mcp__claude_ai_Atlassian",
-    "mcp__claude_ai_Google_Cloud_BigQuery",
-    "mcp__claude_ai_Salesforce",
-    "mcp__claude_ai_Sentry",
-    "mcp__claude_ai_Slack",
-    "mcp__claude_ai_incident_io",
-)
-
 # Harness tools that are irrelevant inside the Ciaobot PWA regardless of
 # workspace. The PWA is the notification, plan-approval, and scheduling
 # surface, so the CLI's own plan-mode, cron, /loop wakeup, routine-trigger,
@@ -133,27 +118,6 @@ def _vault_evidence_score(path: Path) -> int:
     return score
 
 
-def coerce_claude_ai_mcps(raw: object) -> bool | None:
-    """Parse the claude.ai MCPs toggle. ``None``/``"default"`` → unset (use the
-    per-workspace default); booleans pass through; strings ``true/false/on/off``
-    coerce. Anything else → None."""
-    if raw is None:
-        return None
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, (int, float)):
-        return bool(raw)
-    if isinstance(raw, str):
-        cleaned = raw.strip().lower()
-        if cleaned in {"", "default", "none"}:
-            return None
-        if cleaned in {"true", "1", "yes", "on"}:
-            return True
-        if cleaned in {"false", "0", "no", "off"}:
-            return False
-    return None
-
-
 # Accent presets for the PWA. Missing/unknown values resolve to pink
 # (Ciao brand). Only accents shift; canvas tokens stay stable.
 WORKSPACE_COLOR_IDS = ("pink", "cyan", "amber", "emerald", "violet")
@@ -182,16 +146,9 @@ class WorkspaceConfig:
     vault_root: str
     default_provider: str = "claude"
     default_model: str = ""
-    # Extra (non-connector) tools to deny. The claude.ai connector set is
-    # controlled by ``claude_ai_mcps``; this field covers everything else
-    # (e.g. ``mcp__n8n_mcp``, ``Bash``). ``None`` = use the per-workspace
-    # default extras; ``[]`` = explicit opt-out (no extras).
+    # Extra tools to deny (e.g. ``mcp__n8n_mcp``, ``Bash``). ``None`` = use
+    # the per-workspace default extras; ``[]`` = explicit opt-out (no extras).
     disallowed_tools: list[str] | None = None
-    # Whether claude.ai account-OAuth connector MCPs are exposed in this
-    # workspace. ``None`` = default (True).
-    # When False/defaults-off, ``CLAUDE_AI_CONNECTORS`` is added to the
-    # effective denylist in ``disallowed_tools_for_workspace``.
-    claude_ai_mcps: bool | None = None
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
@@ -222,7 +179,6 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         default_provider=str(data.get("default_provider", "claude")).strip() or "claude",
         default_model=str(data.get("default_model", "")).strip(),
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
-        claude_ai_mcps=coerce_claude_ai_mcps(data.get("claude_ai_mcps")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
     )
@@ -261,8 +217,6 @@ def _legacy_workspaces(
     default_model_work: str = "",
     disallowed_tools_personal: list[str] | None = None,
     disallowed_tools_work: list[str] | None = None,
-    claude_ai_mcps_personal: bool | None = None,
-    claude_ai_mcps_work: bool | None = None,
     gws_default_profile: str = "personal",
 ) -> dict[str, WorkspaceConfig]:
     """Current private-layout defaults until callers fully support N workspaces."""
@@ -273,7 +227,6 @@ def _legacy_workspaces(
             default_provider="claude",
             default_model=default_model_personal,
             disallowed_tools=disallowed_tools_personal,
-            claude_ai_mcps=claude_ai_mcps_personal,
             gws_profile=gws_default_profile or "personal",
         ),
         "work": WorkspaceConfig(
@@ -282,7 +235,6 @@ def _legacy_workspaces(
             default_provider="claude",
             default_model=default_model_work,
             disallowed_tools=disallowed_tools_work,
-            claude_ai_mcps=claude_ai_mcps_work,
             gws_profile="work",
         ),
     }
@@ -296,9 +248,9 @@ def _parse_disallowed_tools(raw: str) -> list[str] | None:
     """Parse a CSV denylist. Empty/missing → None (use defaults);
     ``"none"`` → ``[]`` (explicit opt-out); CSV → parsed list.
 
-    The None vs []-empty distinction matters because the personal
-    workspace has built-in defaults (block claude.ai connectors).
-    Operators who want zero denylist set the literal ``"none"``.
+    The None vs []-empty distinction matters because every workspace has
+    built-in defaults (the harness tool denylist). Operators who want zero
+    denylist set the literal ``"none"``.
     """
     cleaned = raw.strip()
     if not cleaned:
@@ -390,19 +342,13 @@ class CiaoConfig:
     # than another.
     default_model_personal: str = ""
     default_model_work: str = ""
-    # Per-workspace tool denylists (the "extra" tools beyond claude.ai
-    # connectors). Forwarded to ``ClaudeAgentOptions.disallowed_tools`` for the
+    # Per-workspace tool denylists (the "extra" tools beyond the default
+    # harness set). Forwarded to ``ClaudeAgentOptions.disallowed_tools`` for the
     # spawned CLI subprocess, so a personal chat can't accidentally touch a
     # work-only MCP (and vice versa). ``None`` = "unset, use built-in
     # defaults"; explicit ``[]`` = "operator opted out of the defaults".
     disallowed_tools_personal: list[str] | None = None
     disallowed_tools_work: list[str] | None = None
-    # Per-workspace claude.ai connector MCP toggle. ``None`` = default (on).
-    # When off, ``CLAUDE_AI_CONNECTORS`` is added to the effective denylist.
-    # Set via ``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``_WORK`` (true/false;
-    # ``default``/unset → default on).
-    claude_ai_mcps_personal: bool | None = None
-    claude_ai_mcps_work: bool | None = None
     workspaces: dict[str, WorkspaceConfig] = field(default_factory=dict)
     _workspace_registry_changed: bool = field(
         init=False, default=False, repr=False
@@ -496,8 +442,6 @@ class CiaoConfig:
                 default_model_work=self.default_model_work,
                 disallowed_tools_personal=self.disallowed_tools_personal,
                 disallowed_tools_work=self.disallowed_tools_work,
-                claude_ai_mcps_personal=self.claude_ai_mcps_personal,
-                claude_ai_mcps_work=self.claude_ai_mcps_work,
                 gws_default_profile=self.gws_default_profile,
             )
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
@@ -777,7 +721,6 @@ class CiaoConfig:
                 ),
                 "default_model": workspace.default_model,
                 "disallowed_tools": workspace.disallowed_tools,
-                "claude_ai_mcps": workspace.claude_ai_mcps,
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
             }
@@ -852,60 +795,28 @@ class CiaoConfig:
             return "normal"
         return self.claude_mode
 
-    def claude_ai_mcps_for_workspace(self, workspace: str | None) -> bool:
-        """Whether claude.ai connector MCPs are exposed in this workspace.
-
-        ``None`` on the workspace config resolves to the default: True.
-        """
-        workspace_config = self.workspace(workspace)
-        if workspace_config is None:
-            return True
-        value = workspace_config.claude_ai_mcps
-        if value is None:
-            return True
-        return value
-
     def disallowed_tools_for_workspace(self, workspace: str | None) -> list[str]:
         """Tools to deny for a chat in this workspace.
 
-        The effective denylist is the union of:
-
-        * the claude.ai connector set (``CLAUDE_AI_CONNECTORS``) when
-          ``claude_ai_mcps`` resolves to False, and
-        * the workspace's extra tools (``disallowed_tools``), which defaults to
-          the harness set (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every
-          workspace.
-
-        So, with the toggle at its default (on), every chat blocks the
-        PWA-irrelevant harness tools (plan mode, cron, /loop wakeup, routine
-        trigger, push, notebook edit, design-system sync) and the 8 claude.ai
-        connectors are allowed until the toggle is flipped off. Both are
-        overridable: the toggle via the per-workspace claude.ai env var or the
-        PWA switch, the extras via the per-workspace disallowed-tools env var or
-        the "Extra disallowed tools" field (the literal ``none`` denies nothing
-        at all).
+        The effective denylist is the workspace's extra tools
+        (``disallowed_tools``), which defaults to the harness set
+        (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every workspace. Every chat
+        blocks the PWA-irrelevant harness tools (plan mode, cron, /loop wakeup,
+        routine trigger, push, notebook edit, design-system sync). claude.ai
+        connector MCPs are always allowed: with multiple providers Ciaobot no
+        longer ships an opinion on them. The extras are overridable via the
+        per-workspace disallowed-tools env var or the "Extra disallowed tools"
+        field (the literal ``none`` denies nothing at all).
 
         An unregistered workspace name — a stale reference, or a renamed or
         deleted workspace — gets the defaults rather than an empty denylist. It
         was the one input that reached the model with nothing denied.
         """
         workspace_config = self.workspace(workspace)
-        connectors = (
-            list(CLAUDE_AI_CONNECTORS)
-            if not self.claude_ai_mcps_for_workspace(workspace)
-            else []
-        )
         extras = workspace_config.disallowed_tools if workspace_config else None
         if extras is None:
             extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
-        # Union, preserving order, deduped.
-        seen: set[str] = set()
-        effective: list[str] = []
-        for tool in (*connectors, *extras):
-            if tool not in seen:
-                seen.add(tool)
-                effective.append(tool)
-        return effective
+        return list(dict.fromkeys(extras))
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "CiaoConfig":
@@ -1008,20 +919,12 @@ class CiaoConfig:
         disallowed_tools_work = _parse_disallowed_tools(
             source.get("CIAO_DISALLOWED_TOOLS_WORK", "")
         )
-        claude_ai_mcps_personal = coerce_claude_ai_mcps(
-            source.get("CIAO_CLAUDE_AI_MCPS_PERSONAL", "")
-        )
-        claude_ai_mcps_work = coerce_claude_ai_mcps(
-            source.get("CIAO_CLAUDE_AI_MCPS_WORK", "")
-        )
         gws_default_profile = source.get("GWS_PROFILE", "personal").strip() or "personal"
         workspaces = _parse_workspaces_json(workspaces_json) or _legacy_workspaces(
             default_model_personal=default_model_personal,
             default_model_work=default_model_work,
             disallowed_tools_personal=disallowed_tools_personal,
             disallowed_tools_work=disallowed_tools_work,
-            claude_ai_mcps_personal=claude_ai_mcps_personal,
-            claude_ai_mcps_work=claude_ai_mcps_work,
             gws_default_profile=gws_default_profile,
         )
 
@@ -1088,8 +991,6 @@ class CiaoConfig:
             default_model_work=default_model_work,
             disallowed_tools_personal=disallowed_tools_personal,
             disallowed_tools_work=disallowed_tools_work,
-            claude_ai_mcps_personal=claude_ai_mcps_personal,
-            claude_ai_mcps_work=claude_ai_mcps_work,
             workspaces=workspaces,
             insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
             in {"", "0", "false", "no", "off"},

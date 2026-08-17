@@ -387,30 +387,25 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 **Workspaces**
 
 ```bash
-# List — returns {workspaces, active, provider_options, claude_ai_connectors}.
-# claude_ai_connectors is the claude.ai connector MCP set the per-workspace
-# toggle controls (for UI labels).
+# List — returns {workspaces, active, provider_options}.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider, default_model,
 # gws_profile, color (pink|cyan|amber|emerald|violet; default
-# pink — PWA accent only), disallowed_tools (extra non-connector tools,
-# CSV or list, null = defaults), claude_ai_mcps (true|false|null where null
-# = per-workspace default: personal off, else on). The effective denylist is
-# the union of the claude.ai connector set (when the toggle is off) and the
-# extras. POST creates `<CIAO_VAULT_ROOT>/<name>` and PATCH
-# /api/workspaces/{name} updates metadata in place. `vault_root` in a request
-# body is ignored: locations are read-only here so a routine settings save
-# cannot relocate a workspace. Setup and migration may still persist an
-# external/legacy root in the registry.
+# pink — PWA accent only), disallowed_tools (extra tools, CSV or list,
+# null = defaults). claude.ai connector MCPs are always allowed. POST
+# creates `<CIAO_VAULT_ROOT>/<name>` and PATCH /api/workspaces/{name} updates
+# metadata in place. `vault_root` in a request body is ignored: locations are
+# read-only here so a routine settings save cannot relocate a workspace.
+# Setup and migration may still persist an external/legacy root in the registry.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces" \
   -H 'content-type: application/json' \
-  -d '{"name":"client-a","claude_ai_mcps":true,"disallowed_tools":"mcp__n8n_mcp"}'
+  -d '{"name":"client-a","disallowed_tools":"mcp__n8n_mcp"}'
 
-# Flip just the toggle on an existing workspace.
+# Update metadata on an existing workspace.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \
   -H 'content-type: application/json' \
-  -d '{"claude_ai_mcps":true}'
+  -d '{"disallowed_tools":"mcp__n8n_mcp"}'
 
 # Delete.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/workspaces/client-a"

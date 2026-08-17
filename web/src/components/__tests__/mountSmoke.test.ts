@@ -788,13 +788,11 @@ describe('component mount smoke', () => {
     expect(providerOptions).toContain('opencode')
     expect(wrapper.findAll('select.workspace-select')).toHaveLength(3)
 
-    expect(wrapper.find('[aria-label="Claude.ai MCPs"]').exists()).toBe(true)
     const providerField = wrapper.findAll('label.settings-field')
       .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
     expect(providerField).toBeTruthy()
     await providerField!.find('select').setValue('codex')
     await nextTick()
-    expect(wrapper.find('[aria-label="Claude.ai MCPs"]').exists()).toBe(false)
     wrapper.unmount()
   })
 

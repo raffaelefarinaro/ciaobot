@@ -69,9 +69,6 @@ export const useProjectStore = defineStore('projects', () => {
   const workspaceProviderOptions = ref<WorkspaceProviderOption[]>([
     { value: 'claude', label: 'Claude' },
   ])
-  // claude.ai connector MCP names the per-workspace toggle controls, for the
-  // PWA Settings label. Populated from /api/workspaces; stable across writes.
-  const workspaceClaudeAiConnectors = ref<string[]>([])
   // App-wide fallback model when a workspace default_model is empty; lets
   // Settings label the picker "Inherit default (<model>)".
   const workspaceAppDefaultModel = ref('')
@@ -1276,7 +1273,6 @@ export const useProjectStore = defineStore('projects', () => {
       workspaceProviderOptions.value = workspaceResponse.provider_options?.length
         ? workspaceResponse.provider_options
         : [{ value: 'claude', label: 'Claude' }]
-      workspaceClaudeAiConnectors.value = workspaceResponse.claude_ai_connectors || []
       projects.value = p
       reconcileChatList(c)
       const knownWorkspaceNames = workspaceOptions.value.map(w => w.name)
@@ -4360,7 +4356,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, reentrySummaries,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,

@@ -1122,31 +1122,6 @@
                     </option>
                   </select>
                 </label>
-                <div v-if="newWorkspaceForm.default_provider !== 'codex'" class="settings-field settings-field--wide">
-                  <div class="settings-label-row">
-                    <span class="ws-label">Claude.ai MCPs</span>
-                    <details class="field-info">
-                      <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
-                      <div class="field-info-panel">
-                        <p>
-                          Allows this workspace to use claude.ai account connectors, for example Airtable,
-                          Slack, Atlassian, BigQuery, Sentry, or similar tools.
-                        </p>
-                        <p>
-                          Turn this off for personal workspaces when your connected accounts point to work systems,
-                          so personal chats do not inherit work-only connectors.
-                        </p>
-                      </div>
-                    </details>
-                  </div>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
-                    <option value="on">On (connectors allowed)</option>
-                    <option value="off">Off (connectors blocked)</option>
-                  </select>
-                </div>
-
-
-
               </div>
               <div class="action-row settings-actions">
                 <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
@@ -1244,31 +1219,6 @@
                       </option>
                     </select>
                   </label>
-                  <div v-if="form.default_provider !== 'codex'" class="settings-field settings-field--wide">
-                    <div class="settings-label-row">
-                      <span class="ws-label">Claude.ai MCPs</span>
-                      <details class="field-info">
-                        <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
-                        <div class="field-info-panel">
-                          <p>
-                            Allows this workspace to use claude.ai account connectors, for example Airtable,
-                            Slack, Atlassian, BigQuery, Sentry, or similar tools.
-                          </p>
-                          <p>
-                            Turn this off for personal workspaces when your connected accounts point to work systems,
-                            so personal chats do not inherit work-only connectors.
-                          </p>
-                        </div>
-                      </details>
-                    </div>
-                    <select class="routine-input workspace-select" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
-                      <option value="on">On (connectors allowed)</option>
-                      <option value="off">Off (connectors blocked)</option>
-                    </select>
-                  </div>
-
-
-
                 </div>
               </div>
             </div>
@@ -4409,7 +4359,6 @@ type WorkspaceForm = {
   default_model: string
   gws_profile: string
   disallowed_tools: string
-  claude_ai_mcps: 'on' | 'off'
   color: WorkspaceColorId
 }
 
@@ -4425,7 +4374,6 @@ function blankWorkspaceForm(): WorkspaceForm {
     default_model: '',
     gws_profile: '',
     disallowed_tools: '',
-    claude_ai_mcps: 'on',
     color: DEFAULT_WORKSPACE_COLOR,
   }
 }
@@ -4441,7 +4389,6 @@ function normalizeWorkspaceProvider(value: unknown): WorkspaceProvider {
 }
 
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
-  const mcps = ws.claude_ai_mcps
   return {
     name: ws.name,
     vault_root: ws.vault_root || '',
@@ -4449,18 +4396,9 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
-    claude_ai_mcps: mcps === false ? 'off' : 'on',
     color: normalizeWorkspaceColor(ws.color),
   }
 }
-
-function claudeAiMcpsPayload(value: 'default' | 'on' | 'off'): boolean | null {
-  if (value === 'on') return true
-  if (value === 'off') return false
-  return null
-}
-
-
 
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
   if (provider.startsWith('custom:')) {
@@ -4598,13 +4536,7 @@ function connectionMcps(providerId: string): string[] {
   }
   if (result.length || providerId !== 'claude') return result
 
-  const currentWs = workspaceForms.value.find((w) => w.name === projectStore.activeWorkspace)
-    || workspaceForms.value[0]
-  if (currentWs && currentWs.claude_ai_mcps === 'off') return result
-  const connectors = projectStore.workspaceClaudeAiConnectors.length
-    ? projectStore.workspaceClaudeAiConnectors
-    : defaultClaudeAiConnectors
-  for (const c of connectors) {
+  for (const c of defaultClaudeAiConnectors) {
     const label = formatConnectorLabel(c)
     if (!result.includes(label)) result.push(label)
   }
@@ -4654,7 +4586,6 @@ async function saveWorkspace(name: string) {
       default_model: form.default_model,
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
-      claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
       color: form.color,
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
@@ -4685,7 +4616,6 @@ async function createNewWorkspace() {
       default_model: form.default_model,
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
-      claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
       color: form.color,
     })
     notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')

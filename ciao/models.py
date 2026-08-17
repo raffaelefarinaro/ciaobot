@@ -120,8 +120,8 @@ class AgentRequest:
     extra_env: dict[str, str] = field(default_factory=dict)
     # Tools the spawned CLI must refuse to call. Forwarded to the SDK's
     # ``ClaudeAgentOptions.disallowed_tools``. Lets per-workspace policy
-    # (e.g. block claude.ai connectors for personal chats) reach the
-    # subprocess without leaking through ``extra_env``.
+    # (e.g. the default harness set or ``Bash``) reach the subprocess
+    # without leaking through ``extra_env``.
     disallowed_tools: list[str] = field(default_factory=list)
     # Provider-native thinking/reasoning level (see THINKING_LEVELS).
     # Empty = provider default, nothing is forwarded.

@@ -29,10 +29,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
-from ciao.config import (
-    WorkspaceConfig,
-    CLAUDE_AI_CONNECTORS,
-)
+from ciao.config import WorkspaceConfig
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.model_tiers import codex_tier_models
@@ -820,9 +817,6 @@ def _workspaces_payload(config) -> dict:
         # PWA can label "Inherit default (<model>)" instead of a vague hint.
         "app_default_model": getattr(config, "claude_default_model", "") or "",
         "provider_options": _workspace_provider_options(config),
-        # The claude.ai connector set the toggle controls, so the PWA can label
-        # the switch without hardcoding tool names.
-        "claude_ai_connectors": list(CLAUDE_AI_CONNECTORS),
     }
 
 
