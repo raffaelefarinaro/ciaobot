@@ -679,7 +679,7 @@ import NewScheduleForm from './NewScheduleForm.vue'
 import NewLoopForm from './NewLoopForm.vue'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
 import { loopInWorkspace, scheduleInWorkspace, workspaceForLoop } from '../lib/automationWorkspace'
 import { askConfirm } from '../lib/confirm'
 
@@ -1045,7 +1045,7 @@ const editInheritedModelLabel = computed(() => {
 
 function selectScheduleModel(value: string | string[], sectionKey: string) {
   editData.value.model = Array.isArray(value) ? value[0] || '' : value
-  editModelProvider.value = sectionKey === 'codex' ? 'codex' : 'claude'
+  editModelProvider.value = providerForModelSection(sectionKey)
 }
 
 const contextGroups = computed(() => {
