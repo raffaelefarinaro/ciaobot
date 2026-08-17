@@ -529,65 +529,6 @@
 
             <div class="routine-row">
               <div class="routine-info">
-                <span class="routine-name">Chat titles</span>
-                <span class="routine-detail">Names a new chat after the first message.</span>
-                <div v-if="getJobTelemetry('title')" class="routine-telemetry">
-                  <span class="badge" :class="getJobBadgeClass('title')">
-                    {{ getJobStatus('title') }}
-                  </span>
-                  <span v-if="hasJobLastRun('title')" class="telemetry-meta">
-                    Last run: {{ getJobLastRunLabel('title') }} ({{ getJobDuration('title') }})
-                  </span>
-                  <span v-if="getJobStatus('title') === 'error' && getJobLastError('title')" class="telemetry-error" :title="getJobLastError('title')">
-                    &middot; {{ getJobLastError('title') }}
-                  </span>
-                </div>
-              </div>
-              <div
-                class="routine-model-controls"
-                :class="{ 'routine-model-controls--single': routineProviderValue('title_model') === 'apple' }"
-              >
-                <select
-                  class="routine-select routine-select--provider"
-                  :value="routineProviderValue('title_model')"
-                  :disabled="routinesSaving"
-                  @change="saveRoutineProvider('title_model', ($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="automatic">Automatic</option>
-                  <option value="apple">Local (free) · beta</option>
-                  <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
-                    {{ provider.label }}
-                  </option>
-                  <option v-if="codexTitlesAvailable" value="codex">OpenAI (via Codex)</option>
-                </select>
-                <ModelSelector
-                  v-if="routineProviderValue('title_model') !== 'apple' && routineProviderValue('title_model') !== 'automatic'"
-                  :model-value="routineModelValue('title_model')"
-                  :sections="routineModelSectionsFor('title_model')"
-                  :disabled="routinesSaving"
-                  @update:model-value="saveRoutineModel('title_model', $event)"
-                />
-                <span class="routine-model-hint">
-                  <template v-if="routineProviderValue('title_model') === 'apple'">
-                    Runs on-device for free using Apple Intelligence. Nothing to install.
-                    <!-- The on-device model does not honour "reply in the same language";
-                         it returns English titles regardless of the chat's language. -->
-                    Titles are written in English.
-                    <!-- Nothing to offer when it is unavailable: it needs macOS 26+,
-                         the desktop app, and Apple Intelligence switched on, none of
-                         which a button here can fix. Say why and let the user choose. -->
-                    <span v-if="routines && routines.apple_model_available === false" class="hint--warn">
-                      Unavailable: {{ routines.apple_model_unavailable_reason || 'not supported on this machine' }} —
-                      titles currently fall back to a cloud model.
-                    </span>
-                  </template>
-                  <template v-else>{{ routineModelSummary('title_model') }}</template>
-                </span>
-              </div>
-            </div>
-
-            <div class="routine-row">
-              <div class="routine-info">
                 <span class="routine-name">Session insights</span>
                 <span class="routine-detail">Extracts learnings when a chat is archived and appends them to that archive.</span>
                 <div v-if="getJobTelemetry('insights')" class="routine-telemetry">
@@ -2758,7 +2699,7 @@ const insightsComparison = ref<InsightsComparison | null>(null)
 
 // Every provider with models is a runtime provider now.
 type AliasProviderKey = RuntimeProvider
-type RoutineModelKey = 'title_model' | 'insights_model'
+type RoutineModelKey = 'insights_model'
 // The routine pickers offer Automatic, Apple, and each available provider.
 type RoutineProviderValue = 'automatic' | 'apple' | AliasProviderKey
 
@@ -2773,7 +2714,6 @@ type AliasProviderSection = {
 }
 
 const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
-  title_model: 'title_model_effective',
   insights_model: 'insights_model_effective',
 }
 
@@ -3114,13 +3054,6 @@ function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
   return inferRoutineModel(routines.value?.[key] || '').provider
 }
 
-// Titles can be dispatched through runtime providers when they have discovered
-// models (i.e. the provider is connected).
-const codexTitlesAvailable = computed(() => {
-  const models = workspaceModels.value?.codex_models || []
-  return models.length > 0
-})
-
 function routineModelValue(key: RoutineModelKey): string {
   const raw = routines.value?.[key] || ''
   if (raw.trim()) return inferRoutineModel(raw).model
@@ -3166,17 +3099,14 @@ async function saveRoutineModel(key: RoutineModelKey, value: string | string[]) 
   await saveRoutines({ [key]: selected })
 }
 
-// Automatic does not pick one model: resolve_title_model / resolve_insights_model
-// take the chat's workspace and read that workspace's tier. Naming a single
-// model here read as a global choice and was wrong for every workspace but the
-// primary one, so say what it follows and list the per-workspace answers.
+// Automatic does not pick one model: resolve_insights_model takes the chat's
+// workspace and reads that workspace's tier. Naming a single model here read
+// as a global choice and was wrong for every workspace but the primary one, so
+// say what it follows and list the per-workspace answers.
 function routineWorkspaceModels(key: RoutineModelKey): Array<[string, string]> {
   const settings = routines.value
   if (!settings) return []
-  const map = key === 'title_model'
-    ? settings.title_model_by_workspace
-    : settings.insights_model_by_workspace
-  return Object.entries(map || {})
+  return Object.entries(settings.insights_model_by_workspace || {})
 }
 
 function routineModelSummary(key: RoutineModelKey): string {

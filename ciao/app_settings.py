@@ -85,9 +85,6 @@ class AppSettings:
     provider.
     """
 
-    # Model used by the chat title generator. Overrides the workspace's
-    # default when set.
-    title_model: str = ""
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
 
@@ -114,17 +111,12 @@ class AppSettings:
 
     # Per-provider default execution mode for new chats. Missing entry =
     # built-in default: ``normal`` for opencode (approval-enforcing),
-    # otherwise the env-backed
-    # ``claude_mode``. Same nested-map rationale as ``provider_default_models``.
+    # otherwise the env-backed ``claude_mode``. Same nested-map rationale as ``provider_default_models``.
     provider_default_modes: dict[str, str] | None = None
 
     # Per-provider default thinking level for new chats. Missing entry = the
     # provider's own default ("auto").
     provider_default_thinking: dict[str, str] | None = None
-
-    # Per-provider chat-title model. Missing entry = the provider's cheap
-    # default.
-    provider_title_models: dict[str, str] | None = None
 
     # Per-provider session-insights model. Missing entry = the provider's
     # balanced default.
@@ -153,7 +145,6 @@ class AppSettingsStore:
             "provider_default_models",
             "provider_default_modes",
             "provider_default_thinking",
-            "provider_title_models",
             "provider_insights_models",
         }
         string_fields = {
@@ -172,7 +163,6 @@ class AppSettingsStore:
         for key in (
             "provider_default_models",
             "provider_default_thinking",
-            "provider_title_models",
             "provider_insights_models",
         ):
             cleaned = _clean_provider_map(raw.get(key))
@@ -218,7 +208,6 @@ class AppSettingsStore:
             if key in {
                 "provider_default_models",
                 "provider_default_thinking",
-                "provider_title_models",
                 "provider_insights_models",
             }:
                 if not isinstance(value, dict):
@@ -256,7 +245,6 @@ class AppSettingsStore:
         """
         if self._defaults is None:
             self._defaults = {
-                "title_model_override": config.title_model_override,
                 "insights_model_override": config.insights_model_override,
                 "apple_intelligence_enabled": config.apple_intelligence_enabled,
 
@@ -275,7 +263,6 @@ class AppSettingsStore:
                 )
         d = self._defaults
         s = self.settings
-        config.title_model_override = s.title_model or d["title_model_override"]
         config.insights_model_override = s.insights_model or d["insights_model_override"]
 
         # Beta feature, off by default: the env default, unless the operator
@@ -302,7 +289,6 @@ class AppSettingsStore:
         # env-backed default; absence means "use the provider's own default".
         config.provider_default_models = dict(s.provider_default_models or {})
         config.provider_default_thinking = dict(s.provider_default_thinking or {})
-        config.provider_title_models = dict(s.provider_title_models or {})
         config.provider_insights_models = dict(s.provider_insights_models or {})
         for descriptor in provider_registry.descriptors():
             current = _default_model_settings(config, descriptor)

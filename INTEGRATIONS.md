@@ -119,10 +119,10 @@ opencli list   # see available adapters
 
 Note: many adapters require the Browser Bridge Chrome extension and an logged-in Chrome session.
 
-### Apple Intelligence (on-device titles and session insights)
+### Apple Intelligence (on-device session insights)
 
-Nothing to install. Selecting **Apple** as the Chat titles or Session insights
-model in Settings → Models uses Apple's on-device Foundation Model through the
+Nothing to install. Selecting **Apple** as the Session insights model in
+Settings → Models uses Apple's on-device Foundation Model through the
 `ciaobot-native` sidecar bundled in `Ciaobot.app` — no API key, no network, and
 no per-task cost. Settings also includes a comparison action that re-runs the
 text-only extraction against a small sample of existing processed archives

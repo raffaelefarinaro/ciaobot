@@ -165,9 +165,6 @@ class JobSpec:
 
 
 REGISTRY: tuple[JobSpec, ...] = (
-    JobSpec("title", "Title generation", "content",
-            "Names a chat from its first message.", True, True,
-            trigger="When a new chat gets its first message."),
     # The archive pipeline. All four run inside one `extract_and_append` task
     # (ciao/insights.py), spawned once when a chat is archived — so they share
     # one trigger and are reported as one group with four steps, in the order

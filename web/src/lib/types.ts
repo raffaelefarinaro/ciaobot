@@ -531,7 +531,6 @@ export interface ModelsResponse {
 // voice transcription engine (Settings → Models tab).
 export interface RoutineSettings {
   // Overrides as stored; empty string = automatic default.
-  title_model: string
   insights_model: string
 
   critique_models: string
@@ -540,8 +539,7 @@ export interface RoutineSettings {
   provider_default_models?: Record<string, string>
   // Per-provider default thinking level for new chats; missing = provider default.
   provider_default_thinking?: Record<string, string>
-  // Per-provider chat-title and session-insights models; missing = provider default.
-  provider_title_models?: Record<string, string>
+  // Per-provider session-insights models; missing = provider default.
   provider_insights_models?: Record<string, string>
   // Per-provider default execution mode for new chats (Settings → Providers).
   // Missing entry = built-in default (opencode → normal, others → auto).
@@ -549,15 +547,13 @@ export interface RoutineSettings {
   // Resolved effective default mode per provider, after built-in defaults.
   provider_default_modes_effective?: Record<string, string>
   // What actually runs right now, after defaults.
-  title_model_effective: string
   insights_model_effective: string
-  // On Automatic these resolve from the chat's workspace, so *_effective above
+  // On Automatic this resolves from the chat's workspace, so *_effective above
   // is only the primary workspace's answer. Empty when an override is set.
-  title_model_by_workspace?: Record<string, string>
   insights_model_by_workspace?: Record<string, string>
 
   critique_models_effective: string
-  // The "apple" title option: needs macOS 26+, the desktop app, and Apple
+  // The "apple" insights option: needs macOS 26+, the desktop app, and Apple
   // Intelligence on. Nothing installable, so Settings shows the reason.
   apple_model_available?: boolean
   apple_model_unavailable_reason?: string

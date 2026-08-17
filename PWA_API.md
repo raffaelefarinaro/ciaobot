@@ -486,26 +486,25 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 **Routine settings (Settings → Models tab)**
 
 ```bash
-# Read internal-routine settings: title, insights, and critique model
-# overrides, the per-provider default model / thinking / routine-model maps,
-# and the effective models after defaults.
+# Read internal-routine settings: insights and critique model overrides, the
+# per-provider default model / thinking / routine-model maps, and the effective
+# models after defaults.
 #
-# title_model_effective / insights_model_effective are the PRIMARY workspace's
-# answer only. With no override both routines resolve from the chat's own
-# workspace, so title_model_by_workspace / insights_model_by_workspace carry the
-# full {workspace: model} map. Both maps are empty when an override is set,
-# because then that one model applies everywhere.
+# insights_model_effective is the PRIMARY workspace's answer only. With no
+# override the insights routine resolves from the chat's own workspace, so
+# insights_model_by_workspace carries the full {workspace: model} map. The map
+# is empty when an override is set, because then that one model applies
+# everywhere.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
 # live config immediately (no restart). Empty string clears an override back
 # to the env default. "apple" routes a routine to the on-device Foundation
-# Model (title_model / insights_model). Per-provider defaults use the nested
-# maps: provider_default_models, provider_default_thinking,
-# provider_title_models, provider_insights_models.
+# Model (insights_model). Per-provider defaults use the nested maps:
+# provider_default_models, provider_default_thinking, provider_insights_models.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"codex":"gpt-5.6-terra"}}'
+  -d '{"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"codex":"gpt-5.6-terra"}}'
 ```
 
 **Project MCP servers (Settings → MCP tab)**

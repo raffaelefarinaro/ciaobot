@@ -315,12 +315,6 @@ class CiaoConfig:
     max_image_size_bytes: int = 10 * 1024 * 1024
     max_voice_size_bytes: int = 25 * 1024 * 1024
     media_ttl_hours: int = 72
-    # Titling uses the Claude Agent SDK's one-shot query(); default Haiku.
-    title_model: str = "haiku"
-    # Operator override for the titling model, set from the PWA Settings →
-    # Models tab (runtime settings store) or ``CIAO_TITLE_MODEL_OVERRIDE``.
-    # Empty = automatic routing: the workspace's haiku-tier model.
-    title_model_override: str = ""
     # Apple Intelligence (the "Local (free)" on-device model) is a beta feature,
     # off by default. Opt-in from Settings → Models, or an operator can flip the
     # default from the env with ``CIAO_APPLE_INTELLIGENCE=1``. When off, the
@@ -366,9 +360,6 @@ class CiaoConfig:
     # Per-provider default thinking level for new chats, set from the PWA
     # Settings → Models tab. A missing entry uses the provider's own default.
     provider_default_thinking: dict[str, str] = field(default_factory=dict)
-    # Per-provider chat-title model, set from the PWA Settings → Models tab.
-    # A missing entry uses the provider's cheap default.
-    provider_title_models: dict[str, str] = field(default_factory=dict)
     # Per-provider session-insights model, set from the PWA Settings → Models
     # tab. A missing entry uses the provider's balanced default.
     provider_insights_models: dict[str, str] = field(default_factory=dict)
@@ -980,8 +971,6 @@ class CiaoConfig:
             media_ttl_hours=int(
                 _env(source, "CIAO_MEDIA_TTL_HOURS", "TELEGRAM_BRIDGE_MEDIA_TTL_HOURS", "72")
             ),
-            title_model=source.get("CIAO_TITLE_MODEL", "").strip() or "haiku",
-            title_model_override=source.get("CIAO_TITLE_MODEL_OVERRIDE", "").strip(),
             apple_intelligence_enabled=source.get(
                 "CIAO_APPLE_INTELLIGENCE", "false"
             ).strip().lower()

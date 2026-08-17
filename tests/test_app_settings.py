@@ -14,7 +14,6 @@ class FakeConfig:
     """Just the fields apply_to_config touches."""
 
     def __init__(self) -> None:
-        self.title_model_override = ""
         self.insights_model_override = ""
         self.insights_model = "sonnet"
         # Beta feature, off by default (the env default here is False).
@@ -29,7 +28,6 @@ class FakeConfig:
         # env-backed defaults.
         self.provider_default_models: dict[str, str] = {}
         self.provider_default_thinking: dict[str, str] = {}
-        self.provider_title_models: dict[str, str] = {}
         self.provider_insights_models: dict[str, str] = {}
         # No env-backed defaults: empty = provider's own catalog default.
         self.codex = CodexSettings()
@@ -45,14 +43,12 @@ def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
     path.write_text(
         json.dumps(
             {
-                "title_model": " gemma4:12b-it-qat ",
                 "bogus": "x",
                 "insights_model": 42,
             }
         )
     )
     store = AppSettingsStore(path)
-    assert store.settings.title_model == "gemma4:12b-it-qat"
     assert store.settings.insights_model == ""
 
 
@@ -76,7 +72,7 @@ def test_update_rejects_a_non_string_value(tmp_path):
     # Engine-value validation went with the cloud engines; type checking is
     # what is left.
     with pytest.raises(ValueError):
-        store.update({"title_model": 3})
+        store.update({"insights_model": 3})
 
 
 def test_apple_intelligence_defaults_to_unset_and_off(tmp_path):
@@ -161,15 +157,15 @@ def test_tts_overrides_apply_and_clear(tmp_path):
     assert config.tts_local_voice == "af_heart"
 
 
-def test_title_override_applies(tmp_path):
+def test_insights_override_applies(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     config = FakeConfig()
-    store.update({"title_model": "ministral-3:3b"})
+    store.update({"insights_model": "ministral-3:3b"})
     store.apply_to_config(config)
-    assert config.title_model_override == "ministral-3:3b"
-    store.update({"title_model": ""})
+    assert config.insights_model_override == "ministral-3:3b"
+    store.update({"insights_model": ""})
     store.apply_to_config(config)
-    assert config.title_model_override == ""
+    assert config.insights_model_override == ""
 
 
 def test_critique_models_override_applies(tmp_path):
@@ -202,23 +198,19 @@ def test_provider_routine_models_persist_and_apply(tmp_path):
     config = FakeConfig()
 
     store.update({
-        "provider_title_models": {"codex": "gpt-5.6-luna"},
         "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
         "provider_default_thinking": {"claude": "high"},
     })
     store.apply_to_config(config)
-    assert config.provider_title_models == {"codex": "gpt-5.6-luna"}
     assert config.provider_insights_models == {"opencode": "anthropic/claude-sonnet-4-6"}
     assert config.provider_default_thinking == {"claude": "high"}
     path = tmp_path / "app_settings.json"
     assert json.loads(path.read_text()) == {
-        "provider_title_models": {"codex": "gpt-5.6-luna"},
         "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
         "provider_default_thinking": {"claude": "high"},
     }
     # Fresh instance sees the persisted maps.
     fresh = AppSettingsStore(path)
-    assert fresh.settings.provider_title_models == {"codex": "gpt-5.6-luna"}
     assert fresh.settings.provider_insights_models == {"opencode": "anthropic/claude-sonnet-4-6"}
     assert fresh.settings.provider_default_thinking == {"claude": "high"}
 
@@ -228,7 +220,7 @@ def test_provider_maps_reject_non_objects(tmp_path):
     with pytest.raises(ValueError, match="must be an object"):
         store.update({"provider_default_models": "gpt-5.6-sol"})
     with pytest.raises(ValueError, match="must be an object"):
-        store.update({"provider_title_models": "gpt-5.6-luna"})
+        store.update({"provider_insights_models": "gpt-5.6-luna"})
 
 
 def test_provider_maps_load_ignores_junk(tmp_path):
@@ -240,7 +232,7 @@ def test_provider_maps_load_ignores_junk(tmp_path):
                     "codex": "gpt-5.6-sol",
                     "bogus": "auto",
                 },
-                "provider_title_models": {
+                "provider_insights_models": {
                     "opencode": "anthropic/claude-sonnet-4-6",
                     "codex": 42,
                 },
@@ -249,7 +241,7 @@ def test_provider_maps_load_ignores_junk(tmp_path):
     )
     store = AppSettingsStore(path)
     assert store.settings.provider_default_models == {"codex": "gpt-5.6-sol"}
-    assert store.settings.provider_title_models == {"opencode": "anthropic/claude-sonnet-4-6"}
+    assert store.settings.provider_insights_models == {"opencode": "anthropic/claude-sonnet-4-6"}
 
 
 def test_provider_default_modes_persist_and_apply(tmp_path):

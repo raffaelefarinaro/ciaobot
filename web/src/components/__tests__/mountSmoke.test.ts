@@ -18,7 +18,6 @@ import { api } from '../../lib/api'
 
 vi.mock('../../lib/api', () => {
   let routineSettings = {
-    title_model: '',
     insights_model: '',
 
     critique_models: '',
@@ -26,7 +25,6 @@ vi.mock('../../lib/api', () => {
     codex_sonnet_model: '',
     codex_opus_model: '',
     codex_fable_model: '',
-    title_model_effective: 'sonnet',
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
@@ -1063,19 +1061,19 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // title_model and insights_model each carry a provider select.
+    // insights_model carries a provider select.
     const providerSelects = wrapper.findAll('.routine-model-controls .routine-select--provider')
-    expect(providerSelects.length).toBeGreaterThanOrEqual(2)
+    expect(providerSelects.length).toBeGreaterThanOrEqual(1)
 
     // Picking Claude stores the effective default as the concrete model.
-    await providerSelects[1].setValue('claude')
+    await providerSelects[0].setValue('claude')
     await flushPromises()
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       insights_model: 'sonnet',
     })
 
     // Picking opencode stores a provider-qualified concrete model.
-    await providerSelects[1].setValue('opencode')
+    await providerSelects[0].setValue('opencode')
     await flushPromises()
     const patchMock = api.patch as unknown as { mock: { calls: Array<[string, unknown]> } }
     const last = patchMock.mock.calls[patchMock.mock.calls.length - 1]

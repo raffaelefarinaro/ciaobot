@@ -5118,14 +5118,6 @@ def _routines_payload(config, app_settings) -> dict:
     )
 
     s = app_settings.settings
-    if config.title_model_override:
-        title_effective = config.title_model_override
-    else:
-        # Automatic resolves to the workspace's default model — Apple's
-        # on-device model is opt-in (choose "Apple" explicitly), not the auto
-        # default just because the binary is on PATH (it fails when Apple
-        # Intelligence is disabled).
-        title_effective = config.default_model_for_workspace(config.primary_workspace())
     from ciao.critique import critique_models_effective
 
     critique_effective = critique_models_effective(config)
@@ -5136,23 +5128,19 @@ def _routines_payload(config, app_settings) -> dict:
             config.primary_workspace()
         )
 
-    # On Automatic these routines resolve per workspace (resolve_title_model and
-    # resolve_insights_model take the chat's workspace), so the single
+    # On Automatic the insights routine resolves per workspace
+    # (resolve_insights_model takes the chat's workspace), so the single
     # *_effective value above is only the primary-workspace answer. Reporting it
     # alone reads as a global choice and is wrong for every other workspace, so
     # ship the whole map and let the UI say what actually varies. Empty when an
     # override is set, because then one model really does apply everywhere.
-    title_by_workspace: dict[str, str] = {}
     insights_by_workspace: dict[str, str] = {}
     for name in config.workspace_names():
-        if not config.title_model_override:
-            title_by_workspace[name] = config.default_model_for_workspace(name)
         if not config.insights_model_override:
             insights_by_workspace[name] = config.default_model_for_workspace(name)
 
     return {
         # Overrides as stored ("" = automatic default).
-        "title_model": s.title_model,
         "insights_model": s.insights_model,
 
         "critique_models": s.critique_models,
@@ -5162,7 +5150,6 @@ def _routines_payload(config, app_settings) -> dict:
         # Per-provider default thinking level for new chats, as stored.
         "provider_default_thinking": s.provider_default_thinking or {},
         # Per-provider routine models, as stored (missing = provider default).
-        "provider_title_models": s.provider_title_models or {},
         "provider_insights_models": s.provider_insights_models or {},
         # Per-provider default execution mode for new chats, as stored
         # (missing = built-in default). Effective defaults below.
@@ -5172,10 +5159,8 @@ def _routines_payload(config, app_settings) -> dict:
             for item in provider_registry.descriptors()
         },
         # What actually runs right now, after defaults.
-        "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,
         # Per-workspace resolution for the Automatic case; empty when overridden.
-        "title_model_by_workspace": title_by_workspace,
         "insights_model_by_workspace": insights_by_workspace,
 
         "critique_models_effective": critique_effective,
