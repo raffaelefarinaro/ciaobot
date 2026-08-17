@@ -25,7 +25,6 @@ dependencies = [
   # `websockets` is already pulled in transitively by uvicorn[standard].
   "httpx==0.28.1",
   "python-pptx==1.0.2",
-  "notebooklm-py==0.8.0",
 ]
 
 [project.optional-dependencies]

@@ -109,8 +109,11 @@ _THREAD_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _COLLAB_CACHE: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
 
 _SERVER_START_TIMEOUT = 30.0
+_SERVER_START_ATTEMPTS = 3
+_SERVER_START_RETRY_DELAYS = (0.25, 0.75)
 _REQUEST_TIMEOUT = 30.0
 _SHUTDOWN_TIMEOUT = 5.0
+_SERVER_START_LOCKS: dict[str, asyncio.Lock] = {}
 # Lines of the server's stderr kept for error messages. The pipe must be read
 # continuously (a full 64K pipe buffer blocks the child's next write and wedges
 # the server mid-turn), so the reader keeps a bounded tail rather than the lot.
@@ -210,6 +213,27 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _server_start_lock(workspace_root: Path) -> asyncio.Lock:
+    """Serialize per-workspace server startup inside this Ciaobot process.
+
+    opencode keeps its state in a shared SQLite database even though Ciaobot
+    gives each chat its own server process. Serializing startup avoids two
+    Ciaobot chats racing through opencode's migrations at the same time.
+    """
+    key = str(workspace_root.resolve())
+    lock = _SERVER_START_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SERVER_START_LOCKS[key] = lock
+    return lock
+
+
+def _is_transient_startup_error(exc: BaseException) -> bool:
+    """Whether a failed server launch is likely to recover on retry."""
+    text = str(exc).lower()
+    return "database is locked" in text or "database is busy" in text
 
 
 def missing_required_paths(spec: Mapping[str, Any]) -> tuple[str, ...]:
@@ -614,6 +638,34 @@ class OpencodeProvider(BaseSDKProvider):
                 "opencode CLI not found. Install it, or set CIAO_OPENCODE_BIN."
             )
 
+        lock = _server_start_lock(self.workspace_root)
+        for attempt in range(_SERVER_START_ATTEMPTS):
+            try:
+                async with lock:
+                    return await self._start_server_once(request, binary)
+            except BaseException as exc:
+                if (
+                    not _is_transient_startup_error(exc)
+                    or attempt + 1 >= _SERVER_START_ATTEMPTS
+                ):
+                    raise
+                delay = _SERVER_START_RETRY_DELAYS[attempt]
+                logger.warning(
+                    "opencode startup hit shared database contention for %s "
+                    "(attempt %d/%d); retrying in %.2fs",
+                    self.workspace_root,
+                    attempt + 1,
+                    _SERVER_START_ATTEMPTS,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        raise AssertionError("unreachable opencode startup retry state")
+
+    async def _start_server_once(
+        self, request: AgentRequest, binary: str
+    ) -> httpx.AsyncClient:
+        """Start, validate, and register one opencode server process."""
         port = _free_port()
         self._password = secrets.token_urlsafe(24)
         env = {

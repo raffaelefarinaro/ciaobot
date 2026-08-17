@@ -98,6 +98,10 @@ Use `scripts/gws-profile.sh <profile> <gws-args>` to switch between accounts (`$
 
 ### `notebooklm`: Google NotebookLM CLI
 
+This is an optional, workspace-specific integration. It is not installed by
+the Ciaobot package; install it only when a workspace uses the NotebookLM
+skill.
+
 ```bash
 pip install notebooklm-py
 notebooklm login   # browser-based, saves to ~/.notebooklm/storage_state.json

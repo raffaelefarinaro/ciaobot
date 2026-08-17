@@ -1168,6 +1168,60 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_database_lock_during_startup_retries_after_contention(tmp_path, monkeypatch):
+    """A shared opencode SQLite lock gets short in-process startup retries."""
+    provider = _provider(tmp_path)
+    attempts: list[int] = []
+    delays: list[float] = []
+
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = None
+            self.stderr = None
+
+        def terminate(self):
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*_args, **_kwargs):
+        attempts.append(len(attempts) + 1)
+        return FakeProcess()
+
+    async def fake_health():
+        if len(attempts) == 1:
+            raise RuntimeError("opencode serve exited with code 1: database is locked")
+
+    async def fake_sleep(delay: float):
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
+    )
+    monkeypatch.setattr("ciao.providers.opencode._free_port", lambda: 43123)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("ciao.providers.opencode.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(provider, "_await_health", fake_health)
+
+    async def noop(*_args):
+        return None
+
+    monkeypatch.setattr(provider, "_verify_contract", noop)
+    monkeypatch.setattr(provider, "_register_control_plane", noop)
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+
+    await provider._ensure_server(Request())  # type: ignore[arg-type]
+
+    assert attempts == [1, 2]
+    assert delays == [0.25]
+    await provider.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_missing_binary_names_the_override_env_var(tmp_path, monkeypatch):
     provider = _provider(tmp_path)
     monkeypatch.setattr(

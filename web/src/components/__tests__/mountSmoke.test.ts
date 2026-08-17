@@ -1079,6 +1079,33 @@ describe('component mount smoke', () => {
   })
 
   it('SettingsView saves routine models by provider and tier', async () => {
+    const mockApi = api as typeof api & {
+      getResponse(path: string): unknown
+      setResponse(path: string, value: unknown): void
+    }
+    const originalModels = mockApi.getResponse('/api/models') as Record<string, unknown>
+    const opencodeModels = [
+      'anthropic/claude-haiku-4.5',
+      'anthropic/claude-sonnet-4.5',
+      'anthropic/claude-opus-4.5',
+    ]
+    mockApi.setResponse('/api/models', {
+      ...originalModels,
+      provider_models: {
+        ...(originalModels.provider_models as Record<string, string[]>),
+        opencode: opencodeModels,
+      },
+      opencode_models: opencodeModels,
+      alias_tiers: {
+        ...(originalModels.alias_tiers as Record<string, Record<string, string>>),
+        opencode: {
+          haiku: opencodeModels[0],
+          sonnet: opencodeModels[1],
+          opus: opencodeModels[2],
+          fable: opencodeModels[2],
+        },
+      },
+    })
     const router = makeRouter()
     await router.push('/settings/models')
     await router.isReady()
@@ -1112,7 +1139,20 @@ describe('component mount smoke', () => {
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       insights_model: 'opus',
     })
+
+    await providerSelects[1].setValue('opencode')
+    await flushPromises()
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      insights_model: 'opencode:anthropic/claude-opus-4.5',
+    })
+
+    await insightsTier.setValue('haiku')
+    await flushPromises()
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      insights_model: 'opencode:anthropic/claude-haiku-4.5',
+    })
     wrapper.unmount()
+    mockApi.setResponse('/api/models', originalModels)
   })
 
   it('ProjectView mounts without throwing', async () => {

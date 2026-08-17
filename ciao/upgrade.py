@@ -91,12 +91,14 @@ async def run_upgrade(
 
 
 async def upgrade_project_deps(project_root: str) -> dict[str, tuple[str, str]]:
-    """Upgrade project deps via ``pip install -e '.[test]'`` and notebooklm-py.
+    """Upgrade the shared project dependencies via ``pip install -e '.[test]'``.
 
     Returns a dict of ``{package: (before, after)}`` for packages whose version changed.
     """
-    # Packages we care about tracking individually
-    tracked = ["claude-agent-sdk", "notebooklm-py"]
+    # Packages we care about tracking individually. Workspace-specific tools
+    # such as NotebookLM are installed and upgraded by the workspace setup,
+    # not by the shared app updater.
+    tracked = ["claude-agent-sdk"]
 
     async def _get_versions() -> dict[str, str]:
         versions: dict[str, str] = {}
