@@ -584,7 +584,7 @@ def _pr_body(
 def _check_dependency_updates(root: Path) -> list:
     """Return available dependency updates, or [] if the check cannot run."""
     try:
-        from ciao.dependency_review import check_available_updates
+        from ciao.dependency_updates import check_available_updates
 
         return check_available_updates(root)
     except Exception as exc:  # noqa: BLE001 - never block a release on this
@@ -618,7 +618,7 @@ def _apply_auto_dependency_updates(root: Path, updates: list, *, reinstall: bool
     if not any(getattr(u, "auto", False) for u in updates):
         return
     try:
-        from ciao.dependency_review import apply_auto_updates
+        from ciao.dependency_updates import apply_auto_updates
 
         applied = apply_auto_updates(root, updates, reinstall=reinstall)
     except Exception as exc:  # noqa: BLE001 - never block a release on this

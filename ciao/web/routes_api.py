@@ -3016,7 +3016,14 @@ async def chat_messages(request: Request) -> JSONResponse:
         return JSONResponse({"error": "not found"}, status_code=404)
     handover_messages = list(getattr(chat, "handover_messages", []) or [])
     if not chat.session_id:
-        return JSONResponse(handover_messages)
+        # A provider may fail before creating its session (for example while
+        # opencode is starting). The durable transcript still contains the
+        # user turn and the persisted error, so do not hide it behind the
+        # session-less handover fast path.
+        current = pcm._transcripts.current_messages(
+            ChatContext.for_web(chat_id), getattr(chat, "provider", "claude")
+        )
+        return JSONResponse(handover_messages + current)
 
     config = request.app.state.config
     provider = getattr(chat, "provider", "claude")

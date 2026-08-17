@@ -200,7 +200,7 @@ async def test_upgrade_all_returns_none_when_nothing_changed(monkeypatch, tmp_pa
 @pytest.mark.asyncio
 async def test_upgrade_all_reports_changes(monkeypatch, tmp_path, caplog) -> None:
     async def _pip_bumped(root):
-        return {"notebooklm-py": ("0.4.0", "0.5.0")}
+        return {"claude-agent-sdk": ("0.2.137", "0.2.139")}
 
     gws_bumped = UpgradeResult(
         command=[], changed=True, success=True,
@@ -220,7 +220,7 @@ async def test_upgrade_all_reports_changes(monkeypatch, tmp_path, caplog) -> Non
         result = await upgrade_all(str(tmp_path))
 
     assert result is not None
-    assert "notebooklm-py: 0.4.0 -> 0.5.0" in result
+    assert "claude-agent-sdk: 0.2.137 -> 0.2.139" in result
     assert "gws: 0.22.1 -> 0.23.0" in result
 
 

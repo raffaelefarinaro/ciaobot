@@ -434,6 +434,15 @@ def _is_retryable_connection_error(text: str) -> bool:
     return any(indicator in low for indicator in connection_indicators)
 
 
+def _is_retryable_provider_startup_error(text: str) -> bool:
+    """Recognize a transient provider-launch failure before turn progress."""
+    low = (text or "").lower()
+    return (
+        "opencode serve exited" in low
+        and ("database is locked" in low or "database is busy" in low)
+    )
+
+
 def _has_running_loop() -> bool:
     try:
         asyncio.get_running_loop()
@@ -5899,15 +5908,18 @@ class ProjectChatManager:
         had_progress: bool,
         reason: str,
     ) -> bool:
-        """Arm a deferred retry for a quota/connection failure.
+        """Arm a deferred retry for a quota/connection/startup failure.
 
-        ``kind`` is ``"quota"`` or ``"connection"``. A connection failure that
-        dropped *after* streaming output (``had_progress``) resumes the session
-        with a "continue" nudge instead of replaying the prompt — replaying
-        could re-run tool calls the partial turn already executed — and is
-        capped at ``_MAX_CONNECTION_DROP_RETRIES`` so a flaky connection cannot
-        loop forever. Every armed retry parks queued follow-ups onto the chat
-        so they survive to the retried turn. Returns True if a retry was armed.
+        ``kind`` is ``"quota"``, ``"connection"``, or ``"startup"``. A
+        connection failure that dropped *after* streaming output
+        (``had_progress``) resumes the session with a "continue" nudge instead
+        of replaying the prompt — replaying could re-run tool calls the partial
+        turn already executed — and is capped at
+        ``_MAX_CONNECTION_DROP_RETRIES``. Provider startup failures use the
+        same cap because they are safe to replay but should not retry forever
+        when the local runtime is persistently unhealthy. Every armed retry
+        parks queued follow-ups onto the chat so they survive to the retried
+        turn. Returns True if a retry was armed.
         """
         chat = self._chats.get(chat_id)
         # Replaying the prompt after output already streamed re-runs any tool
@@ -5923,17 +5935,21 @@ class ProjectChatManager:
             and chat is not None
             and bool(chat.session_id)
         )
-        # The connection-drop cap guards against a flaky link looping forever;
-        # quota resumes are time-gated by the hourly retry interval instead.
-        if resume_continue and kind == "connection":
+        # The connection/startup cap guards against a transient-looking local
+        # failure looping forever; quota retries are time-gated by the hourly
+        # retry interval instead.
+        if kind in {"connection", "startup"}:
             attempts = chat.retry_attempts if chat is not None else 0
             if attempts >= _MAX_CONNECTION_DROP_RETRIES:
                 logger.warning(
-                    "chat %s hit the mid-response connection-drop retry cap "
+                    "chat %s hit the %s retry cap "
                     "(%d); leaving the turn for a manual continue",
                     chat_id,
+                    kind,
                     _MAX_CONNECTION_DROP_RETRIES,
                 )
+                if chat is not None and chat.retry_status == "pending":
+                    self._clear_chat_retry(chat, status="stopped")
                 return False
         if resume_continue:
             prompt = _RESUME_CONTINUE_PROMPT
@@ -5943,7 +5959,7 @@ class ProjectChatManager:
             image_refs = self._image_refs(current_images)
         interval = (
             _RETRY_CONNECTION_INTERVAL_SECONDS
-            if kind == "connection"
+            if kind in {"connection", "startup"}
             else _RETRY_INTERVAL_SECONDS
         )
         armed = self.set_chat_retry(
@@ -6537,13 +6553,66 @@ class ProjectChatManager:
                             break
                         else:
                             logger.exception("Stream error for chat %s", chat_id)
-                            error_msg = str(exc)
+                            error_msg = str(exc).strip() or type(exc).__name__
                             stderr = getattr(exc, "stderr", None)
-                            if stderr:
+                            if stderr and str(stderr) not in error_msg:
                                 error_msg = f"{error_msg}\n{stderr}"
-                            stream.publish({"type": "error", "message": error_msg})
+                            error_chat = self._chats.get(chat_id)
+                            error_model = error_chat.model if error_chat else ""
+                            error_session = error_chat.session_id if error_chat else ""
+                            # A provider can fail before it emits a ResultEvent
+                            # (for example while opencode is starting). Publish
+                            # the same durable shape as a normal failed turn so
+                            # scheduled chats never end as an empty shell.
+                            stream.publish({
+                                "type": "result",
+                                "text": error_msg,
+                                "is_error": True,
+                                "effective_model": error_model,
+                                "usage": {},
+                                "quota": {},
+                                "session_id": error_session,
+                            })
                             had_error = True
-                            if _is_retryable_quota_error(error_msg):
+                            if error_chat is not None:
+                                try:
+                                    error_request = self.build_agent_request(
+                                        error_chat,
+                                        prompt=current_prompt,
+                                        display_prompt=current_prompt,
+                                        images=current_images,
+                                        resume_session=error_chat.session_id or None,
+                                        unattended=turn_unattended,
+                                    )
+                                    self._transcripts.record_turn(
+                                        error_request,
+                                        ctx=ChatContext.for_web(chat_id),
+                                        response_text=error_msg,
+                                        effective_model=error_model,
+                                        session_id=error_chat.session_id or None,
+                                        usage={},
+                                        quota={},
+                                        input_kind="text",
+                                        context_label=error_chat.title,
+                                        provider=error_chat.provider,
+                                        is_error=True,
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    logger.exception(
+                                        "Failed to persist stream error for chat %s",
+                                        chat_id,
+                                    )
+                            if _is_retryable_provider_startup_error(error_msg):
+                                self._arm_retry(
+                                    chat_id,
+                                    stream,
+                                    kind="startup",
+                                    current_prompt=current_prompt,
+                                    current_images=current_images,
+                                    had_progress=had_provider_progress,
+                                    reason=error_msg,
+                                )
+                            elif _is_retryable_quota_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,

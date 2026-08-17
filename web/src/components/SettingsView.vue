@@ -3204,6 +3204,15 @@ function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string
   return tierEffectiveValue(provider, tier) || ''
 }
 
+function serializeRoutineModel(provider: RoutineProviderValue, model: string): string {
+  // Runtime-provider models need an explicit qualifier so the backend does not
+  // send a global routine override through Claude by default.
+  if (provider === 'codex' || provider === 'opencode') {
+    return `${provider}:${model}`
+  }
+  return model
+}
+
 function aliasProviderLabel(provider: AliasProviderKey): string {
   return aliasProviderSections.value.find((section) => section.key === provider)?.label || provider
 }
@@ -3221,15 +3230,18 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
   if (!raw) return { provider: 'automatic', tier: 'sonnet' }
   // 'apfel' is the legacy id from when this shelled out to the apfel CLI.
   if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
-  if (raw.startsWith('codex:')) {
-    const codexModel = raw.slice('codex:'.length)
-    const codexTiers = workspaceModels.value?.alias_tiers?.codex || {}
-    for (const tier of modelTiers) {
-      if (codexTiers[tier.key] === codexModel) {
-        return { provider: 'codex', tier: tier.key }
+  for (const provider of ['codex', 'opencode'] as const) {
+    const prefix = `${provider}:`
+    if (raw.startsWith(prefix)) {
+      const providerModel = raw.slice(prefix.length)
+      const providerTiers = workspaceModels.value?.alias_tiers?.[provider] || {}
+      for (const tier of modelTiers) {
+        if (providerTiers[tier.key] === providerModel) {
+          return { provider, tier: tier.key }
+        }
       }
+      return { provider, tier: 'sonnet' }
     }
-    return { provider: 'codex', tier: 'sonnet' }
   }
   if (raw.startsWith('custom:')) {
     const provider = `custom:${raw.split(':', 2)[1]}` as AliasProviderKey
@@ -3260,8 +3272,8 @@ function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
   return inferRoutineModel(routines.value?.[key] || '').provider
 }
 
-// Titles can be dispatched through the Codex CLI when it has discovered
-// models (i.e. Codex is connected). Other routines stay on Claude routing.
+// Titles can be dispatched through runtime providers when they have discovered
+// models (i.e. the provider is connected).
 const codexTitlesAvailable = computed(() => {
   const tiers = workspaceModels.value?.alias_tiers?.codex
   return !!tiers && Object.values(tiers).some(Boolean)
@@ -3299,9 +3311,7 @@ async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) 
   if (provider === 'custom') return
   const tier = routineTierValue(key)
   const model = tierModelForProvider(provider, tier)
-  // Codex models are dispatched through the Codex CLI, not Claude Code
-  // env-injection; the prefix tells the backend which pipeline to use.
-  await saveRoutines({ [key]: provider === 'codex' ? `codex:${model}` : model })
+  await saveRoutines({ [key]: serializeRoutineModel(provider, model) })
 }
 
 async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
@@ -3311,7 +3321,7 @@ async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
     provider = 'claude'
   }
   const model = tierModelForProvider(provider, tier)
-  await saveRoutines({ [key]: provider === 'codex' ? `codex:${model}` : model })
+  await saveRoutines({ [key]: serializeRoutineModel(provider, model) })
 }
 
 // Automatic does not pick one model: resolve_title_model / resolve_insights_model

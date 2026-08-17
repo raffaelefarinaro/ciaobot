@@ -162,6 +162,13 @@ def _resolve_insights_call(
     surviving sentinel to the bundled helper, so it never reaches an upstream
     either way.
     """
+    # Routine settings qualify runtime-provider overrides so a global choice
+    # is not accidentally sent through Claude (the default one-shot provider).
+    for routed_provider in ("codex", "opencode"):
+        prefix = f"{routed_provider}:"
+        if model.startswith(prefix):
+            return model[len(prefix):] or "sonnet", routed_provider, None
+
     if provider == "codex" and not native_sidecar.is_apple_model(model):
         return model, provider, None
 

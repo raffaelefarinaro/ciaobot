@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from ciao.config import CiaoConfig
-from ciao.models import ResultEvent
+from ciao.models import ChatContext, ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -534,6 +534,7 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     """The CLI mid-response drop banner must be a retryable connection error."""
     from ciao.web.project_chats import (
         _is_retryable_connection_error,
+        _is_retryable_provider_startup_error,
         _is_retryable_quota_error,
         _is_billing_or_spend_limit_error,
     )
@@ -543,6 +544,12 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
         "be incomplete."
     )
     assert _is_retryable_connection_error(banner) is True
+    assert _is_retryable_provider_startup_error(
+        "opencode serve exited with code 1: database is locked"
+    ) is True
+    assert _is_retryable_provider_startup_error(
+        "the model said database is locked"
+    ) is False
     # It is NOT a quota error — must not be routed to the hourly retry path.
     assert _is_retryable_quota_error(banner) is False
 
@@ -557,6 +564,46 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     assert _is_billing_or_spend_limit_error(credits_err) is True
     assert _is_billing_or_spend_limit_error(spend_limit_err) is True
     assert _is_billing_or_spend_limit_error(rate_limit_err) is False
+
+
+async def test_opencode_startup_error_is_persisted_and_retried(tmp_path: Path) -> None:
+    """Pre-session provider failures must not leave an empty scheduled chat."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(
+        project.project_id,
+        title="retry-test",
+        provider="opencode",
+    )
+
+    async def fail_before_provider_session(*_args, **_kwargs):
+        if False:  # pragma: no cover - keeps this a minimal async generator
+            yield None
+        raise RuntimeError("opencode serve exited with code 1: database is locked")
+
+    pcm.stream_chat = fail_before_provider_session  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "run the scheduled review")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_interval_seconds == 30
+    assert any(
+        event.get("type") == "result"
+        and event.get("is_error") is True
+        and "database is locked" in event.get("text", "")
+        for event in events
+    )
+
+    rows = pcm._transcripts.current_messages(
+        ChatContext.for_web(chat.chat_id), "opencode"
+    )
+    assert [row["role"] for row in rows] == ["user", "assistant"]
+    assert rows[-1]["is_error"] is True
+    assert "database is locked" in rows[-1]["content"]
+    pcm.stop_chat_retry(chat.chat_id)
 
 
 

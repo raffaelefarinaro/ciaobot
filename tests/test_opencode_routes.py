@@ -206,6 +206,44 @@ def test_opencode_chat_messages_fall_back_to_the_durable_transcript(
     assert rows[1]["content"] == "world"
 
 
+def test_sessionless_opencode_chat_messages_show_durable_startup_error(
+    tmp_path: Path,
+) -> None:
+    """A failed server launch still has visible history without a session id."""
+    pcm = _manager(tmp_path)
+    chat = _opencode_chat(pcm, "")
+    request = AgentRequest(
+        prompt="review the architecture",
+        model="opencode/big-pickle",
+        mode="auto",
+        provider="opencode",
+        display_prompt="review the architecture",
+    )
+    pcm._transcripts.record_turn(
+        request,
+        ctx=ChatContext.for_web(chat.chat_id),
+        response_text="opencode serve exited with code 1: database is locked",
+        effective_model="opencode/big-pickle",
+        session_id=None,
+        usage={},
+        quota={},
+        input_kind="text",
+        provider="opencode",
+        is_error=True,
+    )
+
+    response = asyncio.run(chat_messages(_request(
+        f"/api/chats/{chat.chat_id}/messages",
+        _app(pcm),
+        chat_id=chat.chat_id,
+    )))
+    rows = json.loads(response.body)
+
+    assert [row["role"] for row in rows] == ["user", "assistant"]
+    assert rows[-1]["is_error"] is True
+    assert "database is locked" in rows[-1]["content"]
+
+
 def test_opencode_subagents_read_child_sessions(
     tmp_path: Path, monkeypatch,
 ) -> None:

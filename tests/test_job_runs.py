@@ -238,8 +238,6 @@ def test_summary_hides_jobs_whose_only_schedule_is_not_installed(tmp_path: Path)
         for item in jr.automation_summary(installed_schedules=installed)
     }
     assert "skill_evolution" in summary
-    # no system-dependency-review schedule here, so nothing can trigger it
-    assert "dependency_review" not in summary
     # jobs with another trigger stay visible even without their schedule
     assert "insights" in summary
     assert "vault_index" in summary  # also runs on startup
@@ -248,17 +246,6 @@ def test_summary_hides_jobs_whose_only_schedule_is_not_installed(tmp_path: Path)
     assert "memory_proposals" not in summary
     steps = {step["job"]: step for step in summary["insights"]["steps"]}
     assert steps["memory_proposals"]["schedule_id"] == "system-memory-curation"
-
-
-def test_summary_keeps_a_recorded_run_for_an_uninstalled_schedule(tmp_path: Path) -> None:
-    """History stays reachable even when the row is hidden."""
-    jr.record_run(jr.JobRun(job="dependency_review", label="depcheck:installed",
-                            status="ok", duration_ms=5))
-    summary = {
-        item["job"]: item for item in jr.automation_summary(installed_schedules=set())
-    }
-    assert "dependency_review" not in summary
-    assert jr.load_runs()["dependency_review"]["stats"]["total_runs"] == 1
 
 
 def test_summary_nests_the_insights_backfill_under_session_insights(tmp_path: Path) -> None:
