@@ -225,6 +225,75 @@ async def test_opencode_chat_titles_use_the_opencode_catalog(
     assert captured["model"] == "anthropic/claude-haiku-4-5"
 
 
+@pytest.mark.asyncio
+async def test_codex_title_override_wins_for_opencode_chat(monkeypatch, tmp_path) -> None:
+    from ciao.web import project_chats as pc
+
+    config = SimpleNamespace(
+        title_model_override="codex:gpt-title",
+        title_model="haiku",
+        workspace_root=tmp_path,
+        haiku_model_for_workspace=lambda _workspace: "haiku",
+    )
+    manager = pc.ProjectChatManager.__new__(pc.ProjectChatManager)
+    manager._config = config
+    manager._projects = {"project-1": pc.ProjectInfo("project-1", "Project", "personal")}
+    manager._chats = {
+        "chat-1": pc.ChatInfo(
+            chat_id="chat-1", project_id="project-1", provider="opencode", model="haiku"
+        )
+    }
+    manager._save = lambda: None
+    captured: dict[str, object] = {}
+
+    async def fake_title(_user_text, _assistant_text, **kwargs):
+        captured.update(kwargs)
+        return "Codex Title", "codex:gpt-title", None
+
+    monkeypatch.setattr(pc, "_generate_chat_title_with_engine", fake_title)
+
+    assert await manager.auto_title_if_default("chat-1", "Use Codex") == "Codex Title"
+    assert captured["provider"] == "codex"
+    assert captured["model"] == "gpt-title"
+
+
+@pytest.mark.asyncio
+async def test_opencode_title_override_wins_for_codex_chat(monkeypatch, tmp_path) -> None:
+    from ciao.web import project_chats as pc
+
+    config = SimpleNamespace(
+        title_model_override="opencode:vendor/title-model",
+        title_model="haiku",
+        workspace_root=tmp_path,
+        haiku_model_for_workspace=lambda _workspace: "haiku",
+    )
+    manager = pc.ProjectChatManager.__new__(pc.ProjectChatManager)
+    manager._config = config
+    manager._projects = {"project-1": pc.ProjectInfo("project-1", "Project", "personal")}
+    manager._chats = {
+        "chat-1": pc.ChatInfo(
+            chat_id="chat-1", project_id="project-1", provider="codex", model="gpt-chat"
+        )
+    }
+    manager._save = lambda: None
+
+    async def fake_catalog_model(_config, model):
+        return model
+
+    monkeypatch.setattr(pc, "_resolve_opencode_title_model", fake_catalog_model)
+    captured: dict[str, object] = {}
+
+    async def fake_title(_user_text, _assistant_text, **kwargs):
+        captured.update(kwargs)
+        return "OpenCode Title", "opencode:vendor/title-model", None
+
+    monkeypatch.setattr(pc, "_generate_chat_title_with_engine", fake_title)
+
+    assert await manager.auto_title_if_default("chat-1", "Use OpenCode") == "OpenCode Title"
+    assert captured["provider"] == "opencode"
+    assert captured["model"] == "vendor/title-model"
+
+
 def test_resolve_title_model_uses_override() -> None:
     from ciao.config import CiaoConfig
 

@@ -955,6 +955,28 @@ class OpencodeProvider(BaseSDKProvider):
         self._session_handover_context = ""
         self._reset_settings()
 
+    async def delete_current_session(self) -> bool:
+        """Delete this provider's current session while the server is alive."""
+        client = self._client
+        session_id = self._session_id
+        if client is None or not session_id:
+            return False
+        try:
+            response = await client.delete(f"/session/{session_id}")
+        except httpx.HTTPError:
+            logger.debug("opencode session deletion failed for %s", session_id, exc_info=True)
+            return False
+        deleted = response.status_code < 400
+        if deleted:
+            self._session_id = ""
+        else:
+            logger.debug(
+                "opencode refused to delete session %s (status %s)",
+                session_id,
+                response.status_code,
+            )
+        return deleted
+
     # --------------------------------------------------------------- session
 
     async def _ensure_session(self, request: AgentRequest) -> str:
