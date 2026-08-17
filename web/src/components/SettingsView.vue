@@ -3148,10 +3148,9 @@ async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: st
 
 // Per-provider default execution mode for new chats. The stored override
 // lives in RoutineSettings.provider_default_modes; a missing entry falls
-// back to the effective default reported by the backend (opencode → bypass,
-// everyone else → auto). Bypass is what opencode users want from a new chat:
-// its "auto" only passes verifiably read-only shell commands and raises a
-// card for everything else.
+// back to the effective default reported by the backend (opencode → normal,
+// everyone else → auto). Opencode starts approval-enforcing for new chats;
+// operators can explicitly choose Auto or Bypass when desired.
 const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
 
 const MODE_LABELS: Record<string, string> = {
@@ -3166,7 +3165,8 @@ function providerModeOverride(provider: AliasProviderKey): string {
 }
 
 function providerModeEffective(provider: AliasProviderKey): string {
-  return routines.value?.provider_default_modes_effective?.[provider] || 'auto'
+  return routines.value?.provider_default_modes_effective?.[provider]
+    || (provider === 'opencode' ? 'normal' : 'auto')
 }
 
 function providerModeSelectorValue(provider: AliasProviderKey): string {

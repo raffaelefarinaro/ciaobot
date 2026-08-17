@@ -904,6 +904,33 @@ def test_workspace_create_rejects_conflicts_and_bad_provider(tmp_path: Path) -> 
     assert config.workspace("research") is None
 
 
+def test_workspace_update_distinguishes_omitted_and_null_denylist(
+    tmp_path: Path,
+) -> None:
+    plane, config, _refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    plane.workspace_update(
+        principal,
+        name="work",
+        disallowed_tools=["Bash"],
+    )
+    assert config.workspace("work").disallowed_tools == ["Bash"]
+
+    # Omitted keeps the existing workspace-specific denylist.
+    plane.workspace_update(principal, name="work")
+    assert config.workspace("work").disallowed_tools == ["Bash"]
+
+    # Explicit null resets it so inherited defaults can apply again.
+    result = plane.workspace_update(
+        principal,
+        name="work",
+        disallowed_tools=None,
+    )
+    assert result["data"]["disallowed_tools"] is None
+    assert config.workspace("work").disallowed_tools is None
+
+
 def test_workspace_update_preserves_omitted_fields(tmp_path: Path) -> None:
     plane, config, refreshes = _workspace_control_plane(tmp_path)
     principal = _chat_create_principal()

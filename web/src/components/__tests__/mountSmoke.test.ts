@@ -30,11 +30,11 @@ vi.mock('../../lib/api', () => {
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
-    // Built-in defaults: opencode runs in bypass, everyone else auto.
+    // Built-in defaults: opencode requires approval, everyone else uses auto.
     provider_default_modes_effective: {
       claude: 'auto',
       codex: 'auto',
-      opencode: 'bypass',
+      opencode: 'normal',
     },
 
     transcription: {
@@ -1009,7 +1009,7 @@ describe('component mount smoke', () => {
     await nextTick()
 
     // The routing card carries a "Default mode" row; the automatic option
-    // names the effective default (opencode -> bypass from the backend).
+    // names the effective default (opencode -> normal from the backend).
     const modeSelect = wrapper.find('.tier-provider-section .routine-select:not(.alias-provider-select)')
     expect(modeSelect.exists()).toBe(true)
     const options = modeSelect.findAll('option').map((option) => option.text())

@@ -1022,7 +1022,7 @@ class CiaoMcpService:
             default_provider: str = "claude",
             default_model: str = "",
             gws_profile: str = "",
-            disallowed_tools: list[str] | None = None,
+            disallowed_tools: Any = _UNSET,
             claude_ai_mcps: Any = _UNSET,
             color: str = "",
         ) -> dict[str, Any]:
@@ -1034,7 +1034,8 @@ class CiaoMcpService:
                 default_provider: claude, codex, or opencode.
                 default_model: Empty inherits the app-wide default.
                 gws_profile: Linked Google Workspace profile, or empty.
-                disallowed_tools: Extra tools to deny in this workspace.
+                disallowed_tools: Extra tools to deny in this workspace;
+                    null resets the workspace-specific list to inherited defaults.
                 claude_ai_mcps: claude.ai connector toggle (null = default).
                 color: Workspace accent (pink, cyan, amber, emerald, violet).
             """
@@ -1059,7 +1060,7 @@ class CiaoMcpService:
             default_provider: str | None = None,
             default_model: str | None = None,
             gws_profile: str | None = None,
-            disallowed_tools: list[str] | None = None,
+            disallowed_tools: Any = _UNSET,
             claude_ai_mcps: Any = _UNSET,
             color: str = "",
         ) -> dict[str, Any]:
@@ -1070,7 +1071,8 @@ class CiaoMcpService:
                 default_provider: claude, codex, or opencode.
                 default_model: Empty inherits the app-wide default.
                 gws_profile: Linked Google Workspace profile, or empty.
-                disallowed_tools: Extra tools to deny in this workspace.
+                disallowed_tools: Extra tools to deny in this workspace;
+                    null resets the workspace-specific list to inherited defaults.
                 claude_ai_mcps: claude.ai connector toggle (null = default).
                 color: Workspace accent (pink, cyan, amber, emerald, violet).
             """
