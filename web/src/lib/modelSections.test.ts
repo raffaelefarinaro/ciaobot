@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { sectionsFromModelsResponse, sortModelsByTier } from './modelSections'
+import {
+  providerForModelSection,
+  sectionsFromModelsResponse,
+  sortModelsByTier,
+} from './modelSections'
 import type { ModelsResponse } from './types'
 
 describe('sortModelsByTier', () => {
@@ -109,6 +113,14 @@ describe('modelSections', () => {
     expect(sections.find((section) => section.key === 'opencode')?.modelBadges).toEqual({
       'anthropic/claude-sonnet-4-6': ['Sonnet'],
     })
+  })
+})
+
+describe('providerForModelSection', () => {
+  it('maps the Anthropic UI section and preserves provider sections', () => {
+    expect(providerForModelSection('anthropic')).toBe('claude')
+    expect(providerForModelSection('codex')).toBe('codex')
+    expect(providerForModelSection('opencode')).toBe('opencode')
   })
 })
 

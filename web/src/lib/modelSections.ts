@@ -1,4 +1,8 @@
-import type { ModelsResponse } from './types'
+import type { ModelsResponse, RuntimeProvider } from './types'
+
+export function providerForModelSection(sectionKey: string): RuntimeProvider {
+  return sectionKey === 'anthropic' ? 'claude' : (sectionKey as RuntimeProvider)
+}
 
 export interface ModelSection {
   key: string

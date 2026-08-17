@@ -92,7 +92,7 @@ import { useTaskStore } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
 import type { RuntimeProvider, ScheduleArchivePolicy } from '../lib/types'
 import ModelSelector from '../components/ModelSelector.vue'
-import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
 const emit = defineEmits<{ created: [] }>()
 const store = useTaskStore()
 const projectStore = useProjectStore()
@@ -140,7 +140,7 @@ const selectedProvider = ref<RuntimeProvider | undefined>(undefined)
 
 function selectScheduleModel(value: string | string[], sectionKey: string) {
   model.value = Array.isArray(value) ? value[0] || '' : value
-  selectedProvider.value = sectionKey === 'codex' ? 'codex' : 'claude'
+  selectedProvider.value = providerForModelSection(sectionKey)
 }
 
 const contextGroups = computed(() => {
