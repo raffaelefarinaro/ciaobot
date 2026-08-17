@@ -588,7 +588,8 @@ def test_question_becomes_an_ask_user_question_card(tmp_path):
     assert payload["questions"][0]["options"] == [
         {"label": "Postgres", "description": "Relational"}
     ]
-    assert payload["questions"][0]["allowCustom"] is True
+    assert payload["questions"][0]["isOther"] is True
+    assert payload["questions"][0]["id"] == "0"
     assert "q_1" in provider._question_requests
 
 
@@ -596,6 +597,25 @@ def test_question_without_questions_is_ignored(tmp_path):
     provider = _provider(tmp_path)
     assert _convert(provider, "question.v2.asked", {"id": "q", "questions": []}) == []
     assert provider._question_requests == {}
+
+
+def test_question_custom_false_is_preserved_for_the_pwa(tmp_path):
+    provider = _provider(tmp_path)
+    events = _convert(
+        provider,
+        "question.v2.asked",
+        {
+            "id": "q_no_custom",
+            "questions": [{
+                "question": "Use the default?",
+                "custom": False,
+                "options": [{"label": "Yes"}],
+            }],
+        },
+    )
+
+    payload = json.loads(events[0].tool_input)
+    assert payload["questions"][0]["isOther"] is False
 
 
 def test_idle_status_is_not_surfaced_as_activity(tmp_path):
@@ -793,6 +813,33 @@ async def test_failed_question_reply_keeps_request_for_retry(tmp_path):
     await _drain_tasks()
 
     assert "q_retry" in provider._question_requests
+
+
+@pytest.mark.asyncio
+async def test_question_reply_uses_provider_question_order(tmp_path):
+    provider, client = _armed_provider(tmp_path, "normal")
+    _convert(
+        provider,
+        "question.v2.asked",
+        {
+            "id": "q_order",
+            "sessionID": "ses_1",
+            "questions": [
+                {"id": "first", "question": "First?", "options": []},
+                {"id": "second", "question": "Second?", "options": []},
+            ],
+        },
+    )
+
+    assert provider.send_question_response(
+        "q_order", {"second": ["B"], "first": ["A"]}
+    ) is True
+    await _drain_tasks()
+
+    assert client.calls == [
+        ("/question/q_order/reply", {"answers": [["A"], ["B"]]})
+    ]
+    assert provider._question_requests == {}
 
 
 # ── real captured stream ────────────────────────────────────────────────

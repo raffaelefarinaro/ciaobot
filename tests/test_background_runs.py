@@ -276,6 +276,35 @@ async def test_cancel_terminates_the_whole_process_tree(tmp_path: Path) -> None:
     assert len(collector.finished) == 1
 
 
+async def test_terminate_kills_group_after_leader_has_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead leader must not prevent the descendant group from being killed."""
+    runner = _runner(tmp_path)
+    signals: list[tuple[int, int]] = []
+
+    class _ExitedProcess:
+        pid = 12345
+        returncode = 0
+
+        async def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(background, "CANCEL_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(
+        background.os,
+        "killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    await runner._terminate(_ExitedProcess())  # type: ignore[arg-type]
+
+    assert signals == [
+        (12345, background.signal.SIGTERM),
+        (12345, background.signal.SIGKILL),
+    ]
+
+
 async def test_cancelling_a_finished_run_is_a_no_op(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     run = await runner.start_run(parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "true"])

@@ -483,6 +483,7 @@ class _PendingRequest:
     request_id: str
     session_id: str
     tool_use_id: str = ""
+    question_ids: tuple[str, ...] = ()
 
 
 class OpencodeProvider(BaseSDKProvider):
@@ -1005,8 +1006,8 @@ class OpencodeProvider(BaseSDKProvider):
             return False
         payload = {
             "answers": [
-                {"questionID": str(question_id), "values": [str(v) for v in values]}
-                for question_id, values in answers.items()
+                [str(value) for value in answers.get(question_id, ())]
+                for question_id in pending.question_ids
             ]
         }
         asyncio.create_task(self._deliver_question_reply(pending, payload))
@@ -1316,17 +1317,24 @@ class OpencodeProvider(BaseSDKProvider):
         questions = props.get("questions")
         if not request_id or not isinstance(questions, list) or not questions:
             return []
+        question_ids = tuple(
+            str(item.get("id") or index)
+            for index, item in enumerate(questions)
+            if isinstance(item, Mapping)
+        )
         self._question_requests[request_id] = _PendingRequest(
             request_id=request_id,
             session_id=str(props.get("sessionID") or ""),
+            question_ids=question_ids,
         )
         payload = {
             "questions": [
                 {
+                    "id": str(item.get("id") or index),
                     "question": str(item.get("question") or ""),
                     "header": str(item.get("header") or ""),
                     "multiSelect": bool(item.get("multiple")),
-                    "allowCustom": bool(item.get("custom")),
+                    "isOther": bool(item.get("custom")),
                     "options": [
                         {
                             "label": str(option.get("label") or option.get("value") or ""),
@@ -1336,7 +1344,7 @@ class OpencodeProvider(BaseSDKProvider):
                         if isinstance(option, Mapping)
                     ],
                 }
-                for item in questions
+                for index, item in enumerate(questions)
                 if isinstance(item, Mapping)
             ]
         }
