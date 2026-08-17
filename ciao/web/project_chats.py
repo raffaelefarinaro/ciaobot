@@ -76,22 +76,15 @@ from ciao.models import (
     ThinkingEvent,
     ToolUseEvent,
 )
-from ciao.model_tiers import (
-    CODEX_FABLE_THINKING_LEVEL,
-    canonical_tier,
-    is_capability_error,
-    is_tier,
-    next_tier_for_failure,
-)
+from ciao.model_tiers import canonical_tier, is_tier
 from ciao.providers.codex import (
+    CODEX_FABLE_THINKING_LEVEL,
     CodexProvider,
     codex_collab_tree_counts,
 )
 from ciao.providers.opencode import (
     OpencodeProvider,
     opencode_collab_tree_counts,
-    opencode_tier_models,
-    opencode_tier_overrides,
 )
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.sessions import StateStore
@@ -734,29 +727,41 @@ def resolve_title_model(config, workspace: str | None = None) -> str:
     """Pick the model for chat title generation.
 
     When the operator has not set an explicit override (Settings → Models →
-    Chat titles = Automatic), use the haiku-tier model for the chat's
-    workspace routing bucket. Callers without workspace context fall back to
-    ``config.title_model``.
+    Chat titles = Automatic), use the workspace's default model. Callers
+    without workspace context fall back to ``config.title_model``.
     """
     if config.title_model_override:
         return cast(str, config.title_model_override)
     if workspace is not None:
-        return cast(str, config.haiku_model_for_workspace(workspace))
+        return cast(str, config.default_model_for_workspace(workspace))
     return cast(str, config.title_model)
 
 
 async def _resolve_opencode_title_model(config: BridgeConfig, model: str) -> str:
-    """Resolve a title tier against opencode's live model catalog."""
-    if not is_tier(model):
+    """Resolve a title model against opencode's live model catalog.
+
+    opencode addresses models as ``providerID/modelID``. A bare id (e.g. a
+    Claude model name or tier alias) is not something opencode can serve
+    directly, so when the requested model is not already qualified, match it
+    inside the catalog to a concrete ``providerID/modelID``. Falls back to the
+    requested id when the catalog is unavailable or nothing matches.
+    """
+    if "/" in model:
         return model
+    wanted = model.strip().lower()
     try:
         catalog = await OpencodeProvider.model_catalog(config.workspace_root)
     except Exception as exc:  # noqa: BLE001 - title generation must degrade softly
         logger.info("opencode title catalog unavailable: %s", exc)
         return model
-    return opencode_tier_models(
-        catalog, opencode_tier_overrides(config)
-    ).get(canonical_tier(model), model)
+    for row in catalog:
+        candidate = str(row.get("model") or "")
+        if not candidate or "/" not in candidate:
+            continue
+        last = candidate.split("/", 1)[-1].lower()
+        if last == wanted or wanted in last:
+            return candidate
+    return model
 
 
 async def _generate_chat_title(
@@ -3303,26 +3308,20 @@ class ProjectChatManager:
         # than another. An explicit ``model`` arg wins.
         project = self._projects.get(project_id)
         workspace = project.workspace if project else None
-        default_model = self._config.default_model_for_workspace(workspace)
-        chat_model = model or default_model
         chat_provider = provider
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
+        # Per-workspace default: one workspace can default to a cheaper model
+        # than another. An explicit ``model`` arg wins. When the provider is
+        # explicitly given (not the workspace default), fall back to that
+        # provider's own operator default.
+        default_model = self._config.default_model_for_workspace(workspace)
+        if not default_model and provider:
+            default_model = self._config.default_model_for_provider(provider)
+        chat_model = model or default_model
         chat_model = self._resolve_and_validate_chat_model(
             chat_model, chat_provider, project_id
         )
-        # A bare tier alias becomes the operator's pinned model for that tier
-        # (Settings -> Providers -> model routing), so the new chat is created
-        # with the model that will actually run, and the header badge shows it
-        # from the start instead of only after the first dispatch.
-        chat_model = self._apply_tier_pin(chat_model, chat_provider)
-        # An empty workspace default ("let the provider pick") still honors
-        # model routing: an operator who pinned tiers expects new chats to
-        # start on the pinned default-tier model rather than whatever the
-        # provider's own default happens to be. Providers without pins keep
-        # the empty default and the provider picks.
-        if not chat_model:
-            chat_model = self._tier_pin(chat_provider, "sonnet")
         # Sweep any other empty chats only after all model and routing-bucket
         # validation has succeeded. Opening a fresh "New Chat" signals the
         # user has moved on from whatever they had open and never sent, so we
@@ -3330,6 +3329,11 @@ class ProjectChatManager:
         # those drafts as a side effect (#259).
         self._cleanup_empty_chats()
         cid = f"chat-{_uuid8()}"
+        # Per-provider default thinking level for new chats; a missing entry
+        # leaves it to the provider default ("" = auto).
+        default_thinking = (self._config.provider_default_thinking or {}).get(
+            chat_provider, ""
+        )
         chat = ChatInfo(
             chat_id=cid,
             project_id=project_id,
@@ -3337,6 +3341,7 @@ class ProjectChatManager:
             model=chat_model,
             provider=chat_provider,
             mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider)),
+            thinking_level=default_thinking,
             control_surface=control_surface or "",
             created_at=_now_iso(),
             spawned_from_chat_id=spawned_from_chat_id,
@@ -4365,7 +4370,10 @@ class ProjectChatManager:
             from ciao.insights import extract_and_append, resolve_insights_model
 
             workspace = project_meta.workspace if project_meta else None
-            insights_model = resolve_insights_model(config, workspace)
+            insights_models = getattr(config, "provider_insights_models", {}) or {}
+            insights_model = insights_models.get(
+                chat_meta.provider if chat_meta else "", ""
+            ) or resolve_insights_model(config, workspace)
             # Auto projects (General, Claude Code CLI) are catch-alls whose
             # docs would become junk drawers; only real projects get the
             # archive-time canonical-doc update.
@@ -4919,33 +4927,6 @@ class ProjectChatManager:
         self._validate_configured_model(resolved_model, provider)
         return resolved_model
 
-    def _tier_pin(self, provider: str, tier: str) -> str:
-        """The operator's pinned model for a tier, or ``""`` when there is none.
-
-        Applies to providers with operator-settable tier pins (Codex,
-        opencode). ``tier`` may be a bare alias or already canonical.
-        """
-        if not is_tier(tier):
-            return ""
-        descriptor = provider_registry.get(provider)
-        if descriptor is None or not descriptor.tier_settings_attr:
-            return ""
-        settings = getattr(self._config, descriptor.tier_settings_attr, None)
-        if settings is None:
-            return ""
-        return getattr(settings, f"{canonical_tier(tier)}_model", "") or ""
-
-    def _apply_tier_pin(self, model: str, provider: str) -> str:
-        """Substitute the operator's tier pin for a bare alias.
-
-        At chat creation only: the pin is the model the user picked for that
-        tier, so the chat is stamped with it directly. An empty model (let
-        the provider pick) and a provider without pins pass through.
-        """
-        if not is_tier(model):
-            return model
-        return self._tier_pin(provider, canonical_tier(model)) or model
-
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""
         model = (chat.model or "").strip()
@@ -5411,14 +5392,6 @@ class ProjectChatManager:
         cost_usd: float = 0.0
         had_error = False
         tool_events: list[dict[str, Any]] = []
-        # First attempt may fail with a capability error (model does not
-        # support image input, tool use, etc.). The retry path below
-        # walks one tier in either direction on the configured ladder and
-        # re-issues the request. ``retry_used`` guards against a
-        # second-tier-fail re-entering the retry; one retry per turn is
-        # the floor — operators who configure a single-model ladder
-        # get the original error surfaced instead of a loop.
-        retry_used = False
 
         # Image-capability pre-flight: when the user attached images, make
         # sure the selected model can actually see them before dispatching.
@@ -5529,19 +5502,12 @@ class ProjectChatManager:
                         return
 
         outcome = _StreamOutcome(effective_model=chat.model)
-        held_result: ResultEvent | None = None
         async for event in self._drive_stream(
             chat_id=chat_id,
             request=request,
             outcome=outcome,
         ):
-            # Hold back the ResultEvent: if a capability fallback follows,
-            # the error result must NOT reach the PWA (it would prematurely
-            # end the turn). Non-result events are forwarded immediately.
-            if isinstance(event, ResultEvent):
-                held_result = event
-            else:
-                yield event
+            yield event
         response_text = outcome.response_text
         had_error = outcome.had_error
         effective_model = outcome.effective_model
@@ -5549,97 +5515,6 @@ class ProjectChatManager:
         quota = outcome.quota
         cost_usd = outcome.cost_usd
         tool_events = outcome.tool_events
-
-        # Capability-error auto-fallback: the model's response came back
-        # as a 4xx/400 saying the model can't handle this input. Walk one
-        # step on the tier ladder (cheaper first, then more capable) and
-        # re-issue. Only Claude chats retry, and only when the chat named a
-        # bare tier alias -- a chat pinned to a concrete model id opted into
-        # that model, so swapping it would broaden scope the user declined.
-        will_fallback = False
-        if (
-            had_error
-            and not retry_used
-            and is_capability_error(response_text)
-            and chat.provider in ("claude",)
-        ):
-            next_model = next_tier_for_failure(request.model)
-            if next_model and next_model != request.model:
-                will_fallback = True
-                logger.warning(
-                    "Auto tier-fallback: %s failed (%s); retrying on %s",
-                    request.model,
-                    response_text.strip().splitlines()[0] if response_text else "capability error",
-                    next_model,
-                )
-                retry_used = True
-                # Drop the resume session: the failed model may have
-                # written a partial transcript under its own session id,
-                # and the new model should not try to continue that.
-                retry_request = AgentRequest(
-                    prompt=request.prompt,
-                    model=next_model,
-                    provider=chat.provider,
-                    # Reuse the original mode rather than recomputing: a
-                    # retry of an unattended turn is still unattended.
-                    mode=request.mode,
-                    display_prompt=request.display_prompt,
-                    resume_session=None,
-                    # Always keep images: the fallback model may support
-                    # vision (e.g. minimax-m3). If it also can't handle
-                    # images its error surfaces normally (retry_used
-                    # prevents a second fallback).
-                    images=images or [],
-                    extra_env=self._build_extra_env(chat),
-                    disallowed_tools=self.disallowed_tools_for_chat(chat),
-                    thinking_level=self._thinking_level_for_chat(chat),
-                    context_digest=request.context_digest,
-                    context_session_id=request.context_session_id,
-                )
-                yield SystemStatusEvent(
-                    type="system",
-                    status=(
-                        f"primary model could not handle this input; "
-                        f"retrying on {next_model}"
-                    ),
-                )
-                retry_outcome = _StreamOutcome(effective_model=next_model)
-                async for event in self._drive_stream(
-                    chat_id=chat_id,
-                    request=retry_request,
-                    outcome=retry_outcome,
-                ):
-                    yield event
-                response_text = retry_outcome.response_text
-                had_error = retry_outcome.had_error
-                effective_model = retry_outcome.effective_model
-                usage = retry_outcome.usage
-                quota = retry_outcome.quota
-                cost_usd = retry_outcome.cost_usd
-                tool_events = retry_outcome.tool_events
-                # Successful fallback: persist the model change so future
-                # turns in this chat use the working model, and notify the
-                # PWA so the model pill updates in real time.
-                if not had_error:
-                    chat.model = next_model
-                    self._save()
-                    yield ModelChangedEvent(
-                        type="model_changed",
-                        model=next_model,
-                    )
-            else:
-                logger.info(
-                    "Auto tier-fallback skipped: no neighbor tier configured for %s",
-                    request.model,
-                )
-
-        # Yield the held-back result from the first model when no fallback
-        # was attempted (normal path or no eligible neighbor). When a
-        # fallback ran, its own ResultEvent was already yielded above and
-        # the first model's error result is intentionally suppressed so
-        # the PWA sees exactly one result per turn.
-        if not will_fallback and held_result is not None:
-            yield held_result
 
         # Record transcript turn
         if handover_context_sent and not had_error:
@@ -7979,7 +7854,12 @@ class ProjectChatManager:
 
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
-        configured = resolve_title_model(self._config, workspace)
+        # A per-provider title model (Settings → Models) wins; otherwise
+        # Automatic resolves to the chat's own model.
+        title_models = getattr(self._config, "provider_title_models", {}) or {}
+        configured = title_models.get(chat.provider, "") or resolve_title_model(
+            self._config, workspace
+        )
         override_provider = ""
         for candidate in ("codex", "opencode"):
             if configured.startswith(f"{candidate}:"):

@@ -25,7 +25,13 @@ class FakeConfig:
         self.critique_models = ""
         # Per-provider default modes; no env-backed default.
         self.provider_default_modes: dict[str, str] = {}
-        # No env-backed defaults: empty = automatic catalog mapping.
+        # Per-provider default models / thinking / routine models; no
+        # env-backed defaults.
+        self.provider_default_models: dict[str, str] = {}
+        self.provider_default_thinking: dict[str, str] = {}
+        self.provider_title_models: dict[str, str] = {}
+        self.provider_insights_models: dict[str, str] = {}
+        # No env-backed defaults: empty = provider's own catalog default.
         self.codex = CodexSettings()
 
 
@@ -177,25 +183,73 @@ def test_critique_models_override_applies(tmp_path):
     assert config.critique_models == ""
 
 
-def test_codex_tier_pins_apply_and_clear(tmp_path):
+def test_codex_default_model_applies_and_clears(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     config = FakeConfig()
 
-    store.update({"codex_sonnet_model": "gpt-5.6-sol", "codex_haiku_model": "gpt-5.6-terra"})
+    store.update({"provider_default_models": {"codex": "gpt-5.6-sol"}})
     store.apply_to_config(config)
-    assert config.codex.sonnet_model == "gpt-5.6-sol"
-    assert config.codex.haiku_model == "gpt-5.6-terra"
-    assert config.codex.tier_overrides() == {
-        "haiku": "gpt-5.6-terra",
-        "sonnet": "gpt-5.6-sol",
-        "opus": "",
-        "fable": "",
-    }
+    assert config.codex.default_model == "gpt-5.6-sol"
 
-    # Clearing a pin restores the automatic (empty) default.
-    store.update({"codex_sonnet_model": "", "codex_haiku_model": ""})
+    # Clearing restores the automatic (empty) default.
+    store.update({"provider_default_models": {"codex": ""}})
     store.apply_to_config(config)
     assert config.codex == CodexSettings()
+
+
+def test_provider_routine_models_persist_and_apply(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+
+    store.update({
+        "provider_title_models": {"codex": "gpt-5.6-luna"},
+        "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
+        "provider_default_thinking": {"claude": "high"},
+    })
+    store.apply_to_config(config)
+    assert config.provider_title_models == {"codex": "gpt-5.6-luna"}
+    assert config.provider_insights_models == {"opencode": "anthropic/claude-sonnet-4-6"}
+    assert config.provider_default_thinking == {"claude": "high"}
+    path = tmp_path / "app_settings.json"
+    assert json.loads(path.read_text()) == {
+        "provider_title_models": {"codex": "gpt-5.6-luna"},
+        "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
+        "provider_default_thinking": {"claude": "high"},
+    }
+    # Fresh instance sees the persisted maps.
+    fresh = AppSettingsStore(path)
+    assert fresh.settings.provider_title_models == {"codex": "gpt-5.6-luna"}
+    assert fresh.settings.provider_insights_models == {"opencode": "anthropic/claude-sonnet-4-6"}
+    assert fresh.settings.provider_default_thinking == {"claude": "high"}
+
+
+def test_provider_maps_reject_non_objects(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    with pytest.raises(ValueError, match="must be an object"):
+        store.update({"provider_default_models": "gpt-5.6-sol"})
+    with pytest.raises(ValueError, match="must be an object"):
+        store.update({"provider_title_models": "gpt-5.6-luna"})
+
+
+def test_provider_maps_load_ignores_junk(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "provider_default_models": {
+                    "codex": "gpt-5.6-sol",
+                    "bogus": "auto",
+                },
+                "provider_title_models": {
+                    "opencode": "anthropic/claude-sonnet-4-6",
+                    "codex": 42,
+                },
+            }
+        )
+    )
+    store = AppSettingsStore(path)
+    assert store.settings.provider_default_models == {"codex": "gpt-5.6-sol"}
+    assert store.settings.provider_title_models == {"opencode": "anthropic/claude-sonnet-4-6"}
 
 
 def test_provider_default_modes_persist_and_apply(tmp_path):

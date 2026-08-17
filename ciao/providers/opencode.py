@@ -41,7 +41,6 @@ from typing import Any
 
 import httpx
 
-from ciao.model_tiers import MODEL_TIERS, canonical_tier
 from ciao.memory_injector import system_prompt_payload
 from ciao.models import (
     AgentRequest,
@@ -172,28 +171,23 @@ _MODE_PERMISSIONS: dict[str, list[dict[str, str]]] = {
 
 @dataclass(frozen=True, slots=True)
 class OpencodeSettings:
-    """Operator overrides for the opencode tier aliases.
+    """Operator override for the opencode default model.
 
-    Empty string means "no pin": the tier falls through to whatever model the
-    session's configured provider resolves. Mirrors ``CodexSettings`` so
-    ``AppSettings.provider_routing`` can drive both the same way.
+    Empty string means "no override": the default falls through to whatever
+    model the session's configured provider resolves. Mirrors
+    ``CodexSettings`` so ``AppSettings.provider_default_models`` can drive
+    both the same way.
     """
 
-    haiku_model: str = ""
-    sonnet_model: str = ""
-    opus_model: str = ""
-    fable_model: str = ""
-
-    def tier_overrides(self) -> dict[str, str]:
-        return {tier: getattr(self, f"{tier}_model") for tier in MODEL_TIERS}
+    default_model: str = ""
 
 
-def opencode_tier_overrides(config: object) -> dict[str, str]:
-    """Extract the per-tier opencode pins from a (duck-typed) config object."""
+def opencode_default_model(config: object) -> str:
+    """The operator's opencode default model, or ``""`` when there is none."""
     settings = getattr(config, "opencode", None)
     if settings is None:
-        return {}
-    return {tier: model for tier, model in settings.tier_overrides().items() if model}
+        return ""
+    return str(getattr(settings, "default_model", "") or "")
 
 
 def resolve_opencode_binary(env: Mapping[str, str] | None = None) -> str | None:
@@ -1571,38 +1565,14 @@ class OpencodeProvider(BaseSDKProvider):
     ) -> tuple[str, str]:
         """Resolve a requested model to ``(providerID, modelID)`` for the prompt.
 
-        A qualified ``provider/model`` id passes through. An unqualified one --
-        in practice a tier alias like ``sonnet``, which is what schedules,
-        routines and the critique panel speak -- is not something opencode can
-        serve: sending it verbatim asks for modelID ``sonnet`` under an empty
-        provider, which opencode rejects. Resolve it against the live catalog
-        instead.
-
-        Returns ``("", "")`` when nothing matches, which makes the caller omit
-        the model and let opencode apply its own default. That is the honest
-        outcome for a catalog with no equivalent of the requested tier, and it
-        keeps a bring-your-own-provider install working out of the box.
+        A qualified ``provider/model`` id passes through. An unqualified one is
+        sent as-is under an empty provider, letting opencode apply its own
+        default when the id is not a concrete catalog entry.
         """
         provider_id, model_id = split_model(model)
         if provider_id or not model_id:
             return provider_id, model_id
-        try:
-            response = await client.get("/provider")
-            response.raise_for_status()
-            catalog = _catalog_from_providers(response.json())
-        except (httpx.HTTPError, ValueError):
-            logger.info("opencode catalog unavailable; letting it pick a model")
-            return "", ""
-        resolved = opencode_tier_models(
-            catalog, opencode_tier_overrides(self.config)
-        ).get(canonical_tier(model_id), "")
-        if not resolved:
-            logger.info(
-                "opencode has no model for tier %r; using its configured default",
-                model_id,
-            )
-            return "", ""
-        return split_model(resolved)
+        return "", model_id.strip()
 
     async def run_streaming(
         self,
@@ -1883,43 +1853,6 @@ def opencode_collab_tree_counts(tree: Sequence[Mapping[str, Any]]) -> tuple[int,
         ):
             running += 1
     return running, bool(tree)
-
-
-def opencode_tier_models(
-    catalog: Sequence[Mapping[str, Any]],
-    overrides: Mapping[str, str] | None = None,
-) -> dict[str, str]:
-    """Map tier aliases onto concrete ``providerID/modelID`` ids from the catalog.
-
-    opencode addresses every model as ``providerID/modelID``, so a bare tier
-    alias is not a model id it can serve -- it would be sent as modelID
-    ``sonnet`` under an empty provider. This is what turns the alias into
-    something opencode recognises.
-
-    An operator pin (Settings -> Models -> model routing) wins, but only while
-    that model is still in the catalog: a pin left behind by a disconnected
-    provider must not outvote a model the user can actually run. Otherwise the
-    tier name is matched inside the model id, which works because opencode's
-    catalog is mostly vendor-named models (``anthropic/claude-sonnet-4-6``).
-
-    A tier with no pin and no match is **absent from the result**, deliberately.
-    opencode is bring-your-own-provider and a catalog of Llama or Qwen models
-    has no "opus"; guessing one would silently run a model the user did not ask
-    for, so the caller omits the model instead and lets opencode pick its own
-    default.
-    """
-    available = [str(row.get("model") or "") for row in catalog]
-    in_catalog = set(available)
-    resolved: dict[str, str] = {}
-    for tier in MODEL_TIERS:
-        pinned = (overrides or {}).get(tier, "")
-        if pinned and pinned in in_catalog:
-            resolved[tier] = pinned
-            continue
-        match = next((m for m in available if tier in m.lower()), "")
-        if match:
-            resolved[tier] = match
-    return resolved
 
 
 def catalog_providers(catalog: Sequence[Mapping[str, Any]]) -> set[str]:

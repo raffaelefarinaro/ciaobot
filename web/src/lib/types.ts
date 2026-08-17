@@ -521,12 +521,6 @@ export interface ModelsResponse {
     input_modalities: string[]
   }>
   model_reasoning_levels?: Record<string, string[]>
-  // Per-backend haiku/sonnet/opus/fable tier models and which
-  // backends are configured/available.
-  alias_tiers?: Record<string, Record<string, string>>
-  // Catalog-derived codex tier mapping before operator pins, used to
-  // label the "Automatic (…)" option while an override is active.
-  codex_tier_defaults?: Record<string, string>
   backends?: Record<string, boolean>
   // Keyed by runtime provider; Claude buckets share the SDK effort levels,
   // while Codex is additionally narrowed by model_reasoning_levels.
@@ -541,22 +535,19 @@ export interface RoutineSettings {
   insights_model: string
 
   critique_models: string
-  // Per-runtime-provider tier pins, keyed by provider id then tier; a missing
-  // entry = automatic catalog mapping. This is the canonical shape — PATCH it
-  // rather than the flat keys below. Effective values come from /api/models
-  // (alias_tiers.<provider>).
-  provider_routing?: Record<string, Record<string, string>>
+  // Per-provider default model for new chats; a missing entry = the provider's
+  // own catalog default.
+  provider_default_models?: Record<string, string>
+  // Per-provider default thinking level for new chats; missing = provider default.
+  provider_default_thinking?: Record<string, string>
+  // Per-provider chat-title and session-insights models; missing = provider default.
+  provider_title_models?: Record<string, string>
+  provider_insights_models?: Record<string, string>
   // Per-provider default execution mode for new chats (Settings → Providers).
   // Missing entry = built-in default (opencode → normal, others → auto).
   provider_default_modes?: Record<string, string>
   // Resolved effective default mode per provider, after built-in defaults.
   provider_default_modes_effective?: Record<string, string>
-  // Flat mirror of the same Codex pins, still emitted and accepted for
-  // clients written before provider_routing existed.
-  codex_haiku_model: string
-  codex_sonnet_model: string
-  codex_opus_model: string
-  codex_fable_model: string
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string
@@ -566,9 +557,6 @@ export interface RoutineSettings {
   insights_model_by_workspace?: Record<string, string>
 
   critique_models_effective: string
-  // Env-backed models used when a tier override is cleared.
-  tier_defaults?: Record<string, Record<string, string>>
-  alias_tiers?: Record<string, Record<string, string>>
   // The "apple" title option: needs macOS 26+, the desktop app, and Apple
   // Intelligence on. Nothing installable, so Settings shows the reason.
   apple_model_available?: boolean

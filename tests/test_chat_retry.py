@@ -189,63 +189,38 @@ async def test_try_retry_now_refuses_active_chat(tmp_path: Path) -> None:
 
 
 async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
-    """A 4xx saying 'does not support image input' should auto-retry the next tier.
+    """A 4xx saying 'does not support image input' surfaces as an error result.
 
-    This is the screenshot scenario: the chat was sent to a model that
-    cannot handle images, the provider returned a 400, and the engine
-    silently retried on the next tier in the configured ladder.
-
-    The PWA must see exactly one ``result`` (the success), a ``status``
-    note about the retry, and a ``model_changed`` event after success.
+    The auto tier-fallback ladder was removed; a capability error is now
+    reported to the PWA as the single result of the turn.
     """
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("tier-fallback", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="tier-fallback-test")
-    # A bare tier alias is what makes the chat eligible for the ladder.
     chat.model = "fable"
     pcm._save()
-    # This test exercises the dispatch-time ladder, not the pre-flight, so
-    # let the turn through as if the pre-flight approved the model.
+    # This test exercises the dispatch path, not the pre-flight, so let the
+    # turn through as if the pre-flight approved the model.
     async def _always_capable(model, chat):
         return True
 
     pcm._model_capable = _always_capable  # type: ignore[assignment]
 
     seen_models: list[str] = []
-    seen_image_counts: list[int] = []
 
     async def fake_drive(*, chat_id, request, outcome):
         seen_models.append(request.model)
-        seen_image_counts.append(len(request.images or []))
-        if request.model == "fable":
-            outcome.response_text = "API Error: 400 this model does not support image input"
-            outcome.had_error = True
-            outcome.effective_model = "fable"
-            evt = ResultEvent(
-                type="result",
-                result=(
-                    "API Error: 400 this model does not support image "
-                    "input (ref: test)"
-                ),
-                session_id="sess-1",
-                is_error=True,
-                effective_model="fable",
-                usage={},
-                quota={},
-                cost_usd=0.0,
-            )
-            outcome.events.append(evt)
-            yield evt
-            return
-        # Second attempt on the next tier succeeds.
-        outcome.response_text = "Here is my answer about the image."
-        outcome.had_error = False
+        outcome.response_text = "API Error: 400 this model does not support image input"
+        outcome.had_error = True
         outcome.effective_model = request.model
         evt = ResultEvent(
             type="result",
-            result="Here is my answer about the image.",
-            session_id="sess-2",
-            is_error=False,
+            result=(
+                "API Error: 400 this model does not support image "
+                "input (ref: test)"
+            ),
+            session_id="sess-1",
+            is_error=True,
             effective_model=request.model,
             usage={},
             quota={},
@@ -271,161 +246,21 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
     )
     events = await asyncio.wait_for(_consume(stream), timeout=2.0)
 
-    # First attempt fired on kimi5.2; retry attempted on minimax-m3
-    # (configured Ollama opus slot). Both must appear in the seen list.
-    assert seen_models[0] == "fable"
-    assert seen_models[-1] == "opus"
-    # Images must be preserved on the retry (not stripped).
-    assert seen_image_counts == [1, 1]
-    # A status line was emitted between the two attempts so the PWA
-    # shows the user what happened.
-    status_events = [
-        e
-        for e in events
-        if e.get("type") == "status" and "retrying" in (e.get("message") or "").lower()
-    ]
-    assert status_events, f"expected a 'retrying' status event, got {events}"
-    # Exactly one result — the error from the first model is suppressed.
+    # Only the original model is dispatched; no silent retry.
+    assert seen_models == ["fable"]
+    # Exactly one result — the error, surfaced to the PWA.
     result_events = [e for e in events if e.get("type") == "result"]
     assert len(result_events) == 1, f"expected exactly one result, got {result_events}"
     final = result_events[0]
-    assert final.get("is_error") is False
-    assert "Here is my answer" in final.get("text", "")
-    # Successful fallback notifies the PWA of the model switch.
+    assert final.get("is_error") is True
+    assert "does not support image" in final.get("text", "")
+    # No model_changed event: the model was not swapped.
     model_changed = [e for e in events if e.get("type") == "model_changed"]
-    assert model_changed == [{"type": "model_changed", "model": "opus"}]
-    # And persists it on the chat so the next turn uses the working model.
+    assert model_changed == []
+    # The chat keeps its original model.
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
-    assert updated.model == "opus"
-
-
-async def test_capability_fallback_persists_model_change(tmp_path: Path) -> None:
-    """After a successful capability fallback, chat.model must stick."""
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("tier-fallback-persist", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="persist-model")
-    chat.model = "fable"
-    pcm._save()
-
-    async def fake_drive(*, chat_id, request, outcome):
-        if request.model == "fable":
-            outcome.response_text = "API Error: 400 this model does not support image input"
-            outcome.had_error = True
-            outcome.effective_model = request.model
-            evt = ResultEvent(
-                type="result",
-                result=outcome.response_text,
-                session_id="sess-1",
-                is_error=True,
-                effective_model=request.model,
-                usage={},
-                quota={},
-                cost_usd=0.0,
-            )
-            outcome.events.append(evt)
-            yield evt
-            return
-        outcome.response_text = "ok"
-        outcome.had_error = False
-        outcome.effective_model = request.model
-        evt = ResultEvent(
-            type="result",
-            result="ok",
-            session_id="sess-2",
-            is_error=False,
-            effective_model=request.model,
-            usage={},
-            quota={},
-            cost_usd=0.0,
-        )
-        outcome.events.append(evt)
-        yield evt
-
-    pcm._drive_stream = fake_drive  # type: ignore[assignment]
-
-    stream = pcm.start_stream(chat.chat_id, "describe this")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
-
-    updated = pcm.get_chat(chat.chat_id)
-    assert updated is not None
-    assert updated.model == "opus"
-    # Reloading from disk must keep the persisted model.
-    pcm2 = _make_manager(tmp_path)
-    reloaded = pcm2.get_chat(chat.chat_id)
-    assert reloaded is not None
-    assert reloaded.model == "opus"
-
-
-async def test_capability_fallback_preserves_images(tmp_path: Path) -> None:
-    """Capability fallback must retry with the original images intact."""
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("tier-fallback-images", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="preserve-images")
-    chat.model = "fable"
-    pcm._save()
-    # Bypass the image-capability pre-flight: this test targets the
-    # dispatch-time ladder's image preservation, not the pre-flight ask.
-    async def _always_capable(model, chat):
-        return True
-
-    pcm._model_capable = _always_capable  # type: ignore[assignment]
-
-    retry_images: list | None = None
-
-    async def fake_drive(*, chat_id, request, outcome):
-        nonlocal retry_images
-        if request.model == "fable":
-            outcome.response_text = "API Error: 400 this model does not support image input"
-            outcome.had_error = True
-            outcome.effective_model = request.model
-            evt = ResultEvent(
-                type="result",
-                result=outcome.response_text,
-                session_id="sess-1",
-                is_error=True,
-                effective_model=request.model,
-                usage={},
-                quota={},
-                cost_usd=0.0,
-            )
-            outcome.events.append(evt)
-            yield evt
-            return
-        retry_images = list(request.images or [])
-        outcome.response_text = "I see a cat."
-        outcome.had_error = False
-        outcome.effective_model = request.model
-        evt = ResultEvent(
-            type="result",
-            result="I see a cat.",
-            session_id="sess-2",
-            is_error=False,
-            effective_model=request.model,
-            usage={},
-            quota={},
-            cost_usd=0.0,
-        )
-        outcome.events.append(evt)
-        yield evt
-
-    pcm._drive_stream = fake_drive  # type: ignore[assignment]
-
-    from ciao.models import ImageAttachment
-
-    img = ImageAttachment(
-        path=tmp_path / "photo.jpg",
-        mime_type="image/jpeg",
-        original_filename="photo.jpg",
-    )
-    stream = pcm.start_stream(chat.chat_id, "what is this?", images=[img])
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
-
-    assert retry_images is not None
-    assert len(retry_images) == 1
-    assert retry_images[0].path == img.path
-    assert retry_images[0].mime_type == "image/jpeg"
-    assert retry_images[0].original_filename == "photo.jpg"
+    assert updated.model == "fable"
 
 
 async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None:

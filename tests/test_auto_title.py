@@ -189,7 +189,8 @@ async def test_opencode_chat_titles_use_the_opencode_catalog(
         title_model_override="",
         title_model="haiku",
         workspace_root=tmp_path,
-        haiku_model_for_workspace=lambda _workspace: "haiku",
+        provider_title_models={},
+        default_model_for_workspace=lambda _workspace: "haiku",
     )
     manager = pc.ProjectChatManager.__new__(pc.ProjectChatManager)
     manager._config = config
@@ -302,13 +303,13 @@ def test_resolve_title_model_uses_override() -> None:
     assert resolve_title_model(config, "personal") == "anthropic/claude-haiku-4.5"
 
 
-def test_resolve_title_model_uses_workspace_haiku_when_automatic() -> None:
+def test_resolve_title_model_uses_workspace_default_when_automatic() -> None:
     from ciao.config import CiaoConfig
 
     config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "CIAO_OLLAMA_API_KEY": "sk-cloud"})
     config.title_model_override = ""
-    assert resolve_title_model(config, "personal") == "haiku"
-    assert resolve_title_model(config, "work") == "haiku"
+    assert resolve_title_model(config, "personal") == config.claude_default_model
+    assert resolve_title_model(config, "work") == config.claude_default_model
 
 
 def test_resolve_title_model_falls_back_without_workspace() -> None:

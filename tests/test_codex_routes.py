@@ -80,19 +80,14 @@ def test_models_endpoint_exposes_codex_catalog_and_per_model_effort(
 
     assert data["provider_models"]["codex"] == ["gpt-test"]
     assert data["provider_defaults"]["codex"] == "gpt-test"
-    assert data["alias_tiers"]["codex"] == {
-        "haiku": "gpt-test",
-        "sonnet": "gpt-test",
-        "opus": "gpt-test",
-        "fable": "gpt-test",
-    }
     assert data["model_reasoning_levels"]["gpt-test"] == ["low", "high"]
     assert data["codex_model_metadata"]["gpt-test"]["display_name"] == "GPT Test"
     assert data["backends"]["codex"] is True
-    assert data["codex_tier_defaults"] == data["alias_tiers"]["codex"]
+    assert "alias_tiers" not in data
+    assert "codex_tier_defaults" not in data
 
 
-def test_models_endpoint_applies_codex_tier_pins(
+def test_models_endpoint_exposes_codex_default_model(
     tmp_path: Path, monkeypatch,
 ) -> None:
     config = CiaoConfig(
@@ -100,7 +95,7 @@ def test_models_endpoint_applies_codex_tier_pins(
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
-        codex=CodexSettings(sonnet_model="gpt-5.6-sol", haiku_model="gpt-gone"),
+        codex=CodexSettings(default_model="gpt-5.6-sol"),
     )
     catalog = [
         {
@@ -121,14 +116,10 @@ def test_models_endpoint_applies_codex_tier_pins(
     response = asyncio.run(list_models(_request("/api/models", app)))
     data = json.loads(response.body)
 
-    # The pin wins where its model is visible; the stale haiku pin falls
-    # back to the automatic mapping.
-    assert data["alias_tiers"]["codex"]["sonnet"] == "gpt-5.6-sol"
-    assert data["alias_tiers"]["codex"]["haiku"] == "gpt-5.6-terra"
-    assert data["codex_tier_defaults"]["sonnet"] == "gpt-5.6-terra"
-    # Tier reasoning levels follow the effective (pinned) model.
-    assert data["model_reasoning_levels"]["sonnet"] == ["low"]
-    assert data["model_reasoning_levels"]["haiku"] == ["high"]
+    # The operator default wins over the catalog default.
+    assert data["provider_defaults"]["codex"] == "gpt-5.6-sol"
+    assert data["model_reasoning_levels"]["gpt-5.6-sol"] == ["low"]
+    assert data["model_reasoning_levels"]["gpt-5.6-terra"] == ["high"]
 
 
 def test_codex_chat_messages_render_thread_items(

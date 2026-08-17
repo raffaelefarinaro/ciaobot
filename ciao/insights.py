@@ -47,14 +47,13 @@ def resolve_insights_model(config: CiaoConfig, workspace: str | None = None) -> 
     """Pick the model for session-insights extraction.
 
     When the operator has not set an explicit override (Settings → Models →
-    Session insights = Automatic), use the sonnet-tier model for the chat's
-    workspace routing bucket. Scripts without workspace context fall back to
-    ``config.insights_model``.
+    Session insights = Automatic), use the workspace's default model. Scripts
+    without workspace context fall back to ``config.insights_model``.
     """
     if config.insights_model_override:
         return config.insights_model_override
     if workspace is not None:
-        return config.sonnet_model_for_workspace(workspace)
+        return config.default_model_for_workspace(workspace)
     return config.insights_model
 
 
@@ -169,7 +168,7 @@ def _resolve_insights_call(
         if model.startswith(prefix):
             return model[len(prefix):] or "sonnet", routed_provider, None
 
-    if provider == "codex" and not native_sidecar.is_apple_model(model):
+    if provider in ("codex", "opencode") and not native_sidecar.is_apple_model(model):
         return model, provider, None
 
     # An insights_model that is itself the sentinel cannot serve as the

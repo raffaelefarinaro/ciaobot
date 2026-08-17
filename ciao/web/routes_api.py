@@ -32,7 +32,6 @@ from ciao import provider_registry
 from ciao.config import WorkspaceConfig
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
-from ciao.model_tiers import codex_tier_models
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
     parse_disallowed_tools_value,
@@ -46,12 +45,11 @@ from ciao.workspaces import (
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
-from ciao.providers.codex import CodexProvider, codex_login_status, codex_tier_overrides
+from ciao.providers.codex import CodexProvider, codex_login_status
 from ciao.providers.opencode import (
     OpencodeProvider,
     _file_touches as _opencode_file_touches,
     _summarize_tool_input as _summarize_opencode_tool_input,
-    opencode_tier_overrides,
 )
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.schedules import (
@@ -2236,10 +2234,8 @@ async def create_project_chat(request: Request) -> JSONResponse:
 
 # ── Chats ────────────────────────────────────────────────────────────────
 
-def _codex_reasoning_levels(
-    catalog: list[dict], overrides: dict[str, str] | None = None
-) -> dict[str, list[str]]:
-    """Per-model reasoning levels from the codex catalog, tier aliases included."""
+def _codex_reasoning_levels(catalog: list[dict]) -> dict[str, list[str]]:
+    """Per-model reasoning levels from the codex catalog."""
     levels: dict[str, list[str]] = {}
     for item in catalog:
         if item.get("hidden"):
@@ -2253,8 +2249,6 @@ def _codex_reasoning_levels(
             for option in efforts or []
             if isinstance(option, dict) and option.get("reasoningEffort")
         ]
-    for tier, model_id in codex_tier_models(catalog, overrides=overrides).items():
-        levels[tier] = list(levels.get(model_id, []))
     return levels
 
 
@@ -2283,7 +2277,7 @@ async def _unsupported_codex_level_error(
         catalog = await CodexProvider.model_catalog(config.workspace_root)
     except Exception:
         return None
-    allowed = _codex_reasoning_levels(catalog, codex_tier_overrides(config)).get(model)
+    allowed = _codex_reasoning_levels(catalog).get(model)
     if allowed and level not in allowed:
         return JSONResponse(
             {
@@ -5024,9 +5018,10 @@ async def list_models(request: Request) -> JSONResponse:
         ),
         codex_models[0] if codex_models else "",
     )
-    # Automatic (catalog-derived) mapping vs the effective one after the
-    # operator's per-tier pins; the settings UI labels "Automatic (…)"
-    # from the former and shows the latter on the tier badges.
+    # The operator's per-provider default model wins over the catalog default.
+    codex_operator_default = config.default_model_for_provider("codex")
+    if codex_operator_default in codex_models:
+        codex_default = codex_operator_default
     # opencode is bring-your-own-provider: its catalog is whatever backends the
     # user has connected, so an empty list simply means "not signed in yet".
     opencode_catalog = await OpencodeProvider.model_catalog(
@@ -5035,6 +5030,11 @@ async def list_models(request: Request) -> JSONResponse:
     opencode_models = [
         str(item.get("model") or "") for item in opencode_catalog if item.get("model")
     ]
+    opencode_operator_default = config.default_model_for_provider("opencode")
+    if opencode_operator_default in opencode_models:
+        opencode_default = opencode_operator_default
+    else:
+        opencode_default = opencode_models[0] if opencode_models else ""
     # Per-model reasoning-effort variants, merged into the same map the PWA
     # already reads for Codex so the picker needs no provider-specific branch.
     opencode_reasoning_levels = {
@@ -5042,16 +5042,9 @@ async def list_models(request: Request) -> JSONResponse:
         for item in opencode_catalog
         if item.get("model")
     }
-    opencode_overrides = opencode_tier_overrides(config)
-    opencode_tiers = {
-        tier: model for tier, model in opencode_overrides.items() if model in opencode_models
-    }
-    codex_overrides = codex_tier_overrides(config)
-    codex_tier_defaults = codex_tier_models(codex_catalog)
-    codex_tiers = codex_tier_models(codex_catalog, overrides=codex_overrides)
     model_reasoning_levels = {
         **opencode_reasoning_levels,
-        **_codex_reasoning_levels(codex_catalog, codex_overrides),
+        **_codex_reasoning_levels(codex_catalog),
     }
     codex_model_metadata: dict[str, dict] = {}
     for item in visible_codex:
@@ -5086,19 +5079,8 @@ async def list_models(request: Request) -> JSONResponse:
         "provider_defaults": {
             "claude": claude_default,
             "codex": codex_default,
-            "opencode": opencode_models[0] if opencode_models else "",
+            "opencode": opencode_default,
         },
-        # Per-provider tier models, so the picker can show
-        # "sonnet -> gpt-5.6-terra (codex)". Tier names resolve to
-        # provider-native ids only at the dispatch boundary.
-        "alias_tiers": {
-            "codex": codex_tiers,
-            "opencode": opencode_tiers,
-        },
-        # Catalog-derived codex mapping before per-tier pins, so the
-        # settings UI can label the automatic choice while an override
-        # is active.
-        "codex_tier_defaults": codex_tier_defaults,
         "backends": {
             "anthropic": True,
             "codex": bool(codex_models),
@@ -5139,18 +5121,18 @@ def _routines_payload(config, app_settings) -> dict:
     if config.title_model_override:
         title_effective = config.title_model_override
     else:
-        # Automatic resolves to the workspace haiku tier — Apple's on-device
-        # model is opt-in
-        # (choose "Apple" explicitly), not the auto default just because the
-        # binary is on PATH (it fails when Apple Intelligence is disabled).
-        title_effective = config.haiku_model_for_workspace(config.primary_workspace())
+        # Automatic resolves to the workspace's default model — Apple's
+        # on-device model is opt-in (choose "Apple" explicitly), not the auto
+        # default just because the binary is on PATH (it fails when Apple
+        # Intelligence is disabled).
+        title_effective = config.default_model_for_workspace(config.primary_workspace())
     from ciao.critique import critique_models_effective
 
     critique_effective = critique_models_effective(config)
     if config.insights_model_override:
         insights_effective = config.insights_model_override
     else:
-        insights_effective = config.sonnet_model_for_workspace(
+        insights_effective = config.default_model_for_workspace(
             config.primary_workspace()
         )
 
@@ -5164,9 +5146,9 @@ def _routines_payload(config, app_settings) -> dict:
     insights_by_workspace: dict[str, str] = {}
     for name in config.workspace_names():
         if not config.title_model_override:
-            title_by_workspace[name] = config.haiku_model_for_workspace(name)
+            title_by_workspace[name] = config.default_model_for_workspace(name)
         if not config.insights_model_override:
-            insights_by_workspace[name] = config.sonnet_model_for_workspace(name)
+            insights_by_workspace[name] = config.default_model_for_workspace(name)
 
     return {
         # Overrides as stored ("" = automatic default).
@@ -5174,23 +5156,20 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model": s.insights_model,
 
         "critique_models": s.critique_models,
-        # Canonical shape: {provider_id: {tier: model}} for every runtime
-        # provider with operator-settable tier pins.
-        "provider_routing": s.provider_routing or {},
+        # Per-provider default model for new chats, as stored (missing =
+        # provider's own catalog default).
+        "provider_default_models": s.provider_default_models or {},
+        # Per-provider default thinking level for new chats, as stored.
+        "provider_default_thinking": s.provider_default_thinking or {},
+        # Per-provider routine models, as stored (missing = provider default).
+        "provider_title_models": s.provider_title_models or {},
+        "provider_insights_models": s.provider_insights_models or {},
         # Per-provider default execution mode for new chats, as stored
         # (missing = built-in default). Effective defaults below.
         "provider_default_modes": s.provider_default_modes or {},
         "provider_default_modes_effective": {
             item.id: config.default_mode_for_provider(item.id)
             for item in provider_registry.descriptors()
-        },
-        # Flat mirror of the same pins, kept so a client written against the
-        # pre-map settings API keeps rendering. PATCH accepts either shape.
-        **{
-            f"{descriptor.id}_{tier}_model": app_settings.tier_pin(descriptor.id, tier)
-            for descriptor in provider_registry.descriptors()
-            if descriptor.tier_settings_attr
-            for tier in ("haiku", "sonnet", "opus", "fable")
         },
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
@@ -5227,7 +5206,7 @@ def _routines_payload(config, app_settings) -> dict:
         },
         # Grouped options for the routine model selectors.
         "model_options": {
-            "anthropic": ["haiku", "sonnet", "opus", "fable"],
+            "anthropic": list(config.claude_models),
         },
         "backends": {
             "anthropic": True,

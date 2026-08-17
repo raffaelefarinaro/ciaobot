@@ -487,8 +487,8 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 
 ```bash
 # Read internal-routine settings: title, insights, and critique model
-# overrides, the per-provider tier pins (provider_routing plus a flat
-# {provider}_{tier}_model mirror), and the effective models after defaults.
+# overrides, the per-provider default model / thinking / routine-model maps,
+# and the effective models after defaults.
 #
 # title_model_effective / insights_model_effective are the PRIMARY workspace's
 # answer only. With no override both routines resolve from the chat's own
@@ -500,13 +500,15 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
 # live config immediately (no restart). Empty string clears an override back
 # to the env default. "apple" routes a routine to the on-device Foundation
-# Model (title_model / insights_model).
+# Model (title_model / insights_model). Per-provider defaults use the nested
+# maps: provider_default_models, provider_default_thinking,
+# provider_title_models, provider_insights_models.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5"}'
+  -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"codex":"gpt-5.6-terra"}}'
 ```
 
-**Project MCP servers (Settings → Providers tab)**
+**Project MCP servers (Settings → MCP tab)**
 
 ```bash
 # Create a project MCP server in .mcp.json. Pass url for an HTTP server, or

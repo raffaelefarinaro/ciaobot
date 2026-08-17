@@ -300,7 +300,21 @@
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/skills' }"
         >
-          assets
+          skills
+        </router-link>
+        <router-link
+          to="/settings/subagents"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/subagents' }"
+        >
+          subagents
+        </router-link>
+        <router-link
+          to="/settings/mcp"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/mcp' }"
+        >
+          mcp
         </router-link>
         <router-link
           to="/settings/automations"

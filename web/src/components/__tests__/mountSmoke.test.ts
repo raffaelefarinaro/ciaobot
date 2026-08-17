@@ -668,9 +668,6 @@ describe('component mount smoke', () => {
     expect(wrapper.text()).toContain('custom skills')
     expect(wrapper.text()).toContain('brainstorming')
     expect(wrapper.text()).toContain('github / package skills')
-    expect(wrapper.text()).toContain('commands')
-    expect(wrapper.text()).toContain('/remember')
-    expect(wrapper.text()).toContain('Store a durable memory')
     wrapper.unmount()
   })
 
@@ -947,7 +944,7 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView shows OpenAI routing and saves configurable tier routes', async () => {
+  it('SettingsView shows per-provider defaults and saves a default model', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -958,44 +955,27 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const providerSelect = wrapper.find('.alias-provider-select')
-    expect(providerSelect.exists()).toBe(true)
-    expect(providerSelect.classes()).toContain('routine-select')
-    expect(providerSelect.findAll('option').map((option) => option.text())).toEqual([
-      'Anthropic (via Claude Code)',
-      'OpenAI (via Codex)',
-      // Registered but with no authenticated backend in this fixture.
-      'opencode (not configured)',
-    ])
-    expect(wrapper.text()).toContain('model routing')
-    expect(wrapper.text()).not.toContain('Claude Code model routing')
-    // Codex tiers are editable pins whose default reflects the automatic
-    // catalog mapping.
-    const codexSelectors = wrapper.findAll('.tier-provider-section .model-selector')
-    expect(codexSelectors.map((selector) => selector.find('.model-selector__trigger').text())).toEqual([
-      'Automatic (gpt-5.6-luna)▾',
-      'Automatic (gpt-5.6-terra)▾',
-      'Automatic (gpt-5.6-sol)▾',
-      'Automatic (gpt-5.6-sol)▾',
-    ])
-    await codexSelectors[0]!.find('.model-selector__trigger').trigger('click')
+    expect(wrapper.text()).toContain('defaults per provider')
+    expect(wrapper.text()).not.toContain('model routing')
+    // Codex exposes an editable default-model selector.
+    const codexSelector = wrapper.find('.model-selector')
+    expect(codexSelector.exists()).toBe(true)
+    await codexSelector.find('.model-selector__trigger').trigger('click')
     await flushPromises()
-    const codexOption = codexSelectors[0]!.findAll('.model-selector__item')
+    const codexOption = codexSelector.findAll('.model-selector__item')
       .find((el) => el.attributes('data-model') === 'gpt-5.6-terra')
     expect(codexOption).toBeTruthy()
     await codexOption!.trigger('click')
     await flushPromises()
-    // Runtime-provider pins go through the nested provider_routing map, not
-    // the flat per-provider scalars (which the backend still accepts).
+    // Per-provider default models go through the provider_default_models map.
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      provider_routing: { codex: { haiku: 'gpt-5.6-terra' } },
+      provider_default_models: { codex: 'gpt-5.6-terra' },
     })
-    expect(wrapper.find('.routing-model-catalog').exists()).toBe(false)
 
     wrapper.unmount()
   })
 
-  it('SettingsView saves a per-provider default mode from the routing card', async () => {
+  it('SettingsView saves a per-provider default mode', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -1006,33 +986,25 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // The routing card carries a "Default mode" row; the automatic option
-    // names the effective default (opencode -> normal from the backend).
-    const modeSelect = wrapper.find('.tier-provider-section .routine-select:not(.alias-provider-select)')
-    expect(modeSelect.exists()).toBe(true)
-    const options = modeSelect.findAll('option').map((option) => option.text())
-    expect(options[0]).toBe('Automatic (Auto)')
+    // The defaults card carries a "Default mode" row per provider; the
+    // automatic option names the effective default (opencode -> normal).
+    const modeSelect = wrapper.findAll('.routine-select')
+      .find((el) => {
+        const options = el.findAll('option')
+        return options.some((o) => o.text() === 'Automatic (Auto)')
+      })
+    expect(modeSelect).toBeTruthy()
 
-    await modeSelect.setValue('bypass')
+    await modeSelect!.setValue('bypass')
     await flushPromises()
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       provider_default_modes: { codex: 'bypass' },
     })
 
-    // Claude joins the provider list with read-only tier inputs, so its
-    // default mode is settable even though its models cannot be re-pinned.
-    const providerSelect = wrapper.find('.alias-provider-select')
-    await providerSelect.setValue('claude')
-    await flushPromises()
-    await nextTick()
-    expect(wrapper.findAll('.tier-provider-section .routing-model-input').length).toBe(4)
-    const claudeMode = wrapper.find('.tier-provider-section .routine-select:not(.alias-provider-select)')
-    expect(claudeMode.findAll('option').map((option) => option.text())[0]).toBe('Automatic (Auto)')
-
     wrapper.unmount()
   })
 
-  it('SettingsView shows unconfigured tier providers disabled with a hint', async () => {
+  it('SettingsView shows signed-out providers with their defaults disabled', async () => {
     // Drive the mock by patching /api/settings/routines: the mock merges the
     // body into the shared routineSettings, so a subsequent GET (which
     // fetchRoutines issues on mount) returns the flipped backends.
@@ -1052,31 +1024,17 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
-      const providerSelect = wrapper.find('.alias-provider-select')
-      // A signed-out provider stays listed rather than vanishing, so the user
-      // can see it exists and what it needs.
-      const labels = providerSelect.findAll('option').map((option) => option.text())
-      expect(labels.some((l) => l.includes('opencode') && l.includes('not configured'))).toBe(true)
-
-      // Select it: tier ModelSelectors render disabled, with the hint.
-      await providerSelect.setValue('opencode')
-      await flushPromises()
-      await nextTick()
-      const tierSelectors = wrapper.findAll('.tier-provider-section .model-selector')
-      expect(tierSelectors.length).toBe(4)
-      for (const selector of tierSelectors) {
-        expect(selector.find('.model-selector__trigger').attributes('disabled')).toBeDefined()
-      }
-      const hint = wrapper.find('.tier-provider-note')
-      expect(hint.exists()).toBe(true)
-      expect(hint.text().toLowerCase()).toContain('opencode')
+      // A signed-out provider (opencode) is not available; its default-model
+      // selector is disabled rather than offering models.
+      const disabledSelectors = wrapper.findAll('.model-selector--disabled')
+      expect(disabledSelectors.length).toBeGreaterThan(0)
     } finally {
       await api.patch('/api/settings/routines', { backends: originalBackends })
       wrapper.unmount()
     }
   })
 
-  it('SettingsView saves routine models by provider and tier', async () => {
+  it('SettingsView saves routine models by provider', async () => {
     const mockApi = api as typeof api & {
       getResponse(path: string): unknown
       setResponse(path: string, value: unknown): void
@@ -1094,15 +1052,6 @@ describe('component mount smoke', () => {
         opencode: opencodeModels,
       },
       opencode_models: opencodeModels,
-      alias_tiers: {
-        ...(originalModels.alias_tiers as Record<string, Record<string, string>>),
-        opencode: {
-          haiku: opencodeModels[0],
-          sonnet: opencodeModels[1],
-          opus: opencodeModels[2],
-          fable: opencodeModels[2],
-        },
-      },
     })
     const router = makeRouter()
     await router.push('/settings/models')
@@ -1114,41 +1063,25 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // title_model (0) and insights_model (1) each carry a provider select;
-    // the title tier select is hidden for tier-less providers (apple/automatic),
-    // so scope the tier lookup to the insights block rather than a fixed index.
-    const controls = wrapper.findAll('.routine-model-controls')
+    // title_model and insights_model each carry a provider select.
     const providerSelects = wrapper.findAll('.routine-model-controls .routine-select--provider')
     expect(providerSelects.length).toBeGreaterThanOrEqual(2)
-    const insightsControls = controls[1]
 
-    // Anthropic tiers are the bare aliases: picking the provider stores the
-    // routine's default tier, and the tier select stores that tier directly.
+    // Picking Claude stores the effective default as the concrete model.
     await providerSelects[1].setValue('claude')
     await flushPromises()
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      insights_model: 'haiku',
+      insights_model: 'sonnet',
     })
 
-    const insightsTier = insightsControls.find('.routine-select--tier')
-    expect(insightsTier.exists()).toBe(true)
-    await insightsTier.setValue('opus')
-    await flushPromises()
-    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      insights_model: 'opus',
-    })
-
+    // Picking opencode stores a provider-qualified concrete model.
     await providerSelects[1].setValue('opencode')
     await flushPromises()
-    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      insights_model: 'opencode:anthropic/claude-opus-4.5',
-    })
+    const patchMock = api.patch as unknown as { mock: { calls: Array<[string, unknown]> } }
+    const last = patchMock.mock.calls[patchMock.mock.calls.length - 1]
+    const body = last[1] as Record<string, string>
+    expect(body.insights_model).toMatch(/^opencode:anthropic\/claude-(opus|sonnet|haiku)-4\.5$/)
 
-    await insightsTier.setValue('haiku')
-    await flushPromises()
-    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      insights_model: 'opencode:anthropic/claude-haiku-4.5',
-    })
     wrapper.unmount()
     mockApi.setResponse('/api/models', originalModels)
   })

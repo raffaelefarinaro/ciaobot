@@ -15,44 +15,6 @@ export interface ModelSection {
   hint?: string
 }
 
-type AliasTierMap = Record<string, Record<string, string>>
-
-const TIER_LABELS: Record<string, string> = {
-  haiku: 'Haiku',
-  sonnet: 'Sonnet',
-  opus: 'Opus',
-  fable: 'Fable',
-}
-
-const ANTHROPIC_MODELS = ['haiku', 'sonnet', 'opus', 'fable']
-
-// Order tier badges appear in, top to bottom.
-const TIER_ORDER = ['Haiku', 'Sonnet', 'Opus', 'Fable']
-
-/**
- * Move tier-tagged models (Haiku, Sonnet, Opus, Fable) to the top of a
- * provider list, in that fixed order. Untagged models keep their original
- * relative order below. The input array is not mutated.
- */
-export function sortModelsByTier(
-  models: string[],
-  modelBadges: Record<string, string[]> | undefined,
-): string[] {
-  const tierRank = (model: string): number => {
-    const badges = modelBadges?.[model] || []
-    let best = TIER_ORDER.length
-    for (const badge of badges) {
-      const idx = TIER_ORDER.indexOf(badge)
-      if (idx !== -1 && idx < best) best = idx
-    }
-    return best
-  }
-  return models
-    .map((model, index) => ({ model, index, rank: tierRank(model) }))
-    .sort((a, b) => a.rank - b.rank || a.index - b.index)
-    .map((entry) => entry.model)
-}
-
 export function parseModelList(raw: string): string[] {
   const seen = new Set<string>()
   const models: string[] = []
@@ -81,33 +43,6 @@ function orderedUnique(models: string[]): string[] {
   return result
 }
 
-function addBadge(badges: Record<string, string[]>, model: string, badge: string) {
-  const key = model.trim()
-  if (!key || !badge) return
-  const existing = badges[key] || []
-  if (!existing.includes(badge)) existing.push(badge)
-  badges[key] = existing
-}
-
-export function providerModelBadges(
-  provider: string,
-  models: string[],
-  aliasTiers: AliasTierMap | undefined | null,
-  localModels: string[] = [],
-): Record<string, string[]> {
-  const badges: Record<string, string[]> = {}
-  const available = new Set(models)
-  for (const local of localModels) {
-    if (available.has(local)) addBadge(badges, local, 'local')
-  }
-  const tiers = aliasTiers?.[provider] || {}
-  for (const [tier, model] of Object.entries(tiers)) {
-    if (!model || !available.has(model)) continue
-    addBadge(badges, model, TIER_LABELS[tier] || tier)
-  }
-  return badges
-}
-
 /**
  * Build sections for the chat / schedule pickers from `/api/models`.
  */
@@ -115,37 +50,18 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
   if (!response) return []
   const sections: ModelSection[] = []
 
-  sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS })
+  sections.push({
+    key: 'anthropic',
+    label: 'Anthropic',
+    models: orderedUnique(response.models || []),
+  })
 
   const codexModels = orderedUnique(response.codex_models || response.provider_models?.codex || [])
   if (codexModels.length) {
-    const modelBadges = providerModelBadges('codex', codexModels, response.alias_tiers)
-    const fableModel = response.alias_tiers?.codex?.fable || ''
-    if (fableModel && modelBadges[fableModel]) {
-      modelBadges[fableModel] = modelBadges[fableModel].filter((badge) => badge !== 'Fable')
-    }
-    // Temporary pseudo-model until Codex ships a real fable-tier model.
-    // Selecting it resolves to fableModel at reasoning effort 'ultra' and locks
-    // the thinking level.
-    const FABLE_PSEUDO_MODEL = 'gpt-5.6-sol-ultra'
-    const hasFablePseudo = fableModel === 'gpt-5.6-sol' && !codexModels.includes(FABLE_PSEUDO_MODEL)
-    const finalCodexModels = hasFablePseudo ? [...codexModels, FABLE_PSEUDO_MODEL] : codexModels
-    if (hasFablePseudo) {
-      modelBadges[FABLE_PSEUDO_MODEL] = ['Fable']
-    } else if (fableModel && !codexModels.includes('fable')) {
-      finalCodexModels.push('fable')
-      if (modelBadges[fableModel]) {
-        modelBadges[fableModel] = modelBadges[fableModel].filter((badge) => badge !== 'Fable')
-      }
-      modelBadges.fable = ['Fable']
-    }
-    const sortedCodexModels = sortModelsByTier(finalCodexModels, modelBadges)
     sections.push({
       key: 'codex',
       label: 'OpenAI Codex',
-      models: sortedCodexModels,
-      modelBadges,
-      modelLabels: hasFablePseudo ? { [FABLE_PSEUDO_MODEL]: `${fableModel}-ultra` } : (fableModel ? { fable: `${fableModel}-ultra` } : undefined),
+      models: codexModels,
     })
   }
 
@@ -155,12 +71,10 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
     response.opencode_models || response.provider_models?.opencode || [],
   )
   if (opencodeModels.length) {
-    const modelBadges = providerModelBadges('opencode', opencodeModels, response.alias_tiers)
     sections.push({
       key: 'opencode',
       label: 'opencode',
-      models: sortModelsByTier(opencodeModels, modelBadges),
-      modelBadges,
+      models: opencodeModels,
     })
   }
 

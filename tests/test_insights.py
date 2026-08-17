@@ -491,11 +491,11 @@ def test_resolve_insights_model_uses_override() -> None:
     assert insights.resolve_insights_model(config, "personal") == "anthropic/claude-haiku-4.5"
 
 
-def test_resolve_insights_model_uses_workspace_sonnet_when_automatic() -> None:
+def test_resolve_insights_model_uses_workspace_default_when_automatic() -> None:
     config = _config()
     config.insights_model_override = ""
-    assert insights.resolve_insights_model(config, "personal") == "sonnet"
-    assert insights.resolve_insights_model(config, "work") == "sonnet"
+    assert insights.resolve_insights_model(config, "personal") == config.claude_default_model
+    assert insights.resolve_insights_model(config, "work") == config.claude_default_model
 
 
 def test_resolve_insights_model_falls_back_without_workspace() -> None:

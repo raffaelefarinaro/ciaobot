@@ -168,24 +168,18 @@ export interface RetryModelOption {
   label: string
 }
 
-const TIER_ORDER = ['haiku', 'sonnet', 'opus', 'fable']
-
 export function retryModelOptions(
-  aliasTiers: Record<string, Record<string, string>> | undefined,
+  providerModels: Record<string, string[]> | undefined,
   providerLabels: Record<string, string> = {},
 ): RetryModelOption[] {
   const out: RetryModelOption[] = []
   const seen = new Set<string>()
-  for (const [provider, tiers] of Object.entries(aliasTiers || {})) {
+  for (const [provider, models] of Object.entries(providerModels || {})) {
     const label = providerLabels[provider] || provider
-    const keys = Object.keys(tiers || {}).sort(
-      (a, b) => TIER_ORDER.indexOf(a) - TIER_ORDER.indexOf(b),
-    )
-    for (const tier of keys) {
-      const model = tiers[tier]
+    for (const model of models || []) {
       if (!model || seen.has(model)) continue
       seen.add(model)
-      out.push({ value: model, label: `${label} · ${tier} — ${model}` })
+      out.push({ value: model, label: `${label} — ${model}` })
     }
   }
   return out

@@ -359,6 +359,19 @@ class CiaoConfig:
     # the built-in default: normal for opencode (approval-enforcing),
     # otherwise ``claude_mode``.
     provider_default_modes: dict[str, str] = field(default_factory=dict)
+    # Per-provider default model for new chats, set from the PWA Settings →
+    # Models tab (runtime settings store). A missing entry uses the provider's
+    # own catalog default.
+    provider_default_models: dict[str, str] = field(default_factory=dict)
+    # Per-provider default thinking level for new chats, set from the PWA
+    # Settings → Models tab. A missing entry uses the provider's own default.
+    provider_default_thinking: dict[str, str] = field(default_factory=dict)
+    # Per-provider chat-title model, set from the PWA Settings → Models tab.
+    # A missing entry uses the provider's cheap default.
+    provider_title_models: dict[str, str] = field(default_factory=dict)
+    # Per-provider session-insights model, set from the PWA Settings → Models
+    # tab. A missing entry uses the provider's balanced default.
+    provider_insights_models: dict[str, str] = field(default_factory=dict)
     restart_exit_code: int = 75
     auto_sync_on_start: bool = False
     auto_vault_index: bool = True
@@ -366,12 +379,11 @@ class CiaoConfig:
     pwa_port: int = 8443
     pwa_host: str = "127.0.0.1"
     gws_default_profile: str = "personal"
-    # Per-tier Codex model pins set from the PWA Settings → Providers tab.
-    # Empty means automatic: tiers derive from the signed-in account's
-    # model catalog (luna→haiku, terra→sonnet, sol→opus/fable).
+    # Per-provider default model for new chats, set from the PWA Settings →
+    # Models tab. A missing entry uses the provider's own catalog default.
     codex: CodexSettings = field(default_factory=CodexSettings)
-    # Per-tier opencode model pins, same shape and meaning as the Codex ones.
-    # Empty means the tier falls through to the session provider's own model.
+    # Per-provider default model for new chats, same shape and meaning as the
+    # Codex one. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
     # Post-archive insights extraction: when a chat is archived, run the raw
     # Claude Code session JSONL through a fast cheap model and append a
@@ -747,26 +759,35 @@ class CiaoConfig:
                     return workspace_config.default_model
                 if descriptor.default_model_config_key:
                     return str(getattr(self, descriptor.default_model_config_key, "") or "")
-                # No operator setting and no descriptor default means "use that
-                # provider account's current catalog default": the provider
-                # resolves it and the chat records the effective model.
+                # A provider with an operator-settable default model (Codex,
+                # opencode) uses it; otherwise "use that provider account's
+                # current catalog default": the provider resolves it and the
+                # chat records the effective model.
+                if descriptor.default_model_settings_attr:
+                    settings = getattr(self, descriptor.default_model_settings_attr, None)
+                    default = getattr(settings, "default_model", "") if settings else ""
+                    if default:
+                        return default
                 return descriptor.default_model
         return self.claude_default_model
 
-    def sonnet_model_for_workspace(self, workspace: str | None) -> str:
-        """The sonnet-tier model for a workspace's routines.
+    def default_model_for_provider(self, provider: str) -> str:
+        """The operator's default model for a provider, or ``""`` when unset.
 
-        A bare tier alias: whichever provider runs the workspace resolves it
-        against its own catalog. Kept as a method rather than inlining the
-        literal so the routines that ask "what does Automatic mean here?"
-        (`resolve_title_model`, `resolve_insights_model`) keep one answer, and
-        so a future per-workspace tier pin has somewhere to live.
+        Used when a chat is created on a provider that is not the workspace's
+        default provider, so the per-provider default still applies.
         """
-        return "sonnet"
+        from ciao import provider_registry
 
-    def haiku_model_for_workspace(self, workspace: str | None) -> str:
-        """The haiku-tier model for a workspace's routines. See above."""
-        return "haiku"
+        descriptor = provider_registry.get(provider)
+        if descriptor is None:
+            return ""
+        if descriptor.default_model_settings_attr:
+            settings = getattr(self, descriptor.default_model_settings_attr, None)
+            default = getattr(settings, "default_model", "") if settings else ""
+            if default:
+                return default
+        return ""
 
     def default_provider_for_workspace(self, workspace: str | None) -> str:
         from ciao import provider_registry

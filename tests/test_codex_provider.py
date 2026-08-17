@@ -665,7 +665,7 @@ async def test_codex_resume_fallback_replays_stable_context(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_codex_tier_resolution_honors_config_pins(
+async def test_codex_passes_through_requested_model(
     tmp_path: Path, monkeypatch,
 ) -> None:
     catalog = [
@@ -680,11 +680,11 @@ async def test_codex_tier_resolution_honors_config_pins(
     provider = CodexProvider(
         tmp_path,
         command=command,
-        config=SimpleNamespace(codex=CodexSettings(sonnet_model="gpt-5.6-sol")),
+        config=SimpleNamespace(codex=CodexSettings(default_model="gpt-5.6-sol")),
     )
     request = AgentRequest(
         prompt="Hi",
-        model="sonnet",
+        model="gpt-5.6-luna",
         mode="normal",
         provider="codex",
         extra_env={"FAKE_CODEX_LOG": str(log)},
@@ -694,40 +694,9 @@ async def test_codex_tier_resolution_honors_config_pins(
 
     records = _read_log(log)
     start = next(row for row in records if row["kind"] == "thread/start")
-    assert start["payload"]["model"] == "gpt-5.6-sol"
-    await provider.disconnect()
-
-
-@pytest.mark.asyncio
-async def test_codex_tier_resolution_drops_stale_pin(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    catalog = [
-        {"model": "gpt-5.6-terra", "isDefault": True},
-        {"model": "gpt-5.6-luna"},
-    ]
-    monkeypatch.setattr(
-        CodexProvider, "model_catalog", AsyncMock(return_value=catalog)
-    )
-    command, log = _fake_command(tmp_path)
-    provider = CodexProvider(
-        tmp_path,
-        command=command,
-        config=SimpleNamespace(codex=CodexSettings(sonnet_model="gpt-4-retired")),
-    )
-    request = AgentRequest(
-        prompt="Hi",
-        model="sonnet",
-        mode="normal",
-        provider="codex",
-        extra_env={"FAKE_CODEX_LOG": str(log)},
-    )
-
-    await provider._ensure_thread(request)
-
-    records = _read_log(log)
-    start = next(row for row in records if row["kind"] == "thread/start")
-    assert start["payload"]["model"] == "gpt-5.6-terra"
+    # The requested model is sent as-is; the operator default is not applied
+    # at the provider boundary (it is resolved at chat creation).
+    assert start["payload"]["model"] == "gpt-5.6-luna"
     await provider.disconnect()
 
 

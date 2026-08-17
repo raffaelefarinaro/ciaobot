@@ -76,13 +76,13 @@ def test_every_provider_is_installable_and_inspectable(descriptor):
 
 
 @pytest.mark.parametrize("descriptor", provider_registry.descriptors(), ids=lambda d: d.id)
-def test_tier_settings_attr_exists_on_the_real_config(descriptor):
-    """A declared tier-pin attribute must actually be on CiaoConfig."""
-    if not descriptor.tier_settings_attr:
+def test_default_model_settings_attr_exists_on_the_real_config(descriptor):
+    """A declared default-model attribute must actually be on CiaoConfig."""
+    if not descriptor.default_model_settings_attr:
         return
     from dataclasses import fields
 
     from ciao.config import CiaoConfig
 
     names = {field.name for field in fields(CiaoConfig)}
-    assert descriptor.tier_settings_attr in names
+    assert descriptor.default_model_settings_attr in names

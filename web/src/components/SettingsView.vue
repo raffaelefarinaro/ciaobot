@@ -559,19 +559,14 @@
                     {{ provider.label }}
                   </option>
                   <option v-if="codexTitlesAvailable" value="codex">OpenAI (via Codex)</option>
-                  <option v-if="routineProviderValue('title_model') === 'custom'" value="custom">Custom model</option>
                 </select>
-                <select
-                  v-if="routineProviderValue('title_model') !== 'apple'"
-                  class="routine-select routine-select--tier"
-                  :value="routineTierValue('title_model')"
-                  :disabled="routinesSaving || !routineTierSelectable('title_model')"
-                  @change="saveRoutineTier('title_model', ($event.target as HTMLSelectElement).value)"
-                >
-                  <option v-for="tier in modelTiers" :key="`title-${tier.key}`" :value="tier.key">
-                    {{ tier.label }}
-                  </option>
-                </select>
+                <ModelSelector
+                  v-if="routineProviderValue('title_model') !== 'apple' && routineProviderValue('title_model') !== 'automatic'"
+                  :model-value="routineModelValue('title_model')"
+                  :sections="routineModelSectionsFor('title_model')"
+                  :disabled="routinesSaving"
+                  @update:model-value="saveRoutineModel('title_model', $event)"
+                />
                 <span class="routine-model-hint">
                   <template v-if="routineProviderValue('title_model') === 'apple'">
                     Runs on-device for free using Apple Intelligence. Nothing to install.
@@ -650,19 +645,14 @@
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
-                  <option v-if="routineProviderValue('insights_model') === 'custom'" value="custom">Custom model</option>
                 </select>
-                <select
-                  v-if="routineProviderValue('insights_model') !== 'apple'"
-                  class="routine-select routine-select--tier"
-                  :value="routineTierValue('insights_model')"
-                  :disabled="routinesSaving || !routineTierSelectable('insights_model')"
-                  @change="saveRoutineTier('insights_model', ($event.target as HTMLSelectElement).value)"
-                >
-                  <option v-for="tier in modelTiers" :key="`insights-${tier.key}`" :value="tier.key">
-                    {{ tier.label }}
-                  </option>
-                </select>
+                <ModelSelector
+                  v-if="routineProviderValue('insights_model') !== 'apple' && routineProviderValue('insights_model') !== 'automatic'"
+                  :model-value="routineModelValue('insights_model')"
+                  :sections="routineModelSectionsFor('insights_model')"
+                  :disabled="routinesSaving"
+                  @update:model-value="saveRoutineModel('insights_model', $event)"
+                />
                 <span class="routine-model-hint">
                   <template v-if="routineProviderValue('insights_model') === 'apple'">
                     Runs on-device for free using Apple Intelligence. Nothing to install.
@@ -944,58 +934,60 @@
           </div>
 
 
-          <!-- Provider-neutral model routing -->
-          <div v-if="tierProviderSections.length" class="card">
+          <!-- Per-provider default model and thinking for new chats. Moved
+               here from the removed model-routing card; these are the
+               per-provider knobs that used to be four tier pins each. -->
+          <div v-if="aliasProviderSections.length" class="card">
             <div class="settings-card-header">
-              <p class="section-title">model routing</p>
+              <p class="section-title">defaults per provider</p>
               <p class="hint">
-                Ciaobot maps Haiku, Sonnet, Opus, and Fable to each provider's own models.
+                Choose the default model and thinking level new chats start on
+                for each provider. "Automatic" uses that provider's own default.
               </p>
             </div>
-            <div class="alias-provider-bar">
-              <label class="settings-field alias-provider-field">
-                <span class="ws-label">Provider</span>
-                <select
-                  class="routine-select alias-provider-select"
-                  :value="selectedTierProviderSection?.key || ''"
-                  :disabled="routinesSaving"
-                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as RoutingProviderKey"
-                >
-                  <option v-for="section in tierProviderSections" :key="section.key" :value="section.key">
-                    {{ section.label }}<template v-if="!section.available"> (not configured)</template>
-                  </option>
-                </select>
-              </label>
-            </div>
-            <div v-if="selectedTierProviderSection" class="tier-provider-section">
-              <div class="settings-field-grid">
-                <label v-for="tier in modelTiers" :key="`${selectedTierProviderSection.key}-${tier.key}`" class="settings-field">
-                  <span class="ws-label">{{ tier.label }}</span>
+            <div class="settings-field-grid">
+              <div
+                v-for="section in aliasProviderSections"
+                :key="section.key"
+                class="settings-field routine-row"
+              >
+                <span class="ws-label">{{ section.label }}</span>
+                <label class="settings-field">
+                  <span class="ws-label">Default model</span>
                   <ModelSelector
-                    v-if="selectedTierProviderSection.configurable"
-                    :model-value="tierSelectorValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
-                    :sections="tierModelSectionsFor(selectedTierProviderSection.key as TierProviderKey, tier.key)"
-                    :disabled="routinesSaving || !selectedTierProviderSection.available"
-                    @update:model-value="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, $event)"
+                    :model-value="providerDefaultModelSelectorValue(section.key)"
+                    :sections="providerDefaultModelSectionsFor(section.key)"
+                    :disabled="routinesSaving || !section.available"
+                    @update:model-value="saveProviderDefaultModel(section.key, $event)"
                   />
-                  <input
-                    v-else
-                    class="routine-input routing-model-input"
-                    :value="tierModelForProvider(selectedTierProviderSection.key, tier.key)"
-                    :aria-label="`${tier.label} ${selectedTierProviderSection.label} routing model`"
-                    disabled
-                  />
+                </label>
+                <label class="settings-field">
+                  <span class="ws-label">Default thinking</span>
+                  <select
+                    class="routine-select"
+                    :value="providerDefaultThinkingValue(section.key)"
+                    :disabled="routinesSaving || !section.available"
+                    @change="saveProviderDefaultThinking(section.key, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <option
+                      v-for="option in providerThinkingOptions(section.key)"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
                 </label>
                 <label class="settings-field">
                   <span class="ws-label">Default mode</span>
                   <select
                     class="routine-select"
-                    :value="providerModeSelectorValue(selectedTierProviderSection.key)"
+                    :value="providerModeSelectorValue(section.key)"
                     :disabled="routinesSaving"
-                    @change="saveProviderMode(selectedTierProviderSection.key, ($event.target as HTMLSelectElement).value)"
+                    @change="saveProviderMode(section.key, ($event.target as HTMLSelectElement).value)"
                   >
                     <option
-                      v-for="option in providerModeOptions(selectedTierProviderSection.key)"
+                      v-for="option in providerModeOptions(section.key)"
                       :key="option.value"
                       :value="option.value"
                     >
@@ -1004,9 +996,6 @@
                   </select>
                 </label>
               </div>
-              <p v-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
-                {{ tierProviderUnavailableHint }}
-              </p>
             </div>
           </div>
         </template>
@@ -1022,7 +1011,7 @@
           :notify-saved="notifySaved"
           :notify-failed="notifyFailed"
           :routines="routines"
-          :alias-tiers="workspaceModels?.alias_tiers"
+          :provider-models="workspaceModels?.provider_models"
           :provider-labels="aliasProviderLabels"
         />
       </template>
@@ -1743,7 +1732,10 @@
             </div>
           </template>
         </div>
+      </template>
 
+      <!-- SUBAGENTS TAB -->
+      <template v-if="currentTab === 'subagents'">
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
@@ -1878,6 +1870,7 @@
             </div>
             <div v-if="addCommandResult" class="action-result" :class="{ '--error': addCommandError }">{{ addCommandResult }}</div>
           </div>
+
           <div v-if="assetLifecycleResult" class="action-result" :class="{ '--error': assetLifecycleError }">{{ assetLifecycleResult }}</div>
 
           <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
@@ -1956,8 +1949,10 @@
             </div>
           </template>
         </div>
+      </template>
 
-        <!-- MCP SERVERS CARD -->
+      <!-- MCP TAB -->
+      <template v-if="currentTab === 'mcp'">
         <div class="card" id="mcp-servers">
           <div class="settings-card-header settings-card-header--split">
             <div>
@@ -2274,7 +2269,7 @@ import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
-import { providerModelBadges, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 
 // The tray owns package updates and native notifications in the desktop app.
@@ -2294,7 +2289,6 @@ const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
-  if (tab === 'mcp') return 'skills'
   return tab
 })
 
@@ -2762,16 +2756,11 @@ type InsightsComparison = {
 }
 const insightsComparison = ref<InsightsComparison | null>(null)
 
-// Every provider with models or tier pins is a runtime provider now.
+// Every provider with models is a runtime provider now.
 type AliasProviderKey = RuntimeProvider
-// The Providers tab routing card shows every runtime provider; Claude is
-// included so its default-mode selector lives next to the others, even
-// though its tiers are the aliases themselves and cannot be re-pinned.
-type TierProviderKey = AliasProviderKey
-type RoutingProviderKey = AliasProviderKey
-type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
 type RoutineModelKey = 'title_model' | 'insights_model'
-type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
+// The routine pickers offer Automatic, Apple, and each available provider.
+type RoutineProviderValue = 'automatic' | 'apple' | AliasProviderKey
 
 type AliasProviderSection = {
   key: AliasProviderKey
@@ -2779,25 +2768,13 @@ type AliasProviderSection = {
   options: string[]
   configurable: boolean
   // Whether the provider is signed in and reporting models. Routine selectors
-  // filter to available sections; the Providers tab tier card shows unavailable
-  // sections disabled with setup guidance.
+  // filter to available sections.
   available: boolean
 }
-const modelTiers: { key: TierKey; label: string }[] = [
-  { key: 'haiku', label: 'Haiku' },
-  { key: 'sonnet', label: 'Sonnet' },
-  { key: 'opus', label: 'Opus' },
-  { key: 'fable', label: 'Fable' },
-]
 
 const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
   title_model: 'title_model_effective',
   insights_model: 'insights_model_effective',
-}
-
-const routineDefaultTiers: Record<RoutineModelKey, TierKey> = {
-  title_model: 'haiku',
-  insights_model: 'sonnet',
 }
 
 async function fetchRoutines() {
@@ -2949,151 +2926,97 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   return sections
 })
 
-// Provider-neutral routing overview for the Providers tab. Models and their
-// automatic tier mapping come from each provider's own discovery in
-// `/api/models`. A provider that is not signed in stays visible with setup
-// guidance instead of vanishing.
-const tierProviderSections = computed<AliasProviderSection[]>(() => {
-  if (!routines.value) return []
-  const codexModels = parseModelList((
-    workspaceModels.value?.codex_models
-    || workspaceModels.value?.provider_models?.codex
-    || []
-  ).join(','))
-  const opencodeModels = parseModelList((
-    workspaceModels.value?.opencode_models
-    || workspaceModels.value?.provider_models?.opencode
-    || []
-  ).join(','))
-  return [
-    {
-      key: 'claude',
-      label: 'Anthropic (via Claude Code)',
-      // Claude's tiers are the aliases themselves; nothing to pin. The
-      // section exists so the default-mode selector covers every provider.
-      options: [],
-      configurable: false,
-      available: true,
-    },
-    {
-      key: 'codex',
-      label: 'OpenAI (via Codex)',
-      options: codexModels,
-      configurable: true,
-      available: codexModels.length > 0,
-    },
-    {
-      key: 'opencode',
-      label: 'opencode',
-      options: opencodeModels,
-      configurable: true,
-      available: opencodeModels.length > 0,
-    },
-  ]
-})
-
 // Provider key -> human label, for components that render model ids from the
-// routing table (Automations offers a one-off retry model).
+// default-model table (Automations offers a one-off retry model).
 const aliasProviderLabels = computed<Record<string, string>>(() => {
   const labels: Record<string, string> = { claude: 'Anthropic (via Claude Code)' }
   for (const section of aliasProviderSections.value) labels[section.key] = section.label
   return labels
 })
 
-const selectedTierProvider = ref<RoutingProviderKey>('codex')
-const selectedTierProviderSection = computed(() =>
-  tierProviderSections.value.find((section) => section.key === selectedTierProvider.value)
-  || tierProviderSections.value[0]
-  || null
-)
+// ── Per-provider default model / thinking (Models tab) ─────────────────
+const DEFAULT_MODEL_SELECTION = '__ciao_default_model__'
 
-// Hint shown when the selected tier provider isn't configured yet.
-const tierModelSections = computed<ModelSection[]>(() => {
-  const section = selectedTierProviderSection.value
-  if (!section || !section.options.length) return []
-  const aliasTiers = workspaceModels.value?.alias_tiers
-  return [
-    {
-      key: section.key,
-      label: section.label,
-      models: section.options,
-      modelBadges: providerModelBadges(section.key, section.options, aliasTiers),
-      disabled: !section.available,
-      hint: section.available ? undefined : tierProviderUnavailableHint.value,
-    },
-  ]
-})
-
-const tierProviderUnavailableHint = computed(() => {
-  const section = selectedTierProviderSection.value
-  if (!section || section.available) return ''
-  if (section.key === 'codex') {
-    return 'Sign in to Codex to discover the available OpenAI models and their tier routing.'
-  }
-  if (section.key === 'opencode') {
-    return 'Sign in to opencode (and connect at least one of its providers) to enable tier mapping.'
-  }
-  return 'Configure this provider to enable tier mapping.'
-})
-
-const DEFAULT_TIER_SELECTION = '__ciao_default__'
-
-function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
-  return routines.value?.provider_routing?.[provider]?.[tier] || ''
+function providerDefaultModelOverride(provider: AliasProviderKey): string {
+  return routines.value?.provider_default_models?.[provider] || ''
 }
 
-function tierEffectiveValue(provider: TierProviderKey, tier: TierKey): string {
-  // A runtime provider's effective tiers come from its account catalog,
-  // exposed by /api/models rather than the routines payload.
-  return workspaceModels.value?.alias_tiers?.[provider]?.[tier] || ''
-}
-
-function tierDefaultValue(provider: TierProviderKey, tier: TierKey): string {
-  if (provider === 'codex') {
-    return workspaceModels.value?.codex_tier_defaults?.[tier]
-      || tierEffectiveValue(provider, tier)
-  }
-  return tierEffectiveValue(provider, tier)
-}
-
-function tierDefaultLabel(provider: TierProviderKey, tier: TierKey): string {
-  const model = tierDefaultValue(provider, tier)
-  // Always "Automatic": every tier is derived from the provider's own catalog
-  // now, never from an env-backed default.
-  return model ? `Automatic (${model})` : 'Automatic'
-}
-
-function tierSelectorValue(provider: TierProviderKey, tier: TierKey): string {
-  return tierOverrideValue(provider, tier) || DEFAULT_TIER_SELECTION
-}
-
-function tierModelSectionsFor(provider: TierProviderKey, tier: TierKey): ModelSection[] {
+function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
+  const section = aliasProviderSections.value.find((s) => s.key === provider)
+  const options = section?.options || []
+  const effective = providerDefaultModelEffective(provider)
   return [
     {
       key: 'default',
       label: 'Default',
-      models: [DEFAULT_TIER_SELECTION],
-      modelLabels: { [DEFAULT_TIER_SELECTION]: tierDefaultLabel(provider, tier) },
+      models: [DEFAULT_MODEL_SELECTION],
+      modelLabels: {
+        [DEFAULT_MODEL_SELECTION]: effective ? `Automatic (${effective})` : 'Automatic',
+      },
     },
-    ...tierModelSections.value,
+    {
+      key: provider,
+      label: section?.label || provider,
+      models: options,
+      disabled: !section?.available,
+    },
   ]
 }
 
-async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: string | string[]) {
+function providerDefaultModelEffective(provider: AliasProviderKey): string {
+  const explicit = workspaceModels.value?.provider_defaults?.[provider]
+  if (explicit) return explicit
+  // Fall back to the provider's first discovered model so a routine pick can
+  // store a concrete id even before an operator default is configured.
+  const section = aliasProviderSections.value.find((s) => s.key === provider)
+  return section?.options?.[0] || ''
+}
+
+function providerDefaultModelSelectorValue(provider: AliasProviderKey): string {
+  return providerDefaultModelOverride(provider) || DEFAULT_MODEL_SELECTION
+}
+
+async function saveProviderDefaultModel(provider: AliasProviderKey, value: string | string[]) {
   const selected = Array.isArray(value) ? value[0] || '' : value
-  const model = selected === DEFAULT_TIER_SELECTION ? '' : selected
-  const routing = JSON.parse(
-    JSON.stringify(routines.value?.provider_routing || {}),
-  ) as Record<string, Record<string, string>>
-  const routes = { ...(routing[provider] || {}) }
-  if (model.trim()) routes[tier] = model.trim()
-  else delete routes[tier]
-  if (Object.keys(routes).length) routing[provider] = routes
-  else delete routing[provider]
-  await saveRoutines({ provider_routing: routing })
-  // Effective tiers live in /api/models; refresh so the badges and
-  // "Automatic (…)" labels reflect the new pin immediately.
+  const model = selected === DEFAULT_MODEL_SELECTION ? '' : selected
+  const defaults = JSON.parse(
+    JSON.stringify(routines.value?.provider_default_models || {}),
+  ) as Record<string, string>
+  if (model.trim()) defaults[provider] = model.trim()
+  else delete defaults[provider]
+  await saveRoutines({ provider_default_models: defaults })
   await fetchWorkspaceModels()
+}
+
+const DEFAULT_THINKING_SELECTION = '__ciao_thinking_default__'
+
+function providerDefaultThinkingOverride(provider: AliasProviderKey): string {
+  return routines.value?.provider_default_thinking?.[provider] || ''
+}
+
+function providerDefaultThinkingValue(provider: AliasProviderKey): string {
+  return providerDefaultThinkingOverride(provider) || DEFAULT_THINKING_SELECTION
+}
+
+function providerThinkingOptions(provider: AliasProviderKey): { value: string; label: string }[] {
+  const levels = workspaceModels.value?.thinking_levels?.[provider] || []
+  return [
+    {
+      value: DEFAULT_THINKING_SELECTION,
+      label: 'Automatic (provider default)',
+    },
+    ...levels.map((level) => ({ value: level, label: level })),
+  ]
+}
+
+async function saveProviderDefaultThinking(provider: AliasProviderKey, value: string) {
+  const selected = value === DEFAULT_THINKING_SELECTION ? '' : value
+  const defaults = JSON.parse(
+    JSON.stringify(routines.value?.provider_default_thinking || {}),
+  ) as Record<string, string>
+  if (selected) defaults[provider] = selected
+  else delete defaults[provider]
+  await saveRoutines({ provider_default_thinking: defaults })
 }
 
 // Per-provider default execution mode for new chats. The stored override
@@ -3147,13 +3070,6 @@ async function saveProviderMode(provider: AliasProviderKey, value: string) {
   await saveRoutines({ provider_default_modes: modes })
 }
 
-function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
-  // Claude's tiers *are* the aliases; the others pin concrete models.
-  if (provider === 'claude') return tier
-  if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || 'Not available'
-  return tierEffectiveValue(provider, tier) || ''
-}
-
 function serializeRoutineModel(provider: RoutineProviderValue, model: string): string {
   // Runtime-provider models need an explicit qualifier so the backend does not
   // send a global routine override through Claude by default.
@@ -3175,47 +3091,23 @@ function routineEffectiveModel(key: RoutineModelKey): string {
   return typeof value === 'string' ? value : ''
 }
 
-function inferRoutineModel(model: string): { provider: RoutineProviderValue; tier: TierKey } {
+function inferRoutineModel(model: string): { provider: RoutineProviderValue; model: string } {
   const raw = model.trim()
-  if (!raw) return { provider: 'automatic', tier: 'sonnet' }
+  if (!raw) return { provider: 'automatic', model: '' }
   // 'apfel' is the legacy id from when this shelled out to the apfel CLI.
-  if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
+  if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', model: '' }
   for (const provider of ['codex', 'opencode'] as const) {
     const prefix = `${provider}:`
     if (raw.startsWith(prefix)) {
-      const providerModel = raw.slice(prefix.length)
-      const providerTiers = workspaceModels.value?.alias_tiers?.[provider] || {}
-      for (const tier of modelTiers) {
-        if (providerTiers[tier.key] === providerModel) {
-          return { provider, tier: tier.key }
-        }
-      }
-      return { provider, tier: 'sonnet' }
+      return { provider, model: raw.slice(prefix.length) }
     }
   }
-  if (raw.startsWith('custom:')) {
-    const provider = `custom:${raw.split(':', 2)[1]}` as AliasProviderKey
-    const tiers = routines.value?.alias_tiers?.[provider] || {}
-    for (const tier of modelTiers) {
-      if (tiers[tier.key] === raw) return { provider, tier: tier.key }
-    }
-    return { provider, tier: 'sonnet' }
+  // A bare Claude tier alias is a real model id on Claude.
+  if (['haiku', 'sonnet', 'opus', 'fable'].includes(raw)) {
+    return { provider: 'claude', model: raw }
   }
-  const claudeTiers: Record<string, TierKey> = { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'fable' }
-  if (claudeTiers[raw]) {
-    return { provider: 'claude', tier: claudeTiers[raw] }
-  }
-
-  const providers: TierProviderKey[] = ['codex', 'opencode']
-  for (const provider of providers) {
-    for (const tier of modelTiers) {
-      if (tierEffectiveValue(provider, tier.key) === raw) {
-        return { provider, tier: tier.key }
-      }
-    }
-  }
-
-  return { provider: 'custom', tier: 'sonnet' }
+  // A concrete model id on the default provider (Claude).
+  return { provider: 'claude', model: raw }
 }
 
 function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
@@ -3225,27 +3117,29 @@ function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
 // Titles can be dispatched through runtime providers when they have discovered
 // models (i.e. the provider is connected).
 const codexTitlesAvailable = computed(() => {
-  const tiers = workspaceModels.value?.alias_tiers?.codex
-  return !!tiers && Object.values(tiers).some(Boolean)
+  const models = workspaceModels.value?.codex_models || []
+  return models.length > 0
 })
 
-function routineTierValue(key: RoutineModelKey): TierKey {
+function routineModelValue(key: RoutineModelKey): string {
   const raw = routines.value?.[key] || ''
-  if (raw.trim()) return inferRoutineModel(raw).tier
-  const effective = inferRoutineModel(routineEffectiveModel(key))
-  if (effective.provider !== 'automatic' && effective.provider !== 'custom') {
-    return effective.tier
-  }
-  return routineDefaultTiers[key]
+  if (raw.trim()) return inferRoutineModel(raw).model
+  return routineEffectiveModel(key)
 }
 
-function routineTierSelectable(key: RoutineModelKey): boolean {
+// The concrete-model sections for a routine once its provider is chosen.
+function routineModelSectionsFor(key: RoutineModelKey): ModelSection[] {
   const provider = routineProviderValue(key)
-  return provider === 'claude' || provider === 'codex' || provider === 'opencode'
-}
-
-function routineCustomModel(key: RoutineModelKey): string {
-  return routineProviderValue(key) === 'custom' ? (routines.value?.[key] || '') : ''
+  if (provider === 'automatic' || provider === 'apple') return []
+  const section = aliasProviderSections.value.find((s) => s.key === provider)
+  return [
+    {
+      key: provider,
+      label: section?.label || provider,
+      models: section?.options || [],
+      disabled: !section?.available,
+    },
+  ]
 }
 
 async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) {
@@ -3258,20 +3152,18 @@ async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) 
     await saveRoutines({ [key]: 'apple' })
     return
   }
-  if (provider === 'custom') return
-  const tier = routineTierValue(key)
-  const model = tierModelForProvider(provider, tier)
+  // Pick the provider's effective default model as the starting point.
+  const model = providerDefaultModelEffective(provider) || routineEffectiveModel(key)
   await saveRoutines({ [key]: serializeRoutineModel(provider, model) })
 }
 
-async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
-  const tier = tierValue as TierKey
-  let provider = routineProviderValue(key)
-  if (provider === 'automatic' || provider === 'apple' || provider === 'custom') {
-    provider = 'claude'
+async function saveRoutineModel(key: RoutineModelKey, value: string | string[]) {
+  const selected = Array.isArray(value) ? value[0] || '' : value
+  if (!selected) {
+    await saveRoutines({ [key]: '' })
+    return
   }
-  const model = tierModelForProvider(provider, tier)
-  await saveRoutines({ [key]: serializeRoutineModel(provider, model) })
+  await saveRoutines({ [key]: selected })
 }
 
 // Automatic does not pick one model: resolve_title_model / resolve_insights_model
@@ -3302,11 +3194,10 @@ function routineModelSummary(key: RoutineModelKey): string {
     return `Automatic: ${routineEffectiveModel(key) || 'default'}`
   }
   if (provider === 'apple') return 'Local (free) · beta'
-  if (provider === 'custom') return `Custom: ${routineCustomModel(key)}`
-  const tier = routineTierValue(key)
-  const model = tierModelForProvider(provider, tier)
-  if (provider === 'codex') return `OpenAI (via Codex) ${tier}: ${model || 'default'}`
-  return `${aliasProviderLabel(provider)} ${tier}: ${model || 'default'}`
+  const model = routineModelValue(key)
+  if (provider === 'codex') return `OpenAI (via Codex): ${model || 'default'}`
+  if (provider === 'opencode') return `opencode: ${model || 'default'}`
+  return `${aliasProviderLabel(provider)}: ${model || 'default'}`
 }
 
 // ── Provider API Key settings (Providers tab) ─────────────────────────────────
@@ -4409,44 +4300,25 @@ function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentM
     if (currentModelValue && !models.includes(currentModelValue)) models.push(currentModelValue)
     return [{ ...section, models }]
   }
-  if (provider === 'codex') {
-    const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === 'codex')
+  if (provider === 'codex' || provider === 'opencode') {
+    const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === provider)
     if (!section) return []
     const models = [...section.models]
-    const badges = { ...(section.modelBadges || {}) }
     const current = currentModelValue.trim()
-    if (current && !modelTiers.some((tier) => tier.key === current) && !models.includes(current)) models.push(current)
-    return [{ ...section, models, modelBadges: badges }]
+    if (current && !models.includes(current)) models.push(current)
+    return [{ ...section, models }]
   }
-  const tiers: TierKey[] = ['haiku', 'sonnet', 'opus', 'fable']
-  const modelBadges: Record<string, string[]> = {}
-  
-  for (const tier of tiers) {
-    const actualModel = tierModelForProvider(provider as AliasProviderKey, tier)
-    if (actualModel && actualModel !== tier) {
-      modelBadges[tier] = [actualModel]
-    }
-  }
-
-  const sections: ModelSection[] = [
-    {
-      key: provider,
-      label: `${aliasProviderLabel(provider as AliasProviderKey)} Tiers`,
-      models: tiers,
-      modelBadges,
-    }
-  ]
-
-  const v = (currentModelValue || '').trim()
-  if (v && !tiers.includes(v as TierKey)) {
-    sections.push({
-      key: 'custom',
-      label: 'Custom override',
-      models: [v],
-    })
-  }
-
-  return sections
+  // Claude's models are the tier aliases plus any configured concrete ids.
+  const section = sectionsFromModelsResponse(workspaceModels.value)
+    .find((item) => item.key === 'anthropic')
+  const models = section ? [...section.models] : []
+  const current = (currentModelValue || '').trim()
+  if (current && !models.includes(current)) models.push(current)
+  return [{
+    key: provider,
+    label: aliasProviderLabel(provider as AliasProviderKey),
+    models,
+  }]
 }
 
 const newWorkspaceModelSections = computed<ModelSection[]>(() => {

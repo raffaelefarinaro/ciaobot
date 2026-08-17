@@ -36,8 +36,7 @@ from ciao.providers.opencode import (
     missing_required_paths,
     mode_settings,
     opencode_collab_tree_counts,
-    opencode_tier_models,
-    opencode_tier_overrides,
+    opencode_default_model,
     _session_handover_text,
     split_model,
     unresolved_placeholders,
@@ -303,7 +302,7 @@ async def test_resume_keeps_session_when_permission_matches(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_session_resolves_bare_tier_before_creation(tmp_path):
+async def test_session_passes_through_unqualified_model(tmp_path):
     provider = _provider(tmp_path)
 
     class _CatalogClient(_SessionClient):
@@ -331,13 +330,15 @@ async def test_session_resolves_bare_tier_before_creation(tmp_path):
     )
 
     assert await provider._ensure_session(request) == "session-new"
-    assert client.get_calls == ["/provider"]
+    # An unqualified model id is sent as-is under an empty provider, letting
+    # opencode apply its own default.
+    assert client.get_calls == []
     assert client.post_calls == [(
         "/session",
         {
             "agent": "build",
             "permission": mode_settings("normal")[1],
-            "model": {"id": "claude-sonnet-4-6", "providerID": "anthropic"},
+            "model": {"id": "sonnet", "providerID": ""},
         },
     )]
 
@@ -540,18 +541,18 @@ def test_catalog_tolerates_junk():
     assert _catalog_from_providers({"all": "nope"}) == []
 
 
-# ── tier pins ───────────────────────────────────────────────────────────
+# ── default model ───────────────────────────────────────────────────────
 
 
-def test_tier_overrides_skips_unpinned_tiers():
+def test_default_model_override():
     class Config:
-        opencode = OpencodeSettings(sonnet_model="anthropic/claude-sonnet-4-6")
+        opencode = OpencodeSettings(default_model="anthropic/claude-sonnet-4-6")
 
-    assert opencode_tier_overrides(Config()) == {"sonnet": "anthropic/claude-sonnet-4-6"}
+    assert opencode_default_model(Config()) == "anthropic/claude-sonnet-4-6"
 
 
-def test_tier_overrides_on_a_config_without_opencode():
-    assert opencode_tier_overrides(object()) == {}
+def test_default_model_on_a_config_without_opencode():
+    assert opencode_default_model(object()) == ""
 
 
 # ── collaboration tree counts ────────────────────────────────────────────
@@ -2114,53 +2115,10 @@ def test_an_unchanged_provider_set_stays_quiet(caplog):
     assert caplog.text == ""
 
 
-# ── tier aliases ────────────────────────────────────────────────────────
-# opencode addresses models as providerID/modelID, so a bare tier alias is not
-# an id it can serve. Schedules, routines and the critique panel all speak tier
-# aliases, so they have to be resolved before dispatch.
-
-
-def _catalog(*models: str) -> list[dict[str, object]]:
-    return [{"model": m, "label": m, "variants": []} for m in models]
-
-
-def test_tier_models_match_the_tier_name_inside_a_vendor_model_id():
-    resolved = opencode_tier_models(
-        _catalog(
-            "anthropic/claude-sonnet-4-6",
-            "anthropic/claude-haiku-4-5",
-            "openai/gpt-5.6-terra",
-        )
-    )
-    assert resolved["sonnet"] == "anthropic/claude-sonnet-4-6"
-    assert resolved["haiku"] == "anthropic/claude-haiku-4-5"
-
-
-def test_an_operator_pin_wins_over_the_name_match():
-    resolved = opencode_tier_models(
-        _catalog("anthropic/claude-sonnet-4-6", "openai/gpt-5.6-terra"),
-        {"sonnet": "openai/gpt-5.6-terra"},
-    )
-    assert resolved["sonnet"] == "openai/gpt-5.6-terra"
-
-
-def test_a_pin_for_a_disconnected_provider_does_not_outvote_the_catalog():
-    """A pin left behind by a provider the user signed out of is not runnable."""
-    resolved = opencode_tier_models(
-        _catalog("anthropic/claude-sonnet-4-6"),
-        {"sonnet": "ollama/gone"},
-    )
-    assert resolved["sonnet"] == "anthropic/claude-sonnet-4-6"
-
-
-def test_a_tier_with_no_equivalent_is_absent_rather_than_guessed():
-    """A Llama/Qwen catalog has no "opus"; guessing would silently swap models.
-
-    The caller omits the model entirely and lets opencode apply its own
-    default, which is what keeps a bring-your-own-provider install working.
-    """
-    resolved = opencode_tier_models(_catalog("ollama/llama3.1", "ollama/qwen3"))
-    assert resolved == {}
+# ── model resolution ────────────────────────────────────────────────────
+# opencode addresses models as providerID/modelID. A qualified id passes
+# through; an unqualified one is sent as-is under an empty provider, letting
+# opencode apply its own default.
 
 
 @pytest.mark.asyncio
@@ -2169,38 +2127,20 @@ def test_a_tier_with_no_equivalent_is_absent_rather_than_guessed():
     [
         # Already qualified: passes straight through.
         ("anthropic/claude-sonnet-4-6", ("anthropic", "claude-sonnet-4-6")),
-        # A tier alias resolves against the catalog...
-        ("sonnet", ("anthropic", "claude-sonnet-4-6")),
-        ("  Sonnet  ", ("anthropic", "claude-sonnet-4-6")),
-        # ...and an unmatchable one yields "let opencode decide", never a
-        # bogus {"providerID": "", "modelID": "fable"}.
-        ("fable", ("", "")),
+        # An unqualified id is sent as-is under an empty provider.
+        ("sonnet", ("", "sonnet")),
+        ("  Sonnet  ", ("", "Sonnet")),
+        ("fable", ("", "fable")),
         ("", ("", "")),
     ],
 )
-async def test_resolve_model_never_sends_an_unqualified_id(
+async def test_resolve_model_passes_through_unqualified_ids(
     tmp_path, requested, expected
 ):
-    class _Response:
-        @staticmethod
-        def raise_for_status() -> None:
-            return None
-
-        @staticmethod
-        def json() -> dict:
-            return {
-                "connected": ["anthropic"],
-                "all": [{
-                    "id": "anthropic",
-                    "models": {"claude-sonnet-4-6": {"id": "claude-sonnet-4-6"}},
-                }],
-            }
-
     class _Client:
         @staticmethod
-        async def get(path: str) -> _Response:
-            assert path == "/provider"
-            return _Response()
+        async def get(path: str) -> None:
+            raise AssertionError(f"catalog should not be consulted for {path}")
 
     provider = _provider(tmp_path)
     assert await provider._resolve_model(_Client(), requested) == expected
