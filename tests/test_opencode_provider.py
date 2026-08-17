@@ -1232,6 +1232,48 @@ async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_mcp_token_is_not_exported_to_the_opencode_process(tmp_path, monkeypatch):
+    """The MCP token is a header, never a shell-visible child credential."""
+    provider = _provider(tmp_path)
+    spawn_kwargs: dict = {}
+
+    class FakeProcess:
+        returncode = None
+        stderr = None
+
+        def terminate(self):
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*_args, **kwargs):
+        spawn_kwargs.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
+    )
+    monkeypatch.setattr("ciao.providers.opencode._free_port", lambda: 43123)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    async def noop(*_args):
+        return None
+
+    monkeypatch.setattr(provider, "_await_health", noop)
+    monkeypatch.setattr(provider, "_verify_contract", noop)
+    monkeypatch.setattr(provider, "_register_control_plane", noop)
+
+    class Request:
+        extra_env: dict = {"CIAO_MCP_SESSION_TOKEN": "stale-from-request-env"}
+        mcp_token = "chat-scoped-secret"
+
+    await provider._ensure_server(Request())  # type: ignore[arg-type]
+
+    assert "CIAO_MCP_SESSION_TOKEN" not in spawn_kwargs["env"]
+    await provider.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_disconnect_is_safe_before_any_server_started(tmp_path):
     await _provider(tmp_path).disconnect()
 

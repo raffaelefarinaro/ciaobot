@@ -621,8 +621,12 @@ class OpencodeProvider(BaseSDKProvider):
             **(request.extra_env or {}),
             "OPENCODE_SERVER_PASSWORD": self._password,
         }
-        if request.mcp_token:
-            env["CIAO_MCP_SESSION_TOKEN"] = request.mcp_token
+        # The control-plane token is registered as a literal Authorization
+        # header below. Never put it in the server environment: opencode passes
+        # that environment to model-launched shell commands, where `env` (or a
+        # malicious workspace script) could steal the token and call `/mcp`
+        # without going through provider permission prompts.
+        env.pop("CIAO_MCP_SESSION_TOKEN", None)
         self._mcp_token = request.mcp_token
 
         # Say it now, while the environment we are about to hand over is in
