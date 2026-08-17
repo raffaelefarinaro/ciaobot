@@ -10,6 +10,7 @@ from ciao.web.commands import (
     _parse_frontmatter,
     list_commands,
     list_picker_entries,
+    list_provider_command_entries,
     list_skill_entries,
 )
 
@@ -78,6 +79,48 @@ def test_project_wins_over_user_on_collision(tmp_path: Path, monkeypatch) -> Non
 def test_missing_dirs_return_empty(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "nonexistent-home"))
     assert list_commands(tmp_path / "no-project") == []
+
+
+def test_provider_command_entries_reads_native_command_dir(tmp_path: Path) -> None:
+    _write_cmd(
+        tmp_path / ".opencode" / "commands",
+        "opencode-only",
+        "---\ndescription: opencode native command\n---\n",
+    )
+    entries = list_provider_command_entries(tmp_path, "opencode")
+    assert [entry.name for entry in entries] == ["opencode-only"]
+    assert entries[0].source == "provider"
+
+
+def test_provider_command_entries_ignores_unknown_provider(tmp_path: Path) -> None:
+    assert list_provider_command_entries(tmp_path, "codex") == []
+
+
+def test_picker_merges_provider_commands_and_deduplicates(tmp_path: Path) -> None:
+    _write_cmd(
+        tmp_path / ".claude" / "commands",
+        "shared",
+        "---\ndescription: canonical\n---\n",
+    )
+    _write_cmd(
+        tmp_path / ".opencode" / "commands",
+        "shared",
+        "---\ndescription: opencode native\n---\n",
+    )
+    _write_cmd(
+        tmp_path / ".opencode" / "commands",
+        "opencode-only",
+        "---\ndescription: opencode only\n---\n",
+    )
+
+    commands, skills = list_picker_entries(tmp_path, "opencode")
+
+    assert [command.name for command in commands] == ["opencode-only", "shared"]
+    # Canonical command wins on name collision with the provider's native one.
+    shared = next(command for command in commands if command.name == "shared")
+    assert shared.description == "canonical"
+    assert shared.source == "project"
+    assert skills == []
 
 
 def test_list_skill_entries_filters_to_provider_install_target(tmp_path: Path) -> None:

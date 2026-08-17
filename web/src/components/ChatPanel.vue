@@ -1519,11 +1519,7 @@ const filteredCommands = computed<SlashCommand[]>(() => {
   if (!active) return []
   const needle = active.query.toLowerCase()
   return slashCommands.value.filter(command =>
-    // Project/user commands are expanded only when they make up the prompt.
-    // Skills are native provider entries, so they remain available alongside
-    // file, chat, and other inline references anywhere in the draft.
-    (active.start === 0 || command.source === 'skill')
-    && command.name.toLowerCase().startsWith(needle),
+    command.name.toLowerCase().startsWith(needle),
   )
 })
 

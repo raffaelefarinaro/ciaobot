@@ -88,6 +88,29 @@ def list_commands(workspace_root: Path) -> list[Command]:
     return sorted(merged.values(), key=lambda c: c.name)
 
 
+def _provider_command_dir(workspace_root: Path, provider: str) -> Path | None:
+    """Native command directory a provider's own CLI loads, if it has one.
+
+    Claude reads ``.claude/commands/`` (already the canonical Ciaobot source),
+    opencode reads ``.opencode/commands/``, and Codex has no documented project
+    command contract — Ciaobot expands canonical commands itself before dispatch.
+    """
+    target = provider.strip().lower()
+    if target == "opencode":
+        return workspace_root / ".opencode" / "commands"
+    if target == "claude":
+        return workspace_root / ".claude" / "commands"
+    return None
+
+
+def list_provider_command_entries(workspace_root: Path, provider: str) -> list[Command]:
+    """Commands the provider's own CLI loads from its native command dir."""
+    root = _provider_command_dir(workspace_root, provider)
+    if root is None:
+        return []
+    return list(_iter_command_files(root, "provider"))
+
+
 def list_skill_entries(workspace_root: Path, provider: str = "") -> list[Command]:
     """Return skills installed for a provider in the slash-picker shape.
 
@@ -157,9 +180,22 @@ def list_provider_skill_entries(provider: str, names: Iterable[str]) -> list[Com
 
 
 def list_picker_entries(workspace_root: Path, provider: str) -> tuple[list[Command], list[Command]]:
-    """Return commands plus deduplicated workspace/provider skill entries."""
+    """Return commands plus deduplicated workspace/provider skill entries.
+
+    Commands merge the canonical Ciaobot commands (``.claude/commands/``) with
+    the provider's own native command dir (e.g. ``.opencode/commands/``), so
+    each provider's own slash entries surface in the picker too.
+    """
     commands = list_commands(workspace_root)
     seen = {command.name.casefold() for command in commands}
+    for command in list_provider_command_entries(workspace_root, provider):
+        key = command.name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        commands.append(command)
+    commands.sort(key=lambda item: item.name.casefold())
+
     skills: list[Command] = []
     candidates = [
         *list_skill_entries(workspace_root, provider),
