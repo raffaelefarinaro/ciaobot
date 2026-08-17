@@ -548,7 +548,7 @@ export interface RoutineSettings {
   // (alias_tiers.<provider>).
   provider_routing?: Record<string, Record<string, string>>
   // Per-provider default execution mode for new chats (Settings → Providers).
-  // Missing entry = built-in default (opencode → bypass, others → auto).
+  // Missing entry = built-in default (opencode → normal, others → auto).
   provider_default_modes?: Record<string, string>
   // Resolved effective default mode per provider, after built-in defaults.
   provider_default_modes_effective?: Record<string, string>

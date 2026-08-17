@@ -255,9 +255,8 @@ def test_default_mode_for_provider_builtin_defaults(tmp_path):
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
     )
-    # opencode's "auto" only passes verifiably read-only commands, so the
-    # built-in default for new opencode chats is bypass.
-    assert config.default_mode_for_provider("opencode") == "bypass"
+    # New opencode chats require approval by default; bypass is explicit.
+    assert config.default_mode_for_provider("opencode") == "normal"
     assert config.default_mode_for_provider("codex") == "auto"
     assert config.default_mode_for_provider("claude") == "auto"
 

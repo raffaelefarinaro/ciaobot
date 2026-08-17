@@ -140,8 +140,8 @@ class AppSettings:
     provider_routing: dict[str, dict[str, str]] | None = None
 
     # Per-provider default execution mode for new chats. Missing entry =
-    # built-in default: ``bypass`` for opencode (its "auto" only passes
-    # verifiably read-only commands), otherwise the env-backed
+    # built-in default: ``normal`` for opencode (approval-enforcing),
+    # otherwise the env-backed
     # ``claude_mode``. Same nested-map rationale as ``provider_routing``.
     provider_default_modes: dict[str, str] | None = None
 
@@ -343,7 +343,7 @@ class AppSettingsStore:
         config.tts_local_voice = s.tts_local_voice or d["tts_local_voice"]
         config.critique_models = s.critique_models or d["critique_models"]
         # Per-provider default modes have no env-backed default; absence means
-        # "use the built-in default" (opencode -> bypass, else claude_mode).
+        # "use the built-in default" (opencode -> normal, else claude_mode).
         config.provider_default_modes = dict(s.provider_default_modes or {})
         routing = s.provider_routing or {}
         for descriptor in provider_registry.descriptors():

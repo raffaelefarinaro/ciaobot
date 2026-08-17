@@ -89,14 +89,13 @@ def test_new_chat_pin_resolves_only_bare_aliases(tmp_path: Path) -> None:
     assert chat.model == "gpt-5.6-sol"
 
 
-def test_new_opencode_chat_defaults_to_bypass(tmp_path: Path) -> None:
+def test_new_opencode_chat_defaults_to_approval_enforcing_mode(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path, _config(tmp_path))
     project = manager.create_project("Modes", workspace="work")
 
-    # opencode's built-in default mode is bypass (its auto raises approval
-    # cards for everything but verifiably read-only shell commands).
+    # New opencode chats require approval by default; bypass is explicit.
     chat = manager.create_chat(project.project_id, provider="opencode")
-    assert chat.mode == "bypass"
+    assert chat.mode == "normal"
 
     # Other providers keep the env-backed default (auto).
     chat = manager.create_chat(project.project_id, provider="claude")
