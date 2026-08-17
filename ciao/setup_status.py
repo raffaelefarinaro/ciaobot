@@ -8,11 +8,13 @@ with the command the user can run next.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import json
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -20,13 +22,34 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Mapping, Any
 
+from ciao import provider_registry
 from ciao.providers.codex import codex_login_status
 
 # Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
 # stay responsive without freezing status until process restart.
-_CLAUDE_DISCOVERY_TTL_SECONDS = 60.0
+_CLAUDE_DISCOVERY_TTL_SECONDS = 300.0
+logger = logging.getLogger(__name__)
+
 _claude_mcps_cache: tuple[float, str, tuple[str, ...]] | None = None
+_claude_mcps_refreshing = False
+_claude_mcps_lock = threading.Lock()
 _claude_skills_cache: tuple[float, tuple[str, ...]] | None = None
+
+
+def _resolve_root(raw: Any) -> Path:
+    """Resolve a root without assuming the process cwd still exists.
+
+    The desktop deploy relaunch can leave the engine with a cwd inside the
+    staging bundle the swap then renames, and there both ``Path.cwd()`` and
+    resolving a relative path raise ``FileNotFoundError``. Readiness must still
+    answer, so an unresolvable root is kept as written: its checks then report
+    not-ready instead of pointing at a directory we made up.
+    """
+    path = Path(raw).expanduser()
+    try:
+        return path.resolve()
+    except OSError:
+        return path
 
 
 def clear_claude_discovery_cache() -> None:
@@ -111,6 +134,9 @@ def _provider(
     protocol: str = "",
     skills: list[str] | None = None,
     mcps: list[str] | None = None,
+    install_url: str = "",
+    app_path: str = "",
+    cli_path: str = "",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -130,6 +156,12 @@ def _provider(
         row["skills"] = skills
     if mcps is not None:
         row["mcps"] = mcps
+    if install_url:
+        row["install_url"] = install_url
+    if app_path:
+        row["app_path"] = app_path
+    if cli_path:
+        row["cli_path"] = cli_path
     return row
 
 
@@ -144,15 +176,6 @@ def _cli_version(binary: str) -> str:
         return "installed"
     lines = (run.stdout or run.stderr).strip().splitlines()
     return lines[-1] if lines else "installed"
-
-
-def _ollama_daemon_ready(local_url: str) -> bool:
-    url = local_url.rstrip("/") + "/api/tags"
-    try:
-        with urllib.request.urlopen(url, timeout=0.4) as response:
-            return 200 <= getattr(response, "status", 200) < 300
-    except (OSError, urllib.error.URLError, TimeoutError):
-        return False
 
 
 def discover_claude_system_skills() -> list[str]:
@@ -171,7 +194,7 @@ def discover_claude_system_skills() -> list[str]:
 
 
 def _discover_claude_system_skills_uncached() -> list[str]:
-    binary = shutil.which("claude") or ""
+    binary = claude_cli_path()
     if binary:
         try:
             res = subprocess.run(
@@ -225,16 +248,26 @@ def discover_claude_mcps(
     ``claude mcp list`` reports health (Connected) even for connectors disabled
     in the per-project ``/mcp`` panel. Those disables live in
     ``~/.claude.json`` → ``projects.<path>.disabledMcpServers``.
+
+    Served stale-while-revalidate: ``claude mcp list`` measures ~12s on a real
+    install, and it is on the Settings -> Providers load path, so a plain TTL
+    made every visit after the window pay the full cost. An expired entry is
+    returned immediately and refreshed on a background thread, so only the first
+    call after startup ever waits.
     """
     global _claude_mcps_cache
     now = time.monotonic()
-    ws_key = str(Path(workspace_root).expanduser().resolve()) if workspace_root else ""
-    if (
-        _claude_mcps_cache is not None
-        and now - _claude_mcps_cache[0] < _CLAUDE_DISCOVERY_TTL_SECONDS
-        and _claude_mcps_cache[1] == ws_key
-    ):
-        return list(_claude_mcps_cache[2])
+    ws_key = str(_resolve_root(workspace_root)) if workspace_root else ""
+    cached = _claude_mcps_cache
+    fresh = (
+        cached is not None
+        and now - cached[0] < _CLAUDE_DISCOVERY_TTL_SECONDS
+        and cached[1] == ws_key
+    )
+    if cached is not None and cached[1] == ws_key:
+        if not fresh:
+            _refresh_claude_mcps_async(ws_key, config_path)
+        return list(cached[2])
 
     connected = _discover_claude_mcps_uncached(
         workspace_root=Path(ws_key) if ws_key else None,
@@ -242,6 +275,35 @@ def discover_claude_mcps(
     )
     _claude_mcps_cache = (now, ws_key, tuple(connected))
     return connected
+
+
+def _refresh_claude_mcps_async(ws_key: str, config_path: Path | None) -> None:
+    """Re-discover in the background, at most one refresh in flight.
+
+    Failures are swallowed on purpose: the stale list already went out to the
+    caller, and a discovery error must not surface as a broken Settings page.
+    """
+    global _claude_mcps_refreshing
+    with _claude_mcps_lock:
+        if _claude_mcps_refreshing:
+            return
+        _claude_mcps_refreshing = True
+
+    def run() -> None:
+        global _claude_mcps_cache, _claude_mcps_refreshing
+        try:
+            connected = _discover_claude_mcps_uncached(
+                workspace_root=Path(ws_key) if ws_key else None,
+                config_path=config_path,
+            )
+            _claude_mcps_cache = (time.monotonic(), ws_key, tuple(connected))
+        except Exception:  # noqa: BLE001 - a stale list is already serving
+            logger.debug("background Claude MCP discovery failed", exc_info=True)
+        finally:
+            with _claude_mcps_lock:
+                _claude_mcps_refreshing = False
+
+    threading.Thread(target=run, name="claude-mcp-refresh", daemon=True).start()
 
 
 def _short_claude_mcp_name(name: str) -> str:
@@ -328,7 +390,7 @@ def _discover_claude_mcps_uncached(
         workspace_root=workspace_root,
         config_path=config_path,
     )
-    binary = shutil.which("claude") or ""
+    binary = claude_cli_path()
     if not binary:
         return connected
     try:
@@ -358,6 +420,108 @@ def _discover_claude_mcps_uncached(
     return connected
 
 
+# Provider status probes share one keyword-only contract so ``setup_status``
+# can enumerate them from ``ciao.provider_registry`` instead of naming each
+# provider. Each probe takes whatever context it needs and ignores the rest.
+def claude_status_probe(
+    env: Mapping[str, str],
+    *,
+    credentials_path: Path,
+    config_path: Path,
+    workspace_root: Path | None = None,
+    **_unused: Any,
+) -> dict[str, Any]:
+    return _claude_status(
+        env, credentials_path, config_path, workspace_root=workspace_root
+    )
+
+
+def codex_status_probe(
+    env: Mapping[str, str],
+    **_unused: Any,
+) -> dict[str, Any]:
+    return codex_login_status(env)
+
+
+def opencode_status_probe(
+    env: Mapping[str, str],
+    **_unused: Any,
+) -> dict[str, Any]:
+    from ciao.providers.opencode import opencode_login_status
+
+    return opencode_login_status(env)
+
+
+# Where the wizard sends someone who has no Claude Code at all. Kept as a
+# constant so the PWA and the CLI point at the same page.
+CLAUDE_INSTALL_DOCS_URL = (
+    "https://code.claude.com/docs/en/quickstart#step-1-install-claude-code"
+)
+
+
+def claude_install_command() -> str:
+    """The documented one-line installer for this platform."""
+    if sys.platform == "win32":
+        return "irm https://claude.ai/install.ps1 | iex"
+    return "curl -fsSL https://claude.ai/install.sh | bash"
+
+
+def claude_app_path() -> str:
+    """Path to an installed Claude desktop app, or "".
+
+    The desktop app ships Claude Code too, but Ciaobot drives the ``claude``
+    CLI through the Agent SDK, so an app-only install still needs the CLI.
+    Detecting it lets setup say "you have the app, add the CLI" instead of the
+    blunter "not installed".
+    """
+    home = Path.home()
+    candidates: list[Path] = []
+    if sys.platform == "darwin":
+        candidates = [
+            Path("/Applications/Claude.app"),
+            home / "Applications" / "Claude.app",
+            Path("/Applications/Claude Code.app"),
+            home / "Applications" / "Claude Code.app",
+        ]
+    elif sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            candidates = [
+                Path(local) / "AnthropicClaude",
+                Path(local) / "Programs" / "Claude",
+            ]
+    else:
+        candidates = [Path("/opt/Claude"), Path("/usr/share/claude")]
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return str(candidate)
+        except OSError:
+            continue
+    return ""
+
+
+def claude_cli_path() -> str:
+    """Absolute path to the ``claude`` CLI Ciaobot would run, or "".
+
+    Prefers the binary bundled with the desktop build, then the user's own
+    install. ``resolve_tool`` (not ``shutil.which``) because the engine often
+    runs under launchd with a stripped PATH that omits ``~/.local/bin`` and
+    Homebrew, where the documented installers put ``claude``.
+    """
+    from ciao.providers.claude import get_bundled_claude_path
+    from ciao.tool_path import resolve_tool
+
+    bundled = get_bundled_claude_path()
+    if bundled:
+        return str(bundled)
+    try:
+        resolved = resolve_tool("claude")
+    except Exception:
+        resolved = None
+    return resolved or shutil.which("claude") or ""
+
+
 def _claude_status(
     env: Mapping[str, str],
     credentials_path: Path,
@@ -365,12 +529,32 @@ def _claude_status(
     *,
     workspace_root: Path | None = None,
 ) -> dict[str, Any]:
-    from ciao.providers.claude import get_bundled_claude_path
-
-    binary = get_bundled_claude_path() or shutil.which("claude") or ""
+    binary = claude_cli_path()
     version = _cli_version(binary) if binary else "not installed"
     claude_skills = discover_claude_system_skills()
     claude_mcps = discover_claude_mcps(workspace_root, config_path=config_path)
+    if not binary:
+        # No CLI means no chats, whatever credentials exist: report the install
+        # step rather than an auth command the user cannot run yet.
+        app_path = claude_app_path()
+        detail = (
+            f"The Claude desktop app is installed ({app_path}), but Ciaobot runs "
+            "chats through the claude CLI, which is not on PATH."
+            if app_path
+            else "Claude Code is not installed on this machine."
+        )
+        return _provider(
+            name="claude",
+            ok=False,
+            auth="not_installed",
+            command=claude_install_command(),
+            detail=detail,
+            version=version,
+            skills=claude_skills,
+            mcps=claude_mcps,
+            install_url=CLAUDE_INSTALL_DOCS_URL,
+            app_path=app_path,
+        )
     if env.get("ANTHROPIC_API_KEY", "").strip():
         return _provider(
             name="claude",
@@ -383,6 +567,7 @@ def _claude_status(
             protocol="Agent SDK ready",
             skills=claude_skills,
             mcps=claude_mcps,
+            cli_path=binary,
         )
     if credentials_path.is_file():
         return _provider(
@@ -396,6 +581,7 @@ def _claude_status(
             protocol="Agent SDK ready",
             skills=claude_skills,
             mcps=claude_mcps,
+            cli_path=binary,
         )
     account = _claude_oauth_account(config_path)
     if account:
@@ -410,6 +596,7 @@ def _claude_status(
             protocol="Agent SDK ready",
             skills=claude_skills,
             mcps=claude_mcps,
+            cli_path=binary,
         )
     return _provider(
         name="claude",
@@ -420,6 +607,7 @@ def _claude_status(
         version=version,
         skills=claude_skills,
         mcps=claude_mcps,
+        cli_path=binary,
     )
 
 
@@ -447,51 +635,6 @@ def _claude_oauth_account(config_path: Path) -> str:
     if uuid_:
         return f"oauthAccount: {uuid_}"
     return "oauthAccount present"
-
-
-def _ollama_status(config: Any, env: Mapping[str, str]) -> dict[str, Any]:
-    if env.get("CIAO_OLLAMA_API_KEY", "").strip():
-        return _provider(
-            name="ollama",
-            ok=True,
-            auth="api_key",
-            command="ciao auth ollama",
-            detail="CIAO_OLLAMA_API_KEY is set.",
-        )
-    local_url = getattr(getattr(config, "ollama", None), "local_url", "http://localhost:11434")
-    if _ollama_daemon_ready(local_url):
-        return _provider(
-            name="ollama",
-            ok=True,
-            auth="local_daemon",
-            command="ciao auth ollama",
-            detail=f"{local_url.rstrip('/')}/api/tags responded.",
-        )
-    return _provider(
-        name="ollama",
-        ok=False,
-        auth="missing",
-        command="ciao auth ollama",
-        detail="Set CIAO_OLLAMA_API_KEY or sign in to a local Ollama daemon.",
-    )
-
-
-def _openrouter_status(env: Mapping[str, str]) -> dict[str, Any]:
-    if env.get("OPENROUTER_API_KEY", "").strip():
-        return _provider(
-            name="openrouter",
-            ok=True,
-            auth="api_key",
-            command="OPENROUTER_API_KEY=sk-or-...",
-            detail="OPENROUTER_API_KEY is set.",
-        )
-    return _provider(
-        name="openrouter",
-        ok=False,
-        auth="missing",
-        command="OPENROUTER_API_KEY=sk-or-...",
-        detail="Create an OpenRouter key and add OPENROUTER_API_KEY to .env.",
-    )
 
 
 def _workspace_guides_linked(workspace_root: Path) -> bool:
@@ -525,8 +668,14 @@ def setup_status(
     process environment without exposing secret values in the response.
     """
     source = env if env is not None else os.environ
-    workspace_root = Path(getattr(config, "workspace_root", Path.cwd())).resolve()
-    vault_root = Path(getattr(config, "vault_root", workspace_root / "memory-vault")).resolve()
+    # ``Path.cwd()`` cannot be the getattr default: it is evaluated even when the
+    # config carries an explicit workspace_root, and it raises once the cwd is gone.
+    configured_root = getattr(config, "workspace_root", None)
+    workspace_root = _resolve_root(configured_root if configured_root is not None else Path("."))
+    configured_vault = getattr(config, "vault_root", None)
+    vault_root = _resolve_root(
+        configured_vault if configured_vault is not None else workspace_root / "memory-vault"
+    )
     raw_credentials_path = source.get("CLAUDE_CREDENTIALS_PATH", "").strip()
     credentials_path = (
         claude_credentials_path
@@ -589,13 +738,18 @@ def setup_status(
         ),
     ]
     providers = {
-        "claude": _claude_status(
-            source, credentials_path, config_path, workspace_root=workspace_root
-        ),
-        "codex": codex_login_status(source),
-        "ollama": _ollama_status(config, source),
-        "openrouter": _openrouter_status(source),
+        descriptor.id: descriptor.status_probe(
+            source,
+            config=config,
+            credentials_path=credentials_path,
+            config_path=config_path,
+            workspace_root=workspace_root,
+        )
+        for descriptor in provider_registry.descriptors()
+        if descriptor.status_probe_path
     }
+    # Routing backends, not runtime providers: they have no provider module and
+    # run through Claude Code, but Settings still shows their credential state.
     configured = all(row["ok"] for row in checks if row["required"])
     provider_ready = any(row["ok"] for row in providers.values())
     bootstrap = bool(getattr(config, "bootstrap_mode", False))

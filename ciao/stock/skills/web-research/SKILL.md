@@ -10,7 +10,7 @@ Use this skill for web questions and URL verification.
 ## Tool sequence
 
 1. Discover
-- Start with provider-native web search (OpenRouter web plugin when available) for candidate sources.
+- Start with provider-native web search for candidate sources.
 
 2. Read
 - For **GitHub URLs** (`github.com/...`, `gist.github.com/...`), use `gh` CLI instead of defuddle. It hits the API directly: cleaner output, fewer tokens, and it works on private repos. See the GitHub URL mapping below.
@@ -54,7 +54,7 @@ For search across GitHub (code, issues, PRs, repos), use `gh search code|issues|
 
 This skill is guidance-only — it has no bash-executable component.
 - **Do NOT** pass a raw search query as the bash `command` argument.
-- Web search is handled automatically by the provider (OpenRouter web plugin) — just reason about what to search and results will appear.
+- Web search is handled automatically by the provider — just reason about what to search and results will appear.
 - For reading specific URLs, use `defuddle parse <url> --md` via Bash for web pages (including YouTube); use `gh` for GitHub — not `fetch_url`.
 - **Never use `curl`, `wget`, or raw Python HTTP requests for HTML pages in Bash.** These frequently return gzip-encoded bytes that cause `UnicodeDecodeError` when decoded as UTF-8. Use `defuddle` instead; it handles compression and encoding correctly.
 - **Do not use WebFetch for HTML pages.** It is reserved for non-HTML targets (API endpoints, raw files, binary content).

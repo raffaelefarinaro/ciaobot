@@ -21,6 +21,8 @@ from typing import Iterable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ciao import provider_registry
+
 from ciao.skills_inventory import build_skill_inventory
 
 logger = logging.getLogger(__name__)
@@ -125,16 +127,8 @@ def _discover_provider_skill_names(provider: str) -> list[str]:
     if cached is not None and now - cached[0] < _PROVIDER_SKILLS_TTL_SECONDS:
         return list(cached[1])
 
-    if target == "claude":
-        from ciao.setup_status import discover_claude_system_skills
-
-        names = discover_claude_system_skills()
-    elif target == "codex":
-        from ciao.providers.codex import codex_system_skills
-
-        names = codex_system_skills()
-    else:
-        names = []
+    descriptor = provider_registry.get(target)
+    names = descriptor.system_skills() if descriptor is not None else []
 
     normalized = tuple(sorted({str(name).strip() for name in names if str(name).strip()}))
     _provider_skills_cache[target] = (now, normalized)
@@ -144,10 +138,10 @@ def _discover_provider_skill_names(provider: str) -> list[str]:
 def list_provider_skill_entries(provider: str, names: Iterable[str]) -> list[Command]:
     """Render provider-owned skills in the slash-picker command shape."""
     target = provider.strip().lower()
-    provider_label = {
-        "claude": "Claude Code",
-        "codex": "OpenAI Codex",
-    }.get(target, target or "provider")
+    descriptor = provider_registry.get(target)
+    provider_label = (
+        descriptor.cli_label if descriptor is not None else (target or "provider")
+    )
     entries = {
         str(name).strip(): Command(
             name=str(name).strip(),

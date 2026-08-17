@@ -25,6 +25,7 @@ def test_foundation_models_runtime_failure_overrides_probe_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     native_sidecar.reset_probe_cache()
+    native_sidecar.set_apple_intelligence_enabled(True)
     monkeypatch.setattr(
         native_sidecar,
         "probe",
@@ -48,6 +49,7 @@ def test_foundation_models_runtime_failure_overrides_probe_availability(
     assert "FoundationModels" in native_sidecar.apple_model_unavailable_reason()
 
     native_sidecar.reset_probe_cache()
+    native_sidecar.set_apple_intelligence_enabled(True)
     assert native_sidecar.apple_model_available() is True
 
 
@@ -55,6 +57,7 @@ def test_successful_foundation_models_response_clears_runtime_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     native_sidecar.reset_probe_cache()
+    native_sidecar.set_apple_intelligence_enabled(True)
     monkeypatch.setattr(
         native_sidecar,
         "probe",
@@ -68,6 +71,33 @@ def test_successful_foundation_models_response_clears_runtime_failure(
     result = asyncio.run(native_sidecar.respond("Say hello"))
 
     assert result == "Hello from Apple"
+    assert native_sidecar.apple_model_available() is True
+
+
+def test_beta_is_disabled_by_default_and_gates_the_on_device_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apple Intelligence is beta, off by default: availability reports no,
+    the reason points at Settings, and `respond` refuses so callers fall back."""
+    native_sidecar.reset_probe_cache()
+    monkeypatch.setattr(
+        native_sidecar,
+        "probe",
+        lambda: {"model": {"available": True}},
+    )
+
+    assert native_sidecar.apple_intelligence_enabled() is False
+    assert native_sidecar.apple_model_available() is False
+
+    reason = native_sidecar.apple_model_unavailable_reason()
+    assert "beta" in reason
+    assert "Settings" in reason
+
+    with pytest.raises(native_sidecar.SidecarError, match="beta"):
+        asyncio.run(native_sidecar.respond("Say hello"))
+
+    # Flipping the flag on (as Settings does) unlocks the same machine.
+    native_sidecar.set_apple_intelligence_enabled(True)
     assert native_sidecar.apple_model_available() is True
 
 

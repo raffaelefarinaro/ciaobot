@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { sectionsFromModelOptions, sectionsFromModelsResponse, sortModelsByTier } from './modelSections'
-import type { ModelsResponse, RoutineSettings } from './types'
+import {
+  providerForModelSection,
+  sectionsFromModelsResponse,
+  sortModelsByTier,
+} from './modelSections'
+import type { ModelsResponse } from './types'
 
 describe('sortModelsByTier', () => {
   it('orders tier-tagged models Haiku, Sonnet, Opus, Fable, keeping untagged below', () => {
@@ -39,9 +43,6 @@ describe('modelSections', () => {
       default: 'opus',
       provider_models: {},
       provider_defaults: {},
-      ollama_models: [],
-      ollama_local_models: [],
-      openrouter_models: [],
       codex_models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'],
       alias_tiers: {
         codex: {
@@ -68,42 +69,39 @@ describe('modelSections', () => {
         'haiku',
         'claude-3-7-sonnet-20250219',
         'claude-opus-4-20250514',
-        'kimi-k2.7-code:cloud',
       ],
       default: 'opus',
       provider_models: {
-        claude_work: ['opus', 'sonnet', 'haiku', 'claude-3-7-sonnet-20250219'],
-        claude_personal: ['kimi-k2.7-code:cloud'],
-        openrouter: ['anthropic/claude-sonnet-4.5', 'anthropic/claude-fable-latest'],
+        claude: ['opus', 'sonnet', 'haiku', 'claude-3-7-sonnet-20250219'],
         codex: ['gpt-test'],
+        opencode: ['anthropic/claude-sonnet-4-6'],
       },
       provider_defaults: {},
-      ollama_models: ['kimi-k2.7-code:cloud', 'glm-5.2:cloud'],
-      ollama_local_models: [],
-      openrouter_models: ['anthropic/claude-sonnet-4.5', 'anthropic/claude-fable-latest'],
       codex_models: ['gpt-test'],
+      opencode_models: ['anthropic/claude-sonnet-4-6'],
       alias_tiers: {
-        ollama: { sonnet: 'kimi-k2.7-code:cloud', fable: 'glm-5.2:cloud' },
-        openrouter: { sonnet: 'anthropic/claude-sonnet-4.5', fable: 'anthropic/claude-fable-latest' },
         codex: { haiku: 'gpt-test', sonnet: 'gpt-test', opus: 'gpt-test', fable: 'gpt-test' },
+        opencode: { sonnet: 'anthropic/claude-sonnet-4-6' },
       },
-      backends: { anthropic: true, ollama: true, openrouter: true },
+      backends: { anthropic: true, codex: true, opencode: true },
       thinking_levels: {},
     }
 
     const sections = sectionsFromModelsResponse(response)
 
-    expect(sections.map((section) => section.label)).toEqual(['Anthropic', 'OpenAI Codex', 'Ollama', 'OpenRouter'])
+    expect(sections.map((section) => section.label)).toEqual([
+      'Anthropic',
+      'OpenAI Codex',
+      'opencode',
+    ])
+    // The Anthropic section is the four tier aliases, never the concrete
+    // `claude-*` ids that also appear in `models`.
     expect(sections.find((section) => section.key === 'anthropic')?.models).toEqual([
       'haiku',
       'sonnet',
       'opus',
       'fable',
     ])
-    expect(sections.find((section) => section.key === 'ollama')?.modelBadges).toEqual({
-      'kimi-k2.7-code:cloud': ['Sonnet'],
-      'glm-5.2:cloud': ['Fable'],
-    })
     expect(sections.find((section) => section.key === 'codex')?.models).toEqual(['gpt-test', 'fable'])
     expect(sections.find((section) => section.key === 'codex')?.modelBadges).toEqual({
       'gpt-test': ['Haiku', 'Sonnet', 'Opus'],
@@ -112,42 +110,54 @@ describe('modelSections', () => {
     expect(sections.find((section) => section.key === 'codex')?.modelLabels).toEqual({
       fable: 'gpt-test-ultra',
     })
-    expect(sections.find((section) => section.key === 'openrouter')?.models).toEqual([
-      'anthropic/claude-sonnet-4.5',
-      'anthropic/claude-fable-latest',
-    ])
-    expect(sections.find((section) => section.key === 'openrouter')?.modelBadges).toEqual({
-      'anthropic/claude-sonnet-4.5': ['Sonnet'],
-      'anthropic/claude-fable-latest': ['Fable'],
+    expect(sections.find((section) => section.key === 'opencode')?.modelBadges).toEqual({
+      'anthropic/claude-sonnet-4-6': ['Sonnet'],
     })
   })
+})
 
-  it('keeps routine Anthropic options fixed and dynamic provider lists separate', () => {
-    const options: RoutineSettings['model_options'] = {
-      anthropic: ['anthropic/claude-sonnet-4.5', 'anthropic/claude-haiku-4.5'],
-      ollama_cloud: ['kimi-k2.7-code:cloud'],
-      ollama_local: ['llama3.1:latest'],
-      openrouter: ['openai/gpt-5.1'],
-    }
+describe('providerForModelSection', () => {
+  it('maps the Anthropic UI section and preserves provider sections', () => {
+    expect(providerForModelSection('anthropic')).toBe('claude')
+    expect(providerForModelSection('codex')).toBe('codex')
+    expect(providerForModelSection('opencode')).toBe('opencode')
+  })
+})
 
-    const sections = sectionsFromModelOptions(options, { ollama: true, openrouter: true }, {
-      ollama: { sonnet: 'kimi-k2.7-code:cloud' },
-      openrouter: { opus: 'openai/gpt-5.1' },
+describe('opencode section', () => {
+  const base: ModelsResponse = {
+    models: [],
+    default: 'opus',
+    provider_models: {},
+    provider_defaults: {},
+  } as unknown as ModelsResponse
+
+  it('renders opencode models as their own section', () => {
+    const sections = sectionsFromModelsResponse({
+      ...base,
+      opencode_models: ['anthropic/claude-sonnet-4-6', 'opencode/big-pickle'],
     })
+    const opencode = sections.find((s) => s.key === 'opencode')
+    expect(opencode?.label).toBe('opencode')
+    expect(opencode?.models).toContain('opencode/big-pickle')
+  })
 
-    expect(sections.map((section) => section.label)).toEqual(['Anthropic', 'Ollama', 'OpenRouter'])
-    expect(sections.find((section) => section.key === 'anthropic')?.models).toEqual([
-      'haiku',
-      'sonnet',
-      'opus',
-      'fable',
+  it('omits the section when nothing is authenticated', () => {
+    const sections = sectionsFromModelsResponse({ ...base, opencode_models: [] })
+    expect(sections.find((s) => s.key === 'opencode')).toBeUndefined()
+  })
+
+  it('owns the `provider/model` id shape outright', () => {
+    // OpenRouter used to claim this shape too, and a heuristic had to guess
+    // between them. opencode is now the only provider that uses it.
+    const sections = sectionsFromModelsResponse({
+      ...base,
+      opencode_models: ['anthropic/claude-sonnet-4-6', 'google/gemini-3-pro'],
+    })
+    const opencode = sections.find((s) => s.key === 'opencode')
+    expect(opencode?.models).toEqual([
+      'anthropic/claude-sonnet-4-6',
+      'google/gemini-3-pro',
     ])
-    expect(sections.find((section) => section.key === 'ollama')?.modelBadges).toEqual({
-      'llama3.1:latest': ['local'],
-      'kimi-k2.7-code:cloud': ['Sonnet'],
-    })
-    expect(sections.find((section) => section.key === 'openrouter')?.modelBadges).toEqual({
-      'openai/gpt-5.1': ['Opus'],
-    })
   })
 })

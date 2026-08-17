@@ -14,7 +14,7 @@ Reply to a message (handles threading automatically)
 ## Usage
 
 ```bash
-scripts/gws-profile.sh <personal|work> gmail +reply --message-id <ID> --body <TEXT>
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply --message-id <ID> --body <TEXT>
 ```
 
 ## Flags
@@ -35,12 +35,12 @@ scripts/gws-profile.sh <personal|work> gmail +reply --message-id <ID> --body <TE
 ## Examples
 
 ```bash
-scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body 'Thanks, got it!'
-scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body 'Looping in Carol' --cc carol@example.com
-scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body 'Adding Dave' --to dave@example.com
-scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body '<b>Bold reply</b>' --html
-scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body 'Updated version' -a updated.docx
-scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body 'Draft reply' --draft
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply --message-id 18f1a2b3c4d --body 'Thanks, got it!'
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply --message-id 18f1a2b3c4d --body 'Looping in Carol' --cc carol@example.com
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply --message-id 18f1a2b3c4d --body 'Adding Dave' --to dave@example.com
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply --message-id 18f1a2b3c4d --body '<b>Bold reply</b>' --html
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply --message-id 18f1a2b3c4d --body 'Updated version' -a updated.docx
+scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply --message-id 18f1a2b3c4d --body 'Draft reply' --draft
 ```
 
 ## Tips

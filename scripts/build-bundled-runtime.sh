@@ -36,6 +36,10 @@ uv export \
 
 rm -rf "$output"
 mkdir -p "$output/python" "$output/site-packages" "$output/bin"
+# The bundled-site hook is written from a path computed with os.path.relpath,
+# which needs both ends anchored the same way; resolve the caller's possibly
+# relative output directory once, up front.
+output=$(CDPATH= cd -- "$output" && pwd)
 
 download_runtime() {
     arch=$1
@@ -80,8 +84,31 @@ download_runtime() {
         --no-deps \
         --target "$output/site-packages/$arch" \
         "$repo_root"
-    if ! PYTHONPATH="$output/site-packages/$arch" \
-        "$python_bin" -c 'import pydantic_core; from pydantic_core import core_schema' >/dev/null 2>&1; then
+    # Attach the dependency tree to this interpreter only, through a .pth hook
+    # in its own site-packages. Exporting PYTHONPATH from the launcher instead
+    # would hand the tree to every descendant process, including a Homebrew or
+    # repo-venv `ciao` on a different CPython, which then dies importing the
+    # 3.12 extension modules.
+    purelib=$("$python_bin" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+    if [ ! -d "$purelib" ]; then
+        echo "Bundled ${arch} interpreter has no site-packages at $purelib" >&2
+        exit 1
+    fi
+    rel=$("$python_bin" -c \
+        'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
+        "$output/site-packages/$arch" "$purelib")
+    sed "s|@BUNDLED_SITE_REL@|$rel|" \
+        "$repo_root/scripts/runtime_bundled_site.py" >"$purelib/ciao_bundled_site.py"
+    if grep -q '@BUNDLED_SITE_REL@' "$purelib/ciao_bundled_site.py"; then
+        echo "Bundled ${arch} site hook kept its unsubstituted placeholder" >&2
+        exit 1
+    fi
+    # Sorts after any .pth the interpreter ships, so those run first.
+    echo 'import ciao_bundled_site' >"$purelib/zz-ciao-bundled-site.pth"
+
+    # Probe with no PYTHONPATH at all: this is what the launcher now relies on.
+    if ! (unset PYTHONPATH; "$python_bin" -c \
+        'import pydantic_core, ciao; from pydantic_core import core_schema') >/dev/null 2>&1; then
         echo "Bundled ${arch} runtime cannot import pydantic-core" >&2
         exit 1
     fi
@@ -118,11 +145,17 @@ if [ -n "${CIAO_RUNTIME_ROOT:-}" ]; then
 else
     unset CIAO_RUNTIME_ROOT
 fi
-# Child agent commands must resolve to this matching Python runtime too.  In
-# particular, inheriting this process's PYTHONPATH into a Homebrew/repo ciao
-# shim would mix CPython 3.12 extension modules with another interpreter.
+# Child agent commands should resolve to this matching Python runtime too.
 export PATH="$root/bin${PATH:+:$PATH}"
-export PYTHONPATH="$site${PYTHONPATH:+:$PYTHONPATH}"
+# Deliberately no PYTHONPATH: the interpreter finds its own dependency tree
+# through the ciao_bundled_site hook in its site-packages. PYTHONPATH is
+# inherited by every descendant, so exporting it here handed the 3.12 tree to
+# any child running a different Python - and a shell profile that re-prepends
+# /opt/homebrew/bin defeats the PATH ordering above, so `ciao` in a child shell
+# resolved to the Homebrew shim and died with
+# `No module named 'pydantic_core._pydantic_core'`. An inherited PYTHONPATH is
+# dropped for the same reason, in reverse: it must not shadow the bundle.
+unset PYTHONPATH
 # Python writes __pycache__ next to the sources it imports, and those sources
 # live inside the signed app bundle. Left alone, the first run adds files the
 # code signature does not seal, so `codesign -v` fails on an app that has only

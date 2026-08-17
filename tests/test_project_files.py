@@ -10,6 +10,7 @@ filenames, and oversized or disallowed extensions.
 
 from __future__ import annotations
 
+import errno
 import json
 import time
 import uuid
@@ -541,6 +542,58 @@ def test_native_desktop_drop_keeps_generic_error_for_non_screenshot(tmp_path: Pa
     assert "Save the file to a folder first" in error["error"]
 
 
+def test_native_desktop_drop_explains_an_undownloaded_cloud_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cloud placeholder gets download advice, not a raw ``[Errno 11]``.
+
+    Dragging a file out of iCloud Drive whose bytes are not on disk clears the
+    grant's existence check — ``stat`` reports the real size — and then fails the
+    read with ``EDEADLK``, because this process may not ask the File Provider to
+    materialise the file. macOS raises that errno only for this case, so the test
+    raises it directly: a dataless file cannot be created in a temp dir, and
+    ``EDEADLK`` is what the server has to key off anyway.
+    """
+    pcm = _make_manager(tmp_path)
+    config = pcm._config
+    project = next(iter(pcm.list_projects()))
+    chat = pcm.create_chat(project.project_id, title="Drop test")
+    dropped_image = tmp_path / "Screenshot 2026-02-20 at 21.33.14.png"
+    dropped_image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    grant_id = _write_desktop_drop_grant(config, [dropped_image.resolve()])
+    client = _make_client(pcm, config)
+
+    unpatched_read_bytes = Path.read_bytes
+
+    def refuse_unmaterialised_read(self: Path) -> bytes:
+        if self == dropped_image.resolve():
+            raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+        return unpatched_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", refuse_unmaterialised_read)
+
+    response = client.post(
+        "/api/desktop-drop",
+        json={
+            "grant_id": grant_id,
+            "project_id": project.project_id,
+            "chat_id": chat.chat_id,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["image_refs"] == []
+    assert len(body["errors"]) == 1
+    error = body["errors"][0]
+    assert error["filename"] == dropped_image.name
+    assert "Download Now" in error["error"]
+    # The complaint that started this: the user saw only the errno.
+    assert "Errno" not in error["error"]
+    assert "deadlock" not in error["error"]
+    assert str(dropped_image) not in error["error"]
+
+
 def test_native_desktop_drop_clears_staged_copies(tmp_path: Path) -> None:
     """The shell's staged copy is deleted once its bytes are in media_root."""
     pcm = _make_manager(tmp_path)
@@ -573,6 +626,62 @@ def test_native_desktop_drop_clears_staged_copies(tmp_path: Path) -> None:
     assert len(body["image_refs"]) == 1
     assert body["errors"] == []
     assert not (grant_dir / "staged" / grant_id).exists()
+
+
+def test_native_desktop_drop_keeps_a_staged_non_image_copy(
+    tmp_path: Path,
+) -> None:
+    """A staged non-image is the agent's only readable handle, so it survives.
+
+    The shell now stages dataless cloud files of any type; the server must
+    keep the non-image copy (the agent is handed its path to keep reading)
+    while the image copies, whose bytes are in media_root, are deleted.
+    """
+    pcm = _make_manager(tmp_path)
+    config = pcm._config
+    project = next(iter(pcm.list_projects()))
+    chat = pcm.create_chat(project.project_id, title="Drop test")
+    grant_dir = config.state_path.parent / "desktop-drop-grants"
+    grant_id = str(uuid.uuid4())
+    staged_dir = grant_dir / "staged" / grant_id
+    image_dir = staged_dir / "0"
+    image_dir.mkdir(parents=True)
+    staged_image = image_dir / "shot.png"
+    staged_image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    doc_dir = staged_dir / "1"
+    doc_dir.mkdir()
+    staged_doc = doc_dir / "report.pdf"
+    staged_doc.write_bytes(b"%PDF-1.4\n")
+    (grant_dir / f"{grant_id}.json").write_text(
+        json.dumps(
+            {
+                "created_at": time.time(),
+                "paths": [str(staged_image), str(staged_doc)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = _make_client(pcm, config)
+
+    response = client.post(
+        "/api/desktop-drop",
+        json={
+            "grant_id": grant_id,
+            "project_id": project.project_id,
+            "chat_id": chat.chat_id,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["image_refs"]) == 1
+    assert body["paths"] == [str(staged_doc)]
+    assert body["errors"] == []
+    # The image copy is gone; the agent's non-image handle is still readable.
+    assert not staged_image.exists()
+    assert staged_doc.exists()
+    assert not image_dir.exists()
+    assert doc_dir.exists()
 
 
 def test_native_desktop_drop_rejects_expired_grant(tmp_path: Path) -> None:

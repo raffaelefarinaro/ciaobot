@@ -3,24 +3,36 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+import logging
+from pathlib import Path
 from typing import cast
 
+from ciao import provider_registry
 from ciao.config import BridgeConfig
 from ciao.models import AgentRequest, StreamEvent
-from ciao.providers import ClaudeProvider, CodexProvider
+from ciao.memory_tool import prune_expired_entries
 from ciao.providers.base import ActiveHandle, BaseProvider, ProviderCapabilities
 
 ProviderImpl = BaseProvider
-
-_PROVIDER_FACTORIES = {
-    "claude": ClaudeProvider,
-    "codex": CodexProvider,
-}
+logger = logging.getLogger(__name__)
 
 
 def supported_providers() -> tuple[str, ...]:
     """Provider names accepted by chats, schedules, and the CLI."""
-    return tuple(_PROVIDER_FACTORIES)
+    return provider_registry.provider_ids()
+
+
+def capabilities_for(provider: str) -> ProviderCapabilities:
+    """Static capabilities of a provider, without instantiating it.
+
+    Lets routes and the PWA describe a provider the current chat is not
+    running. Unknown ids get the all-``False`` default rather than raising, so
+    a stale chat record degrades to "supports nothing" instead of a 500.
+    """
+    descriptor = provider_registry.get(provider)
+    if descriptor is None:
+        return ProviderCapabilities()
+    return descriptor.factory().capabilities
 
 
 class ProviderService:
@@ -36,9 +48,7 @@ class ProviderService:
     def _ensure_provider(self, provider: str) -> ProviderImpl:
         """Create the provider instance on first use based on provider name."""
         if self._provider is None:
-            factory = _PROVIDER_FACTORIES.get(provider)
-            if factory is None:
-                raise ValueError(f"Unknown provider '{provider}'")
+            factory = provider_registry.require(provider).factory()
             self._provider = factory(self._config.workspace_root, config=self._config)
         return self._provider
 
@@ -58,6 +68,27 @@ class ProviderService:
     async def execute_streaming(
         self, request: AgentRequest
     ) -> AsyncGenerator[StreamEvent, None]:
+        # Native provider guide loaders read CLAUDE.md/AGENTS.md at session
+        # start. Remove only entries whose explicit expiry has passed before
+        # that happens; memory remains in the guide and is never duplicated
+        # into a provider-specific prompt block.
+        try:
+            result = prune_expired_entries(
+                Path(getattr(self._config, "workspace_root", ".")) / "CLAUDE.md"
+            )
+            memory_changed = bool(
+                result.get("removed", {}).get("memory", 0)
+                or result.get("removed", {}).get("profile", 0)
+            )
+            if memory_changed:
+                logger.info("Pruned expired workspace memory entries: %s", result.get("removed"))
+                # Native guide content is loaded when the provider process or
+                # session starts. Reconnect before resuming so the current
+                # turn cannot keep a just-expired fact in its native snapshot.
+                if self._provider is not None:
+                    await self.disconnect()
+        except Exception:  # noqa: BLE001 - memory hygiene must not block a turn
+            logger.warning("Could not prune expired workspace memory", exc_info=True)
         provider = self._ensure_provider(request.provider)
         async for event in provider.run_streaming(request, self._register_handle):
             yield event

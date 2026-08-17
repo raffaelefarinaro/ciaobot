@@ -101,6 +101,42 @@ def test_codex_entity_context_uses_the_registry_selected_legacy_owner(
     assert "[[People/Alba]]" in visible
 
 
+def test_codex_injects_memory_when_workspace_guides_diverge(tmp_path: Path) -> None:
+    from ciao.memory_tool import ensure_regions, write_region
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Claude guide\n", encoding="utf-8")
+    ensure_regions(guide)
+    write_region(guide, "memory", ["remember this workspace fact"])
+    (tmp_path / "AGENTS.md").write_text("# Custom Codex guide\n", encoding="utf-8")
+
+    provider = CodexProvider(tmp_path)
+    instructions = provider._memory_instructions(
+        AgentRequest(prompt="test", model="gpt-test", mode="normal", provider="codex")
+    )
+
+    assert "remember this workspace fact" in instructions
+
+
+def test_codex_does_not_duplicate_memory_for_linked_workspace_guides(
+    tmp_path: Path,
+) -> None:
+    from ciao.memory_tool import ensure_regions, write_region
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Claude guide\n", encoding="utf-8")
+    ensure_regions(guide)
+    write_region(guide, "memory", ["native guide owns this fact"])
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+
+    provider = CodexProvider(tmp_path)
+    instructions = provider._memory_instructions(
+        AgentRequest(prompt="test", model="gpt-test", mode="normal", provider="codex")
+    )
+
+    assert "native guide owns this fact" not in instructions
+
+
 FAKE_APP_SERVER = r'''#!/usr/bin/env python3
 import json
 import os
@@ -590,6 +626,42 @@ async def test_codex_provider_forks_resumed_thread(tmp_path: Path) -> None:
     fork = next(row for row in records if row["kind"] == "thread/fork")
     assert fork["payload"]["threadId"] == "thread-parent"
     await provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_codex_resume_fallback_replays_stable_context(tmp_path: Path) -> None:
+    from ciao.providers.stdio_rpc import RpcError
+
+    provider = CodexProvider(tmp_path)
+    calls: list[str] = []
+
+    class _Peer:
+        async def request(self, method: str, _params: object, **_kwargs: object):
+            calls.append(method)
+            if method == "thread/resume":
+                raise RpcError("thread disappeared")
+            if method == "thread/start":
+                return {"thread": {"id": "thread-new"}, "model": "gpt-test"}
+            if method == "account/rateLimits/read":
+                return {"rateLimits": {}}
+            raise AssertionError(method)
+
+    async def _peer(_request: AgentRequest):
+        return _Peer()
+
+    provider._ensure_peer = _peer  # type: ignore[method-assign]
+    request = AgentRequest(
+        prompt="continue",
+        model="gpt-test",
+        mode="normal",
+        provider="codex",
+        resume_session="thread-old",
+        stable_context_prefix="[stable context]\n",
+    )
+
+    assert await provider._ensure_thread(request) == "thread-new"
+    assert calls[:2] == ["thread/resume", "thread/start"]
+    assert request.prompt.startswith("[stable context]\n")
 
 
 @pytest.mark.asyncio

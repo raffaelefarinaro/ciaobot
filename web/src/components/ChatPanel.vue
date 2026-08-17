@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handleFileLinkClick">
+  <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header. No page tag: the breadcrumb below already reads
@@ -19,28 +19,44 @@
     >
       <template #title>
         <div class="header-left">
-          <button class="close-btn" @click="$emit('close')" title="Close chat">&times;</button>
+          <!-- Same 18px stroke icon in the same 30px box as the trailing header
+               actions, so the close control reads as one of them. It used to be
+               a `&times;` character at 20px, which is a different size from
+               every icon around it and sits on the text baseline rather than in
+               a box - visibly out of line beside the breadcrumb. -->
+          <button class="btn-icon close-btn" @click="$emit('close')" title="Close chat" aria-label="Close chat">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
           <div class="header-breadcrumb" ref="breadcrumbRef">
-            <!-- The workspace was only ever implied here, through --accent. This
-                 is the screen where you are deepest inside one, so it says so —
+            <!-- Workspace and project are one thing - the scope the chat sits in -
+                 so they share a wrapper. Wrapping them together is what lets the
+                 narrow header put the scope on one quiet line above the title:
+                 as three loose flex items they broke into three lines at three
+                 different sizes, with the workspace the largest text in the
+                 header and the title the smallest.
+                 The workspace was only ever implied here, through --accent. This
+                 is the screen where you are deepest inside one, so it says so -
                  with its number key, which is otherwise only discoverable in
                  the sidebar. -->
-            <span
-              v-if="workspaceCrumb"
-              class="breadcrumb-workspace"
-              :data-workspace-color="workspaceCrumb.color"
-              :title="`Workspace ${workspaceCrumb.name} (press ${workspaceCrumb.key})`"
-            >
-              {{ workspaceCrumb.name }}
+            <span v-if="hasScopeCrumb" class="breadcrumb-scope">
+              <span
+                v-if="workspaceCrumb"
+                class="breadcrumb-workspace"
+                :data-workspace-color="workspaceCrumb.color"
+                :title="`Workspace ${workspaceCrumb.name} (press ${workspaceCrumb.key})`"
+              >{{ workspaceCrumb.name }}</span>
+              <span v-if="workspaceCrumb && projectCrumb" class="breadcrumb-separator">/</span>
+              <span
+                v-if="projectCrumb"
+                class="breadcrumb-project"
+                @click.stop="toggleContext"
+                :class="{ active: showContext }"
+              >{{ projectCrumb }}</span>
             </span>
-            <span v-if="workspaceCrumb" class="breadcrumb-separator">/</span>
-            <span
-              v-if="project && project.name !== 'General'"
-              class="breadcrumb-project"
-              @click.stop="toggleContext"
-              :class="{ active: showContext }"
-            >{{ project.name }}</span>
-            <span v-if="project && project.name !== 'General'" class="breadcrumb-separator">/</span>
+            <span v-if="hasScopeCrumb" class="breadcrumb-separator breadcrumb-separator--title">/</span>
             <input
               v-if="editingTitle"
               class="title-input"
@@ -132,7 +148,7 @@
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn touch-hit mobile-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
@@ -142,13 +158,13 @@
             v-if="chat.provider"
             type="button"
             class="model-picker-summary desktop-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
-          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ activeModelId }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
+          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ chipModelLabel }} · {{ chipModeLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
-            :model-value="canonicalTier(chat.model)"
+            :model-value="canonicalTier(activeModelId)"
             :active-models="activeModelHighlights"
             :sections="chatModelSections"
             :filter-section="capabilityPickerSection"
@@ -157,6 +173,23 @@
             @select="selectModel"
             @close="showModelPicker = false"
           >
+            <template #header>
+              <div class="mode-picker-row">
+                <span class="mode-picker-row__label">Mode</span>
+                <div class="mode-picker-row__chips">
+                  <button
+                    v-for="opt in modePickerOptions"
+                    :key="opt.value"
+                    type="button"
+                    class="mode-row-chip"
+                    :class="{ 'mode-row-chip--active': chat.mode === opt.value }"
+                    :disabled="modeChipSaving"
+                    :title="opt.description"
+                    @click="selectMode(opt.value)"
+                  >{{ opt.label }}</button>
+                </div>
+              </div>
+            </template>
             <template #footer>
               <div
                 v-if="showThinkingLevels"
@@ -274,8 +307,34 @@
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" ref="messagesEl" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
+    <div class="messages" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
+      <Transition name="history-loading">
+        <div
+          v-if="store.messageHistoryLoading && !renderItems.length && !store.isStreaming"
+          class="history-loading-card"
+          role="status"
+          aria-live="polite"
+        >
+          <div class="history-loading-heading">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading conversation</span>
+          </div>
+          <div class="history-skeleton history-skeleton--user" aria-hidden="true">
+            <span class="history-skeleton-line history-skeleton-line--wide"></span>
+            <span class="history-skeleton-line history-skeleton-line--short"></span>
+          </div>
+          <div class="history-skeleton history-skeleton--assistant" aria-hidden="true">
+            <span class="history-skeleton-line history-skeleton-line--long"></span>
+            <span class="history-skeleton-line history-skeleton-line--medium"></span>
+            <span class="history-skeleton-line history-skeleton-line--short"></span>
+          </div>
+        </div>
+      </Transition>
+      <div v-if="store.messageHistoryLoading && renderItems.length" class="history-loading-inline" role="status" aria-live="polite">
+        <span class="history-loading-spinner" aria-hidden="true"></span>
+        <span>Updating conversation…</span>
+      </div>
       <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
@@ -751,7 +810,7 @@
          a structured question; we render an interactive option list so the
          answer flows back as the next user message. The SDK's built-in CLI
          picker can't run headless, so this is the only path. -->
-    <div v-if="activeQuestions.length && (dockPrimary === 'question' || dockExpanded)" class="question-card">
+    <div v-if="questionCardVisible" class="question-card">
       <div class="question-card-header">
         <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
@@ -771,15 +830,27 @@
         </div>
         <div class="question-options">
           <button
-            v-for="opt in q.options"
+            v-for="(opt, oi) in q.options"
             :key="opt.label"
             type="button"
             class="question-option"
             :class="{ selected: isQuestionOptionSelected(qi, opt.label) }"
+            :aria-keyshortcuts="questionOptionShortcut(qi, oi) || undefined"
             @click="toggleQuestionOption(qi, opt.label, q.multiSelect)"
           >
-            <span class="question-option-label">{{ opt.label }}</span>
-            <span v-if="opt.description" class="question-option-desc">{{ opt.description }}</span>
+            <span class="question-option-main">
+              <!-- Keyboard hint, not part of the label: only rendered where the
+                   digit actually works (first question, first nine options). -->
+              <span
+                v-if="questionOptionShortcut(qi, oi)"
+                class="question-option-key"
+                aria-hidden="true"
+              >{{ questionOptionShortcut(qi, oi) }}</span>
+              <span class="question-option-text">
+                <span class="question-option-label">{{ opt.label }}</span>
+                <span v-if="opt.description" class="question-option-desc">{{ opt.description }}</span>
+              </span>
+            </span>
           </button>
         </div>
         <input
@@ -1066,10 +1137,29 @@
     <div class="input-bar" :class="{ disabled: chat.archived }">
       <template v-if="chat.archived">
         <div class="archived-notice">
-          <span>This chat is archived.</span>
-          <button class="btn-sm primary continue-chat-btn" @click="continueChat" :disabled="isContinuing">
-            {{ isContinuing ? 'Continuing...' : 'Continue in new chat' }}
-          </button>
+          <div class="archived-notice-row">
+            <span>This chat is archived.</span>
+            <button class="btn-sm primary continue-chat-btn" @click="continueChat" :disabled="isContinuing">
+              {{ isContinuing ? 'Continuing...' : 'Continue in new chat' }}
+            </button>
+          </div>
+          <!-- What Ciaobot took from this conversation. Runs as a live line
+               while the pipeline works, then settles and stays: the archived
+               chat is the permanent record of what was learned from it, and
+               nothing else in the app ever reported this. -->
+          <p
+            v-if="archiveTidying"
+            class="archived-postprocess"
+            aria-live="polite"
+          >
+            <span class="archived-postprocess-dot" aria-hidden="true" />
+            {{ archiveTidyLabel }}…
+          </p>
+          <p
+            v-else-if="archiveTidySummary"
+            class="archived-postprocess"
+            :class="{ failed: archiveTidyFailed }"
+          >{{ archiveTidySummary }}</p>
         </div>
       </template>
       <template v-else>
@@ -1119,6 +1209,12 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage, apiErrorMessage } from '../lib/errorMessage'
+import {
+  isPostprocessing,
+  postprocessFailed,
+  postprocessLabel,
+  postprocessSummary,
+} from '../lib/postprocessView'
 import { useFileViewerStore } from '../stores/fileViewer'
 import VoiceRecorder from './VoiceRecorder.vue'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
@@ -1129,7 +1225,7 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
-import type { AgentAssetsResponse, CommandsResponse, Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, Loop, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1148,6 +1244,7 @@ import {
   selectedModelEntry,
 } from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
+import { handleCodeCopyClick } from '../lib/codeCopy'
 import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
@@ -1168,13 +1265,11 @@ import {
   type MentionProject,
 } from '../composables/useMentionPicker'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
+import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 import {
   clearPlanReturnMode,
-  includeBuiltinPlanCommand,
-  planCommandTargetMode,
   rememberPlanReturnMode,
   restorePlanReturnMode,
-  type SlashCommand,
 } from '../lib/planCommand'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
@@ -1239,6 +1334,7 @@ const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 const { thinkingExpanded, toggleThinking } = useThinkingPreference()
+const { reentrySummaryEnabled } = useReentrySummaryPreference()
 const draftChatId = store.activeChatId
 const inputText = ref(readChatDraft(draftChatId))
 const inputRevision = ref(0)
@@ -1366,9 +1462,8 @@ function primaryAction() {
   send()
 }
 
-// Slash-command picker: populated once on mount from /api/commands, with
-// UI-owned commands added even when they have no disk-backed asset.
-const slashCommands = ref<SlashCommand[]>(includeBuiltinPlanCommand([]))
+// Slash-command picker: populated once on mount from /api/commands.
+const slashCommands = ref<SlashCommand[]>([])
 const commandHighlightIdx = ref(0)
 
 interface SlashCommandTrigger {
@@ -1409,13 +1504,13 @@ async function loadSlashCommands(): Promise<void> {
   try {
     const provider = encodeURIComponent(chat.value.provider || '')
     const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}`)
-    slashCommands.value = includeBuiltinPlanCommand([
+    slashCommands.value = [
       ...(response.commands || []),
       ...(response.skills || []),
-    ])
+    ]
   } catch {
-    // Keep the built-in /plan entry available when asset discovery is offline.
-    slashCommands.value = includeBuiltinPlanCommand([])
+    // Asset discovery is offline: leave the picker empty rather than stale.
+    slashCommands.value = []
   }
 }
 
@@ -1475,7 +1570,19 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
-const reentrySummary = computed(() => store.reentrySummaries[chat.value.chat_id] || '')
+const reentrySummary = computed(() => {
+  if (!reentrySummaryEnabled.value) return ''
+  return store.reentrySummaries[chat.value.chat_id] || ''
+})
+
+// Post-archive pipeline, reported in the archived-chat footer. Reads through the
+// chat record rather than a transient flag so the settled summary is still there
+// when this chat is reopened weeks later.
+const archivePostprocess = computed(() => store.chatPostprocess(chat.value.chat_id))
+const archiveTidying = computed(() => isPostprocessing(archivePostprocess.value))
+const archiveTidyLabel = computed(() => postprocessLabel(archivePostprocess.value))
+const archiveTidySummary = computed(() => postprocessSummary(archivePostprocess.value))
+const archiveTidyFailed = computed(() => postprocessFailed(archivePostprocess.value))
 watch(() => chat.value.provider, () => {
   void loadSlashCommands()
 })
@@ -1507,27 +1614,60 @@ function leavePlanMode(): void {
   void togglePlanMode('exit')
 }
 
-async function handlePlanCommand(
-  action: 'enter' | 'exit',
-  originChatId: string,
-  returnMode: string,
-  submittedText: string,
-  submittedRevision: number,
-): Promise<void> {
-  const changed = await togglePlanMode(action, originChatId, returnMode)
-  if (!changed) return
-  const composerUnchanged =
-    inputRevision.value === submittedRevision
-    && inputText.value === submittedText
-  if (!composerUnchanged) return
+// Mode row, rendered inside the model picker popover's header slot (see
+// ``modePickerOptions`` usage in the template). Plan has its own chip above
+// because leaving plan mid-session has different UX implications (the chat
+// returns to the previous mode, not a chosen one) and its own disabled state
+// while toggling.
+//
+// The four modes here mirror ``BridgeMode`` in ciao.models. We treat
+// ``"normal"`` as the SDK's default ("Manual" in Claude Code terms): every
+// tool call prompts. ``"auto"`` is the classifier-backed mode that auto-
+// approves most calls and only escalates risky ones — the mode Sebastien
+// was asking about. ``"bypass"`` is ``bypassPermissions``: every tool runs
+// without a prompt, use only in containers.
+//
+// ``modeChipSaving`` is intentionally separate from ``planModeSaving`` so a
+// stuck plan switch doesn't lock the row — they're independent paths.
 
-  // The command itself is consumed, but pending images/comments belong to the
-  // next user turn and must remain staged. Persist against the originating
-  // chat even if the active chat changed while the PATCH was in flight.
-  writeChatDraft(originChatId, '')
-  inputText.value = ''
-  await nextTick()
-  autoResize()
+const MODE_PICKER_OPTIONS: ReadonlyArray<{ value: string; label: string; description: string }> = [
+  { value: 'auto', label: 'Auto', description: 'Fewer prompts, classifier approves safe actions' },
+  { value: 'bypass', label: 'Bypass', description: 'Skip all checks (use in containers only)' },
+  { value: 'normal', label: 'Manual', description: 'Approve each tool call' },
+  { value: 'plan', label: 'Plan', description: 'Read-only — propose, do not act' },
+]
+const modePickerOptions = MODE_PICKER_OPTIONS
+
+const modeChipSaving = ref(false)
+
+async function selectMode(target: string): Promise<void> {
+  if (modeChipSaving.value || chat.value.archived) return
+  if (target === chat.value.mode) {
+    showModelPicker.value = false
+    return
+  }
+  // Route plan mode through the existing togglePlanMode path so the
+  // rememberPlanReturnMode bookkeeping still applies when leaving a mode
+  // that the user might want to come back to.
+  if (target === 'plan') {
+    showModelPicker.value = false
+    void togglePlanMode('enter')
+    return
+  }
+  // Leaving plan for any other mode: clear the stored return-to mode so
+  // a later plan entry doesn't snap back to a stale value.
+  if (chat.value.mode === 'plan') {
+    clearPlanReturnMode(chat.value.chat_id)
+  }
+  modeChipSaving.value = true
+  try {
+    await store.updateChat(chat.value.chat_id, { mode: target })
+    showModelPicker.value = false
+  } catch (e) {
+    store.pushErrorToast('Could not change mode', errorMessage(e, 'Could not change mode'))
+  } finally {
+    modeChipSaving.value = false
+  }
 }
 
 // Inline editing state for queued messages. Keyed by queue entry id.
@@ -1794,10 +1934,20 @@ const workspaceCrumb = computed(() => {
     key: index < 9 ? String(index + 1) : '',
   }
 })
+// 'General' is the implicit project every workspace has, so naming it in the
+// breadcrumb would say nothing.
+const projectCrumb = computed(() => {
+  const name = project.value?.name
+  return name && name !== 'General' ? name : null
+})
+// Whether there is a scope line at all - it decides both the wrapper and the
+// separator that joins the scope to the chat title.
+const hasScopeCrumb = computed(() => !!workspaceCrumb.value || !!projectCrumb.value)
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
 const modelsResponse = ref<ModelsResponse | null>(null)
+
 const thinkingLevels = ref<Record<string, string[]>>({})
 
 const openTraces = ref<Record<number, boolean>>({})
@@ -2012,18 +2162,26 @@ const touchedFiles = computed<TouchedFile[]>(() => {
   return Array.from(byPath.values()).sort((a, b) => b.index - a.index)
 })
 
-type ProviderKey = 'claude' | 'codex'
-type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex' | `custom:${string}`
-type ModelBucketValue = 'work' | 'personal' | 'openrouter' | ''
-type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex' | 'custom'
+type ProviderKey = RuntimeProvider
+// One bucket per runtime provider: each owns its own auth and its own catalog,
+// so the provider *is* the route. (This used to also enumerate the env-injected
+// Ollama/OpenRouter/custom routes that ran through the Claude runner.)
+type BucketKey = ProviderKey
 type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
-  { key: 'claude_work', label: 'Claude', provider: 'claude' },
-  { key: 'claude_personal', label: 'Ollama', provider: 'claude' },
-  { key: 'openrouter', label: 'OpenRouter', provider: 'claude' },
+  { key: 'claude', label: 'Claude', provider: 'claude' },
   { key: 'codex', label: 'Codex', provider: 'codex' },
+  { key: 'opencode', label: 'opencode', provider: 'opencode' },
 ]
+
+// ModelSelector names the Claude section 'anthropic' (the models are Anthropic's,
+// the runner is Claude Code), so the two vocabularies need one hop between them.
+const SECTION_BY_BUCKET: Record<BucketKey, string> = {
+  claude: 'anthropic',
+  codex: 'codex',
+  opencode: 'opencode',
+}
 
 
 function toggleTrace(i: number) {
@@ -2152,6 +2310,13 @@ const activeQuestions = computed(() => {
   return store.activeQuestions[id] || []
 })
 
+// The card is only on screen when it wins the dock, or when the dock strip is
+// expanded behind a permission. Named because the keyboard shortcuts below key
+// off the same condition as the template: a hidden card must not eat digits.
+const questionCardVisible = computed(() =>
+  activeQuestions.value.length > 0 && (dockPrimary.value === 'question' || dockExpanded.value),
+)
+
 type QuestionAnswer = { selected: Set<string>; other: string }
 const questionAnswers = ref<Record<number, QuestionAnswer>>({})
 
@@ -2185,6 +2350,53 @@ function toggleQuestionOption(i: number, label: string, multi: boolean) {
 
 function isQuestionOptionSelected(i: number, label: string): boolean {
   return questionAnswers.value[i]?.selected.has(label) ?? false
+}
+
+// Digit shortcuts cover the first question only -- the picker almost always
+// carries one, and a second block would need a second digit row with no way to
+// tell them apart. The badge is rendered from the same function so the hint can
+// never claim a key that does nothing.
+const MAX_QUESTION_SHORTCUTS = 9
+
+function questionOptionShortcut(qi: number, oi: number): string {
+  if (qi !== 0 || oi >= MAX_QUESTION_SHORTCUTS) return ''
+  return String(oi + 1)
+}
+
+// Keyboard handling for the open question card. ChatLayout owns the single
+// window keydown listener (onUnreservedKeydown) and offers the key here first,
+// the same way it offers arrows to the home grid; returning true means "eaten",
+// and the layout then preventDefaults instead of running its own binding. That
+// is what lets an open card outrank the 1-9 workspace switcher without either
+// side growing a second listener.
+//
+// The caller has already screened out modifiers and text fields (composer and
+// the card's own "Other" input both count as typing targets), so this only
+// decides whether the card has a use for the key.
+function handleQuestionShortcut(e: KeyboardEvent): boolean {
+  if (!questionCardVisible.value) return false
+  const q = activeQuestions.value[0]
+  if (!q) return false
+
+  if (e.key === 'Enter') {
+    // Never steal Enter from a focused control: on Cancel/Send answer, or on
+    // an option button reached by Tab, the native activation is what the user
+    // is asking for. Enter only submits from "nowhere in particular", which is
+    // where focus sits after picking with a digit.
+    if (e.target instanceof HTMLElement && e.target.closest('button, a, [role="button"]')) return false
+    // Multi-select is a collection, not a choice: digits toggle and the
+    // explicit Send answer ends it, so Enter stays a no-op there.
+    if (activeQuestions.value.some(other => other.multiSelect)) return false
+    if (!allQuestionsAnswered.value) return false
+    submitQuestionAnswers()
+    return true
+  }
+
+  if (!/^[1-9]$/.test(e.key)) return false
+  const opt = q.options[Number(e.key) - 1]
+  if (!opt) return false
+  toggleQuestionOption(0, opt.label, q.multiSelect)
+  return true
 }
 
 // Block Send answer until every question has at least one option picked
@@ -2317,10 +2529,7 @@ function cancelCapability(q: { request_id: string }) {
 // Section key (ModelSelector) for a bucket, used to preselect the backend when
 // the capability card opens the full picker.
 function capabilitySectionForBucket(bucket: BucketKey): string {
-  if (bucket === 'codex') return 'codex'
-  if (bucket === 'openrouter') return 'openrouter'
-  if (bucket === 'claude_personal') return 'ollama'
-  return 'anthropic'
+  return SECTION_BY_BUCKET[bucket] || 'anthropic'
 }
 
 const capabilityPickerSection = ref('')
@@ -2330,33 +2539,13 @@ const activeProvider = computed<ProviderKey>(() => {
 })
 
 const activeBucket = computed<BucketKey>(() => {
-  const c = chat.value
-  if (!c) return 'claude_work'
-  if (c.provider === 'codex') return 'codex'
-  if (c.model.startsWith('custom:')) {
-    const parts = c.model.split(':', 3)
-    if (parts[1]) return `custom:${parts[1]}`
-  }
-  // OpenRouter ids are owner/model (no ':' tag); Ollama ids carry ':'.
-  if (c.model.includes('/') && !c.model.includes(':')) return 'openrouter'
-  // The server records the explicit bucket choice. Legacy values are kept
-  // for existing chats; new workspace config may use clearer bucket names.
-  if (c.model_bucket === 'openrouter') return 'openrouter'
-  if (c.model_bucket === 'work' || c.model_bucket === 'anthropic') return 'claude_work'
-  if (c.model_bucket === 'personal' || c.model_bucket === 'ollama') return 'claude_personal'
-  const ollamaModels = modelsResponse.value?.ollama_models || []
-  return ollamaModels.includes(c.model) ? 'claude_personal' : 'claude_work'
+  return (chat.value?.provider as BucketKey) || 'claude'
 })
 
 const chatModelSections = computed(() => {
   const baseSections = sectionsFromModelsResponse(modelsResponse.value)
-  // The Anthropic section is always the real Anthropic subscription: its tier
-  // aliases route to Anthropic and picking one hands the chat over there. It is
-  // NOT relabeled per active bucket — when routing through Ollama/OpenRouter
-  // those tiers already appear as badges on that provider's concrete models
-  // (e.g. "minimax-m3:cloud · Opus"), so a "Claude (Ollama)" clone would just
-  // duplicate them. Keeping a single fixed "Claude (Anthropic)" section both
-  // removes that duplicate and preserves an explicit handover path to Anthropic.
+  // Name the Anthropic section for its vendor so it reads as a peer of the
+  // Codex and opencode sections rather than as "the default".
   return baseSections.map(section => {
     if (section.key === 'anthropic') {
       return { ...section, label: 'Claude (Anthropic)' }
@@ -2365,38 +2554,42 @@ const chatModelSections = computed(() => {
   })
 })
 
-// The exact model id the chat is running on. When the chat is on a tier alias
-// (e.g. "sonnet") it would otherwise render as that bare alias in the header
-// chip; resolve it through the active bucket so the user sees the actual
-// provider-native model (e.g. "minimax-m3:cloud") instead of the alias.
+// The model id the chat is running on, as stored. A tier alias stays an alias
+// here: the provider resolves it per turn against its own catalog, so there is
+// no single concrete id to substitute.
 const activeModelId = computed(() => {
-  const c = chat.value
-  if (!c) return ''
-  const resolved = effectiveModelForBucket(c.model, activeBucket.value)
-  return resolved || c.model
+  const stored = chat.value?.model?.trim()
+  if (stored) return stored
+  // Older OpenCode chats were created before the provider catalog was
+  // persisted, so they can legitimately have an empty model. Keep the
+  // header actionable by showing the provider's current default while the
+  // user can still pick a concrete entry from the popover.
+  const provider = chat.value?.provider || ''
+  return providerDefaults.value[provider]
+    || modelsResponse.value?.provider_models?.[provider]?.[0]
+    || (provider === 'claude' ? modelsResponse.value?.default : '')
+    || ''
 })
 
 const activeModelHighlights = computed(() => {
   const c = chat.value
   if (!c) return []
-  const resolvedModel = canonicalTier(c.model)
+  const model = activeModelId.value
+  if (!model) return []
+  const resolvedModel = canonicalTier(model)
   const tier = tierAlias(resolvedModel)
   if (tier) {
-    // Only the Anthropic subscription bucket highlights the bare tier, because
-    // there the model literally IS the tier and lives in the "Claude
-    // (Anthropic)" section. For concrete-provider buckets (codex / ollama /
-    // openrouter) highlight only that provider's real model — the bare tier now
-    // belongs to the separate Anthropic handover section and must not light up.
-    if (activeBucket.value === 'claude_work') return [tier]
-    const provider = activeBucket.value === 'claude_personal' ? 'ollama' : activeBucket.value
-    const nativeModel = modelsResponse.value?.alias_tiers?.[provider]?.[tier]
-    return nativeModel ? [nativeModel] : [c.model]
+    // On Claude the model literally IS the tier, so highlight the alias. Codex
+    // and opencode pin tiers to concrete models, so highlight the pinned model
+    // and leave the bare alias to the Anthropic section.
+    if (activeBucket.value === 'claude') return [tier]
+    const nativeModel = modelsResponse.value?.alias_tiers?.[activeBucket.value]?.[tier]
+    return nativeModel ? [nativeModel] : [model]
   }
-  if (isFableSelection(c.model, c.thinking_level)) {
+  if (isFableSelection(model, c.thinking_level)) {
     return [CODEX_FABLE_PSEUDO_MODEL]
   }
-  const effective = effectiveModelForBucket(c.model, activeBucket.value)
-  return [effective || c.model]
+  return [model]
 })
 
 const bucketLocked = computed(() => {
@@ -2428,16 +2621,33 @@ const showThinkingLevels = computed(() => {
   return !isFableSelection(chat.value?.model, chat.value?.thinking_level)
 })
 
-// Thinking level for the header chip. An empty thinking_level is a real,
-// selectable state — the picker renders it as "auto" (let the provider decide)
-// — so the chip has to name it too. Omitting the segment made "no level set"
-// indistinguishable from "the chip doesn't report levels". Blank only when the
-// model exposes no levels at all (e.g. Fable), where the segment is noise; a
-// level that is somehow set is always shown even then.
+// Thinking level for the header chip. An empty thinking_level means the user
+// left it at the provider default ("auto"), which the chip does not report —
+// only an explicitly chosen level gets a segment. "think:" keeps this segment
+// apart from the mode segment, whose default value is also "auto".
 const chipThinkingLabel = computed(() => {
-  const level = chat.value?.thinking_level || ''
-  if (level) return level
-  return showThinkingLevels.value ? 'auto' : ''
+  const level = (chat.value?.thinking_level || '').trim().toLowerCase()
+  // "auto" is the provider default, not a user-selected tuning knob. It is
+  // still available inside the picker, but repeating it in the compact header
+  // chip made the default look like an explicit mode.
+  return level && level !== 'auto' ? `think:${level}` : ''
+})
+
+// The permission mode (auto/bypass/manual/plan) decides whether tool calls
+// run silently or raise approval cards, so the chip names it next to the
+// model instead of leaving it discoverable only inside the picker.
+const chipModeLabel = computed(() => chat.value?.mode || 'auto')
+
+// The provider is already the chip's first segment, so a model id that
+// repeats it as a prefix ("opencode/deepseek-...") wastes the width budget
+// that now also carries the mode segment. The tooltip keeps the full id.
+const chipModelLabel = computed(() => {
+  const model = activeModelId.value || ''
+  const provider = chat.value?.provider || ''
+  if (!model) return 'select model'
+  return provider && model.startsWith(`${provider}/`)
+    ? model.slice(provider.length + 1)
+    : model
 })
 
 const inputPlaceholder = computed(() => {
@@ -3170,6 +3380,15 @@ function handleFileLinkClick(e: MouseEvent): void {
   }
 }
 
+// One delegated listener at the panel root serves every clickable thing the
+// markdown renderer emits. Code-block copy buttons live inside `v-html`
+// output that is rebuilt on each streamed token, so they can only be reached
+// by delegation — a per-button listener would be dropped on every re-render.
+function handlePanelClick(e: MouseEvent): void {
+  if (handleCodeCopyClick(e)) return
+  handleFileLinkClick(e)
+}
+
 const liveTraceMetaParts = computed(() => {
   let toolCount = 0
   let textCount = 0
@@ -3682,16 +3901,6 @@ function send() {
   const text = inputText.value.trim()
   const hasAttachments = store.pendingImages.length > 0 || store.pendingComments.length > 0 || store.pendingChatComments.length > 0
   if (!text && !hasAttachments) return
-  const planTargetMode = planCommandTargetMode(text, chat.value.mode)
-  if (planTargetMode) {
-    const originChatId = chat.value.chat_id
-    const returnMode = chat.value.mode
-    const submittedText = inputText.value
-    const submittedRevision = inputRevision.value
-    const action = planTargetMode === 'plan' ? 'enter' : 'exit'
-    void handlePlanCommand(action, originChatId, returnMode, submittedText, submittedRevision)
-    return
-  }
   if (text) recordSentPrompt(chat.value.chat_id, inputText.value)
   // Always "queue": when a response is in flight the backend buffers and
   // flushes on turn end; for a fresh turn this starts it.
@@ -3814,8 +4023,7 @@ function tierAlias(model: string): TierAlias | null {
 
 function tierForModel(model: string, bucket: BucketKey): TierAlias | null {
   if (bucket === 'codex') return null
-  const provider = bucket === 'claude_personal' ? 'ollama' : bucket
-  const tiers = modelsResponse.value?.alias_tiers?.[provider] || {}
+  const tiers = modelsResponse.value?.alias_tiers?.[bucket] || {}
   for (const [tier, target] of Object.entries(tiers)) {
     if (target === model) return tier as TierAlias
   }
@@ -3830,106 +4038,42 @@ function canonicalTier(model: string): string {
   return resolvedAlias || model
 }
 
-// Render the routing backend (Ollama / Anthropic / OpenRouter / Codex / custom)
-// as the operator in the brain chip. Falls back to the CLI provider when no
-// bucket is set, so chats in the legacy / auto state still show something
-// sensible ('claude' or 'codex') instead of going blank.
+// Render the vendor behind the chat as the operator in the brain chip. Falls
+// back to the CLI provider when no bucket is set, so a chat in the legacy /
+// auto state still shows something sensible instead of going blank.
 function routingBucketLabel(bucket: string | undefined, provider: string): string {
   if (!bucket) return provider
-  if (bucket === 'claude_personal') return 'ollama'
-  if (bucket === 'claude_work') return 'anthropic'
-  if (bucket.startsWith('custom:')) return 'custom'
+  if (bucket === 'claude') return 'anthropic'
   return bucket
 }
 
-// Capitalize the provider for the header chip (Ollama / Anthropic / OpenRouter /
-// Codex / custom name). Falls back to the bucket label when the bucket is not
-// one of the known routes.
-// Takes a NORMALISED bucket (activeBucket), not the raw ChatInfo.model_bucket.
-// The raw field carries legacy values like 'work' / 'personal' / '' that match
-// none of the cases below, so passing it through printed the workspace name
-// ("Work") where the provider belongs. activeBucket already folds those into
-// claude_work / claude_personal / openrouter / codex / custom:<id>.
+// Vendor name for the header chip, from the chat's provider.
 function routingProviderLabel(bucket: string | undefined, provider: string): string {
   const lower = routingBucketLabel(bucket, provider)
   if (!lower) return ''
-  if (lower === 'ollama') return 'Ollama'
   if (lower === 'anthropic') return 'Anthropic'
-  if (lower === 'openrouter') return 'OpenRouter'
   if (lower === 'codex') return 'Codex'
+  // Lower-case on purpose: that is how opencode brands itself.
+  if (lower === 'opencode') return 'opencode'
   if (lower === 'claude') return 'Claude'
-  if (lower === 'custom') {
-    if (bucket?.startsWith('custom:')) {
-      const id = bucket.slice('custom:'.length)
-      const cp = modelsResponse.value?.custom_providers?.find((item) => item.id === id)
-      return cp?.name || 'Custom'
-    }
-    return 'Custom'
-  }
   return lower.charAt(0).toUpperCase() + lower.slice(1)
 }
 
-function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
-  if (bucket.startsWith('custom:')) return ''
-  if (bucket === 'codex') return ''
-  if (bucket === 'openrouter') return 'openrouter'
-  return bucket === 'claude_personal' ? 'personal' : 'work'
-}
-
 function bucketLabel(bucket: BucketKey): string {
-  if (bucket.startsWith('custom:')) {
-    const id = bucket.slice('custom:'.length)
-    const provider = modelsResponse.value?.custom_providers?.find(item => item.id === id)
-    return provider ? `${provider.name} via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'}` : id
-  }
   return BUCKET_DEFS.find((def) => def.key === bucket)?.label || 'Claude'
 }
 
+// Which provider owns a model id. Membership in a provider's catalog is
+// authoritative; the `provider/model` shape is the fallback for an opencode id
+// the catalog has not reported yet.
 function bucketForSelectedModel(model: string): BucketKey {
-  if (model.startsWith('custom:')) {
-    const parts = model.split(':', 3)
-    if (parts[1]) return `custom:${parts[1]}`
-  }
   const response = modelsResponse.value
   if (response?.alias_tiers?.codex?.[model]) return 'codex'
   if ((response?.codex_models || []).includes(model)) return 'codex'
   if (model === CODEX_FABLE_PSEUDO_MODEL) return 'codex'
-  const openrouterModels = response?.openrouter_models || []
-  if (openrouterModels.includes(model) || (model.includes('/') && !model.includes(':'))) {
-    return 'openrouter'
-  }
-  const ollamaModels = response?.ollama_models || []
-  if (ollamaModels.includes(model) || model.includes(':')) {
-    return 'claude_personal'
-  }
-  return 'claude_work'
-}
-
-function effectiveModelForBucket(model: string, bucket: BucketKey): string {
-  if (bucket === 'codex') return model
-  const tier = tierAlias(model)
-  if (!tier) return model
-  if (bucket === 'openrouter') {
-    return modelsResponse.value?.alias_tiers?.openrouter?.[tier] || model
-  }
-  if (bucket === 'claude_personal') {
-    return modelsResponse.value?.alias_tiers?.ollama?.[tier] || model
-  }
-  return model
-}
-
-function routeKindFor(model: string, bucket: BucketKey): RouteKind {
-  if (bucket.startsWith('custom:')) return 'custom'
-  if (bucket === 'codex') return 'codex'
-  const effective = effectiveModelForBucket(model, bucket)
-  if (bucket === 'openrouter' || (effective.includes('/') && !effective.includes(':'))) {
-    return 'openrouter'
-  }
-  const local = modelsResponse.value?.ollama_local_models || []
-  if (local.includes(effective)) return 'ollama-local'
-  const ollama = modelsResponse.value?.ollama_models || []
-  if (ollama.includes(effective) || effective.includes(':')) return 'ollama'
-  return 'anthropic'
+  if ((response?.opencode_models || []).includes(model)) return 'opencode'
+  if (model.includes('/')) return 'opencode'
+  return 'claude'
 }
 
 
@@ -3940,17 +4084,14 @@ async function selectModel(value: string | string[], sectionKey = '') {
     return
   }
   const sectionBucket: Partial<Record<string, BucketKey>> = {
-    anthropic: 'claude_work',
+    anthropic: 'claude',
     codex: 'codex',
-    ollama: 'claude_personal',
-    openrouter: 'openrouter',
+    opencode: 'opencode',
   }
-  // The Anthropic section is an explicit handover to the Anthropic
-  // subscription: picking a tier there always routes to claude_work, never the
-  // currently-active Ollama/OpenRouter/Codex bucket. To change tier while
-  // staying on a concrete provider, pick that provider's real model instead.
+  // Picking from the Anthropic section is an explicit handover to Claude Code,
+  // never a tier change on whichever provider is active. To change tier while
+  // staying on a provider, pick that provider's own model instead.
   const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
-  const modelBucket = modelBucketForBucket(targetBucket)
   // A fable chat stores the real model, so comparing raw ids would make
   // "fable -> the plain model" look like re-picking what is already selected
   // and return without doing anything.
@@ -3967,20 +4108,17 @@ async function selectModel(value: string | string[], sectionKey = '') {
   }
   const isFablePseudo = model === CODEX_FABLE_PSEUDO_MODEL
   const realModel = isFablePseudo ? CODEX_FABLE_REAL_MODEL : model
-  const targetRoute = routeKindFor(realModel, targetBucket)
-  const currentRoute = routeKindFor(chat.value.model, activeBucket.value)
-  const customProvider = targetBucket.startsWith('custom:')
-    ? modelsResponse.value?.custom_providers?.find(item => item.id === targetBucket.slice('custom:'.length))
-    : undefined
+  // A handover is needed exactly when the provider changes: each runs its own
+  // CLI with its own session, so the new one has never seen this chat.
+  const targetRoute = targetBucket
+  const currentRoute = activeBucket.value
   const updates: {
     provider: ProviderKey
     model: string
-    model_bucket: ModelBucketValue
     thinking_level?: string
   } = {
-    provider: (customProvider?.runner || BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
+    provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
     model: realModel,
-    model_bucket: modelBucket,
   }
   if (isFablePseudo) {
     updates.thinking_level = CODEX_FABLE_LEVEL
@@ -4349,7 +4487,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
+defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut })
 </script>
 
 <style scoped>
@@ -4420,64 +4558,72 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
 
 .header-left {
   display: flex;
+  /* The close button is a 30px box, the breadcrumb is a one- or two-line block
+     of text: centring the two keeps the icon on the optical middle of whichever
+     the breadcrumb turns out to be. */
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-width: 0;
   text-align: left;
 }
 
-.close-btn {
-  background: none;
-  border: none;
-  color: var(--fg2);
-  cursor: pointer;
-  font-size: 20px;
-  padding: 0 4px;
-  line-height: 1;
-  font-family: var(--font);
-  min-width: 30px;
-  min-height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
+/* Sizing, hover fill and touch padding all come from PaneHeader's shared
+   .btn-icon rules, so this only sets the resting colour: the same quiet --fg3
+   as the trailing actions, since closing the chat is not the errand you came
+   here for. */
+.close-btn { color: var(--fg3); }
 .close-btn:hover { color: var(--fg); }
 
 .header-breadcrumb {
   display: flex;
   align-items: center;
-  gap: 8px;
+  column-gap: 6px;
   min-width: 0;
   flex: 1;
   position: relative;
 }
 
+/* Workspace and project together: where this chat lives. On one line it is the
+   same type size as the title - the hierarchy is carried by weight and colour,
+   because two font sizes centred in a flex row never quite share a baseline
+   (the title is an overflow:hidden box, so its baseline is synthesized) and the
+   near-miss is exactly what read as misaligned.
+   Not a flex row itself but inline text, so the whole scope ellipses as one
+   string when the header runs out of room instead of each crumb truncating on
+   its own. */
+.breadcrumb-scope {
+  font-size: var(--text-lg);
+  line-height: 1.3;
+  min-width: 0;
+  flex: 0 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Hue is workspace identity, so the crumb is tinted by data-workspace-color
    rather than inheriting whatever the active accent happens to be. */
 .breadcrumb-workspace {
-  display: inline-flex;
-  align-items: center;
-  font-size: var(--text-lg);
   color: var(--accent);
-  white-space: nowrap;
-  flex-shrink: 0;
 }
 
 @media (max-width: 600px) {
   /* The chat title is what matters on a phone; the crumb is orientation. */
   .breadcrumb-workspace { display: none; }
   .breadcrumb-workspace + .breadcrumb-separator { display: none; }
+  /* A chat in the implicit General project has no project crumb, so hiding the
+     workspace empties the scope. Drop the wrapper and its divider too, rather
+     than leave a bare "/" in front of the title. */
+  .breadcrumb-scope:not(:has(.breadcrumb-project)),
+  .breadcrumb-scope:not(:has(.breadcrumb-project)) + .breadcrumb-separator--title {
+    display: none;
+  }
 }
 
 .breadcrumb-project {
-  font-size: var(--text-lg);
   color: var(--fg2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   cursor: pointer;
   transition: color 120ms var(--ease);
-  flex-shrink: 0;
 }
 
 .breadcrumb-project:hover {
@@ -4486,12 +4632,17 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
 
 .breadcrumb-separator {
   color: var(--fg3);
-  /* Same step as the crumb either side of it. The hardcoded 16px here sat
-     visibly smaller than --text-lg once the font scale was applied, and did not
-     move with the Appearance setting at all. */
-  font-size: var(--text-lg);
   user-select: none;
+  /* Inside the scope the separator is inline text, so it needs its own breathing
+     room; the one that joins the scope to the title is a flex item and gets it
+     from the row's column-gap. */
+  margin: 0 0.3em;
   flex-shrink: 0;
+}
+.breadcrumb-separator--title {
+  /* A flex item, not inline text: the row's column-gap already spaces it. */
+  font-size: var(--text-lg);
+  margin: 0;
 }
 
 /* Compact project context popup, positioned below the breadcrumb.
@@ -4615,7 +4766,12 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
 
 .title-input {
   font-weight: 600;
-  font-size: 14px;
+  /* Same step as the title it replaces, so renaming does not resize the text
+     under the cursor. The literal 14px also ignored the font-scale setting. */
+  font-size: var(--text-lg);
+  /* The breadcrumb aligns text on its baseline; an input has one, but it is its
+     content's, which would hang the box below the crumb beside it. */
+  align-self: center;
   background: var(--bg);
   border: 1px solid var(--accent);
   border-radius: 4px;
@@ -4651,6 +4807,116 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat })
      against `.messages` (no explicit height) to 0 in some engines and left
      short/streaming chats stuck at the top with dead space below. */
   margin-top: auto;
+}
+
+.history-loading-card {
+  width: min(100%, 620px);
+  margin: auto 0 8px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg2) 82%, transparent);
+  animation: history-loading-enter 220ms ease-out both;
+}
+
+.history-loading-heading,
+.history-loading-inline {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+
+.history-loading-heading {
+  margin-bottom: 14px;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.history-loading-inline {
+  align-self: center;
+  padding: 4px 10px 2px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+
+.history-loading-spinner {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: history-loading-spin 0.8s linear infinite;
+}
+
+.history-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 78%;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg3) 70%, transparent);
+}
+
+.history-skeleton + .history-skeleton {
+  width: 88%;
+  margin-top: 10px;
+}
+
+.history-skeleton--user {
+  margin-left: auto;
+  border-radius: 14px 14px 2px 14px;
+}
+
+.history-skeleton-line {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: history-skeleton-sweep 1.4s ease-in-out infinite;
+}
+
+.history-skeleton-line--wide { width: 84%; }
+.history-skeleton-line--long { width: 92%; }
+.history-skeleton-line--medium { width: 68%; }
+.history-skeleton-line--short { width: 42%; }
+
+.history-loading-enter-active,
+.history-loading-leave-active {
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.history-loading-enter-from,
+.history-loading-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+@keyframes history-loading-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes history-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes history-skeleton-sweep {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .history-loading-card,
+  .history-loading-spinner,
+  .history-skeleton-line {
+    animation: none;
+  }
+  .history-loading-card { opacity: 0.9; }
 }
 
 .message-wrap {
@@ -5500,6 +5766,57 @@ details[open] > .activity-summary::before {
 .plan-mode-chip:active { transform: scale(0.96); }
 .plan-mode-chip:disabled { opacity: 0.55; cursor: wait; transform: none; }
 
+/* Mode row, rendered in the model picker popover's header slot. Mirrors
+   .thinking-levels below it in the footer slot: same label treatment, same
+   pill-chip row, so the popover reads as one cohesive "chat behavior"
+   picker instead of two different widgets glued together. */
+.mode-picker-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mode-picker-row__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg2);
+}
+
+.mode-picker-row__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mode-row-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.mode-row-chip:hover {
+  background: var(--bg3);
+}
+
+.mode-row-chip--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.mode-row-chip:disabled { opacity: 0.55; cursor: wait; }
+
 @keyframes bg-agents-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
@@ -5533,6 +5850,83 @@ details[open] > .activity-summary::before {
   padding: 0;
   background: transparent;
   font-size: var(--text-sm);
+}
+
+/* Fenced code blocks (lib/codeCopy.ts emits the wrapper + button). The rule is
+   anchored on .chat-panel rather than .message-content so it also covers the
+   code blocks inside activity traces and the streaming bubble. */
+/* The button sits in its own row above the block rather than floating over it:
+   on a phone-width block an overlay would cover the start of the code. */
+.chat-panel :deep(.code-block) {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 0;
+  margin: 6px 0;
+}
+
+.chat-panel :deep(.code-block pre) {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+}
+
+.chat-panel :deep(.code-copy-btn) {
+  position: relative;
+  margin-bottom: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+  /* Dimmed but always present: this PWA runs on phones, where :hover never
+     fires and a hover-only control would be unreachable. */
+  opacity: 0.6;
+  transition: opacity 120ms var(--ease), background 120ms var(--ease), color 120ms var(--ease);
+}
+
+/* Touch: grow the chip and expand its hit area to a full touch target without
+   moving anything around it. The expander is dropped for fine pointers, where
+   it would only steal clicks from the text next to the chip. */
+@media (hover: none) {
+  .chat-panel :deep(.code-copy-btn) {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .chat-panel :deep(.code-copy-btn::after) {
+    content: '';
+    position: absolute;
+    inset: calc(-1 * var(--space-2));
+    min-width: var(--touch);
+  }
+}
+
+.chat-panel :deep(.code-copy-btn:hover),
+.chat-panel :deep(.code-copy-btn:focus-visible) {
+  opacity: 1;
+  background: var(--bg3);
+  color: var(--fg);
+}
+
+.chat-panel :deep(.code-copy-btn:active) {
+  transform: scale(0.96);
+}
+
+.chat-panel :deep(.code-copy-btn[data-copy-state="copied"]) {
+  opacity: 1;
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+}
+
+.chat-panel :deep(.code-copy-btn[data-copy-state="failed"]) {
+  opacity: 1;
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, var(--border));
 }
 
 .message-content :deep(:is(h1, h2, h3, h4)) {
@@ -6125,9 +6519,57 @@ details[open] > .activity-summary::before {
   text-align: center;
   padding: 10px 12px;
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.archived-notice-row {
+  display: flex;
   align-items: center;
   justify-content: center;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* A footnote, not a component: no card, no border, no background. It reports
+   work the user did not ask for and does not need to act on, so it stays in the
+   muted register even once it has something to say. */
+.archived-postprocess {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--fg3);
+  text-align: center;
+  flex-wrap: wrap;
+}
+
+/* The single exception to the muted rule: a failed step is only ever visible
+   here, so it is allowed to say so. */
+.archived-postprocess.failed { color: var(--warning); }
+
+.archived-postprocess-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg3);
+  flex: 0 0 auto;
+  animation: archived-postprocess-breathe 2.6s ease-in-out infinite;
+}
+
+@keyframes archived-postprocess-breathe {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .archived-postprocess-dot { animation: none; opacity: 0.75; }
 }
 
 .image-btn {
@@ -6382,6 +6824,38 @@ details[open] > .activity-summary::before {
   border-color: var(--accent);
   box-shadow: inset 2px 0 0 var(--accent);
 }
+.question-option-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+/* Keeps a wrapped description aligned under its label rather than under the
+   badge. */
+.question-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* Keyboard chip: low-emphasis on purpose so it reads as a hint next to the
+   label rather than as numbering the model wrote. */
+.question-option-key {
+  flex: none;
+  min-width: 18px;
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  color: var(--fg2);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.question-option.selected .question-option-key {
+  color: var(--accent);
+  border-color: var(--accent);
+}
 .question-option-label { font-weight: 600; }
 .question-option-desc { font-size: 12px; color: var(--fg2); line-height: 1.3; }
 .question-other {
@@ -6581,12 +7055,12 @@ details[open] > .activity-summary::before {
   line-height: 1.4;
   font-family: var(--font);
   white-space: nowrap;
-  /* Three segments now (provider · model · thinking). The thinking level is
-     last, so a 220px clip ellipsised away the very thing the chip exists to
-     report; a long custom-provider name plus a tagged model id already filled
-     that budget on its own. Still bounded so the pill cannot crowd out the
-     chat title. */
-  max-width: min(320px, calc(100vw - 200px));
+  /* Four segments now (provider · model · mode · thinking). The trailing
+     segments are the very thing the chip exists to report, so the content is
+     kept short (the model segment drops a provider-repeating prefix) and the
+     budget sized for the four-segment shape. Still bounded so the pill cannot
+     crowd out the chat title. */
+  max-width: min(380px, calc(100vw - 200px));
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
@@ -6758,19 +7232,38 @@ details[open] > .activity-summary::before {
   }
   :deep(.header-title) { text-align: left; min-width: 0; }
   .header-left { min-width: 0; }
+  /* Two lines, not three. The header used to wrap workspace, project and title
+     into a line each, at --text-lg, a hardcoded 11px and --text-sm - the
+     workspace the biggest text in the header, the chat title the smallest, and
+     no divider left to explain the stack. Now the scope wraps as one quiet
+     eyebrow above the title, and the title is the largest thing in the block,
+     which is the order they matter in. */
   .header-breadcrumb {
     flex-wrap: wrap;
-    column-gap: 4px;
-    row-gap: 1px;
-    line-height: 1.15;
+    column-gap: 6px;
+    row-gap: 0;
   }
-  .breadcrumb-project {
+  .breadcrumb-scope {
     flex: 1 1 100%;
-    font-size: 11px;
-    line-height: 1.15;
-    max-width: 100%;
+    font-size: var(--text-xs);
+    line-height: 1.35;
   }
-  .breadcrumb-separator { display: none; }
+  /* The divider between scope and title only means anything while they share a
+     line. Stacked, the line break is the separator. */
+  .breadcrumb-separator--title { display: none; }
+  /* PaneHeader drops every pane title to --text-sm on narrow screens, which is
+     right for a title competing with a page tag and a wordmark. This header has
+     neither, and the title has its own full-width row, so it keeps body size and
+     stays the anchor of the block. Two-line clamp is inherited from PaneHeader. */
+  .header-breadcrumb .pane-title.chat-title {
+    font-size: var(--text-base);
+    line-height: 1.25;
+  }
+  /* Renaming keeps the layout it replaces: own row, same step as the title. */
+  .title-input {
+    flex: 1 1 100%;
+    font-size: var(--text-base);
+  }
   :deep(.header-actions) {
     flex-shrink: 0;
     gap: 6px;

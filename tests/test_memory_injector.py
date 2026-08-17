@@ -78,76 +78,56 @@ def test_system_prompt_payload_returns_instructions_for_empty() -> None:
     assert payload is not None
     assert payload["type"] == "preset"
     assert payload["preset"] == "claude_code"
-    assert "Ciaobot System Instructions" in payload["append"]
+    assert "Ciaobot core instructions" in payload["append"]
 
 
-def test_system_prompt_includes_gws_operational_notes() -> None:
-    """The gws integration notes moved out of the gws-shared skill and must
-    live in the system prompt so the agent gets them every turn."""
+def test_system_prompt_points_to_gws_wrapper() -> None:
+    """The core keeps only the routing rule; service detail lives in skills."""
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert "Google Workspace (gws)" in append
+    assert "Google Workspace calls go through" in append
     assert "scripts/gws-profile.sh" in append
-    # Key operational gotchas that used to live in gws-shared.
     assert "GWS_PROFILE" in append
-    assert "supportsAllDrives" in append
+    assert "supportsAllDrives" not in append
 
 
-def test_system_prompt_retries_gws_keychain_failures_outside_codex_sandbox() -> None:
-    """A Codex sandbox cannot always read macOS Keychain CA roots."""
+def test_system_prompt_keeps_provider_sandbox_detail_out_of_the_core() -> None:
+    """Provider-specific retry mechanics belong in the GWS skill."""
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert "no native root CA certificates found" in append
-    assert "sandbox_permissions: require_escalated" in append
+    assert "no native root CA certificates found" not in append
+    assert "sandbox_permissions: require_escalated" not in append
 
 
-def test_system_prompt_includes_url_reading_notes() -> None:
-    """PWA turns get their instructions from system_prompt.md, not the repo's
-    CLAUDE.md, so the defuddle-first rule has to live here or it never fires."""
+def test_system_prompt_delegates_url_detail_to_skills() -> None:
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert "Reading URLs" in append
-    assert "defuddle parse <url> --md" in append
-    # WebFetch must stay described as the fallback, not an equal option.
-    assert "WebFetch" in append
-    assert "web-research" in append
+    assert "installed skills" in append
+    assert "Reading URLs" not in append
+    assert "defuddle parse" not in append
 
 
-def test_system_prompt_includes_issue_labeling_notes() -> None:
-    """Every gh issue create from a chat turn must apply the convention;
-    a drift test pins the table so a future edit cannot silently drop it."""
+def test_system_prompt_delegates_issue_labeling_to_skills() -> None:
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert "Issue labeling" in append
-    # Title-prefix -> label mapping is the rule. Each row must stay.
-    for prefix, label in (
-        ("[Bug]", "bug"),
-        ("[Feature]", "enhancement"),
-        ("[Docs]", "documentation"),
-        ("[Chore]", "chore"),
-    ):
-        assert prefix in append, f"missing title prefix {prefix}"
-        assert label in append, f"missing label {label}"
-    # The anonymous bug-report form was retired on 2026-07-30, so nothing can
-    # open a `[Report]` issue any more. The prompt must say so rather than
-    # listing it as a live option.
-    assert "retired `[Report]` prefix" in append
+    assert "installed skills" in append
+    assert "Issue labeling" not in append
 
 
-def test_system_prompt_includes_ciaobot_diagnostics_notes() -> None:
+def test_system_prompt_keeps_diagnostic_entrypoint_compact() -> None:
     """Installed agents should know which local logs to inspect for support."""
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert "Ciaobot Diagnostics and Issue Reports" in append
+    assert "When diagnosing Ciaobot itself" in append
     assert ".runtime/server_errors.log" in append
     assert ".runtime/job_runs.jsonl" in append
-    assert ".runtime/ciao.stderr.log" in append
-    assert "GitHub issue" in append
+    assert ".runtime/ciao.stderr.log" not in append
+    assert "Public GitHub issues" in append
 
 
 def test_system_prompt_includes_project_canonical_doc_notes() -> None:
@@ -155,25 +135,22 @@ def test_system_prompt_includes_project_canonical_doc_notes() -> None:
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert "Project canonical docs" in append
-    assert "[Canonical doc:" in append
-    assert "log.md" in append
+    assert "canonical document" in append
+    assert "meaningful decisions" in append
 
 
-def test_system_prompt_includes_memory_and_vault_notes() -> None:
-    """Agents should know bounded memory, vault search, and recall CLIs every session."""
+def test_system_prompt_includes_native_memory_and_vault_routing() -> None:
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert "Memory and vault" in append
-    assert "ciao memory" in append
-    assert "ciao vault-search" in append
-    assert "ciao vault-index" in append
-    assert "ciao vault-lint" in append
-    assert "ciao sync-skills" in append
-    assert "ciao create-chat" in append
-    assert "delegate_spawn" in append
-    assert "Memory-Proposals.md" in append
+    assert "ciao:memory" in append
+    assert "ciao:profile" in append
+    assert "vault_search" in append
+    assert "private working evidence" in append
+    assert "internal sentinels" in append
+    assert "memory_update" in append
+    assert "ciao memory" not in append
+    assert "ciao vault-search" not in append
 
 
 def test_mcp_system_prompt_strips_legacy_control_recipes(tmp_path: Path) -> None:
@@ -192,27 +169,13 @@ def test_mcp_system_prompt_strips_legacy_control_recipes(tmp_path: Path) -> None
     assert "ciao vault-search" not in mcp_append
     assert "ciao vault-lint" not in mcp_append
     assert "ciao sync-skills" not in mcp_append
-    # Those recipes remain on the legacy path.
-    assert "ciao create-chat" in legacy_append
-    assert "ciao vault-lint" in legacy_append
-
-    # It no longer injects specific MCP tool-name equivalents; a single nudge to
-    # prefer the typed tools replaces the recipe block.
-    assert "prefer them over curl, the ciao CLI" in mcp_append
-    assert "Ciaobot MCP control plane" not in mcp_append
-    assert "memory_read" not in mcp_append
-
-    # Bounded memory has no MCP tool surface — both arms edit the CLAUDE.md
-    # `ciao:memory` / `ciao:profile` regions in place with `Edit`. The MCP
-    # path must not fabricate a dedicated "MCP memory tools" claim.
-    assert "MCP memory tools" not in mcp_append
-    assert "there is no `ciao memory` command" in mcp_append
-    assert "there is no `ciao memory` command" in legacy_append
-    assert "Edit the `ciao:memory`" in mcp_append
-    assert "ciao:profile" in mcp_append
-
-    # Stripping recipes makes the MCP prompt strictly shorter than legacy.
-    assert len(mcp_append) < len(legacy_append)
+    # Legacy transport recipes are no longer copied into either arm.
+    assert "ciao create-chat" not in legacy_append
+    assert "ciao vault-lint" not in legacy_append
+    assert "ciao create-chat" not in mcp_append
+    assert "Prefer the managed Ciaobot MCP tools" in mcp_append
+    assert "memory_update" in mcp_append
+    assert "there is no `ciao memory` command" not in mcp_append
 
 
 def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
@@ -221,7 +184,7 @@ def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
     assert payload["type"] == "preset"
     assert payload["preset"] == "claude_code"
     assert payload["exclude_dynamic_sections"] is True
-    assert "Ciaobot System Instructions" in payload["append"]
+    assert "Ciaobot core instructions" in payload["append"]
     assert "hello memory" in payload["append"]
 
 
@@ -234,7 +197,7 @@ def test_system_prompt_payload_preserves_existing_append() -> None:
     payload = mi.system_prompt_payload("memory block", base_system_prompt=base)
     assert payload is not None
     assert payload["append"].startswith("operator hint")
-    assert "Ciaobot System Instructions" in payload["append"]
+    assert "Ciaobot core instructions" in payload["append"]
     assert "memory block" in payload["append"]
 
 
@@ -323,4 +286,4 @@ def test_noncanonical_or_ambiguous_expiration_tags_stay_visible(
 def test_system_prompt_payload_includes_expertise_header() -> None:
     payload = mi.system_prompt_payload("memory block")
     assert payload is not None
-    assert "[SYSTEM EXPERTISE: SOPs & Durable Memory]" in payload["append"]
+    assert "[SYSTEM EXPERTISE: Ciaobot core]" in payload["append"]

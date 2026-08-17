@@ -20,14 +20,22 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ciao import vault_index
+from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
 from ciao.loops import publish_loops_changed
-from ciao.memory_tool import resolve_region
+from ciao.memory_tool import memory_status as memory_status_payload
+from ciao.memory_tool import resolve_region, update_region
 from ciao.models import ControlSurface
 from ciao.web.project_chats import UnknownModelError, _MAX_ACTIVE_DELEGATES
 from ciao.schedules import ScheduleEntry, compute_next_run
 
 logger = logging.getLogger(__name__)
+
+# MCP needs to distinguish an omitted optional field from an explicit JSON
+# null. ``None`` is a meaningful reset for workspace connector settings and
+# denylists, so a normal ``= None`` default loses information before the
+# control plane sees it.
+_UNSET = object()
 
 # One grammar for a proposal bullet, shared by the list and dismiss paths. The
 # trailing `_(from: …)_` source tag is optional and captured when present.
@@ -115,6 +123,7 @@ class CiaoControlPlane:
         startup_tracker: Any | None = None,
         lifecycle_callback: Callable[[int], Any] | None = None,
         connection_tracker: Any | None = None,
+        background_runner: Any | None = None,
     ) -> None:
         self.config = config
         self.pcm = project_chat_manager
@@ -128,6 +137,9 @@ class CiaoControlPlane:
         # Optional: the app-wide ConnectionTracker, used by file_surface to
         # report real connected clients instead of a per-turn stream proxy.
         self.connection_tracker = connection_tracker
+        # Optional: the BackgroundRunner backing the background_run_* tools.
+        # Unset on legacy-only instances and in most tests.
+        self.background = background_runner
 
     def set_lifecycle_callback(self, callback: Callable[[int], Any]) -> None:
         """Attach the server restart callback after uvicorn is constructed."""
@@ -276,6 +288,27 @@ class CiaoControlPlane:
         chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
         return str(getattr(chat, "mode", "auto") or "auto")
 
+    def _child_mode(self, principal: McpPrincipal, requested: str | None) -> str:
+        """Keep an MCP-created child at its caller's permission ceiling.
+
+        The child starts its first turn immediately, so accepting a stronger
+        mode from model-authored tool arguments would let a normal/auto chat
+        manufacture a bypass session without an operator approval. The
+        provider enforces the returned mode as its session permission rules;
+        keeping the clamp here also covers Codex and Claude child chats.
+        """
+        parent_mode = self.chat_mode(principal)
+        if parent_mode not in {"normal", "plan", "auto", "bypass"}:
+            parent_mode = "normal"
+        if requested and requested != parent_mode:
+            logger.warning(
+                "Clamping child chat mode %r to parent %r for %s",
+                requested,
+                parent_mode,
+                principal.chat_id or "unscoped MCP session",
+            )
+        return parent_mode
+
     def _vault_root(self, principal: McpPrincipal) -> Path:
         workspace = self._workspace(principal)
         resolver = getattr(self.pcm, "_workspace_vault_root", None)
@@ -319,6 +352,49 @@ class CiaoControlPlane:
             "active_chat_ids": self.pcm.active_chat_ids(),
             "startup": self.startup_tracker.to_dict() if self.startup_tracker else None,
         })
+
+    def memory_status(self, principal: McpPrincipal) -> dict[str, Any]:
+        """Report native guide memory usage without copying its contents."""
+        self._workspace(principal)
+        guide = Path(self.config.workspace_root) / "CLAUDE.md"
+        return _ok(memory_status_payload(
+            guide,
+            memory_char_limit=int(getattr(self.config, "memory_char_limit", 2200)),
+            user_char_limit=int(getattr(self.config, "user_char_limit", 1375)),
+        ))
+
+    def memory_update(
+        self,
+        principal: McpPrincipal,
+        region: str,
+        *,
+        action: Literal["add", "replace", "remove"],
+        entry: str = "",
+        match: str = "",
+    ) -> dict[str, Any]:
+        """Apply one bounded edit to the native ``CLAUDE.md`` memory region."""
+        self._workspace(principal)
+        if action not in {"add", "replace", "remove"}:
+            raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
+        canonical = resolve_region(region)
+        limit = (
+            int(getattr(self.config, "memory_char_limit", 2200))
+            if canonical == "memory"
+            else int(getattr(self.config, "user_char_limit", 1375))
+        )
+        guide = Path(self.config.workspace_root) / "CLAUDE.md"
+        try:
+            result = update_region(
+                guide,
+                canonical,
+                action=action,
+                entry=entry,
+                match=match,
+                char_limit=limit,
+            )
+        except ValueError as exc:
+            raise ControlPlaneError("memory_update_invalid", str(exc)) from exc
+        return _ok(result)
 
     # ---- memory proposals ----------------------------------------------
 
@@ -387,6 +463,118 @@ class CiaoControlPlane:
             "text": proposal_text,
             "dismissed": True,
         })
+
+    # ---- workspaces ----------------------------------------------------
+
+    def workspaces_list(self, principal: McpPrincipal) -> dict[str, Any]:
+        """All configured logical workspaces, not just the active one."""
+        from ciao.workspaces import workspace_to_dict
+
+        return _ok(
+            {"workspaces": [workspace_to_dict(item, self.config) for item in self.config.workspaces.values()]}
+        )
+
+    def workspace_create(
+        self,
+        principal: McpPrincipal,
+        *,
+        name: str,
+        default_provider: str = "claude",
+        default_model: str = "",
+        gws_profile: str = "",
+        disallowed_tools: Any = _UNSET,
+        claude_ai_mcps: Any = _UNSET,
+        color: str = "",
+    ) -> dict[str, Any]:
+        """Register a new logical workspace under the standard vault folder."""
+        from ciao.workspaces import persist_workspaces, workspace_from_request, workspace_to_dict
+
+        data: dict[str, Any] = {
+            "name": name,
+            "default_provider": default_provider,
+            "default_model": default_model,
+            "gws_profile": gws_profile,
+        }
+        if disallowed_tools is not _UNSET:
+            data["disallowed_tools"] = disallowed_tools
+        if claude_ai_mcps is not _UNSET:
+            data["claude_ai_mcps"] = claude_ai_mcps
+        if color:
+            data["color"] = color
+        workspace = workspace_from_request(data, config=self.config)
+        self.config.workspaces[workspace.name] = workspace
+        persist_workspaces(self.config)
+        self._refresh_workspace_registry()
+        return _ok(workspace_to_dict(workspace, self.config))
+
+    def workspace_update(
+        self,
+        principal: McpPrincipal,
+        *,
+        name: str,
+        default_provider: str | None = None,
+        default_model: str | None = None,
+        gws_profile: str | None = None,
+        disallowed_tools: Any = _UNSET,
+        claude_ai_mcps: Any = _UNSET,
+        color: str = "",
+    ) -> dict[str, Any]:
+        """Update a registered workspace. Omitted fields keep their values."""
+        from ciao.workspaces import persist_workspaces, workspace_from_request, workspace_to_dict
+
+        existing = self.config.workspace(name)
+        if existing is None:
+            raise ControlPlaneError("workspace_not_found", f"Workspace '{name}' was not found.")
+        data: dict[str, Any] = {"name": name}
+        if default_provider is not None:
+            data["default_provider"] = default_provider
+        if default_model is not None:
+            data["default_model"] = default_model
+        if gws_profile is not None:
+            data["gws_profile"] = gws_profile
+        if disallowed_tools is not _UNSET:
+            data["disallowed_tools"] = disallowed_tools
+        if claude_ai_mcps is not _UNSET:
+            data["claude_ai_mcps"] = claude_ai_mcps
+        if color:
+            data["color"] = color
+        workspace = workspace_from_request(data, config=self.config, existing=existing)
+        self.config.workspaces[workspace.name] = workspace
+        persist_workspaces(self.config)
+        self._refresh_workspace_registry()
+        return _ok(workspace_to_dict(workspace, self.config))
+
+    def workspace_delete(self, principal: McpPrincipal, *, name: str) -> dict[str, Any]:
+        """Delete a registered workspace. The last workspace cannot be deleted."""
+        if self.config.workspace(name) is None:
+            raise ControlPlaneError("workspace_not_found", f"Workspace '{name}' was not found.")
+        if len(self.config.workspaces) <= 1:
+            raise ControlPlaneError(
+                "last_workspace", "Cannot delete the last workspace."
+            )
+        if name == principal.workspace:
+            # The caller lives inside the workspace being deleted; dropping it
+            # mid-turn would invalidate the calling scope, so wait until idle.
+            return self._defer_until_chat_idle(
+                principal,
+                "workspace_delete",
+                lambda: self._delete_workspace(name),
+            )
+        return _ok(self._delete_workspace(name))
+
+    def _delete_workspace(self, name: str) -> dict[str, Any]:
+        from ciao.workspaces import persist_workspaces
+
+        self.config.workspaces.pop(name, None)
+        persist_workspaces(self.config)
+        self._refresh_workspace_registry()
+        return {"deleted": name}
+
+    def _refresh_workspace_registry(self) -> None:
+        """Notify the project-chat manager after a registry mutation."""
+        refresh = getattr(self.pcm, "refresh_workspaces", None)
+        if callable(refresh):
+            refresh()
 
     # ---- vault ---------------------------------------------------------
 
@@ -518,6 +706,7 @@ class CiaoControlPlane:
         prompt: str | None = None,
     ) -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
+        mode = self._child_mode(principal, mode)
         chat = self.pcm.create_chat(
             project.project_id, title=title, provider=provider, model=model, mode=mode
         )
@@ -545,12 +734,16 @@ class CiaoControlPlane:
         mode: str | None = None,
         thinking_level: str | None = None,
         project_id: str | None = None,
-        model_bucket: str | None = None,
         control_surface: str | None = None,
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if project_id is not None:
             self._project(principal, project_id)
+        if mode is not None:
+            # A normal/auto MCP caller must not upgrade its own or another
+            # chat to bypass through the auto-approved metadata tool. Keep the
+            # same ceiling used for newly-created child chats.
+            mode = self._child_mode(principal, mode)
         updated = self.pcm.update_chat(
             chat_id,
             title=title,
@@ -559,7 +752,6 @@ class CiaoControlPlane:
             mode=mode,
             thinking_level=thinking_level,
             project_id=project_id,
-            model_bucket=model_bucket,
         )
         if updated is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
@@ -651,7 +843,6 @@ class CiaoControlPlane:
         provider: str,
         model: str,
         messages: list[dict[str, Any]] | None = None,
-        model_bucket: str = "",
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if chat_id == principal.chat_id:
@@ -663,7 +854,6 @@ class CiaoControlPlane:
                     provider=provider.strip(),
                     model=model.strip(),
                     messages=[row for row in (messages or []) if isinstance(row, dict)],
-                    model_bucket=model_bucket.strip(),
                 ),
             )
         chat = self.pcm.handover_chat(
@@ -671,7 +861,6 @@ class CiaoControlPlane:
             provider=provider.strip(),
             model=model.strip(),
             messages=[row for row in (messages or []) if isinstance(row, dict)],
-            model_bucket=model_bucket.strip(),
         )
         if chat is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
@@ -769,7 +958,6 @@ class CiaoControlPlane:
         title: str = "",
         provider: str | None = None,
         model: str | None = None,
-        model_bucket: str | None = None,
         mode: str | None = None,
         delegation_id: str = "",
         project_id: str | None = None,
@@ -787,6 +975,7 @@ class CiaoControlPlane:
             )
         if not prompt.strip():
             raise ControlPlaneError("empty_prompt", "prompt is required.")
+        mode = self._child_mode(principal, mode)
         active = self.pcm.active_delegate_count(parent.chat_id)
         if active >= _MAX_ACTIVE_DELEGATES:
             raise ControlPlaneError(
@@ -802,7 +991,6 @@ class CiaoControlPlane:
                 title=title.strip() or "Delegate",
                 provider=provider,
                 model=model,
-                model_bucket=model_bucket,
                 mode=mode,
                 spawned_from_chat_id=parent.chat_id,
                 delegation_id=delegation_id.strip(),
@@ -839,6 +1027,114 @@ class CiaoControlPlane:
             "active": sum(1 for r in rows if r["running"] and not r["archived"]),
             "limit": _MAX_ACTIVE_DELEGATES,
         })
+
+    # ---- background command runs ----------------------------------------
+
+    def _background_runner(self) -> Any:
+        if self.background is None:
+            raise ControlPlaneError(
+                "unavailable",
+                "Background command runs are not available on this server.",
+                retryable=True,
+            )
+        return self.background
+
+    def _background_payload(
+        self, run: BackgroundRun, *, tail: list[str] | None = None
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "run_id": run.run_id,
+            "label": run.label,
+            "status": run.status,
+            "exit_code": run.exit_code,
+            "pid": run.pid,
+            "cmd": list(run.cmd),
+            "cwd": run.cwd,
+            "timeout_s": run.timeout_s,
+            "started_at": run.started_at,
+            "ended_at": run.ended_at,
+            "error": run.error,
+            "log_path": str(self._background_runner().log_path(run.run_id)),
+        }
+        if tail is not None:
+            payload["last_lines"] = tail
+        return payload
+
+    def _owned_run(self, principal: McpPrincipal, run_id: str) -> BackgroundRun:
+        """Resolve a run the calling chat owns, or raise ``run_not_found``.
+
+        A run belongs to exactly the chat that started it. A run owned by
+        another chat reports as *not found* rather than *forbidden*: the run id
+        is otherwise an existence oracle for work in chats the caller cannot
+        see. The workspace check is defence in depth for a stale record whose
+        chat has since moved.
+        """
+        value = (run_id or "").strip()
+        if not value:
+            raise ControlPlaneError("run_required", "run_id is required.")
+        run: BackgroundRun | None = self._background_runner().get(value)
+        if (
+            run is None
+            or run.parent_chat_id != principal.chat_id
+            or (run.workspace and run.workspace != principal.workspace)
+        ):
+            raise ControlPlaneError("run_not_found", f"Run '{value}' was not found.")
+        return run
+
+    async def background_run_start(
+        self,
+        principal: McpPrincipal,
+        *,
+        cmd: Any,
+        cwd: str = "",
+        env: dict[str, Any] | None = None,
+        timeout_s: int = 1800,
+        label: str = "",
+    ) -> dict[str, Any]:
+        """Start a command in a tracked background subprocess.
+
+        The run is attributed to the calling chat and inherits its workspace,
+        so ``background_run_status``/``_cancel`` from any other chat cannot see
+        or touch it. Nothing here builds a shell command line: ``cmd`` is an
+        argv list handed to ``create_subprocess_exec``.
+        """
+        chat, project = self._chat_scope(principal, "")
+        workspace = self._workspace(principal, project.workspace)
+        try:
+            run: BackgroundRun = await self._background_runner().start_run(
+                parent_chat_id=chat.chat_id,
+                project_id=project.project_id,
+                workspace=workspace,
+                cmd=cmd,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                label=label,
+            )
+        except BackgroundRunError as exc:
+            raise ControlPlaneError(exc.code, str(exc)) from exc
+        return _ok(self._background_payload(run))
+
+    def background_run_status(
+        self, principal: McpPrincipal, run_id: str, lines: int = TAIL_LINES
+    ) -> dict[str, Any]:
+        run = self._owned_run(principal, run_id)
+        tail = self._background_runner().tail(run.run_id, max(1, min(int(lines), 500)))
+        return _ok(self._background_payload(run, tail=tail))
+
+    async def background_run_cancel(
+        self, principal: McpPrincipal, run_id: str
+    ) -> dict[str, Any]:
+        run = self._owned_run(principal, run_id)
+        try:
+            updated: BackgroundRun = await self._background_runner().cancel(run.run_id)
+        except BackgroundRunError as exc:
+            raise ControlPlaneError(exc.code, str(exc)) from exc
+        return _ok(
+            self._background_payload(
+                updated, tail=self._background_runner().tail(updated.run_id)
+            )
+        )
 
     # ---- schedules/loops ----------------------------------------------
 
@@ -909,6 +1205,7 @@ class CiaoControlPlane:
             run_at_date=values.get("run_at_date"),
             web_chat_id=web_chat_id,
             web_project_id=web_project_id,
+            web_project_name=getattr(project, "name", "") if project is not None else "",
             workspace=workspace,
             archive_policy=str(values.get("archive_policy") or "manual"),
             title=str(values.get("title") or ""),
@@ -931,6 +1228,7 @@ class CiaoControlPlane:
             run_at_date=preview["run_at_date"],
             web_chat_id=preview["web_chat_id"],
             web_project_id=preview["web_project_id"],
+            web_project_name=preview["web_project_name"],
             workspace=preview["workspace"],
             archive_policy=preview["archive_policy"],
             title=preview["title"],
@@ -1410,4 +1708,3 @@ class CiaoControlPlane:
             record["status"] = "failed"
             record["error"] = str(exc)
             record["completed_at"] = datetime.now(UTC).isoformat()
-

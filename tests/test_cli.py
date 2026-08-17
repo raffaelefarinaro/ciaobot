@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import plistlib
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -513,6 +515,88 @@ def test_setup_yes_overrides_repoint_guard(tmp_path: Path) -> None:
     assert (second / ".env").exists()
 
 
+def _stub_setup_for_launchd(workspace: Path, **kwargs) -> list[Path]:
+    root = workspace.expanduser().resolve()
+    (root / ".runtime").mkdir(parents=True)
+    (root / ".runtime" / "setup-token").write_text("test-token\n", encoding="utf-8")
+    launch_agents = Path(kwargs["launch_agents_dir"])
+    launch_agents.mkdir(parents=True, exist_ok=True)
+    (launch_agents / "com.ciao.server.plist").write_text("plist", encoding="utf-8")
+    return []
+
+
+def _launchd_setup_argv(workspace: Path, launch_agents: Path) -> list[str]:
+    return [
+        "setup",
+        "--workspace",
+        str(workspace),
+        "--auth-token",
+        "test-token",
+        "--launch-agents-dir",
+        str(launch_agents),
+        "--app-dir",
+        str(workspace / "Applications"),
+        "--load-launchd",
+    ]
+
+
+def test_setup_quiets_only_the_expected_launchd_unload_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[0] != "launchctl":
+            return real_run(command, *args, **kwargs)
+        calls.append((list(command), kwargs))
+        return subprocess.CompletedProcess(
+            command, 5 if command[1] == "unload" else 0
+        )
+
+    monkeypatch.setattr(cli, "setup_workspace", _stub_setup_for_launchd)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert (
+        cli.main(_launchd_setup_argv(tmp_path / "workspace", tmp_path / "LaunchAgents"))
+        == 0
+    )
+
+    assert calls[0][0][1] == "unload"
+    assert calls[0][1]["stderr"] is subprocess.DEVNULL
+    assert "stdout" not in calls[0][1]
+    assert calls[1][0][1] == "load"
+    assert calls[1][1] == {"check": False}
+
+
+def test_setup_preserves_load_failure_status_and_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[0] != "launchctl":
+            return real_run(command, *args, **kwargs)
+        calls.append((list(command), kwargs))
+        if command[1] == "load" and kwargs.get("stderr") is not subprocess.DEVNULL:
+            print("launchctl: load failed", file=sys.stderr)
+        return subprocess.CompletedProcess(command, 5 if command[1] == "load" else 0)
+
+    monkeypatch.setattr(cli, "setup_workspace", _stub_setup_for_launchd)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = cli.main(
+        _launchd_setup_argv(tmp_path / "workspace", tmp_path / "LaunchAgents")
+    )
+
+    assert result == 5
+    assert calls[1][1] == {"check": False}
+    assert capsys.readouterr().err == "launchctl: load failed\n"
+
+
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     ours = apps / "Ciao.app" / "Contents"
@@ -786,9 +870,23 @@ def test_setup_url_reads_port_from_env(tmp_path: Path, capsys) -> None:
 
 
 def test_auth_print_only_outputs_terminal_command(capsys) -> None:
-    assert cli.main(["auth", "ollama", "--print-only"]) == 0
+    assert cli.main(["auth", "opencode", "--print-only"]) == 0
 
-    assert capsys.readouterr().out.strip() == "ollama signin"
+    assert capsys.readouterr().out.strip().endswith("auth login")
+
+
+def test_auth_print_only_opencode_does_not_require_installation(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda: None)
+
+    assert cli.main(["auth", "opencode", "--print-only"]) == 0
+
+    assert capsys.readouterr().out.strip() == "opencode auth login"
+
+
+def test_auth_rejects_a_non_runtime_provider(capsys) -> None:
+    """Only the three runtime providers have a login; nothing else is offered."""
+    with pytest.raises(SystemExit):
+        cli.main(["auth", "ollama", "--print-only"])
 
 
 def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:
@@ -828,27 +926,21 @@ def test_vault_index_accepts_arbitrary_workspace_name(monkeypatch) -> None:
     assert called[0].workspace == "client"
 
 
-def test_create_chat_accepts_configured_workspace_and_bucket(monkeypatch) -> None:
+def test_create_chat_accepts_a_configured_workspace(monkeypatch) -> None:
     called = []
     monkeypatch.setattr(cli, "_create_chat_command", lambda args: called.append(args) or 0)
 
-    assert (
-        cli.main(
-            [
-                "create-chat",
-                "--prompt",
-                "hello",
-                "--workspace",
-                "client",
-                "--model-bucket",
-                "anthropic",
-            ]
-        )
-        == 0
-    )
+    assert cli.main(["create-chat", "--prompt", "hello", "--workspace", "client"]) == 0
 
     assert called[0].workspace == "client"
-    assert called[0].model_bucket == "anthropic"
+
+
+def test_create_chat_rejects_the_removed_model_bucket_flag(monkeypatch) -> None:
+    """The bucket named which upstream a tier alias resolved to; nothing reads it."""
+    monkeypatch.setattr(cli, "_create_chat_command", lambda args: 0)
+
+    with pytest.raises(SystemExit):
+        cli.main(["create-chat", "--prompt", "hi", "--model-bucket", "anthropic"])
 
 
 def test_create_chat_command_uses_active_workspace_without_name_clamp(

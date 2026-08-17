@@ -683,6 +683,7 @@ import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace
 import { colorForWorkspace } from '../lib/workspaceColors'
 import { archiveMenuLabel as menuLabel, archiveConfirmMessage } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
+import { askPrompt } from '../lib/prompt'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1020,11 +1021,21 @@ function toggleSubchats(chatId: string) {
   }
 }
 
+// `window.prompt` cannot be used here: wry's WKUIDelegate never shows it, so in
+// the desktop app it returned null and this button did nothing at all. See
+// lib/prompt.
 async function addProject() {
-  const name = prompt('Project name:')
+  const name = await askPrompt('Project name', { title: 'New project' })
   if (!name) return
-  const p = await store.createProject(name)
-  expandedProjects.add(p.project_id)
+  try {
+    const p = await store.createProject(name)
+    expandedProjects.add(p.project_id)
+  } catch (e) {
+    // A failed create used to reject silently, leaving the same "nothing
+    // happened" symptom the missing dialog caused. `alert` is also a no-op in
+    // the desktop webview, so surface it as a toast.
+    store.pushErrorToast('Could not create project', errorMessage(e))
+  }
 }
 
 function workspaceLabel(name: string): string {
@@ -1170,7 +1181,13 @@ async function setRetry(chatId: string) {
   const lastUser = [...msgs].reverse().find(m => m.role === 'user')
   const text = lastUser?.content?.trim()
   if (!text) {
-    alert('Open the chat or type a message first. No user turn found to retry.')
+    // Not `alert`: it is a no-op in the desktop webview, so the menu entry
+    // looked broken rather than unavailable.
+    store.pushToast({
+      chat_id: '',
+      title: 'Nothing to retry',
+      body: 'Open the chat or send a message first — there is no user turn to retry.',
+    })
     return
   }
   await store.setChatRetry(chatId, text, lastUser?.images)
@@ -1466,7 +1483,13 @@ async function confirmDeleteChat(chatId: string) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-1);
+  /* No gap: the label carries its own leading space instead. A collapsed label
+     is max-width:0, but a flex gap is reserved whether or not the item beside
+     it has width - so on an icons-only row the 4px still counted, pushing the
+     glyph 2px left of the pill's centre and leaving twice as much air on its
+     right. As padding on the label it disappears with the label, because
+     border-box folds it into that max-width:0. */
+  gap: 0;
   /* min-width, not width: the active item grows to fit its label. */
   min-width: 30px;
   height: 30px;
@@ -1494,6 +1517,8 @@ async function confirmDeleteChat(chatId: string) {
 .nav-item-label {
   max-width: 0;
   overflow: hidden;
+  /* The gap that used to live on .nav-item; see the note there. */
+  padding-inline-start: var(--space-1);
   color: inherit;
   font-family: var(--font-mono);
   font-size: var(--text-xs);

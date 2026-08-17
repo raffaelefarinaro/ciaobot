@@ -34,7 +34,13 @@ Do these on `develop` (or a short prep branch merged into develop) **before** ru
    - Inspect applied edits with `git diff`; keep, amend, or discard before committing. Explicitly tell the user why any finding is deferred.
    A release is the checkpoint where small messes get paid down, not deferred further. `/code-review` nominally covers the cleanup angles too, but on a large diff its findings cap spends every slot on correctness and the cleanup tail is dropped — so on a release, **run `/simplify` as well**. In v0.6.0 it was the only pass that caught a merge resolution which had silently deleted a feature's markup while leaving ~90 lines of its script wired up and unreachable. Only skip `/code-review` if it is genuinely absent from the environment (check with the `Skill` tool / `/help`) — if so, say that explicitly to the user and do the equivalent review by hand instead of silently moving on. Everyday feature PRs use `skills/pr/SKILL.md` (`/pr`) for the same gate on the branch diff.
 3. **Dependencies.** The release tool checks the Python/npm dependencies used to build the app and prints available updates as `[auto|manual] [safe|major]`; `auto`-flagged ones are bumped on `--apply`, the rest are only reported. These registries are build inputs, not end-user installation channels. Run a plan-only pass first, then decide whether to adopt any `manual` updates in a separate commit before releasing. Don't blanket-upgrade majors as part of a release.
-4. **Docs.** Update anything the change touched: `README.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `PWA_API.md` (any new/changed state-changing route **must** be documented here).
+4. **Docs — sync, then prove it.** The docs must describe the product as it is about to ship, not as it was at the last tag. The sync is partly mechanical and partly a judgment call:
+   - **The mechanical gate.** `tests/test_architecture_doc.py`, `tests/test_env_vars_documented.py`, and `tests/test_pwa_api_docs.py` fail when a `ciao/` module is missing from `docs/ARCHITECTURE.md`, a `CIAO_*` env var is missing from `INTEGRATIONS.md`, or a route is missing from `PWA_API.md` (state-changing routes also need an Agent recipe). They run inside `pytest tests/` (so `_run_checks` catches them), but run them explicitly **before** the cut — a doc failing after `--apply` has already bumped and committed means a revert-and-rerun:
+     ```bash
+     env -u PYTHONPATH .venv/bin/python -m pytest tests/test_architecture_doc.py tests/test_env_vars_documented.py tests/test_pwa_api_docs.py
+     ```
+   - **The stale-claims sweep (the gate cannot do this).** Those tests prove structure, not truth — a paragraph describing a removed engine, a renamed env var, a deleted page, or a renamed CLI flag passes them. For every feature the release removed or renamed (`git diff <last-tag>..develop --stat`, then the removed identifiers), `git grep -n <env var | route | provider id | command>` across `README.md`, `INTEGRATIONS.md`, `PWA_API.md`, `docs/`, and `DESIGN.md`, and delete or update every hit. v0.8.0 shipped exactly this kind of rot: `PWA_API.md` still documented the cloud transcription engine four releases after its removal, and `INTEGRATIONS.md` still claimed n8n was denied by default two releases after the policy was dropped — both caught by a release-time sweep, not by the sync tests.
+   - **What to touch.** `README.md` (features/Providers), `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `PWA_API.md` (any new/changed state-changing route **must** be documented here), `docs/MCP.md` (the tool catalog must match `@tool(name=…)` in `ciao/mcp_server.py`), and — when the release touches the UI — `DESIGN.md` / `docs/DESIGN_SYSTEM.md` and the home-lanes plan's status. Commit doc fixes on `develop` before the cut; do not let them ride in the `release: prepare` commit.
 5. **The capabilities skill.** For any new user-facing feature, update `ciao/stock/skills/ciao-capabilities/SKILL.md` — add the feature to the right section and add trigger keywords to its frontmatter `description`. Skim the CHANGELOG since the last release tag to catch features that shipped without a catalog entry.
 6. **The desktop gate — run it if anything under `desktop/` changed.** `pytest tests/` and the `npm run build`s do not compile Rust, build the Swift voice sidecar, or assemble `Ciaobot.app`, so a desktop change can be green locally and still fail CI's `build-desktop` job — after the tag exists. `./scripts/check-desktop.sh` runs the same commands CI does (sidecar build, `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then a universal `tauri build`) and asserts the sidecar ends up bundled, universal, signed, and runnable inside the built app. `prepare-release` runs it as part of its checks, but run it yourself first: finding a clippy failure before the release branch exists is much cheaper. Needs Rust 1.90.0 and `swiftc`; `--fast` skips the bundle build.
 7. **This skill.** If the release flow, flags, or traps changed, update `skills/ciao-release/SKILL.md` too.
@@ -85,7 +91,20 @@ Release evidence is an explicit operator-triggered check owned by this skill. It
 
 ## Rebuild the PWA last
 
-`ciao/web/static/` is **tracked** (the packaged wheel serves from there), so the built `index.html` in the release commit must reference the asset hashes of the code you are actually shipping. One wrinkle: `ciao/web/static/assets/` itself is *gitignored* (`.gitignore:22`) — only `index.html` and the non-hashed assets are tracked, and the hashed bundles are regenerated by the publish workflow's own build. So a stale committed `index.html` is a local-run hazard rather than a shipped one, but commit the rebuild anyway to keep the tree honest. Run `cd web && npm run build` *after* the final source change and commit the result. If you rebuild early and then fix something, the packaged frontend is a mixed state — it will boot, so nothing fails loudly.
+`ciao/web/static/` holds the packaged frontend the wheel serves, but the two
+generated parts of it are **not tracked**: `assets/` (hashed bundles) and
+`index.html` (the shell that names them). Tracking the shell bought nothing —
+the bundles it points at were ignored, so a fresh clone could never serve it —
+while its hash line changed on every build, which made every pair of frontend
+branches conflict on it. Packaging globs the filesystem, not git, so what ships
+is whatever `npm run build` last produced.
+
+That makes the build order load-bearing rather than cosmetic: run `cd web && npm
+run build` *after* the final source change. `prepare-release` verifies the
+result — `_check_built_pwa` fails the release if the shell is missing or names a
+bundle that is not on disk, which is what a stale build looks like after a
+branch switch. Without a build you would otherwise get a wheel that installs and
+then serves a 404 where the UI should be.
 
 Corollary: if a concurrent session is editing the tree, its unfinished work gets baked into your build output. Check `git status` before building.
 

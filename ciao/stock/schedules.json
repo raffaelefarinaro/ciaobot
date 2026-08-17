@@ -20,7 +20,7 @@
       "workspace": "default",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections and update the configured vault; append durable learnings to `Workspace/Learnings.md` (error resolutions, non-obvious workarounds, user corrections, outdated assumptions, not routine work). Promote durable cross-session facts into the bounded memory regions of the workspace `CLAUDE.md`: the `ciao:memory` region for cross-project preferences, environment facts, and lessons learned, and the `ciao:profile` region for user identity and communication style. Both regions are already in your system prompt, and each section header carries its current usage, so read the header. There is no memory command; edit the regions with `Edit`. Remove entries whose valid `[expires: YYYY-MM-DD]` date has passed, and report malformed expiration tags instead of guessing. When a region is at or above ~85% of its cap, consolidate BEFORE promoting: merge related entries and remove stale one-off corrections that have no reuse value (e.g. \"User said X -> assistant did Y\" single-doc edits, resolved open loops), so there is headroom. Nothing enforces the cap at write time, so the cap is your responsibility. Then run `ciao memory-audit --json` and act on the rot it reports, because the regions load on every single turn and a wrong claim there is asserted before the user has said a word. Every fact is either state (a current value, which you REPLACE when it changes) or an event (a thing that happened, which you APPEND to a log and never edit). For each `event_shaped_entries` finding, move that entry out of the region and into `Workspace/Learnings.md`: it records a chat turn, not a current value. For each `stale_path_entries` finding, open the cited path, then correct it or drop the claim; do not assume the finding is right, since a path can be missing here and correct in a sibling repo. Treat `superseded_state_candidates` as a question rather than a defect: when one entry supersedes another, keep only the current value, and when the two describe different facets of the subject, leave both. Report the counts you fixed and the ones you deliberately kept. If `ciao memory-audit` is unavailable or fails, say so plainly and continue; never report the surface as clean on the strength of a command that did not run. Then review pending batches in `Workspace/Memory-Proposals.md`. Route each fact by scope: put a fact in a memory region ONLY when it applies across projects. A fact scoped to one project belongs in that project's canonical doc. Standing operating directives belong in the `CLAUDE.md` body OUTSIDE the fenced regions: the regions hold remembered facts, the body holds instructions. When consolidating, move any project-scoped entry sitting in a region out to its owning project doc rather than deleting it. Also skim the guide body: if it holds remembered facts rather than standing directives, move them into the memory region. Leave genuine directives in place, and when unsure whether something is a fact or a directive, propose the move rather than editing the body. Remove processed batches from the proposals file, editing the region first and dismissing the proposal second so a failed turn cannot lose the fact. Never skip a durable fact because a region is full; consolidate to make room instead. Scan recently archived chats by project: when session-insights contain Decisions, Open loops, or material status changes for a vault-backed project, update that project's canonical doc and `log.md` if present, only when something actually changed. If nothing new needs processing, reply with a one-line no-op and stop. Report only processed counts plus changed files."
+      "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections and update the configured vault; append durable learnings to `Workspace/Learnings.md`. Promote only cross-project facts into the bounded `ciao:memory` or `ciao:profile` regions of the workspace `CLAUDE.md`; project facts belong in the project's canonical doc. Use `memory_status` to inspect usage, `memory_update` or Edit to change the native guide, and remove valid expired entries with the typed operation or Edit. Report malformed expiration tags instead of guessing. Consolidate before adding when a region is near its cap. Run `ciao memory-audit --json` and act on reliable findings. Edit the region first, then dismiss processed proposals with `memory_proposal_resolve`. If nothing new needs processing, reply with a one-line no-op and stop. Report only processed counts plus changed files."
     },
     {
       "schedule_id": "system-workspace-hygiene",
@@ -32,9 +32,7 @@
       "enabled": true,
       "frequency": "weekly",
       "daily_time_utc": "01:01",
-      "days_of_week": [
-        "sun"
-      ],
+      "days_of_week": ["sun"],
       "day_of_month": null,
       "run_at_date": null,
       "timezone_name": "UTC",
@@ -49,16 +47,14 @@
     {
       "schedule_id": "system-skill-evolution",
       "title": "Skill evolution",
-      "description": "Weekly look at how your custom skills performed: reviews recent sessions for errors and corrections and drafts improvement proposals for skills that struggled. Proposals are saved for your review \u2014 nothing is applied automatically, and it does nothing if you have no custom skills.",
+      "description": "Weekly look at how your custom skills performed: reviews recent sessions for errors and corrections and drafts improvement proposals for skills that struggled. Proposals are saved for your review — nothing is applied automatically, and it does nothing if you have no custom skills.",
       "scope": "system",
       "editable": false,
       "removable": false,
       "enabled": true,
       "frequency": "weekly",
       "daily_time_utc": "00:31",
-      "days_of_week": [
-        "sun"
-      ],
+      "days_of_week": ["sun"],
       "day_of_month": null,
       "run_at_date": null,
       "timezone_name": "UTC",
@@ -68,7 +64,7 @@
       "workspace": "default",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Run `python3 -m ciao.skill_evolution` with the workspace default model. Summarize proposals written and any failed gates. Do not apply proposals automatically."
+      "prompt": "Run `python3 -m ciao.skill_evolution` with the workspace default model. Summarize proposals written and any failed gates. Do not apply proposals automatically, and do not edit native memory unless the curation workflow explicitly calls for it."
     }
   ]
 }

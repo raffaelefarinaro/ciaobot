@@ -81,11 +81,18 @@ class Edge:
 @dataclass(slots=True)
 class NodeResult:
     """What a node produced. Stored in ``ctx[node.id]`` so downstream
-    nodes can read prior outputs."""
+    nodes can read prior outputs.
+
+    ``expected_failure`` is for a deliberate negative branch, such as a
+    predicate selecting a ``fail`` edge. It still leaves ``ok`` false so DAG
+    routing is unchanged, but tells the run recorder not to report the branch
+    as an operational error. Real executor failures must leave this false.
+    """
 
     ok: bool
     output: Any = None
     error: str | None = None
+    expected_failure: bool = False
 
 
 def _subprocess_env(payload: dict[str, Any]) -> dict[str, str] | None:
@@ -218,18 +225,29 @@ def _exec_prompt(node: Node, ctx: dict[str, Any]) -> NodeResult:
 
 def _exec_gate(node: Node, ctx: dict[str, Any]) -> NodeResult:
     """Run a Python predicate. ``payload['fn']`` is a callable that
-    receives the ctx dict and returns a bool (or a tuple ``(bool, str)``
-    where the string is stored as ``output``). Anything truthy is
-    treated as ok=true."""
+    receives the ctx dict and returns a bool, a tuple ``(bool, str)``
+    where the string is stored as ``output``, or a tuple
+    ``(bool, str, bool)`` whose third value marks an expected negative
+    branch. It may also return a ``NodeResult`` for an explicit outcome.
+    Anything truthy is treated as ok=true."""
     fn = node.payload.get("fn")
     if not callable(fn):
         raise ValueError(f"gate node '{node.id}' payload['fn'] must be callable")
     verdict = fn(ctx)
-    if isinstance(verdict, tuple) and len(verdict) == 2:
-        ok, output = verdict
+    if isinstance(verdict, NodeResult):
+        return verdict
+    expected_failure = False
+    if isinstance(verdict, tuple) and len(verdict) in (2, 3):
+        ok, output = verdict[:2]
+        if len(verdict) == 3:
+            expected_failure = bool(verdict[2])
     else:
         ok, output = bool(verdict), None
-    return NodeResult(ok=ok, output=output)
+    return NodeResult(
+        ok=ok,
+        output=output,
+        expected_failure=expected_failure,
+    )
 
 
 def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
@@ -335,7 +353,12 @@ def _next_node(
 
 
 def _serialize_result(res: NodeResult) -> dict[str, Any]:
-    return {"ok": res.ok, "output": res.output, "error": res.error}
+    return {
+        "ok": res.ok,
+        "output": res.output,
+        "error": res.error,
+        "expected_failure": res.expected_failure,
+    }
 
 
 def _deserialize_result(data: dict[str, Any]) -> NodeResult:
@@ -343,6 +366,7 @@ def _deserialize_result(data: dict[str, Any]) -> NodeResult:
         ok=bool(data.get("ok")),
         output=data.get("output"),
         error=data.get("error"),
+        expected_failure=bool(data.get("expected_failure")),
     )
 
 
@@ -439,13 +463,17 @@ def run(
             try:
                 result = executor(node, ctx)
                 if not result.ok:
-                    handle.status = "error"
-                    # Gate nodes carry their failure reason in ``output``
-                    # (the second element of the ``(bool, str)`` tuple), not
-                    # ``error`` — surface it so the recorded run isn't blank.
-                    handle.error = result.error or (
-                        str(result.output) if result.output is not None else None
-                    )
+                    if not result.expected_failure:
+                        handle.status = "error"
+                        # Gate nodes carry their failure reason in ``output``
+                        # (the second element of the ``(bool, str)`` tuple),
+                        # not ``error`` — surface it so the recorded run
+                        # isn't blank.
+                        handle.error = result.error or (
+                            str(result.output)
+                            if result.output is not None
+                            else None
+                        )
             except Exception as exc:  # noqa: BLE001
                 handle.error = f"{type(exc).__name__}: {exc}"[:1000]
                 result = NodeResult(ok=False, error=str(exc))
@@ -461,4 +489,3 @@ def run(
         _save_checkpoint()
         current = _next_node(node.id, result.ok, edges)
     return ctx
-

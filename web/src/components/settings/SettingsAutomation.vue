@@ -9,7 +9,8 @@
         <p class="hint">
           Work Ciaobot does on its own: naming chats, extracting insights when a chat is
           archived, keeping the vault and skills in order. Each row says when it runs and
-          what happened last time.
+          what happened last time. Rows that run several steps on one trigger list those
+          steps in the order they execute.
         </p>
       </div>
     </div>
@@ -113,9 +114,16 @@ const props = defineProps<{
   automationError: string
   fetchAutomation: () => Promise<void>
   notifySaved: (body: string, title?: string) => void
+  // The failure channel. `alert` cannot be used: it shows nothing at all in the
+  // desktop webview, so a failed run looked like a button that did nothing.
+  notifyFailed: (title: string, detail: string) => void
   // Model routing table, so a model-backed job that keeps failing can be
   // retried with a different model without leaving the page.
   routines: RoutineSettings | null
+  // Per-provider effective tier models, from /api/models. Each provider
+  // resolves these from its own account catalog, which is why they do not ride
+  // on the routines payload.
+  aliasTiers: Record<string, Record<string, string>> | undefined
   providerLabels: Record<string, string>
 }>()
 
@@ -125,7 +133,7 @@ const groups = computed(() => groupAutomations(props.automationItems))
 const headline = computed(() => automationHeadline(props.automationItems))
 
 const retryModelOptions = computed(() =>
-  buildRetryModelOptions(props.routines?.alias_tiers, props.providerLabels),
+  buildRetryModelOptions(props.aliasTiers, props.providerLabels),
 )
 const configuredInsightsModel = computed(
   () => props.routines?.insights_model_effective || '',
@@ -184,7 +192,7 @@ async function runJob(item: AutomationProcess, model: string) {
     props.notifySaved(`Started "${item.label}" via the ${scheduleId} schedule.`, 'Automations')
     await props.fetchAutomation()
   } catch (e) {
-    alert(`Failed to run ${item.label}: ${errorMessage(e)}`)
+    props.notifyFailed(`Could not run "${item.label}"`, errorMessage(e))
   } finally {
     runningJobs.value[item.job] = false
   }

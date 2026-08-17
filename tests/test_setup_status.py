@@ -24,6 +24,20 @@ from ciao.web.routes_api import (
 )
 
 
+@pytest.fixture(autouse=True)
+def claude_cli_present(monkeypatch):
+    """Pretend the ``claude`` CLI is installed.
+
+    Claude readiness now reports the install step first, so without this the
+    rest of the module's expectations would depend on whether the machine
+    running the tests happens to have Claude Code on PATH.
+    """
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_cli_path", lambda: "/usr/local/bin/claude"
+    )
+    monkeypatch.setattr("ciao.setup_status._cli_version", lambda binary: "2.0.0 (Claude Code)")
+
+
 def _config(tmp_path, env_extra: dict[str, str] | None = None) -> CiaoConfig:
     env = {
         "PWA_AUTH_TOKEN": "test-token",
@@ -113,6 +127,38 @@ def test_setup_status_reports_missing_required_config(tmp_path) -> None:
     assert data["configured"] is False
 
 
+def test_setup_status_survives_a_deleted_working_directory(tmp_path, monkeypatch) -> None:
+    """A dead cwd must not turn the readiness payload into a 500.
+
+    The desktop deploy relaunch can leave the engine with a cwd inside a staging
+    bundle that the swap then renames, and ``os.getcwd()`` raises there.
+    """
+    config = _config(tmp_path)
+    (tmp_path / "memory-vault").mkdir()
+    expected_root = str(tmp_path.resolve())
+
+    def _dead_cwd() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "getcwd", _dead_cwd)
+
+    data = setup_status(
+        config,
+        env={"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"},
+    )
+
+    checks = {row["id"]: row for row in data["checks"]}
+    assert data["workspace_root"] == expected_root
+    assert checks["workspace"]["ok"] is True
+    assert checks["vault"]["ok"] is True
+
+    # A config without an explicit workspace_root has no root to fall back to,
+    # but the payload must still be produced instead of raising.
+    bare = setup_status(SimpleNamespace(pwa_auth_token="test-token"), env={})
+    assert isinstance(bare["checks"], list)
+    assert "providers" in bare
+
+
 def test_setup_status_marks_bootstrap_mode(tmp_path) -> None:
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
 
@@ -173,26 +219,48 @@ def test_setup_status_ignores_empty_oauth_account(tmp_path) -> None:
     assert data["providers"]["claude"]["auth"] == "missing"
 
 
-def test_setup_status_detects_ollama_cloud_key_or_local_daemon(tmp_path, monkeypatch) -> None:
-    config = _config(tmp_path, {"CIAO_OLLAMA_API_KEY": "sk-ollama"})
-    data = setup_status(config, env={"CIAO_OLLAMA_API_KEY": "sk-ollama"})
-    assert data["providers"]["ollama"]["ok"] is True
-    assert data["providers"]["ollama"]["auth"] == "api_key"
+def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(
+    tmp_path, monkeypatch
+) -> None:
+    """No CLI means no chats, so setup asks for the install, not for a login.
 
-    monkeypatch.setattr("ciao.setup_status._ollama_daemon_ready", lambda url: True)
+    An API key alone does not make Claude usable: Ciaobot drives the ``claude``
+    binary through the Agent SDK.
+    """
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
     config = _config(tmp_path)
-    data = setup_status(config, env={})
-    assert data["providers"]["ollama"]["ok"] is True
-    assert data["providers"]["ollama"]["auth"] == "local_daemon"
+
+    claude = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})["providers"]["claude"]
+
+    assert claude["ok"] is False
+    assert claude["auth"] == "not_installed"
+    assert claude["install_url"].startswith("https://code.claude.com/docs/")
+    assert "install" in claude["command"]
+    assert "not installed" in claude["detail"]
 
 
-def test_setup_status_detects_openrouter_key(tmp_path) -> None:
-    config = _config(tmp_path, {"OPENROUTER_API_KEY": "sk-or-test"})
+def test_setup_status_names_the_desktop_app_when_only_the_cli_is_missing(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "/Applications/Claude.app")
+    config = _config(tmp_path)
 
-    data = setup_status(config, env={"OPENROUTER_API_KEY": "sk-or-test"})
+    claude = setup_status(config, env={})["providers"]["claude"]
 
-    assert data["providers"]["openrouter"]["ok"] is True
-    assert data["providers"]["openrouter"]["auth"] == "api_key"
+    assert claude["auth"] == "not_installed"
+    assert claude["app_path"] == "/Applications/Claude.app"
+    assert "/Applications/Claude.app" in claude["detail"]
+
+
+def test_setup_status_reports_the_resolved_cli_path(tmp_path) -> None:
+    """The wizard shows which binary it would run, not just that one exists."""
+    config = _config(tmp_path)
+
+    claude = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})["providers"]["claude"]
+
+    assert claude["cli_path"] == "/usr/local/bin/claude"
 
 
 def test_setup_status_includes_codex_subscription_login(tmp_path, monkeypatch) -> None:
@@ -334,7 +402,9 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     registry = _json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
     assert [w["name"] for w in registry] == ["life"]
     assert registry[0]["vault_root"] == "memory-vault/life"
-    assert registry[0]["gws_profile"] == "life"
+    # Setup links no Google account: which accounts exist is the user's choice,
+    # made in Settings → Workspaces after onboarding.
+    assert registry[0]["gws_profile"] == ""
 
 
 def test_setup_finish_rejects_a_traversal_workspace_name(tmp_path) -> None:
@@ -378,7 +448,6 @@ def test_setup_finish_persists_codex_as_first_workspace_provider(tmp_path) -> No
         (ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
     )
     assert registry[0]["default_provider"] == "codex"
-    assert registry[0]["model_bucket"] == ""
     assert (ws / "AGENTS.md").is_symlink()
     assert (ws / "AGENTS.md").resolve() == (ws / "CLAUDE.md").resolve()
 
@@ -394,6 +463,7 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
         json={
             "password": "wizard-pass",
             "workspace": str(ws),
+            "workspace_name": "journal",
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
             "app_dir": str(tmp_path / "Applications"),
         },
@@ -407,6 +477,7 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
     registry = json.loads(
         (ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
     )
+    assert registry[0]["name"] == "journal"
     assert registry[0]["vault_root"] == "."
 
     loaded = CiaoConfig.from_env(
@@ -414,11 +485,14 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
             "PWA_AUTH_TOKEN": "test-token",
             "CIAO_WORKSPACE": str(ws),
             "CIAO_VAULT_ROOT": ".",
+            "CIAO_WORKSPACES": json.dumps(
+                [{"name": "journal", "vault_root": "."}]
+            ),
             "CIAO_RUNTIME_ROOT": str(ws / ".runtime"),
             "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
         }
     )
-    assert loaded.workspace_vault_root("personal") == ws
+    assert loaded.workspace_vault_root("journal") == ws
 
 
 def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
@@ -948,3 +1022,63 @@ def test_discover_claude_system_skills_filters_enabled_and_caches(monkeypatch) -
     assert setup_status.discover_claude_system_skills() == ["skill-creator"]
     assert setup_status.discover_claude_system_skills() == ["skill-creator"]
     assert calls["n"] == 1
+
+
+# ── Claude MCP discovery cache ──────────────────────────────────────────
+# `claude mcp list` measures ~12s on a real install and sits on the
+# Settings -> Providers load path, so the cache decides whether that tab is
+# usable. A plain TTL made every visit past the window pay it again.
+
+
+def test_expired_mcp_cache_serves_stale_and_refreshes_in_background(monkeypatch):
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    done = threading.Event()
+
+    def slow_discovery(**kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            done.set()
+        return [f"mcp-{len(calls)}"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_discovery)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+
+    # First call has nothing to serve, so it waits.
+    assert ss.discover_claude_mcps(None) == ["mcp-1"]
+    assert len(calls) == 1
+
+    # Expire the entry; the next call must return the stale value immediately
+    # rather than paying the discovery again.
+    stamp, ws_key, value = ss._claude_mcps_cache
+    monkeypatch.setattr(
+        ss, "_claude_mcps_cache", (stamp - ss._CLAUDE_DISCOVERY_TTL_SECONDS - 1, ws_key, value)
+    )
+    assert ss.discover_claude_mcps(None) == ["mcp-1"]
+
+    # ...and a refresh runs behind it.
+    assert done.wait(timeout=5), "background refresh never ran"
+    deadline = _time.monotonic() + 5
+    while ss._claude_mcps_cache[2] != ("mcp-2",) and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert ss._claude_mcps_cache[2] == ("mcp-2",)
+
+
+def test_a_fresh_mcp_cache_does_not_refresh(monkeypatch):
+    from ciao import setup_status as ss
+
+    calls = []
+    monkeypatch.setattr(
+        ss, "_discover_claude_mcps_uncached", lambda **kw: calls.append(1) or ["a"]
+    )
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+
+    ss.discover_claude_mcps(None)
+    ss.discover_claude_mcps(None)
+    assert len(calls) == 1, "a fresh entry must not spawn a discovery"

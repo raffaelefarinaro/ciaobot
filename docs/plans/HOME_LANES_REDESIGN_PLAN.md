@@ -1,6 +1,14 @@
 # Home screen: workspace lanes + shared chat signals
 
-Status: planned, not started
+Status: implemented (`7ba915e` + follow-ups, merged via PR #258); this file is
+kept as the design record. The implementation deviates from the plan in a few
+places: an explicit `unread` tier sits between working and quiet; the tier-4
+"older" disclosure was not built (older chats merge into `quiet` with an
+opacity ramp); lanes stack full-width under a 760px container query instead of
+the planned single-expanded-lane breakpoint; the home column is `--home-max:
+1320px` rather than ~1040px; unread chats get a dedicated dot in addition to
+title weight; and the "working" card ring became a solid accent dot with halo,
+plus a per-lane "+ new" project picker beyond the plan.
 Design date: 2026-08-11
 Target repository: `raffaelefarinaro/ciaobot`
 Visual reference: <https://claude.ai/code/artifact/8acebb3b-8e89-4b61-83a1-0c03e00c95ac>

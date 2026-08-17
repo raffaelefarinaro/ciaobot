@@ -9,12 +9,12 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import cast
 
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, normalize_claude_mode
 from ciao.models import BridgeMode
 from ciao.providers.codex import CodexSettings
-from ciao.providers.ollama import OllamaSettings
-from ciao.providers.openrouter import OpenRouterSettings
+from ciao.providers.opencode import OpencodeSettings
 
 
 # claude.ai account-OAuth connector MCPs (Airtable, Atlassian, Slack, Asana,
@@ -193,7 +193,6 @@ class WorkspaceConfig:
     # effective denylist in ``disallowed_tools_for_workspace``.
     claude_ai_mcps: bool | None = None
     gws_profile: str = ""
-    model_bucket: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
 
@@ -225,7 +224,6 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
         claude_ai_mcps=coerce_claude_ai_mcps(data.get("claude_ai_mcps")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
-        model_bucket=str(data.get("model_bucket", "")).strip(),
         color=color,
     )
 
@@ -277,7 +275,6 @@ def _legacy_workspaces(
             disallowed_tools=disallowed_tools_personal,
             claude_ai_mcps=claude_ai_mcps_personal,
             gws_profile=gws_default_profile or "personal",
-            model_bucket="personal",
         ),
         "work": WorkspaceConfig(
             name="work",
@@ -287,7 +284,6 @@ def _legacy_workspaces(
             disallowed_tools=disallowed_tools_work,
             claude_ai_mcps=claude_ai_mcps_work,
             gws_profile="work",
-            model_bucket="work",
         ),
     }
 
@@ -373,6 +369,12 @@ class CiaoConfig:
     # Models tab (runtime settings store) or ``CIAO_TITLE_MODEL_OVERRIDE``.
     # Empty = automatic routing: the workspace's haiku-tier model.
     title_model_override: str = ""
+    # Apple Intelligence (the "Local (free)" on-device model) is a beta feature,
+    # off by default. Opt-in from Settings → Models, or an operator can flip the
+    # default from the env with ``CIAO_APPLE_INTELLIGENCE=1``. When off, the
+    # "apple" sentinel is treated as an unavailable backend and every routine
+    # falls back to its cloud model.
+    apple_intelligence_enabled: bool = False
     # BCP-47 language for the on-device voice engines. Dictation needs a
     # matching language installed in System Settings → Keyboard → Dictation;
     # the synthesizer uses it to choose a voice.
@@ -384,8 +386,8 @@ class CiaoConfig:
     claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku"])
     claude_default_model: str = "opus"
     # Per-workspace default models. Empty string falls back to
-    # claude_default_model. Lets the personal workspace default to a
-    # cheap Ollama model while work stays on Anthropic.
+    # claude_default_model, so one workspace can prefer a cheaper tier
+    # than another.
     default_model_personal: str = ""
     default_model_work: str = ""
     # Per-workspace tool denylists (the "extra" tools beyond claude.ai
@@ -406,6 +408,11 @@ class CiaoConfig:
         init=False, default=False, repr=False
     )
     claude_mode: BridgeMode = "auto"
+    # Per-provider default execution mode for new chats, set from the PWA
+    # Settings → Providers tab (runtime settings store). A missing entry uses
+    # the built-in default: normal for opencode (approval-enforcing),
+    # otherwise ``claude_mode``.
+    provider_default_modes: dict[str, str] = field(default_factory=dict)
     restart_exit_code: int = 75
     auto_sync_on_start: bool = False
     auto_vault_index: bool = True
@@ -413,19 +420,13 @@ class CiaoConfig:
     pwa_port: int = 8443
     pwa_host: str = "127.0.0.1"
     gws_default_profile: str = "personal"
-    # Models in `ollama.models` get rerouted to a local Ollama daemon via
-    # the Anthropic-compatible API. Empty allowlist disables the routing.
-    ollama: OllamaSettings = field(default_factory=OllamaSettings)
     # Per-tier Codex model pins set from the PWA Settings → Providers tab.
     # Empty means automatic: tiers derive from the signed-in account's
     # model catalog (luna→haiku, terra→sonnet, sol→opus/fable).
     codex: CodexSettings = field(default_factory=CodexSettings)
-    # Runtime-selected custom-provider tier routes, keyed by provider id.
-    custom_routing: dict[str, dict[str, str]] = field(default_factory=dict)
-    # Auto-discover models installed on the local Ollama daemon at startup
-    # (GET /api/tags against ``ollama.local_url``) and surface them in the
-    # model pickers. Disable with ``CIAO_OLLAMA_LOCAL_DISCOVERY=0``.
-    ollama_local_discovery: bool = True
+    # Per-tier opencode model pins, same shape and meaning as the Codex ones.
+    # Empty means the tier falls through to the session provider's own model.
+    opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
     # Post-archive insights extraction: when a chat is archived, run the raw
     # Claude Code session JSONL through a fast cheap model and append a
     # `## Session insights` section to the archived markdown.
@@ -436,7 +437,7 @@ class CiaoConfig:
     # Fallback when session insights run without workspace context (e.g.
     # ``scripts/backfill_insights.py``). Live archives use
     # :func:`ciao.insights.resolve_insights_model` instead.
-    insights_model: str = "deepseek-v4-flash:0731-cloud"
+    insights_model: str = "sonnet"
     # Operator override for the insights model, set from the PWA Settings →
     # Models tab (runtime settings store) or ``CIAO_INSIGHTS_MODEL``.
     # Empty = automatic routing: the workspace's sonnet-tier model.
@@ -460,9 +461,6 @@ class CiaoConfig:
     # Comma-separated list of models for the adversarial_review MCP tool.
     # Empty string defaults to the script's built-in panel.
     critique_models: str = ""
-    # OpenRouter (Anthropic-compatible) routing. Available when
-    # OPENROUTER_API_KEY is set; aliases resolve to per-tier models.
-    openrouter: OpenRouterSettings = field(default_factory=OpenRouterSettings)
     # Advisory caps for the ``ciao:memory`` / ``ciao:profile`` regions in
     # the workspace CLAUDE.md. Injected as a frozen snapshot into Claude and
     # Codex system prompts at session start; edited with Edit on the guide.
@@ -769,12 +767,18 @@ class CiaoConfig:
             {
                 "name": workspace.name,
                 "vault_root": workspace.vault_root,
-                "default_provider": workspace.default_provider,
+                # Persist the effective provider, not a stale registry value
+                # left behind after a provider was removed.  The route layer
+                # already serializes this way; keeping the config registry
+                # consistent prevents the next restart from resurrecting the
+                # invalid id (#292).
+                "default_provider": self.default_provider_for_workspace(
+                    workspace.name
+                ),
                 "default_model": workspace.default_model,
                 "disallowed_tools": workspace.disallowed_tools,
                 "claude_ai_mcps": workspace.claude_ai_mcps,
                 "gws_profile": workspace.gws_profile,
-                "model_bucket": workspace.model_bucket,
                 "color": workspace.color,
             }
             for workspace in self.workspaces.values()
@@ -790,65 +794,63 @@ class CiaoConfig:
         Falls back to ``claude_default_model`` when the per-workspace
         knob is empty or the workspace is unknown.
         """
+        from ciao import provider_registry
+
         workspace_config = self.workspace(workspace)
-        if workspace_config and workspace_config.default_model:
-            return workspace_config.default_model
-        if workspace_config and workspace_config.default_provider == "codex":
-            # Empty means "use the Codex account's current catalog default";
-            # app-server resolves it and the chat records the effective model.
-            return ""
+        if workspace_config:
+            descriptor = provider_registry.get(workspace_config.default_provider)
+            if descriptor is not None:
+                if workspace_config.default_model:
+                    return workspace_config.default_model
+                if descriptor.default_model_config_key:
+                    return str(getattr(self, descriptor.default_model_config_key, "") or "")
+                # No operator setting and no descriptor default means "use that
+                # provider account's current catalog default": the provider
+                # resolves it and the chat records the effective model.
+                return descriptor.default_model
         return self.claude_default_model
 
-    def model_bucket_for_workspace(self, workspace: str | None) -> str:
-        """Resolve the model-routing bucket for a workspace."""
-        workspace_config = self.workspace(workspace)
-        if workspace_config and workspace_config.model_bucket:
-            return workspace_config.model_bucket
-        if workspace_config:
-            provider = workspace_config.default_provider
-            if provider == "openrouter":
-                return "openrouter"
-            if provider == "ollama":
-                return "ollama"
-            if provider == "claude":
-                return "work"
-            if provider == "codex":
-                return ""
-        # An unregistered name (typo, stale reference, renamed workspace) has
-        # no bucket of its own; fall back to the primary workspace's rather
-        # than guessing from the name, which only ever worked for the two
-        # names the first release happened to ship.
-        primary = self.workspace(self.primary_workspace())
-        if primary and primary.model_bucket and workspace != self.primary_workspace():
-            return primary.model_bucket
-        return "personal"
-
     def sonnet_model_for_workspace(self, workspace: str | None) -> str:
-        """Return the sonnet-tier model id for a workspace's routing bucket."""
-        bucket = self.model_bucket_for_workspace(workspace)
-        if bucket == "openrouter":
-            return self.openrouter.sonnet_model
-        if bucket in {"personal", "ollama"}:
-            return self.ollama.sonnet_model
+        """The sonnet-tier model for a workspace's routines.
+
+        A bare tier alias: whichever provider runs the workspace resolves it
+        against its own catalog. Kept as a method rather than inlining the
+        literal so the routines that ask "what does Automatic mean here?"
+        (`resolve_title_model`, `resolve_insights_model`) keep one answer, and
+        so a future per-workspace tier pin has somewhere to live.
+        """
         return "sonnet"
 
     def haiku_model_for_workspace(self, workspace: str | None) -> str:
-        """Return the haiku-tier model id for a workspace's routing bucket."""
-        bucket = self.model_bucket_for_workspace(workspace)
-        if bucket == "openrouter":
-            return self.openrouter.haiku_model
-        if bucket in {"personal", "ollama"}:
-            return self.ollama.haiku_model
+        """The haiku-tier model for a workspace's routines. See above."""
         return "haiku"
 
     def default_provider_for_workspace(self, workspace: str | None) -> str:
+        from ciao import provider_registry
+
         workspace_config = self.workspace(workspace)
-        if (
-            workspace_config
-            and workspace_config.default_provider in {"claude", "codex"}
+        # An unregistered value (a stale reference to a removed backend, a
+        # typo) leaves the answer at the default provider.
+        if workspace_config and provider_registry.is_provider(
+            workspace_config.default_provider
         ):
             return workspace_config.default_provider
         return "claude"
+
+    def default_mode_for_provider(self, provider: str) -> BridgeMode:
+        """The default execution mode for new chats on ``provider``.
+
+        An operator pin (Settings → Providers → default mode) wins. Otherwise
+        the built-in default: opencode runs in normal mode so tool calls
+        require operator approval. Every other provider falls back to
+        ``claude_mode``.
+        """
+        mode = (self.provider_default_modes or {}).get(provider, "")
+        if mode in {"normal", "plan", "auto", "bypass"}:
+            return cast(BridgeMode, mode)
+        if provider == "opencode":
+            return "normal"
+        return self.claude_mode
 
     def claude_ai_mcps_for_workspace(self, workspace: str | None) -> bool:
         """Whether claude.ai connector MCPs are exposed in this workspace.
@@ -997,81 +999,7 @@ class CiaoConfig:
                 workspaces_json = ""
 
         claude_models = _split_csv(source.get("CLAUDE_MODELS", "opus,sonnet,haiku"))
-        ollama_models = tuple(_split_csv(source.get("CIAO_OLLAMA_MODELS", "")))
-        ollama_local_models = tuple(
-            _split_csv(source.get("CIAO_OLLAMA_LOCAL_MODELS", ""))
-        )
-        # Append Ollama models (cloud allowlist + manually pinned local ones)
-        # to the picker so the PWA shows them. Keeps claude_models as the
-        # single source of truth for the API. Auto-discovered local models
-        # are appended later in main() once the daemon has been probed.
-        claude_models = list(claude_models) + [
-            m
-            for m in (*ollama_models, *ollama_local_models)
-            if m not in claude_models
-        ]
         claude_default_model = claude_models[0] if claude_models else "opus"
-        # API key flips the upstream from device-linked daemon to direct
-        # cloud. When the operator sets a key without an explicit URL,
-        # default to ollama.com so the spawned CLI never has to round-trip
-        # through a daemon that wasn't started.
-        ollama_api_key = source.get("CIAO_OLLAMA_API_KEY", "").strip() or "ollama"
-        ollama_url = source.get("CIAO_OLLAMA_URL", "").strip()
-        if not ollama_url:
-            ollama_url = (
-                "https://ollama.com"
-                if ollama_api_key != "ollama"
-                else "http://localhost:11434"
-            )
-        ollama_title_model = (
-            source.get("CIAO_OLLAMA_TITLE_MODEL", "").strip() or "gemma4:e2b-it-qat"
-        )
-        ollama_haiku_model = (
-            source.get("CIAO_OLLAMA_HAIKU_MODEL", "").strip()
-            or "deepseek-v4-flash:0731-cloud"
-        )
-        ollama_sonnet_model = (
-            source.get("CIAO_OLLAMA_SONNET_MODEL", "").strip()
-            or "kimi-k2.7-code:cloud"
-        )
-        ollama_opus_model = (
-            source.get("CIAO_OLLAMA_OPUS_MODEL", "").strip()
-            or "minimax-m3:cloud"
-        )
-        ollama_fable_model = (
-            source.get("CIAO_OLLAMA_FABLE_MODEL", "").strip()
-            or "glm-5.2:cloud"
-        )
-        ollama_settings = OllamaSettings(
-            models=ollama_models,
-            base_url=ollama_url,
-            api_key=ollama_api_key,
-            cookie=source.get("CIAO_OLLAMA_COOKIE", "").strip(),
-            title_model=ollama_title_model,
-            haiku_model=ollama_haiku_model,
-            sonnet_model=ollama_sonnet_model,
-            opus_model=ollama_opus_model,
-            fable_model=ollama_fable_model,
-            local_models=ollama_local_models,
-            local_url=source.get("CIAO_OLLAMA_LOCAL_URL", "").strip()
-            or "http://localhost:11434",
-        )
-
-        openrouter_settings = OpenRouterSettings(
-            api_key=source.get("OPENROUTER_API_KEY", "").strip(),
-            base_url=source.get("CIAO_OPENROUTER_BASE_URL", "").strip()
-            or "https://openrouter.ai/api",
-            haiku_model=source.get("CIAO_OPENROUTER_HAIKU_MODEL", "").strip()
-            or "anthropic/claude-haiku-latest",
-            sonnet_model=source.get("CIAO_OPENROUTER_SONNET_MODEL", "").strip()
-            or "anthropic/claude-sonnet-latest",
-            opus_model=source.get("CIAO_OPENROUTER_OPUS_MODEL", "").strip()
-            or "anthropic/claude-opus-latest",
-            fable_model=source.get("CIAO_OPENROUTER_FABLE_MODEL", "").strip()
-            or "anthropic/claude-fable-latest",
-            models=tuple(_split_csv(source.get("CIAO_OPENROUTER_MODELS", ""))),
-        )
-
         default_model_personal = source.get("CLAUDE_DEFAULT_MODEL_PERSONAL", "").strip()
         default_model_work = source.get("CLAUDE_DEFAULT_MODEL_WORK", "").strip()
         disallowed_tools_personal = _parse_disallowed_tools(
@@ -1130,13 +1058,13 @@ class CiaoConfig:
             ),
             title_model=source.get("CIAO_TITLE_MODEL", "").strip() or "haiku",
             title_model_override=source.get("CIAO_TITLE_MODEL_OVERRIDE", "").strip(),
+            apple_intelligence_enabled=source.get(
+                "CIAO_APPLE_INTELLIGENCE", "false"
+            ).strip().lower()
+            in {"1", "true", "yes", "on"},
             transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
             or "en-US",
             tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
-            ollama_local_discovery=source.get(
-                "CIAO_OLLAMA_LOCAL_DISCOVERY", ""
-            ).strip().lower()
-            not in {"0", "false", "no", "off"},
             claude_models=list(claude_models or ["opus", "sonnet", "haiku"]),
             claude_default_model=claude_default_model,
             claude_mode=normalize_claude_mode(
@@ -1156,8 +1084,6 @@ class CiaoConfig:
             pwa_port=int(source.get("PWA_PORT", "8443")),
             pwa_host=source.get("PWA_HOST", "0.0.0.0").strip(),
             gws_default_profile=gws_default_profile,
-            ollama=ollama_settings,
-            openrouter=openrouter_settings,
             default_model_personal=default_model_personal,
             default_model_work=default_model_work,
             disallowed_tools_personal=disallowed_tools_personal,
@@ -1213,84 +1139,6 @@ class CiaoConfig:
 logger = logging.getLogger(__name__)
 
 
-def refresh_local_ollama_models(config: CiaoConfig) -> bool:
-    """Re-discover local Ollama daemon models and merge into the live config.
-
-    Called at startup (ciao.main) and when the Settings → Models tab loads,
-    so a freshly ``ollama pull``-ed model shows up without a restart.
-    Additive while running: models removed from the daemon drop out on the
-    next restart. Models already in the cloud allowlist keep their cloud
-    routing. Returns True when the local set changed.
-    """
-    if not config.ollama_local_discovery:
-        return False
-    from ciao.providers.ollama import discover_local_models
-
-    discovered = discover_local_models(config.ollama.local_url)
-    merged = tuple(
-        dict.fromkeys(
-            [
-                *config.ollama.local_models,
-                *(m for m in discovered if m not in config.ollama.models),
-            ]
-        )
-    )
-    if merged == config.ollama.local_models:
-        return False
-    config.ollama = replace(config.ollama, local_models=merged)
-    for m in merged:
-        if m not in config.claude_models:
-            config.claude_models.append(m)
-    logger.info("Local Ollama models available: %s", ", ".join(merged))
-    return True
-
-
-
-def refresh_openrouter_models(config: "CiaoConfig") -> bool:
-    """Discover models from OpenRouter and merge into the picker.
-
-    Called at startup and when the Settings tab loads, so the OpenRouter
-    model list is populated dynamically from the live catalogue rather than
-    requiring a static allowlist. Returns True when the set changed.
-    """
-    from ciao.providers.openrouter import discover_models, merge_discovered
-
-    if not config.openrouter.available:
-        return False
-    discovered, _ = discover_models(config.openrouter, anthropic_only=False)
-    if not discovered:
-        return False
-    before = config.openrouter.models
-    config.openrouter = merge_discovered(config.openrouter, discovered)
-    for m in config.openrouter.models:
-        if m not in config.claude_models:
-            config.claude_models.append(m)
-    return config.openrouter.models != before
-
-
-def refresh_cloud_ollama_models(config: "CiaoConfig") -> bool:
-    """Discover models from Ollama Cloud and merge into the live config.
-
-    Called at startup and when the Settings tab loads, so the Ollama Cloud
-    model list is populated dynamically from the live catalogue. Returns True
-    when the set changed.
-    """
-    if not config.ollama.api_key or config.ollama.api_key == "ollama":
-        return False
-    from ciao.providers.ollama import discover_cloud_models
-    discovered = discover_cloud_models(config.ollama)
-    if not discovered:
-        return False
-    before = config.ollama.models
-    merged = tuple(dict.fromkeys([*config.ollama.models, *discovered]))
-    if merged == before:
-        return False
-    config.ollama = replace(config.ollama, models=merged)
-    for m in merged:
-        if m not in config.claude_models:
-            config.claude_models.append(m)
-    logger.info("Ollama Cloud models available: %s", ", ".join(merged))
-    return True
 
 
 # Backward-compatible alias used by project_chats.py and other modules

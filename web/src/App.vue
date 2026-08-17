@@ -42,6 +42,7 @@
     <router-view />
     <InAppToast />
     <ConfirmDialog />
+    <PromptDialog />
   </div>
 </template>
 
@@ -51,6 +52,7 @@ import { useRoute } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import { errorMessage } from './lib/errorMessage'
 import InAppToast from './components/InAppToast.vue'
+import PromptDialog from './components/PromptDialog.vue'
 import RestartNotice from './components/RestartNotice.vue'
 import StartupView from './components/StartupView.vue'
 import { askConfirm } from './lib/confirm'
@@ -127,7 +129,12 @@ async function switchBackToHost() {
     window.location.assign('/')
   } catch (e) {
     switchingToHost.value = false
-    window.alert(errorMessage(e, 'Failed to switch back to host'))
+    // Not `window.alert`: the desktop webview shows no native dialog, so this
+    // failure was invisible there. See lib/prompt for the same constraint.
+    projectStore.pushErrorToast(
+      'Could not switch back to host',
+      errorMessage(e, 'The request failed.'),
+    )
   }
 }
 

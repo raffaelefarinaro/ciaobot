@@ -112,6 +112,17 @@ Ciaobot is a focused control surface for a personal AI assistant. Its visual ide
 
 The PWA is information-dense but not cramped. Monospaced typography, compact labels, restrained animation, and a deep indigo foundation establish the console character. A warm pink accent supplies personality and orientation. The interface must remain understandable without color, animation, hover, or prior knowledge of its icons.
 
+The home screen ("jump back in") is the primary entry point: active chats are
+sorted into recency tiers rendered as lanes with key-badge navigation, unread
+and needs-input signals, and per-lane "+ new" project entry. One lane holds
+chats that carry a needs-your-input question or decision; an explicit unread
+lane sits between the working and quiet tiers; long-idle chats fade into the
+quiet lane rather than disappearing. Lanes collapse into a single stacked
+column under ~760px; arrow-key navigation follows that visual order, using
+up/down between stacked workspace lanes and left/right within a lane. Signals
+are shape-and-text-first (tier labels, badges,
+weight, dots) so no lane relies on color alone.
+
 `Ciaobot.app` owns the macOS Dock window, native menu-bar item, and
 notifications. Desktop preferences live in the tray itself rather than a
 separate settings window, so the shell has no bundled interactive UI. The tray
@@ -157,7 +168,7 @@ Respect the user-controlled font scale. Truncate compact navigation labels only 
 
 The PWA is mobile-first and safe-area aware. Desktop uses a persistent project sidebar beside the active workspace. Narrow screens use an overlay sidebar and full-width panels, with secondary actions moving into menus or sheets before titles are sacrificed.
 
-Use the 4px-based spacing scale deliberately: 4px for internal micro-spacing, 8px between closely related controls, 12–16px for component rhythm, and 24–32px between major groups. Shared settings and schedule pages are capped near 600px so forms remain readable on wide screens.
+Use the 4px-based spacing scale deliberately: 4px for internal micro-spacing, 8px between closely related controls, 12–16px for component rhythm, and 24–32px between major groups. Long-form surfaces stay readable on wide screens: settings cards are capped at `min(100%, 1040px)`, while the home screen and automations pages are full-bleed by design.
 
 All interactive targets are at least 44×44px on touch layouts. Compact visual glyphs may sit inside a larger hit area. Honor device safe areas, virtual keyboards, standalone PWA chrome, and browser zoom. Do not disable pinch zoom or text scaling.
 

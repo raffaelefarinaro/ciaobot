@@ -14,7 +14,7 @@ ciao run
 
 `ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. Setup no longer generates the retired rumps agent or `Ciaobot Server.app`; it removes them when an older install left them behind. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
-Provider settings for custom compatible endpoints are persisted in the tracked workspace file `.ciao/custom_providers.json`; bearer tokens are kept separately in the gitignored `.runtime/custom_provider_tokens.json` and are never committed or returned by the API. Focused provider tests belong in `tests/test_custom_providers.py`.
+The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
 
 A fresh first logical workspace and workspaces added later in Settings live at
 `<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
@@ -39,7 +39,8 @@ ciao public-preflight scan /tmp/ciao-public-export --private-patterns /tmp/priva
 ciao package-smoke --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
 ciao auth codex --print-only               # show Codex / ChatGPT login command
-ciao auth ollama                           # run provider login helper
+ciao auth opencode --print-only            # show opencode login command
+ciao auth opencode                         # run provider login helper
 ciao scaffold eval example --workspace .  # create evals/example.json
 ciao eval --suite evals/example.json --workspace .
 ```
@@ -66,8 +67,10 @@ published native verifier, and installs the bundled runtime into `Ciaobot.app`.
 When a configured workspace is already referenced by the LaunchAgent, it
 preserves that workspace and password; on a clean machine it leaves setup to
 the app's bootstrap onboarding rather than generating a hidden password. It
-does not require Python, Homebrew, or sudo. A DMG is intentionally not built or
-attached to releases.
+does not require Python, Homebrew, or sudo. The installer prints milestone
+percentages, verification status, and a short multilingual Ciao greeting
+sequence; `--dry-run` shows the same terminal treatment without changing files.
+A DMG is intentionally not built or attached to releases.
 
 The source template is `scripts/install.sh`. The release workflow substitutes
 the verifier checksum and attaches `install.sh`, the verifier, the signed app
@@ -115,7 +118,7 @@ npm install          # optional root Node tooling
 cd web
 npm install
 npm run build        # typecheck + Vite build, outputs to ciao/web/static/
-npm test             # 42 files / 345 tests
+npm test             # 61 test files under web/src
 ```
 
 ## macOS desktop development
@@ -161,10 +164,15 @@ npm run tauri build -- --target universal-apple-darwin
 The main webview loads the live localhost PWA and must never be added to a
 Tauri capability. While the engine is unreachable it loads the bundled
 `startup.html` recovery page and automatically navigates to the PWA after
-recovery; test both states when changing desktop startup or service lifecycle
-code. The shell exposes **no** Tauri commands and declares no capabilities:
-every desktop preference and action is driven from the tray in Rust, so remote
-page content has no IPC surface to reach. Keep it that way — adding a command
+recovery; the same local page is reused by a hidden update window that the tray
+shows immediately when an update starts. The update window receives native
+progress events and offers a collapsed/expanded terminal detail view. Test both
+startup and update states when changing desktop startup or service lifecycle
+code. The shell's IPC surface is deliberately tiny: exactly two Tauri commands
+(`check_permission` / `request_permission`, backing the PWA's push-notification
+permission flow, declared for the main/update capability) — everything else
+about the desktop experience is driven from the tray in Rust, so remote page
+content has no other IPC surface to reach. Keep it that way — adding a command
 means re-introducing a bundled window to own it. Release builds require `TAURI_SIGNING_PRIVATE_KEY` and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; Apple signing remains ad-hoc.
 The main window keeps Tauri's native drag/drop handler enabled so Finder paths
@@ -335,7 +343,8 @@ that schedule is not installed.
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
 For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests.
-For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths.
+For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths. An open `AskUserQuestion` card takes those digits over for its own options while it is up (Design System rule S7) and hands them back when it closes, so check both states after touching either handler.
+On the home screen, also verify that arrow keys follow the rendered lane layout: stacked workspace lanes use up/down between lanes and left/right within a lane, while side-by-side lanes retain the opposite mapping.
 For sidebar chat-group changes, verify that a supervisor's delegate disclosure has a visible `aria-expanded` state, keeps a 44px touch target, hides and restores only its delegate rows, and automatically reopens when the selected chat is a delegate.
 For composer drag-and-drop changes, test both local host and remote client roles:
 host paths must be absolute, while client files must upload into the active
@@ -430,7 +439,18 @@ Exit 0 clean, 1 findings, 2 a region could not be read.
 
 Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories and projects `.mcp.json` MCP servers into `.codex/config.toml` for Codex chats. The generated MCP block preserves user-owned Codex server tables and copies only environment references, never literal credentials. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
 
-The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions also live in the system prompt (`ciao/system_prompt.md`).
+The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions live in `gws-shared`; only the short profile-wrapper routing rule belongs in the compact core (`ciao/system_prompt.md`).
+
+### Provider context and native memory
+
+Normal chats send one compact provider-neutral context capsule containing the
+active workspace/project, canonical document, date, retrieval hint, entity
+matches, and unattended-turn marker. Stable routing facts are sent once per
+provider session; handovers use a separate bounded excerpt. Claude, Codex, and
+OpenCode receive the same compact Ciaobot core, while their native
+`CLAUDE.md`/`AGENTS.md` loaders remain the only source of bounded memory.
+`memory_tool.py` prunes valid expired entries before provider startup and
+exposes `memory_status`/`memory_update` without creating a second memory store.
 
 Edit canonical sources, not the generated `.claude/`, `.agents/`, or `.codex/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
 

@@ -35,9 +35,9 @@ from ciao.providers.base import (
     BaseSDKProvider,
     ProviderCapabilities,
     build_prompt,
+    prepend_stable_context,
 )
 from ciao.providers.connect_errors import annotate_connection_host
-from ciao.custom_providers import runtime_model
 from ciao.providers.stdio_rpc import RpcError, RpcProcessError, StdioJsonRpcPeer
 from ciao.tool_path import resolve_tool
 
@@ -287,6 +287,14 @@ def resolve_codex_binary(env: Mapping[str, str] | None = None) -> str | None:
         if candidate.is_file():
             return str(candidate.resolve())
     return None
+
+
+def auth_command(*, device_auth: bool = False) -> list[str]:
+    """Interactive login command, for ``ciao auth codex`` and the PWA."""
+    binary = resolve_codex_binary()
+    if not binary:
+        raise FileNotFoundError("Codex CLI not found")
+    return [binary, "login", "--device-auth"] if device_auth else [binary, "login"]
 
 
 def _codex_path_env(binary: str) -> dict[str, str]:
@@ -771,17 +779,24 @@ class CodexProvider(BaseSDKProvider):
     def _memory_instructions(self, request: AgentRequest | None = None) -> str:
         if self._developer_instructions is not None:
             return self._developer_instructions
-        cfg = self.config
+        claude_guide = self.workspace_root / "CLAUDE.md"
+        codex_guide = self.workspace_root / "AGENTS.md"
         memory = ""
         try:
+            guides_share_file = (
+                claude_guide.is_file()
+                and codex_guide.is_file()
+                and claude_guide.resolve() == codex_guide.resolve()
+            )
+        except (OSError, RuntimeError):
+            guides_share_file = False
+        if not guides_share_file:
+            cfg = self.config
             memory = build_memory_block(
-                guide_path=self.workspace_root / "CLAUDE.md",
+                guide_path=claude_guide,
                 memory_char_limit=int(getattr(cfg, "memory_char_limit", 2200)),
                 user_char_limit=int(getattr(cfg, "user_char_limit", 1375)),
             )
-        except Exception:  # noqa: BLE001 — never block a chat on memory wiring
-            logger.exception("memory block failed; continuing without it")
-            memory = ""
         payload = system_prompt_payload(
             memory,
             control_surface=request.control_surface if request is not None else "legacy",
@@ -817,12 +832,11 @@ class CodexProvider(BaseSDKProvider):
         return "\n".join(sections)
 
     def _prompt_text(self, request: AgentRequest) -> str:
-        prompt = build_prompt(request)
-        context = self._runtime_context(request)
-        marker = "[CIAO_CONTEXT_END]"
-        if prompt.startswith("[CIAO_CONTEXT_BEGIN]\n") and marker in prompt:
-            return prompt.replace(marker, context + "\n" + marker, 1)
-        return f"[CIAO_CONTEXT_BEGIN]\n{context}\n{marker}\n\n{prompt}"
+        # ProjectChatManager supplies one provider-neutral context capsule in
+        # the request prompt. Codex's developer instructions are static, so
+        # injecting a second runtime/entity block here only duplicates context
+        # and makes the native AGENTS.md guidance less cacheable.
+        return build_prompt(request)
 
     async def _ensure_peer(self, request: AgentRequest) -> StdioJsonRpcPeer:
         if (
@@ -857,7 +871,7 @@ class CodexProvider(BaseSDKProvider):
         return self._peer
 
     async def _ensure_thread(self, request: AgentRequest) -> str:
-        requested_model = runtime_model(request.model)
+        requested_model = request.model
         if is_tier(requested_model):
             catalog = await self.model_catalog(self.workspace_root)
             requested_model = codex_tier_models(
@@ -889,6 +903,7 @@ class CodexProvider(BaseSDKProvider):
             if not requested_session:
                 raise
             logger.warning("Codex thread %s could not resume; starting fresh", requested_session)
+            prepend_stable_context(request)
             response = await peer.request(
                 "thread/start",
                 {key: value for key, value in params.items() if key != "threadId"},

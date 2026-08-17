@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import functools
 import json
 import logging
@@ -27,29 +28,35 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import subagent_tracking
 from ciao import desktop_build
+from ciao import provider_registry
 from ciao.config import (
     WorkspaceConfig,
     CLAUDE_AI_CONNECTORS,
-    DEFAULT_WORKSPACE_COLOR,
-    coerce_claude_ai_mcps,
-    coerce_workspace_color,
-)
-from ciao.custom_providers import (
-    discover_models,
-    encode_model,
-    load_custom_providers,
-    parse_model,
-    public_provider,
-    provider_for_model,
-    save_custom_providers,
 )
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.model_tiers import codex_tier_models
+from ciao.workspaces import (
+    WORKSPACE_NAME_RE,
+    parse_disallowed_tools_value,
+    persist_workspaces,
+    workspace_from_request,
+    workspace_provider_options,
+    workspace_provider_values,
+    workspace_to_dict,
+)
+# Kept as an alias: several call sites predate the shared module.
+_WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.codex import CodexProvider, codex_login_status, codex_tier_overrides
-from ciao.provider_service import supported_providers
+from ciao.providers.opencode import (
+    OpencodeProvider,
+    _file_touches as _opencode_file_touches,
+    _summarize_tool_input as _summarize_opencode_tool_input,
+    opencode_tier_overrides,
+)
+from ciao.provider_service import capabilities_for, supported_providers
 from ciao.schedules import (
     ScheduleEntry,
     compute_last_expected_run,
@@ -119,28 +126,16 @@ _IMAGE_MANIFEST_RE = re.compile(
     r"\n{0,2}\[INCOMING IMAGES\]\n(?:\d+\. [^\n]*(?:\n|$))+\s*$",
 )
 
-_WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_WORKSPACE_PROVIDER_LABELS = {
-    "claude": "Anthropic (via Claude Code)",
-    "codex": "OpenAI (via Codex)",
-    "ollama": "Ollama (via Claude Code)",
-    "openrouter": "OpenRouter (via Claude Code)",
-}
-_PROVIDER_KEY_META = {
-    "CIAO_OLLAMA_API_KEY": {
-        "label": "Ollama Cloud API key",
-        "description": "Routes configured Ollama cloud models directly through ollama.com.",
-    },
-    "OPENROUTER_API_KEY": {
-        "label": "OpenRouter API key",
-        "description": "Optional key for critique/review model routing.",
-    },
-}
+# Provider API keys editable from Settings. Empty: every provider authenticates
+# through its own CLI (`ciao auth <provider>`), so there is no key to type here.
+_PROVIDER_KEY_META: dict[str, dict[str, str]] = {}
 # Keys Ciaobot itself consumes, as opposed to provider logins. Empty since
 # voice moved on-device: OPENAI_API_KEY lived here for cloud transcription and
 # speech, and nothing else in the app ever read it.
 _SERVICE_KEY_META: dict[str, dict[str, str]] = {}
-_GWS_BUILTIN_PROFILES = ("personal", "work")
+# Labels and example chips for the two account names that predate the account
+# registry. Nothing creates them any more — a fresh install starts with no
+# Google account — but an install that already has one keeps its wording.
 # Annotated because the values are heterogeneous (str labels alongside a
 # list[str] of examples): without it mypy widens every lookup to Sequence[str],
 # and `meta["purpose"]` stops being usable where a str is expected.
@@ -189,76 +184,12 @@ def _known_workspace_names(pcm: object) -> set[str]:
     return {"personal", "work"}
 
 
-def _ollama_cloud_available(config) -> bool:
-    ollama = getattr(config, "ollama", None)
-    if ollama is None:
-        return False
-    return bool(getattr(ollama, "api_key", "")) and ollama.api_key != "ollama"
-
-
-def _ollama_backend_available(config) -> bool:
-    ollama = getattr(config, "ollama", None)
-    if ollama is None:
-        return False
-    return bool(ollama.local_models) or _ollama_cloud_available(config)
-
-
-def _openrouter_model_options(config) -> list[str]:
-    openrouter = config.openrouter
-    if not openrouter.available:
-        return []
-    return list(
-        dict.fromkeys(
-            [
-                openrouter.haiku_model,
-                openrouter.sonnet_model,
-                openrouter.opus_model,
-                openrouter.fable_model,
-                *openrouter.models,
-            ]
-        )
-    )
-
-
-def _ollama_cloud_model_options(config) -> list[str]:
-    ollama = config.ollama
-    tier_models = (
-        [
-            ollama.haiku_model,
-            ollama.sonnet_model,
-            ollama.opus_model,
-            ollama.fable_model,
-            ollama.title_model,
-        ]
-        if _ollama_cloud_available(config)
-        else []
-    )
-    return list(dict.fromkeys([*ollama.models, *tier_models]))
-
-
 def _workspace_provider_options(config) -> list[dict[str, str]]:
-    values = ["claude", "codex"]
-    if _ollama_backend_available(config):
-        values.append("ollama")
-    openrouter = getattr(config, "openrouter", None)
-    if openrouter is not None and openrouter.available:
-        values.append("openrouter")
-    options = [
-        {"value": value, "label": _WORKSPACE_PROVIDER_LABELS[value]}
-        for value in values
-    ]
-    for provider in load_custom_providers(config):
-        options.append({
-            "value": f"custom:{provider.id}",
-            "label": f"{provider.name} (via {provider.runner.title()})",
-            "runner": provider.runner,
-            "default_model": encode_model(provider.id, provider.models[0]) if provider.models else "",
-        })
-    return options
+    return workspace_provider_options(config)
 
 
 def _workspace_provider_values(config) -> set[str]:
-    return {option["value"] for option in _workspace_provider_options(config)}
+    return workspace_provider_values(config)
 
 
 def _extract_text_content(raw: object) -> str:
@@ -876,33 +807,12 @@ async def list_workspaces(request: Request) -> JSONResponse:
     return JSONResponse(_workspaces_payload(config))
 
 
-def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
-    try:
-        color = coerce_workspace_color(getattr(workspace, "color", DEFAULT_WORKSPACE_COLOR))
-    except ValueError:
-        color = DEFAULT_WORKSPACE_COLOR
-    return {
-        "name": getattr(workspace, "name", ""),
-        "vault_root": getattr(workspace, "vault_root", ""),
-        "default_provider": getattr(workspace, "default_provider", "claude"),
-        "default_model": getattr(workspace, "default_model", ""),
-        "disallowed_tools": (
-            list(cast(Iterable[Any], getattr(workspace, "disallowed_tools", None)))
-            if getattr(workspace, "disallowed_tools", None) is not None
-            else None
-        ),
-        # claude.ai connector MCP toggle. null = per-workspace default
-        # (personal off, else on). The effective denylist is computed by
-        # ``CiaoConfig.disallowed_tools_for_workspace``.
-        "claude_ai_mcps": getattr(workspace, "claude_ai_mcps", None),
-        "gws_profile": getattr(workspace, "gws_profile", ""),
-        "model_bucket": getattr(workspace, "model_bucket", ""),
-        "color": color,
-    }
+def _workspace_to_dict(workspace: WorkspaceConfig, config) -> dict:
+    return workspace_to_dict(workspace, config)
 
 
 def _workspaces_payload(config) -> dict:
-    workspaces = [_workspace_to_dict(workspace) for workspace in config.workspaces.values()]
+    workspaces = [_workspace_to_dict(workspace, config) for workspace in config.workspaces.values()]
     return {
         "workspaces": workspaces,
         "active": workspaces[0]["name"] if workspaces else None,
@@ -917,15 +827,7 @@ def _workspaces_payload(config) -> dict:
 
 
 def _parse_disallowed_tools_value(raw: object) -> list[str] | None:
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        if raw.strip().lower() == "default":
-            return None
-        return [item.strip() for item in raw.split(",") if item.strip()]
-    if isinstance(raw, list):
-        return [str(item).strip() for item in raw if str(item).strip()]
-    raise ValueError("disallowed_tools must be a list, comma-separated string, or null")
+    return parse_disallowed_tools_value(raw)
 
 
 def _workspace_from_request(
@@ -934,120 +836,11 @@ def _workspace_from_request(
     config,
     existing: WorkspaceConfig | None = None,
 ) -> WorkspaceConfig:
-    name = str(data.get("name", existing.name if existing else "")).strip()
-    if not _WORKSPACE_NAME_RE.match(name):
-        raise ValueError("workspace name must use letters, numbers, dashes, or underscores")
-    if existing is None:
-        for configured_name in config.workspace_names():
-            if configured_name.casefold() == name.casefold():
-                raise ValueError(
-                    f"workspace name conflicts with existing workspace "
-                    f"'{configured_name}'"
-                )
-        target_root = config.canonical_workspace_vault_root(name)
-        for configured_name in config.workspace_names():
-            try:
-                configured_root = config.workspace_vault_root(configured_name)
-            except ValueError:
-                continue
-            if configured_root == target_root:
-                raise ValueError(
-                    f"workspace vault folder is already owned by "
-                    f"'{configured_name}'"
-                )
-    requested_provider = str(
-        data.get(
-            "default_provider",
-            existing.default_provider if existing else "claude",
-        )
-    ).strip() or "claude"
-    available_providers = _workspace_provider_values(config)
-    if requested_provider not in available_providers:
-        allowed = ", ".join(sorted(available_providers))
-        raise ValueError(f"default_provider must be one of: {allowed}")
-    provider = requested_provider
-    custom_workspace = None
-    if requested_provider.startswith("custom:"):
-        custom_id = requested_provider.split(":", 1)[1]
-        custom_workspace = next(
-            (item for item in load_custom_providers(config) if item.id == custom_id),
-            None,
-        )
-        if custom_workspace is None:
-            raise ValueError(f"unknown custom provider '{custom_id}'")
-        provider = custom_workspace.runner
-    default_model = str(
-        data.get("default_model", existing.default_model if existing else "")
-    ).strip()
-    if custom_workspace is not None:
-        if default_model and parse_model(default_model) is None:
-            default_model = encode_model(custom_workspace.id, default_model)
-        if not default_model:
-            if not custom_workspace.models:
-                raise ValueError("custom provider must have at least one model before it can be a workspace default")
-            default_model = encode_model(custom_workspace.id, custom_workspace.models[0])
-    if "disallowed_tools" in data:
-        disallowed_tools = _parse_disallowed_tools_value(data.get("disallowed_tools"))
-    elif existing is not None:
-        disallowed_tools = existing.disallowed_tools
-    else:
-        disallowed_tools = None
-    if "claude_ai_mcps" in data:
-        claude_ai_mcps = coerce_claude_ai_mcps(data.get("claude_ai_mcps"))
-    elif existing is not None:
-        claude_ai_mcps = existing.claude_ai_mcps
-    else:
-        claude_ai_mcps = None
-    if "color" in data:
-        color = coerce_workspace_color(data.get("color"))
-    elif existing is not None:
-        try:
-            color = coerce_workspace_color(existing.color)
-        except ValueError:
-            color = DEFAULT_WORKSPACE_COLOR
-    else:
-        color = DEFAULT_WORKSPACE_COLOR
-    return WorkspaceConfig(
-        name=name,
-        # Vault locations are not an editable Settings field. Updating a
-        # workspace must preserve setup-created/external roots exactly; a new
-        # user-named workspace always receives its standard folder beneath the
-        # configured vault. Accepting request-body paths here allowed `/` and
-        # `..` to turn one authenticated save into filesystem-wide writes and
-        # scans.
-        vault_root=(
-            existing.vault_root
-            if existing is not None
-            else config.stored_workspace_vault_root(name)
-        ),
-        default_provider=provider,
-        default_model=default_model,
-        disallowed_tools=disallowed_tools,
-        claude_ai_mcps=claude_ai_mcps,
-        gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
-        model_bucket=(
-            str(data.get("model_bucket", existing.model_bucket if existing else "")).strip()
-            or (f"custom:{custom_workspace.id}" if custom_workspace is not None else "")
-        ),
-        color=color,
-    )
-
-
-def _workspaces_path(config) -> Path:
-    return Path(config.state_path).resolve().parent / "workspaces.json"
+    return workspace_from_request(data, config=config, existing=existing)
 
 
 def _persist_workspaces(config) -> None:
-    persist = getattr(config, "persist_workspace_registry", None)
-    if callable(persist):
-        persist()
-        return
-    path = _workspaces_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = [_workspace_to_dict(workspace) for workspace in config.workspaces.values()]
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    persist_workspaces(config)
 
 
 def _refresh_project_manager_workspaces(request: Request) -> None:
@@ -1162,8 +955,6 @@ def _provider_key_auth_method(config, key: str) -> str:
     file_value = _read_env_value(_env_path(config), key)
     if file_value:
         return "api_key"
-    if key == "CIAO_OLLAMA_API_KEY" and getattr(config.ollama, "api_key", "ollama") != "ollama":
-        return "api_key"
     if key == "ANTHROPIC_API_KEY" and _claude_oauth_ready():
         return "oauth"
     return "missing"
@@ -1192,20 +983,24 @@ def _provider_config_payload(config) -> dict:
         "auto_update_github_skills": getattr(config, "auto_update_github_skills", False),
         "requires_restart": True,
         "env_path": str(_env_path(config)),
+        # Each row carries its own labels so the Settings card does not have to
+        # map provider ids to names; a new provider gets a correct card for
+        # free instead of falling through to another provider's label.
         "connections": {
-            key: providers[key]
-            for key in ("claude", "codex")
-            if key in providers
+            descriptor.id: {
+                **providers[descriptor.id],
+                "label": descriptor.cli_label,
+                "short_label": descriptor.short_label,
+            }
+            for descriptor in provider_registry.descriptors()
+            if descriptor.id in providers
         },
-        "custom_providers": [
-            public_provider(provider) for provider in load_custom_providers(config)
-        ],
     }
 
 
 def _launch_provider_login(config, provider: str) -> tuple[bool, str]:
     """Open the provider-owned interactive login in macOS Terminal."""
-    if provider not in {"claude", "codex"}:
+    if not provider_registry.is_provider(provider):
         raise ValueError(f"unsupported provider '{provider}'")
     command = _auth_command_for_provider(provider)
     rendered = shlex.join(command)
@@ -1239,7 +1034,7 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     provider = request.path_params["provider"]
     action = request.path_params["action"]
     config = request.app.state.config
-    if provider not in {"claude", "codex"}:
+    if not provider_registry.is_provider(provider):
         return JSONResponse({"error": "unsupported provider"}, status_code=404)
     if action == "connect":
         try:
@@ -1273,19 +1068,17 @@ async def provider_connection_action(request: Request) -> JSONResponse:
 
 
 def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
+    """Push edited service keys into the process env.
+
+    No provider key reaches the live config: every provider authenticates
+    through its own CLI, so there is nothing here to re-point.
+    """
     for key, value in updates.items():
         value = value.strip()
         if value:
             os.environ[key] = value
         else:
             os.environ.pop(key, None)
-        if key == "CIAO_OLLAMA_API_KEY":
-            if value:
-                base_url = os.environ.get("CIAO_OLLAMA_URL", "").strip() or "https://ollama.com"
-                config.ollama = replace(config.ollama, api_key=value, base_url=base_url)
-            else:
-                base_url = os.environ.get("CIAO_OLLAMA_URL", "").strip() or "http://localhost:11434"
-                config.ollama = replace(config.ollama, api_key="ollama", base_url=base_url)
 
 
 async def provider_config_settings(request: Request) -> JSONResponse:
@@ -1316,12 +1109,6 @@ async def provider_config_settings(request: Request) -> JSONResponse:
         updates["CIAO_AUTO_UPDATE_GITHUB_SKILLS"] = "true" if val else "false"
         config.auto_update_github_skills = val
 
-    if "custom_providers" in body:
-        try:
-            await asyncio.to_thread(save_custom_providers, config, body["custom_providers"])
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-
     _write_env_values(_env_path(config), updates)
     provider_key_changes = {
         k: v for k, v in updates.items()
@@ -1341,26 +1128,6 @@ async def provider_config_settings(request: Request) -> JSONResponse:
     return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
 
 
-async def custom_provider_probe(request: Request) -> JSONResponse:
-    """Probe an unsaved custom endpoint for OpenAI-compatible model ids."""
-    try:
-        body = await request.json()
-        if not isinstance(body, dict):
-            raise ValueError("expected object")
-        from ciao.custom_providers import _provider_from_mapping
-
-        existing = next(
-            (item for item in load_custom_providers(request.app.state.config)
-             if item.id == str(body.get("id") or "").strip().lower()),
-            None,
-        )
-        provider = _provider_from_mapping(body, existing=existing)
-        models = await asyncio.to_thread(discover_models, provider)
-        return JSONResponse({"ok": bool(models), "models": list(models)})
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-
-
 def _gws_profile_config_dir(config, profile: str) -> Path | None:
     # Single source of truth lives in ciao.gws_auth so the health monitor and
     # re-login manager map profiles to credential dirs the same way.
@@ -1376,24 +1143,59 @@ def _gws_file_present(config_dir: Path | None, names: tuple[str, ...]) -> bool:
 
 
 def _gws_profile_usage(config) -> dict[str, list[str]]:
-    default_profile = getattr(config, "gws_default_profile", "personal") or "personal"
+    """Workspaces per profile.
+
+    Only explicit links count: a workspace with no account selected is listed
+    under none, rather than being attributed to an operator-level default it
+    never chose.
+    """
     usage: dict[str, list[str]] = {}
     for workspace in config.workspaces.values():
-        profile = (getattr(workspace, "gws_profile", "") or default_profile).strip()
+        profile = str(getattr(workspace, "gws_profile", "") or "").strip()
         if not profile:
-            profile = default_profile
+            continue
         usage.setdefault(profile, []).append(getattr(workspace, "name", ""))
     return usage
 
 
 def _gws_profile_names(config) -> list[str]:
-    names = list(_GWS_BUILTIN_PROFILES)
-    default_profile = getattr(config, "gws_default_profile", "personal") or "personal"
-    for profile in [default_profile, *_gws_profile_usage(config).keys()]:
-        profile = str(profile).strip()
-        if profile and profile not in names:
-            names.append(profile)
-    return names
+    """The Google accounts to show: the ones the user added or connected.
+
+    No built-in list: a fresh install shows none until an account is added.
+    """
+    from ciao import gws_auth
+
+    return gws_auth.known_profiles(config)
+
+
+def _ensure_gws_profile_registered(config, profile: str) -> None:
+    """Record ``profile`` in the account registry if it is not there yet.
+
+    Disconnecting deletes the credential files, which is also all that makes an
+    unregistered (pre-registry or terminal-created) account discoverable. The
+    account itself must survive that, or "Disconnect" would silently delete the
+    card and leave no way back to it.
+    """
+    from ciao import gws_auth
+
+    entries = gws_auth.load_profile_registry(config)
+    if any(entry["name"] == profile for entry in entries):
+        return
+    label = str(_GWS_PROFILE_META.get(profile, {}).get("label", "")) or f"{profile} Google account"
+    entries.append({"name": profile, "label": label})
+    try:
+        gws_auth.save_profile_registry(config, entries)
+    except OSError:
+        logger.exception("Failed to persist the Google account registry")
+
+
+def _valid_gws_profile(profile: object) -> str:
+    """Return the profile slug, or "" when the name cannot address a directory."""
+    from ciao import gws_auth
+
+    if not isinstance(profile, str):
+        return ""
+    return gws_auth.slugify_profile(profile)
 
 
 def _gws_profile_payload(
@@ -1401,24 +1203,27 @@ def _gws_profile_payload(
     profile: str,
     usage: dict[str, list[str]],
     health: dict | None = None,
+    labels: dict[str, str] | None = None,
 ) -> dict:
+    custom_label = (labels or {}).get(profile, "")
     meta = _GWS_PROFILE_META.get(
         profile,
         {
-            "label": f"{profile} Google profile",
-            "purpose": "Custom Google Workspace profile configured outside the built-in personal/work wrapper.",
+            "label": custom_label or f"{profile} Google account",
+            "purpose": "Google account you added. Link it to the workspaces that should use it.",
         },
     )
+    if custom_label:
+        meta = {**meta, "label": custom_label}
     config_dir = _gws_profile_config_dir(config, profile)
     credentials_present = _gws_file_present(config_dir, _GWS_AUTH_FILES)
     client_secret_present = _gws_file_present(config_dir, ("client_secret.json",))
     wrapper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
     helper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-auth-helper.py"
-    setup_command = ""
-    headless_auth_command = ""
-    if profile in _GWS_BUILTIN_PROFILES:
-        setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
-        headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
+    # The wrapper and helper take the profile name, so every account — not just
+    # the two legacy ones — gets a working terminal alternative.
+    setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
+    headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
 
     from ciao import gws_auth
 
@@ -1485,15 +1290,26 @@ def _gws_integration_payload(config) -> dict:
         health = gws_auth.read_health_cache(Path(config.state_path).parent)
     except Exception:
         health = {}
+    labels = {
+        entry["name"]: entry["label"]
+        for entry in gws_auth.load_profile_registry(config)
+        if entry.get("label")
+    }
+    names = _gws_profile_names(config)
+    # An operator default that names no existing account is not a default the
+    # UI should advertise; workspaces then show "No Google account" instead.
+    default_profile = str(getattr(config, "gws_default_profile", "") or "").strip()
+    if default_profile not in names:
+        default_profile = ""
     return {
         "installed": bool(binary_path),
         "binary_path": binary_path,
-        "default_profile": getattr(config, "gws_default_profile", "personal") or "personal",
+        "default_profile": default_profile,
         "wrapper_path": str(wrapper_path) if wrapper_path.is_file() else "",
         "headless_helper_path": str(helper_path) if helper_path.is_file() else "",
         "profiles": [
-            _gws_profile_payload(config, profile, usage, health.get(profile))
-            for profile in _gws_profile_names(config)
+            _gws_profile_payload(config, profile, usage, health.get(profile), labels)
+            for profile in names
         ],
     }
 
@@ -1581,8 +1397,9 @@ async def gws_save_client_secret(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
 
     if not client_secret_str:
         return JSONResponse({"error": "Missing client_secret content"}, status_code=400)
@@ -1617,8 +1434,9 @@ async def gws_auth_url(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
 
     config_dir = _gws_profile_config_dir(config, profile)
     if config_dir is None:
@@ -1654,8 +1472,9 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
 
     if not code_or_url:
         return JSONResponse({"error": "Missing authorization code or redirect URL"}, status_code=400)
@@ -1705,12 +1524,16 @@ async def gws_disconnect(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
 
     config_dir = _gws_profile_config_dir(config, profile)
     if config_dir is None:
         return JSONResponse({"error": "Could not determine config directory"}, status_code=500)
+
+    # Disconnecting keeps the account; only "remove" deletes it.
+    _ensure_gws_profile_registered(config, profile)
 
     try:
         for name in ("credentials.json", "credentials.enc", "token_cache.json",
@@ -1725,6 +1548,99 @@ async def gws_disconnect(request: Request) -> JSONResponse:
                 secret_path.unlink()
     except Exception as e:
         return JSONResponse({"error": f"Failed to disconnect profile: {str(e)}"}, status_code=500)
+
+    return JSONResponse(_gws_integration_payload(config))
+
+
+async def gws_add_profile(request: Request) -> JSONResponse:
+    """Register a Google account so workspaces can be linked to it.
+
+    Adding is bookkeeping only: it records the name and label. Credentials
+    arrive later through the OAuth flow, which creates the credential dir.
+    """
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
+
+    from ciao import gws_auth
+
+    raw_name = str(body.get("name", "") or "").strip()
+    profile = _valid_gws_profile(raw_name)
+    if not profile:
+        return JSONResponse(
+            {"error": "Give the account a name using letters, numbers, dashes, or underscores."},
+            status_code=400,
+        )
+    if profile in gws_auth.GWS_SERVICE_NAMES:
+        return JSONResponse(
+            {
+                "error": (
+                    f"'{profile}' is reserved for a Google Workspace service; "
+                    "choose another account name."
+                )
+            },
+            status_code=400,
+        )
+    if profile in _gws_profile_names(config):
+        return JSONResponse(
+            {"error": f"A Google account named '{profile}' already exists."},
+            status_code=400,
+        )
+    label = str(body.get("label", "") or "").strip() or f"{raw_name} Google account"
+    entries = gws_auth.load_profile_registry(config)
+    entries.append({"name": profile, "label": label})
+    try:
+        gws_auth.save_profile_registry(config, entries)
+    except OSError as exc:
+        return JSONResponse({"error": f"Failed to save the account list: {exc}"}, status_code=500)
+    return JSONResponse(_gws_integration_payload(config))
+
+
+async def gws_remove_profile(request: Request) -> JSONResponse:
+    """Forget a Google account and delete its stored credentials.
+
+    Workspaces pointing at it are unlinked in the same pass so the registry
+    cannot keep a dangling reference to an account that no longer exists.
+    """
+    config = request.app.state.config
+    try:
+        body = await request.json()
+        profile = body.get("profile")
+    except Exception:
+        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
+
+    from ciao import gws_auth
+
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
+
+    config_dir = _gws_profile_config_dir(config, profile)
+    if config_dir is not None and config_dir.is_dir():
+        try:
+            shutil.rmtree(config_dir)
+        except OSError as exc:
+            return JSONResponse(
+                {"error": f"Failed to delete stored credentials: {exc}"}, status_code=500
+            )
+
+    entries = [
+        entry for entry in gws_auth.load_profile_registry(config) if entry["name"] != profile
+    ]
+    try:
+        gws_auth.save_profile_registry(config, entries)
+    except OSError as exc:
+        return JSONResponse({"error": f"Failed to save the account list: {exc}"}, status_code=500)
+
+    unlinked = False
+    for workspace in config.workspaces.values():
+        if getattr(workspace, "gws_profile", "") == profile:
+            workspace.gws_profile = ""
+            unlinked = True
+    if unlinked:
+        config.persist_workspace_registry()
 
     return JSONResponse(_gws_integration_payload(config))
 
@@ -1759,8 +1675,9 @@ async def gws_relogin_start(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
 
     manager = _gws_relogin_manager(request)
     try:
@@ -1774,9 +1691,9 @@ async def gws_relogin_start(request: Request) -> JSONResponse:
 
 async def gws_relogin_status(request: Request) -> JSONResponse:
     """Poll a pending re-login. Returns pending/completed/error/none."""
-    profile = request.query_params.get("profile", "")
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(request.query_params.get("profile", ""))
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
     manager = _gws_relogin_manager(request)
     result = manager.status(profile)
     # When a re-login just completed, refresh the health cache so Settings and
@@ -1798,8 +1715,9 @@ async def gws_relogin_cancel(request: Request) -> JSONResponse:
         profile = body.get("profile")
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
-    if profile not in _GWS_BUILTIN_PROFILES:
-        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    profile = _valid_gws_profile(profile)
+    if not profile:
+        return JSONResponse({"error": "Invalid profile"}, status_code=400)
     manager = _gws_relogin_manager(request)
     return JSONResponse(manager.cancel(profile))
 
@@ -1978,16 +1896,33 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
     no staged copy, because the shell is older than that fix or the drop was not
     an image, the raw errno tells the user nothing they can act on.
 
-    Three tiers, narrowest first. An NSIRD path gets screenshot-specific advice.
-    Any other permission denial still gets actionable text, just without naming
-    a screenshot, so a plain unreadable drop is not mislabelled and does not
-    regress to a raw errno. Anything else falls through to the errno, which is
-    all we know about it.
+    Four tiers, narrowest first. An NSIRD path gets screenshot-specific advice.
+    ``EDEADLK`` means a cloud placeholder (see below). Any other permission
+    denial still gets actionable text, just without naming a screenshot, so a
+    plain unreadable drop is not mislabelled and does not regress to a raw
+    errno. Anything else falls through to the errno, which is all we know
+    about it.
     """
     if _looks_like_nsird_screenshot(path):
         return (
             "macOS won't let us read this screenshot directly. "
             "Save it to disk first, then drag it in."
+        )
+    if exc.errno == errno.EDEADLK:
+        # A file dragged out of iCloud Drive (or any other File Provider) whose
+        # bytes are not on disk: `stat` reports the real size, so the grant's
+        # existence check passes, and the read is then refused with EDEADLK
+        # ("Resource deadlock avoided") because this process may not ask the
+        # provider to materialise it. Unlike EPERM the errno is unambiguous
+        # here, so it needs no corroborating path check. The desktop shell
+        # stages unreadable drops past this (`needs_drop_staging` in
+        # desktop/src-tauri/src/lib.rs); a file over the staging limit, an
+        # older shell, or a client node transferring a non-image still lands
+        # here. A non-image dropped on a host does not: the path is handed to
+        # the agent unread, so the agent hits the same errno on its own.
+        return (
+            f"{path.name} is not downloaded to this Mac yet. Right-click it in "
+            "Finder, choose Download Now, then drag it in again."
         )
     if isinstance(exc, PermissionError):
         return (
@@ -2000,9 +1935,12 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
 def _clear_desktop_drop_staging(request: Request, grant_id: str) -> None:
     """Delete the desktop shell's staged copies for a consumed grant.
 
-    Only images are staged, and by this point their bytes are in media_root or
-    on the host, so the copies are dead weight. Best-effort: the shell's own
-    stale sweep covers a grant that errored out before reaching here.
+    Only the image copies are dead weight by this point: their bytes are in
+    media_root or on the host. A staged non-image copy is the agent's only
+    readable handle on a cloud placeholder, so it is deliberately left in
+    place for the agent to keep reading; the shell's stale sweep reclaims it
+    later. Best-effort: the shell's own stale sweep covers a grant that errored
+    out before reaching here.
     """
     try:
         # The id reaches us from the request body, and this builds an rmtree
@@ -2013,7 +1951,25 @@ def _clear_desktop_drop_staging(request: Request, grant_id: str) -> None:
     except (ValueError, AttributeError):
         return
     grant_dir = request.app.state.config.state_path.parent / "desktop-drop-grants"
-    shutil.rmtree(grant_dir / "staged" / grant_id, ignore_errors=True)
+    staged_dir = grant_dir / "staged" / grant_id
+    try:
+        for index_dir in staged_dir.iterdir():
+            if not index_dir.is_dir():
+                continue
+            for staged in index_dir.iterdir():
+                if (
+                    staged.is_file()
+                    and staged.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
+                ):
+                    staged.unlink(missing_ok=True)
+            # Drop the index dir once every copy in it went away.
+            try:
+                index_dir.rmdir()
+            except OSError:
+                pass
+        staged_dir.rmdir()
+    except OSError:
+        pass
 
 
 def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
@@ -2277,7 +2233,6 @@ async def create_project_chat(request: Request) -> JSONResponse:
             model=body.get("model"),
             mode=body.get("mode"),
             provider=body.get("provider"),
-            model_bucket=body.get("model_bucket"),
             control_surface=body.get("control_surface"),
         )
     except ValueError as exc:
@@ -2390,7 +2345,6 @@ async def chat_detail(request: Request) -> JSONResponse:
             mode=body.get("mode"),
             project_id=body.get("project_id"),
             thinking_level=body.get("thinking_level"),
-            model_bucket=body.get("model_bucket"),
         )
         if chat is not None and "control_surface" in body:
             changed = chat.control_surface != surface
@@ -2435,7 +2389,6 @@ async def chat_handover(request: Request) -> JSONResponse:
             provider=provider,
             model=model,
             messages=[m for m in messages if isinstance(m, dict)],
-            model_bucket=str(body.get("model_bucket", "")).strip(),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -2607,6 +2560,15 @@ async def chat_archive(request: Request) -> JSONResponse:
         # archived, so this is keyed off the cascade running at all.
         "archived_chat_ids": (
             ([chat_id] + result.archived_ids()) if result is not None else []
+        ),
+        # The initiating client clears the active pane as soon as this response
+        # arrives. Return the lifecycle record as well as publishing it over
+        # /ws/events, so that client cannot miss the first "running" state in
+        # the archive/event race.
+        "postprocess": (
+            dict(chat_meta.postprocess)
+            if chat_meta and chat_meta.postprocess
+            else None
         ),
         "stopped_chat_ids": result.stopped_ids() if result is not None else [],
         "failed_chat_ids": result.failed_ids() if result is not None else [],
@@ -2847,7 +2809,179 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
     return result
 
 
-def _overlay_codex_transcript_metadata(
+def _render_opencode_thread(thread: dict, chat, *, metadata: bool = True) -> list[dict]:
+    """Render opencode session messages into the provider-neutral PWA row shape.
+
+    ``thread`` is :meth:`OpencodeProvider.read_thread`'s ``{"info", "messages"}``
+    payload; each message is ``{"info": {role, ...}, "parts": [...]}``.
+
+    ``metadata`` overlays ``chat``'s per-turn images/timings/unattended flags
+    onto the rows. Pass ``False`` when ``thread`` is a *child* session: its
+    turn numbering restarts at 0, so the parent chat's turn metadata does not
+    apply to it.
+    """
+    messages = thread.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+    result: list[dict] = []
+    user_idx = 0
+    pending_tools: list[str] = []
+
+    def flush_tools() -> None:
+        if pending_tools:
+            result.append({
+                "role": "system",
+                "content": "\n".join(pending_tools),
+                "tool_name": "_activity",
+            })
+            pending_tools.clear()
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        info = message.get("info")
+        info = info if isinstance(info, dict) else {}
+        role = str(info.get("role") or "")
+        parts = message.get("parts")
+        parts = [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
+        if role == "user":
+            flush_tools()
+            # A prompt can span several text parts; synthetic ones are
+            # opencode's own injections (compaction summaries), not something
+            # the user typed.
+            texts = [
+                str(part.get("text") or "")
+                for part in parts
+                if part.get("type") == "text" and not part.get("synthetic")
+            ]
+            content = _strip_injected_context("\n".join(texts)).strip()
+            if not content:
+                continue
+            entry: dict = {
+                "role": "user",
+                "content": content,
+                "turn_index": user_idx,
+            }
+            if metadata:
+                refs = chat.user_turn_images.get(str(user_idx))
+                if refs:
+                    entry["images"] = list(refs)
+                timing = chat.user_turn_timings.get(str(user_idx)) or {}
+                if timing.get("sent_at"):
+                    entry["sent_at"] = timing["sent_at"]
+                if chat.user_turn_unattended.get(str(user_idx)):
+                    entry["unattended"] = True
+            result.append(entry)
+            user_idx += 1
+            continue
+        if role != "assistant":
+            continue
+        for part in parts:
+            kind = str(part.get("type") or "")
+            if kind == "text":
+                flush_tools()
+                text = str(part.get("text") or "").strip()
+                if text:
+                    result.append({"role": "assistant", "content": text})
+                continue
+            if kind == "reasoning":
+                # Same `_thinking` tag as the Claude replay path: the PWA
+                # folds it into the collapsed Activity trace.
+                flush_tools()
+                text = str(part.get("text") or "").strip()
+                if text:
+                    result.append({
+                        "role": "system",
+                        "content": text,
+                        "tool_name": "_thinking",
+                    })
+                continue
+            if kind == "tool":
+                tool = str(part.get("tool") or "tool")
+                state = part.get("state")
+                state = state if isinstance(state, dict) else {}
+                raw_input = state.get("input")
+                touches = _opencode_file_touches(tool, raw_input)
+                if str(state.get("status") or "") == "error":
+                    # A failed/denied write or edit reached nothing on disk:
+                    # match the live path (and the Claude replay path) by
+                    # rendering a plain activity row instead of a file card.
+                    touches = []
+                if touches:
+                    flush_tools()
+                    for touch in touches:
+                        result.append({
+                            "role": "system",
+                            "tool_name": "_filecard",
+                            "content": touch["file_path"],
+                            "file_path": touch["file_path"],
+                            "action": touch.get("action") or "touched",
+                            "tool": tool,
+                        })
+                    continue
+                summary = _summarize_opencode_tool_input(tool, raw_input)
+                line = f"{_tool_icon(tool)} {tool}"
+                if summary:
+                    line += f" {summary}"
+                pending_tools.append(line)
+        flush_tools()
+    if metadata:
+        _overlay_assistant_timings(result, chat.user_turn_timings)
+    return result
+
+
+def _opencode_child_status(messages: list) -> str:
+    """A child session's lifecycle state, read from its own messages.
+
+    opencode's session objects carry no status field, but the last assistant
+    message does: an ``error`` payload marks a failure, and a ``time`` record
+    without ``completed`` marks a turn still in flight.
+    """
+    last: dict | None = None
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        info = message.get("info")
+        if isinstance(info, dict) and info.get("role") == "assistant":
+            last = info
+    if last is None:
+        return "completed"
+    if last.get("error"):
+        return "failed"
+    time_info = last.get("time")
+    if (
+        isinstance(time_info, dict)
+        and time_info.get("created")
+        and not time_info.get("completed")
+    ):
+        return "running"
+    return "completed"
+
+
+def _opencode_child_turn_index(info: dict, chat) -> int:
+    """The parent turn a child belongs to: the last one sent before it began."""
+    time_info = info.get("time")
+    created_ms = time_info.get("created") if isinstance(time_info, dict) else None
+    if not isinstance(created_ms, (int, float)) or isinstance(created_ms, bool):
+        return 0
+    best = 0
+    for key, timing in (chat.user_turn_timings or {}).items():
+        sent_at = (timing or {}).get("sent_at")
+        if not sent_at:
+            continue
+        try:
+            idx = int(key)
+            sent_ms = datetime.fromisoformat(
+                str(sent_at).replace("Z", "+00:00")
+            ).timestamp() * 1000
+        except (TypeError, ValueError):
+            continue
+        if sent_ms <= created_ms and idx > best:
+            best = idx
+    return best
+
+
+def _overlay_transcript_metadata(
     entries: list[dict], transcript_rows: list[dict]
 ) -> None:
     metadata = [
@@ -2905,7 +3039,10 @@ async def chat_messages(request: Request) -> JSONResponse:
     """Return conversation history for a chat.
 
     Claude chats read the SDK session file via ``get_session_messages``.
-    Codex chats read the app-server thread via ``thread/read``.
+    Codex chats read the app-server thread via ``thread/read``; opencode chats
+    read the session history from a short-lived ``opencode serve``. Both fall
+    back to the durable ``.runtime`` transcript when the provider-side session
+    is unreadable.
 
     When a chat is archived, provider-side session storage is deleted to reclaim
     disk space (Claude SDK blob, Codex thread). In that case we fall back to the
@@ -2919,37 +3056,57 @@ async def chat_messages(request: Request) -> JSONResponse:
         return JSONResponse({"error": "not found"}, status_code=404)
     handover_messages = list(getattr(chat, "handover_messages", []) or [])
     if not chat.session_id:
-        return JSONResponse(handover_messages)
+        # A provider may fail before creating its session (for example while
+        # opencode is starting). The durable transcript still contains the
+        # user turn and the persisted error, so do not hide it behind the
+        # session-less handover fast path.
+        current = pcm._transcripts.current_messages(
+            ChatContext.for_web(chat_id), getattr(chat, "provider", "claude")
+        )
+        return JSONResponse(handover_messages + current)
 
     config = request.app.state.config
-    if getattr(chat, "provider", "claude") == "codex":
-        thread = await CodexProvider.read_thread(
-            config.workspace_root, chat.session_id
-        )
-        if thread is not None:
-            rendered = _render_codex_thread(thread, chat)
-            if rendered:
-                current = pcm._transcripts.current_messages(
-                    ChatContext.for_web(chat_id), "codex"
-                )
-                if current and current[-1].get("role") == "assistant" and current[-1].get("is_error"):
-                    has_error_in_rendered = False
-                    for row in reversed(rendered):
-                        if row.get("role") == "assistant":
-                            if row.get("is_error") or row.get("content") == current[-1].get("content"):
-                                has_error_in_rendered = True
-                            break
-                    if not has_error_in_rendered:
-                        err_msg = dict(current[-1])
-                        rendered.append(err_msg)
-                _overlay_codex_transcript_metadata(
-                    rendered,
-                    current,
-                )
-                return JSONResponse(handover_messages + rendered)
+    provider = getattr(chat, "provider", "claude")
+    if provider in ("codex", "opencode"):
+        if getattr(chat, "archived", False):
+            # An archived chat is read-only and its provider-side session may
+            # be gone; serve the vault markdown without paying a provider
+            # session read (for opencode, a throwaway server spawn) first.
+            archived = _messages_from_archived_transcript(pcm, config, chat)
+            if archived is not None:
+                return JSONResponse(handover_messages + archived)
+        rendered: list[dict] = []
+        if provider == "codex":
+            thread = await CodexProvider.read_thread(
+                config.workspace_root, chat.session_id
+            )
+            if thread is not None:
+                rendered = _render_codex_thread(thread, chat)
+        else:
+            opencode_thread = await OpencodeProvider.read_thread(
+                config.workspace_root, chat.session_id
+            )
+            if opencode_thread:
+                rendered = _render_opencode_thread(opencode_thread, chat)
         current = pcm._transcripts.current_messages(
-            ChatContext.for_web(chat_id), "codex"
+            ChatContext.for_web(chat_id), provider
         )
+        if rendered:
+            if current and current[-1].get("role") == "assistant" and current[-1].get("is_error"):
+                has_error_in_rendered = False
+                for row in reversed(rendered):
+                    if row.get("role") == "assistant":
+                        if row.get("is_error") or row.get("content") == current[-1].get("content"):
+                            has_error_in_rendered = True
+                        break
+                if not has_error_in_rendered:
+                    err_msg = dict(current[-1])
+                    rendered.append(err_msg)
+            _overlay_transcript_metadata(
+                rendered,
+                current,
+            )
+            return JSONResponse(handover_messages + rendered)
         if current:
             _overlay_assistant_timings(current, chat.user_turn_timings)
             return JSONResponse(handover_messages + current)
@@ -3249,6 +3406,35 @@ async def chat_subagents(request: Request) -> JSONResponse:
                 "turn_index": int(item.get("root_turn_index") or 0),
             })
         return JSONResponse(entries)
+
+    if getattr(chat, "provider", "claude") == "opencode":
+        opencode_entries: list[dict] = []
+        for item in await OpencodeProvider.read_collab_tree(
+            config.workspace_root, chat.session_id
+        ):
+            info = item.get("info")
+            info = info if isinstance(info, dict) else {}
+            agent_id = str(info.get("id") or "")
+            if not agent_id:
+                continue
+            messages = item.get("messages")
+            messages = messages if isinstance(messages, list) else []
+            opencode_entries.append({
+                "agent_id": agent_id,
+                "parent_agent_id": str(info.get("parentID") or ""),
+                "messages": _render_opencode_thread(item, chat, metadata=False),
+                "tool_use_id": "",
+                "description": str(info.get("title") or ""),
+                "subagent_type": "opencode",
+                "is_async": True,
+                # opencode's session objects carry no status field, but this
+                # endpoint is polled every few seconds while a turn streams —
+                # derive the lifecycle from the child's own messages and anchor
+                # it to the parent turn sent before the child was created.
+                "status": _opencode_child_status(messages),
+                "turn_index": _opencode_child_turn_index(info, chat),
+            })
+        return JSONResponse(opencode_entries)
 
     workspace = str(config.workspace_root)
 
@@ -4329,12 +4515,29 @@ def _enrich_schedule(
         entry_dict["effective_model"] = entry.model
     web_project_id = entry_dict.get("web_project_id")
     web_chat_id = entry_dict.get("web_chat_id")
+    # Whether the target still resolves. Stated explicitly because the PWA
+    # cannot infer it from context_label: that field is always set, so a
+    # truthy label suppressed the "unavailable" indicator and a stale target
+    # rendered as an ordinary one (previously as a bare `proj-...` id).
+    entry_dict["context_available"] = True
     if web_project_id and pcm:
         project = pcm.get_project(web_project_id)
-        entry_dict["context_label"] = f"{project.name} (new chat per run)" if project else web_project_id
+        if project:
+            entry_dict["context_label"] = f"{project.name} (new chat per run)"
+        else:
+            # A stale id is not a label. Show the remembered name, which is
+            # also what the dispatcher re-homes by.
+            remembered = (entry_dict.get("web_project_name") or "").strip()
+            entry_dict["context_label"] = (
+                f"{remembered} (new chat per run)" if remembered else "Project not found"
+            )
+            entry_dict["context_available"] = bool(
+                remembered and pcm.find_project(remembered, entry_dict.get("workspace") or "")
+            )
     elif web_chat_id and pcm:
         chat = pcm.get_chat(web_chat_id)
         entry_dict["context_label"] = chat.title if chat else web_chat_id
+        entry_dict["context_available"] = chat is not None
     else:
         entry_dict["context_label"] = ""
     next_run = compute_next_run(entry)
@@ -4510,9 +4713,9 @@ async def create_schedule(request: Request) -> JSONResponse:
     # stale; workspace survives). Explicit body override wins.
     workspace = (body.get("workspace") or "").strip().lower()
     known_workspaces = _known_workspace_names(pcm)
+    target_project = pcm.get_project(web_project_id) if web_project_id else None
     if workspace not in known_workspaces and web_project_id:
-        project = pcm.get_project(web_project_id)
-        workspace = project.workspace if project else ""
+        workspace = target_project.workspace if target_project else ""
     entry = sm.create(
         daily_time_utc=body.get("time") or "",
         prompt=body["prompt"],
@@ -4528,6 +4731,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         run_at_date=run_at_date,
         web_chat_id=web_chat_id,
         web_project_id=web_project_id,
+        web_project_name=target_project.name if target_project else "",
         archive_policy=archive_policy,
         workspace=workspace if workspace in known_workspaces else "",
         title=str(body.get("title", "")).strip(),
@@ -4590,11 +4794,13 @@ async def schedule_detail(request: Request) -> JSONResponse:
         entry.web_chat_id = body["web_chat_id"] or None
     if "web_project_id" in body:
         entry.web_project_id = body["web_project_id"] or None
-        # Re-stamp the workspace to match the new target project so the
-        # stale-id fallback keeps routing to the right General project.
+        # Re-stamp the workspace and the target's name. Project ids regenerate
+        # per instance, so the name is what lets a later run find the same
+        # project again instead of silently falling back to General.
         pcm = request.app.state.project_chat_manager
         project = pcm.get_project(entry.web_project_id) if entry.web_project_id else None
         entry.workspace = project.workspace if project else ""
+        entry.web_project_name = project.name if project else ""
     if "workspace" in body:
         ws = (body["workspace"] or "").strip().lower()
         pcm = request.app.state.project_chat_manager
@@ -4800,7 +5006,16 @@ async def run_loop_now(request: Request) -> JSONResponse:
 
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
-    codex_catalog = await CodexProvider.model_catalog(config.workspace_root)
+    # `?refresh=1` bypasses the provider catalog caches. Each provider serves its
+    # own catalog on demand, so there is nothing to warm at startup; this is the
+    # on-demand equivalent, used by the Settings tab so a provider connected in
+    # another window shows up without waiting out the TTL.
+    refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    codex_catalog = await CodexProvider.model_catalog(
+        config.workspace_root, force=refresh
+    )
     visible_codex = [item for item in codex_catalog if not item.get("hidden")]
     codex_models = [
         str(item.get("model") or item.get("id") or "")
@@ -4818,10 +5033,32 @@ async def list_models(request: Request) -> JSONResponse:
     # Automatic (catalog-derived) mapping vs the effective one after the
     # operator's per-tier pins; the settings UI labels "Automatic (…)"
     # from the former and shows the latter on the tier badges.
+    # opencode is bring-your-own-provider: its catalog is whatever backends the
+    # user has connected, so an empty list simply means "not signed in yet".
+    opencode_catalog = await OpencodeProvider.model_catalog(
+        config.workspace_root, force=refresh
+    )
+    opencode_models = [
+        str(item.get("model") or "") for item in opencode_catalog if item.get("model")
+    ]
+    # Per-model reasoning-effort variants, merged into the same map the PWA
+    # already reads for Codex so the picker needs no provider-specific branch.
+    opencode_reasoning_levels = {
+        str(item.get("model")): list(item.get("variants") or [])
+        for item in opencode_catalog
+        if item.get("model")
+    }
+    opencode_overrides = opencode_tier_overrides(config)
+    opencode_tiers = {
+        tier: model for tier, model in opencode_overrides.items() if model in opencode_models
+    }
     codex_overrides = codex_tier_overrides(config)
     codex_tier_defaults = codex_tier_models(codex_catalog)
     codex_tiers = codex_tier_models(codex_catalog, overrides=codex_overrides)
-    model_reasoning_levels = _codex_reasoning_levels(codex_catalog, codex_overrides)
+    model_reasoning_levels = {
+        **opencode_reasoning_levels,
+        **_codex_reasoning_levels(codex_catalog, codex_overrides),
+    }
     codex_model_metadata: dict[str, dict] = {}
     for item in visible_codex:
         model_id = str(item.get("model") or item.get("id") or "")
@@ -4835,86 +5072,58 @@ async def list_models(request: Request) -> JSONResponse:
             ),
             "input_modalities": list(item.get("inputModalities") or []),
         }
-    # Cloud allowlist + locally-discovered daemon models both count as
-    # "Ollama" for bucketing: they show in the personal Claude bucket,
-    # never in the work (Anthropic subscription) bucket.
-    ollama_cloud = _ollama_cloud_model_options(config)
-    ollama = list(dict.fromkeys([*ollama_cloud, *config.ollama.local_models]))
-    claude_work = [m for m in config.claude_models if m not in ollama]
-    claude_personal = [m for m in config.claude_models if m in ollama]
-
-    work_default = config.claude_default_model if config.claude_default_model in claude_work else (claude_work[0] if claude_work else "")
-    personal_default = claude_personal[0] if claude_personal else ""
-
-    # OpenRouter backend: available when an API key is set. The picker
-    # offers the per-tier alias defaults plus any discovered/disabled
-    # anthropic-family models.
-    or_settings = config.openrouter
-    openrouter_models = _openrouter_model_options(config)
-    openrouter_tiers = {
-        "haiku": or_settings.haiku_model,
-        "sonnet": or_settings.sonnet_model,
-        "opus": or_settings.opus_model,
-        "fable": or_settings.fable_model,
-    } if or_settings.available else {}
-    openrouter_default = or_settings.sonnet_model if or_settings.available else ""
-
-    custom_providers = load_custom_providers(config)
-    custom_payload = []
-    for provider in custom_providers:
-        models = provider.models
-        custom_payload.append({
-            **public_provider(provider),
-            "models": [encode_model(provider.id, model) for model in models],
-            "model_labels": {
-                encode_model(provider.id, model): model for model in models
-            },
-        })
+    # Claude Code serves one upstream, so its models are a single list rather
+    # than the work/personal split the routing-backend era needed.
+    claude_models = list(config.claude_models)
+    claude_default = (
+        config.claude_default_model
+        if config.claude_default_model in claude_models
+        else (claude_models[0] if claude_models else "")
+    )
 
     return JSONResponse({
         "models": config.claude_models,
         "default": config.claude_default_model,
         "provider_models": {
-            "claude_work": claude_work,
-            "claude_personal": claude_personal,
-            "openrouter": openrouter_models,
+            "claude": claude_models,
             "codex": codex_models,
+            "opencode": opencode_models,
         },
         "provider_defaults": {
-            "claude_work": work_default,
-            "claude_personal": personal_default,
-            "openrouter": openrouter_default,
+            "claude": claude_default,
             "codex": codex_default,
+            "opencode": opencode_models[0] if opencode_models else "",
         },
-        # Per-backend tier models, so the picker can show
-        # "sonnet -> kimi (ollama) / gpt-5.6-terra (codex)". Tier names are
-        # resolved to provider-native ids only at the dispatch boundary.
+        # Per-provider tier models, so the picker can show
+        # "sonnet -> gpt-5.6-terra (codex)". Tier names resolve to
+        # provider-native ids only at the dispatch boundary.
         "alias_tiers": {
-            "ollama": {
-                "haiku": config.ollama.haiku_model,
-                "sonnet": config.ollama.sonnet_model,
-                "opus": config.ollama.opus_model,
-                "fable": config.ollama.fable_model,
-            },
-            "openrouter": openrouter_tiers,
             "codex": codex_tiers,
+            "opencode": opencode_tiers,
         },
         # Catalog-derived codex mapping before per-tier pins, so the
         # settings UI can label the automatic choice while an override
         # is active.
         "codex_tier_defaults": codex_tier_defaults,
         "backends": {
-            "ollama": _ollama_backend_available(config),
-            "openrouter": or_settings.available,
             "anthropic": True,
             "codex": bool(codex_models),
+            "opencode": bool(opencode_models),
         },
-        "ollama_models": ollama,
-        "ollama_local_models": list(config.ollama.local_models),
-        "openrouter_models": openrouter_models,
-        "custom_providers": custom_payload,
         "codex_models": codex_models,
         "codex_model_metadata": codex_model_metadata,
+        "opencode_models": opencode_models,
+        # Registry-driven descriptors so the PWA can build its provider list
+        # (labels, buckets, capabilities) without a hard-coded union.
+        "providers": [
+            {
+                "id": item.id,
+                "label": item.label,
+                "short_label": item.short_label,
+                "capabilities": asdict(capabilities_for(item.id)),
+            }
+            for item in provider_registry.descriptors()
+        ],
         "model_reasoning_levels": model_reasoning_levels,
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
     })
@@ -4933,7 +5142,6 @@ def _routines_payload(config, app_settings) -> dict:
     )
 
     s = app_settings.settings
-    ollama = config.ollama
     if config.title_model_override:
         title_effective = config.title_model_override
     else:
@@ -4972,19 +5180,24 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model": s.insights_model,
 
         "critique_models": s.critique_models,
-        "ollama_haiku_model": s.ollama_haiku_model,
-        "ollama_sonnet_model": s.ollama_sonnet_model,
-        "ollama_opus_model": s.ollama_opus_model,
-        "ollama_fable_model": s.ollama_fable_model,
-        "openrouter_haiku_model": s.openrouter_haiku_model,
-        "openrouter_sonnet_model": s.openrouter_sonnet_model,
-        "openrouter_opus_model": s.openrouter_opus_model,
-        "openrouter_fable_model": s.openrouter_fable_model,
-        "codex_haiku_model": s.codex_haiku_model,
-        "codex_sonnet_model": s.codex_sonnet_model,
-        "codex_opus_model": s.codex_opus_model,
-        "codex_fable_model": s.codex_fable_model,
-        "custom_routing": s.custom_routing or {},
+        # Canonical shape: {provider_id: {tier: model}} for every runtime
+        # provider with operator-settable tier pins.
+        "provider_routing": s.provider_routing or {},
+        # Per-provider default execution mode for new chats, as stored
+        # (missing = built-in default). Effective defaults below.
+        "provider_default_modes": s.provider_default_modes or {},
+        "provider_default_modes_effective": {
+            item.id: config.default_mode_for_provider(item.id)
+            for item in provider_registry.descriptors()
+        },
+        # Flat mirror of the same pins, kept so a client written against the
+        # pre-map settings API keeps rendering. PATCH accepts either shape.
+        **{
+            f"{descriptor.id}_{tier}_model": app_settings.tier_pin(descriptor.id, tier)
+            for descriptor in provider_registry.descriptors()
+            if descriptor.tier_settings_attr
+            for tier in ("haiku", "sonnet", "opus", "fable")
+        },
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,
@@ -4993,37 +5206,16 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model_by_workspace": insights_by_workspace,
 
         "critique_models_effective": critique_effective,
-        "tier_defaults": app_settings.tier_model_defaults(),
-        "alias_tiers": {
-            "ollama": {
-                "haiku": config.ollama.haiku_model,
-                "sonnet": config.ollama.sonnet_model,
-                "opus": config.ollama.opus_model,
-                "fable": config.ollama.fable_model,
-            },
-            "openrouter": {
-                "haiku": config.openrouter.haiku_model,
-                "sonnet": config.openrouter.sonnet_model,
-                "opus": config.openrouter.opus_model,
-                "fable": config.openrouter.fable_model,
-            } if config.openrouter.available else {},
-            **{
-                f"custom:{provider.id}": {
-                    tier: (s.custom_routing or {}).get(provider.id, {}).get(tier, "")
-                    or (
-                        encode_model(provider.id, provider.models[0])
-                        if provider.models else ""
-                    )
-                    for tier in ("haiku", "sonnet", "opus", "fable")
-                }
-                for provider in load_custom_providers(config)
-            },
-        },
         # The "apple" title/insights options need macOS 26+, the desktop app,
         # and Apple Intelligence switched on; the routine rows explain which
         # prerequisite is missing instead of silently hiding the option.
         "apple_model_available": native_sidecar.apple_model_available(),
         "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
+        # Apple Intelligence is a beta feature, off by default. The toggle in
+        # Settings → Models PATCHes apple_intelligence_enabled; when off, the
+        # "apple" sentinel above reports unavailable and routines fall back.
+        "apple_intelligence_enabled": bool(config.apple_intelligence_enabled),
+        "apple_intelligence_beta": native_sidecar.APPLE_INTELLIGENCE_BETA,
         "transcription": {
             "locale": config.transcription_locale,
             # On-device dictation needs macOS 26+, the installed app, and a
@@ -5042,23 +5234,8 @@ def _routines_payload(config, app_settings) -> dict:
         # Grouped options for the routine model selectors.
         "model_options": {
             "anthropic": ["haiku", "sonnet", "opus", "fable"],
-            "ollama_cloud": _ollama_cloud_model_options(config),
-            "ollama_local": list(ollama.local_models),
-            "openrouter": _openrouter_model_options(config),
-            "custom_providers": [
-                {
-                    **public_provider(provider),
-                    "models": [encode_model(provider.id, model) for model in provider.models],
-                    "model_labels": {
-                        encode_model(provider.id, model): model for model in provider.models
-                    },
-                }
-                for provider in load_custom_providers(config)
-            ],
         },
         "backends": {
-            "ollama": _ollama_backend_available(config),
-            "openrouter": config.openrouter.available,
             "anthropic": True,
         },
         "workspace_context": {
@@ -5079,19 +5256,6 @@ async def settings_routines(request: Request) -> JSONResponse:
     app_settings = request.app.state.app_settings
     if app_settings is None:
         return JSONResponse({"error": "settings store unavailable"}, status_code=503)
-    if request.method == "GET":
-        # Re-discover local daemon models so a freshly `ollama pull`-ed
-        # model appears in the selectors without a restart. Bounded by the
-        # discovery timeout (2s) and run off the event loop.
-        from ciao.config import (
-            refresh_local_ollama_models,
-            refresh_cloud_ollama_models,
-            refresh_openrouter_models,
-        )
-
-        await asyncio.to_thread(refresh_local_ollama_models, config)
-        await asyncio.to_thread(refresh_cloud_ollama_models, config)
-        await asyncio.to_thread(refresh_openrouter_models, config)
     if request.method == "PATCH":
         try:
             body = await request.json()
@@ -5653,9 +5817,10 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
 
     Returns the inferred vault mode ("scratch" vs "existing"), the resolved
     vault root, and any nested workspace directories the folder already
-    contains (e.g. ``memory-vault/personal/``, ``memory-vault/work/``). The
-    wizard uses this to decide whether to ask for a "first workspace" name
-    (scratch) or show the existing ones as read-only chips (existing).
+    contains (e.g. legacy ``memory-vault/personal/`` and
+    ``memory-vault/work/``). The wizard uses this to show existing workspace
+    chips when they are present; otherwise it asks for the logical workspace
+    name that will be assigned to the selected folder.
     """
     from ciao.cli import detect_vault_mode
     from ciao.setup_status import detect_nested_workspaces

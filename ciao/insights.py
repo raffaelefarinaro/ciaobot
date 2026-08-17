@@ -38,7 +38,6 @@ from ciao import job_runs, native_sidecar
 
 if TYPE_CHECKING:
     from ciao.config import CiaoConfig
-from ciao.providers.ollama import OllamaSettings
 from ciao.transcripts import _claude_projects_dir
 
 logger = logging.getLogger(__name__)
@@ -60,6 +59,36 @@ def resolve_insights_model(config: CiaoConfig, workspace: str | None = None) -> 
 
 
 _INSIGHTS_HEADER = "## Session insights"
+# Written by _append_section immediately before the header so the real
+# appended section is distinguishable from a transcript that merely quotes
+# the header text (curation chats do this routinely). Archives written
+# before the stamp existed are handled by the heuristic in
+# locate_insights_section.
+_INSIGHTS_STAMP = "<!-- ciao:session-insights -->"
+_MARKER_LINE_RE = re.compile(
+    rf"^{re.escape(_INSIGHTS_HEADER)}[ \t]*(?=\r?$)", re.MULTILINE
+)
+# The stamp is part of the archive format too: require it at the beginning of
+# its own line before binding it to the following heading. Without that
+# anchor, a transcript sentence ending in the stamp could bind to a heading
+# on the next line and make the quoted text look like extracted insights.
+_STAMPED_MARKER_RE = re.compile(
+    rf"^{re.escape(_INSIGHTS_STAMP)}\r?\n"
+    rf"{re.escape(_INSIGHTS_HEADER)}[ \t]*(?=\r?$)",
+    re.MULTILINE,
+)
+# Rendered archives title each transcript turn "## Turn N", render subagent
+# turns as "#### Turn N" under a trailing "## Subagents" block, and close with
+# "### Usage"/"### Quota" trailers. The appended insights section always sits
+# after all of those, so any such heading after a marker proves the marker is
+# quoted transcript content.
+_TURN_HEADING_RE = re.compile(
+    r"^(?:#{2,4} Turn \d+|## Subagents\s*$|### (?:Usage|Quota)\s*$)",
+    re.MULTILINE,
+)
+# Rendered archives fence quoted transcript text in line-start ``` blocks
+# (the appended body's snippet fences are indented and do not match).
+_FENCE_LINE_RE = re.compile(r"^```", re.MULTILINE)
 _RETRY_DELAY_S = 30
 _READ_TOOL_TRUNCATE_CHARS = 200
 _KEEP_FULL_TOOLS = frozenset({"Edit", "Write", "Bash", "Task", "NotebookEdit"})
@@ -124,35 +153,31 @@ def _backfill_ceiling() -> int:
 
 def _resolve_insights_call(
     config, model: str, *, provider: str = "claude"
-) -> tuple[str, dict[str, str], str, str | None]:
-    """Resolve an insights model to (effective_model, env, provider, note).
+) -> tuple[str, str, str | None]:
+    """Resolve an insights model to (effective_model, provider, note).
 
-    Apple needs no special case here any more: `intended_backend` knows the
-    sentinel names an `apple` backend and `_backend_available` asks the sidecar,
-    so `resolve_with_fallback` substitutes the configured model and produces the
-    note when Apple Intelligence is off — the same path every other unavailable
-    backend takes. `run_oneshot` dispatches a surviving sentinel to the bundled
-    helper, so it never reaches an upstream either way.
+    The requested model is used as-is; the only substitution left is Apple's
+    on-device model when Apple Intelligence is unavailable, which
+    `resolve_model_or_fallback` reports as a note. `run_oneshot` dispatches a
+    surviving sentinel to the bundled helper, so it never reaches an upstream
+    either way.
     """
-    from ciao.custom_providers import env_for_model as custom_env_for_model
-    from ciao.custom_providers import provider_for_model, runtime_model
-    custom = provider_for_model(config, model)
-    if custom is not None:
-        return runtime_model(model), custom_env_for_model(config, model), custom.runner, None
-    if provider == "codex" and not native_sidecar.is_apple_model(model):
-        return model, {}, provider, None
+    # Routine settings qualify runtime-provider overrides so a global choice
+    # is not accidentally sent through Claude (the default one-shot provider).
+    for routed_provider in ("codex", "opencode"):
+        prefix = f"{routed_provider}:"
+        if model.startswith(prefix):
+            return model[len(prefix):] or "sonnet", routed_provider, None
 
-    from ciao.providers.routing import resolve_with_fallback
+    if provider == "codex" and not native_sidecar.is_apple_model(model):
+        return model, provider, None
 
     # An insights_model that is itself the sentinel cannot serve as the
     # fallback; sonnet is the tier the automatic setting resolves to.
-    default_model = (config.insights_model or "").strip()
-    if native_sidecar.is_apple_model(default_model):
-        default_model = "sonnet"
-    effective_model, env, note = resolve_with_fallback(
-        model, config, default_model=default_model
+    effective_model, note = native_sidecar.resolve_model_or_fallback(
+        model, default_model=(config.insights_model or "").strip()
     )
-    return effective_model, env, provider, note
+    return effective_model, provider, note
 
 
 def _fit_transcript(filtered_jsonl: str) -> tuple[str, int]:
@@ -190,6 +215,22 @@ def is_context_overflow(exc: Exception) -> bool:
     return "too long" in text or "context window" in text or "context_length_exceeded" in text
 
 
+def is_terminal_failure(exc: Exception) -> bool:
+    """True when the provider already classified the failure as non-retriable.
+
+    ``ciao.providers.oneshot`` sets ``OneShotError.transient`` from the
+    upstream status and body: auth, subscription, quota, usage-limit and
+    bad-model rejections fail identically on a second call, and
+    ``run_oneshot`` therefore raises them without retrying internally.
+    Re-sending them from here only buys another rejected request plus the
+    30s wait, once per archive across a whole backfill run.
+
+    Read through ``getattr`` so a provider that raises a plain exception
+    (timeout, subprocess error) stays retriable, which is the safe default.
+    """
+    return getattr(exc, "transient", None) is False
+
+
 _INSIGHTS_SYSTEM_PROMPT = """\
 You are extracting durable signal from a Claude Code session transcript.
 The user is the workspace owner. Output Markdown with the exact section headers below.
@@ -202,6 +243,9 @@ Rules:
 - Skip anything obvious from user/assistant text alone.
 - "Errors" = tool/model/system failure, not just things the user disliked.
 - "User corrections" = the user pushed back, redirected, or rejected an approach.
+  Append the "Durable rule:" sentence only when the correction implies a
+  preference that should hold in future sessions, phrased as a present-tense
+  standing rule; omit it for one-off fixes.
 - "New entities" = people/projects/places/products mentioned for the first time, not generic nouns.
 - When citing wikilinks, use bare [[Target]] or [[Target|Display]] syntax. Do NOT wrap wikilinks in backticks, quotes, or other formatting.
 - Be terse. One line per item where possible.
@@ -213,7 +257,7 @@ Rules:
 - Tried <approach>; blocked by <reason>; switched to <alternative>. [idx=N]
 
 ## User corrections
-- User said: "<short quote>" -> assistant changed <what>. [idx=N]
+- User said: "<short quote>" -> assistant changed <what>. Durable rule: <present-tense standing preference, if any>. [idx=N]
 
 ## New entities
 - <type>: <name> - <one-line context>. [idx=N]
@@ -416,9 +460,9 @@ async def extract_and_append(
     Always swallows exceptions — this runs as a fire-and-forget task and
     must never crash the route or leave the archive corrupted.
 
-    The model call goes through a one-shot ``claude_agent_sdk.query()``
-    call, routed to the configured upstream (Ollama / OpenRouter /
-    Anthropic) via the ``env`` dict.
+    The model call goes through ``run_oneshot``, which dispatches to the
+    runtime provider that owns the model (Claude Code, Codex, or opencode) or
+    to the bundled Apple helper.
 
     When ``trajectories_enabled" and ``session_id`` are set, a JSON
     trajectory is written to ``~/.ciao/trajectories/YYYY-MM/`` after the
@@ -439,6 +483,10 @@ async def extract_and_append(
     filing one workspace's facts into another workspace's queue.
     """
     output = ""
+    # Every live surface keys post-archive work by chat, and `track` reads this
+    # out of the `extra` it is given at entry (not from the handle mid-block),
+    # so it has to be resolved before the first tracked step opens.
+    chat_id = str((trajectory_meta or {}).get("chat_id") or "")
     try:
         if not archive_path.exists():
             logger.warning("Archive path %s missing, skipping insights", archive_path)
@@ -447,12 +495,16 @@ async def extract_and_append(
             logger.info("Archive %s already has insights, skipping", archive_path)
             return
 
-        effective_model, env, provider, note = _resolve_insights_call(
+        effective_model, provider, note = _resolve_insights_call(
             config, model, provider=provider
         )
         async with job_runs.track(
             "insights", "Session insights", model=effective_model,
-            extra={"archive": archive_path.name, "session_id": session_id},
+            extra={
+                "archive": archive_path.name,
+                "session_id": session_id,
+                "chat_id": chat_id,
+            },
         ) as run:
             if note:
                 run.extra["fallback"] = note
@@ -460,7 +512,6 @@ async def extract_and_append(
             output, model_error = await _run_model_with_retry(
                 filtered_jsonl=filtered_jsonl,
                 model=effective_model,
-                env=env,
                 provider=provider,
                 cwd=workspace_root,
             )
@@ -482,12 +533,10 @@ async def extract_and_append(
             # configured model instead; the insights themselves are already
             # extracted at this point.
             doc_model = effective_model
-            doc_env = env
             if native_sidecar.is_apple_model(doc_model):
                 doc_model = (config.insights_model or "").strip() or "sonnet"
                 if native_sidecar.is_apple_model(doc_model):
                     doc_model = "sonnet"
-                doc_env = {}
             try:
                 from ciao.project_doc_update import update_project_doc
 
@@ -497,13 +546,16 @@ async def extract_and_append(
                 async with job_runs.track(
                     "project_doc_update", "Project doc update",
                     model=doc_model,
-                    extra={"doc": str(doc), "archive": archive_path.name},
+                    extra={
+                        "doc": str(doc),
+                        "archive": archive_path.name,
+                        "chat_id": chat_id,
+                    },
                 ) as run:
                     wrote = await update_project_doc(
                         doc_path=doc,
                         insights_md=output,
                         model=doc_model,
-                        env=doc_env,
                         provider=provider,
                         cwd=workspace_root,
                     )
@@ -524,7 +576,7 @@ async def extract_and_append(
                 meta = trajectory_meta or {}
                 with job_runs.track_sync(
                     "trajectory", "Trajectory capture",
-                    extra={"session_id": session_id},
+                    extra={"session_id": session_id, "chat_id": chat_id},
                 ) as run:
                     path = build_and_persist_trajectory(
                         session_id=session_id,
@@ -561,8 +613,11 @@ async def extract_and_append(
 
                 with job_runs.track_sync(
                     "memory_proposals", "Memory proposals",
-                    extra={"archive": archive_path.name},
+                    extra={"archive": archive_path.name, "chat_id": chat_id},
                 ) as run:
+                    # The count is what the archived chat reports back to the
+                    # user ("3 memory proposals"); a bare bool cannot say that.
+                    proposal_stats: dict[str, int] = {}
                     proposals_result = proposals_from_archive(
                         archive_path,
                         proposal_vault_root,
@@ -573,8 +628,11 @@ async def extract_and_append(
                             and getattr(config, "workspace_root", None)
                             else None
                         ),
+                        stats=proposal_stats,
                     )
                     run.extra["wrote"] = bool(proposals_result)
+                    run.extra["proposals"] = proposal_stats.get("proposed", 0)
+                    run.extra["promoted"] = proposal_stats.get("promoted", 0)
             except Exception:  # noqa: BLE001 — fire-and-forget, never crash
                 logger.exception(
                     "Memory proposals failed for %s", archive_path
@@ -586,9 +644,65 @@ async def extract_and_append(
             )
 
 
+def locate_insights_section(text: str) -> tuple[int, int] | None:
+    """Locate the real appended Session-insights section of an archive.
+
+    Returns ``(section_start, body_start)`` — the offset where the section
+    (stamp included) begins, and the offset just past the header line — or
+    ``None`` when the archive carries no appended section.
+
+    A plain substring match is not enough: chats that *discuss* insights
+    (nightly curation, meta work on the pipeline) quote the header verbatim
+    inside their transcript, which made the old check skip extraction for
+    those archives and let the proposal parser re-ingest already-reviewed
+    bullets. Resolution order:
+
+    * A stamped section is authoritative — but only a stamp immediately
+      followed by the header line, the exact shape :func:`_append_section`
+      writes, with no transcript structure after it. The section is always
+      the last thing in the file, so anything transcript-shaped after the
+      header (a turn heading, a trailer, or a line-start ``` — rendered
+      archives fence quoted text, so a quoted stamp is followed by at least
+      its closing fence) proves the stamp is quoted content. The check looks
+      only *forward*: fence *parity* over the prefix would be flipped by a
+      single unbalanced ``` inside any earlier turn's verbatim text — common
+      in chats that paste partial code blocks — and would hide the real
+      section, re-triggering extraction on every pass.
+    * Otherwise take the last line-anchored header, under the same
+      forward-looking rule.
+    """
+    stamped_matches = list(_STAMPED_MARKER_RE.finditer(text))
+    if stamped_matches:
+        # The real stamp is always the last stamp+header pair; if this one is
+        # followed by transcript structure it is quoted content, and every
+        # earlier pair sits even deeper in the transcript.
+        stamped = stamped_matches[-1]
+        if _is_appended_tail(text, stamped.end()):
+            return stamped.start(), stamped.end()
+        return None
+    matches = list(_MARKER_LINE_RE.finditer(text))
+    if matches and _is_appended_tail(text, matches[-1].end()):
+        return matches[-1].start(), matches[-1].end()
+    return None
+
+
+def _is_appended_tail(text: str, idx: int) -> bool:
+    """True when everything after *idx* looks like an appended insights body.
+
+    Transcript structure after a marker — a turn heading, the Subagents
+    block, a Usage/Quota trailer, or a line-start ``` fence — proves the
+    marker is quoted transcript content, not the section the pipeline
+    appended at end of file. (The appended body's own snippet fences are
+    indented and never start a line.)
+    """
+    return not _TURN_HEADING_RE.search(text, idx) and not _FENCE_LINE_RE.search(
+        text, idx
+    )
+
+
 def _has_insights_section(path: Path) -> bool:
     try:
-        return _INSIGHTS_HEADER in path.read_text(encoding="utf-8")
+        return locate_insights_section(path.read_text(encoding="utf-8")) is not None
     except OSError:
         return False
 
@@ -598,27 +712,13 @@ def _append_section(path: Path, body: str) -> None:
     if not text:
         return
     with path.open("a", encoding="utf-8") as f:
-        f.write(f"\n\n{_INSIGHTS_HEADER}\n\n{text}\n")
-
-
-def _ollama_env(model: str, settings: OllamaSettings) -> dict[str, str]:
-    """Route the insights model to the right upstream.
-
-    Delegates to :func:`ciao.providers.ollama.routine_env_for_model`:
-    not gated on the per-chat ``models`` allowlist (the insights model is
-    fixed at the server level), local-daemon models go to ``local_url``,
-    Anthropic aliases stay on the subscription path with no overrides.
-    """
-    from ciao.providers.ollama import routine_env_for_model
-
-    return routine_env_for_model(model, settings)
+        f.write(f"\n\n{_INSIGHTS_STAMP}\n{_INSIGHTS_HEADER}\n\n{text}\n")
 
 
 async def _run_model_with_retry(
     *,
     filtered_jsonl: str,
     model: str,
-    env: dict[str, str],
     provider: str = "claude",
     cwd: Path | None = None,
 ) -> tuple[str, str]:
@@ -643,8 +743,8 @@ async def _run_model_with_retry(
 
     async def call() -> str:
         if provider == "claude":
-            return await _call_model(payload, model, env)
-        return await _call_model(payload, model, env, provider=provider, cwd=cwd)
+            return await _call_model(payload, model)
+        return await _call_model(payload, model, provider=provider, cwd=cwd)
 
     try:
         return await call(), ""
@@ -664,6 +764,12 @@ async def _run_model_with_retry(
                 _max_input_chars(),
             )
             return "", str(exc).strip() or type(exc).__name__
+        if is_terminal_failure(exc):
+            # Quota / auth / bad-model. No traceback: this is an account or
+            # settings condition, not a code fault, and the detail already
+            # says which.
+            logger.error("Insights model call rejected terminally (%s); not retrying", exc)
+            return "", str(exc).strip() or type(exc).__name__
         logger.info("Insights model call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
 
     await asyncio.sleep(_RETRY_DELAY_S)
@@ -677,7 +783,6 @@ async def _run_model_with_retry(
 async def _call_model(
     filtered_jsonl: str,
     model: str,
-    env: dict[str, str],
     *,
     provider: str = "claude",
     cwd: Path | None = None,
@@ -709,7 +814,6 @@ async def _call_model(
     kwargs: dict[str, Any] = {
         "system_prompt": _INSIGHTS_SYSTEM_PROMPT,
         "model": model,
-        "env": env,
         "timeout_s": _insights_timeout_s(),
     }
     if provider != "claude":
@@ -769,6 +873,8 @@ transcript itself.
 Rules:
 - Skip anything obvious from the transcript prose alone.
 - "User corrections" = the user pushed back, redirected, or rejected an approach.
+  Append the "Durable rule:" sentence only when the correction implies a
+  present-tense standing preference; omit it for one-off fixes.
 - "New entities" = people/projects/places/products mentioned for the first time.
 - Be terse. One line per item where possible.
 
@@ -776,7 +882,7 @@ Your entire response must be Markdown using only the section headers below. Neve
 return JSON, a code-fenced transcript, session metadata, or a generic recap.
 
 ## User corrections
-- User said: "<short quote>" -> assistant changed <what>.
+- User said: "<short quote>" -> assistant changed <what>. Durable rule: <present-tense standing preference, if any>.
 
 ## New entities
 - <type>: <name> - <one-line context>.
@@ -866,7 +972,11 @@ async def compare_apple_insights(config, *, limit: int = 2) -> dict[str, Any]:
     for archive in archives:
         try:
             body = await asyncio.to_thread(archive.read_text, encoding="utf-8")
-            transcript, existing = body.split(_INSIGHTS_HEADER, 1)
+            location = locate_insights_section(body)
+            if location is None:
+                continue
+            section_start, body_start = location
+            transcript, existing = body[:section_start], body[body_start:]
             transcript, dropped = native_sidecar.fit_apple_input(transcript.strip())
             if dropped:
                 logger.info(
@@ -1057,7 +1167,7 @@ async def backfill_insights_task(
                         "Extract durable signal per the system prompt's section schema.\n\n"
                         f"{body}"
                     )
-                    effective_model, env, text_provider, note = _resolve_insights_call(
+                    effective_model, text_provider, note = _resolve_insights_call(
                         config, insights_model
                     )
 
@@ -1088,7 +1198,6 @@ async def backfill_insights_task(
                             user_prompt,
                             system_prompt=_TEXT_MODE_SYSTEM_PROMPT,
                             model=effective_model,
-                            env=env,
                             timeout_s=_insights_timeout_s(),
                             cwd=config.workspace_root,
                             provider=text_provider,
@@ -1098,6 +1207,14 @@ async def backfill_insights_task(
                     try:
                         output = await run_text_extract()
                     except Exception as exc:
+                        if is_terminal_failure(exc):
+                            logger.error(
+                                "Text fallback insights call rejected terminally (%s); "
+                                "not retrying %s",
+                                exc,
+                                archive_path,
+                            )
+                            return "error"
                         logger.info("Text fallback insights call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
                         await asyncio.sleep(_RETRY_DELAY_S)
                         try:

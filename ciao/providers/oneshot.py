@@ -1,9 +1,10 @@
-"""One-shot model calls via the Claude Agent SDK.
+"""One-shot model calls, dispatched to a runtime provider.
 
-The upstream (Anthropic / Ollama / OpenRouter) is chosen by the caller
-through the ``env`` dict -- the same ``ANTHROPIC_BASE_URL`` /
-``ANTHROPIC_AUTH_TOKEN`` env injection used for chats -- so this helper is
-backend-agnostic and needs no provider switch of its own.
+``provider`` selects the runner: ``claude`` (Claude Agent SDK), ``codex``, or
+``opencode``. The Apple on-device sentinel is handled ahead of all three, in
+:func:`run_oneshot`. On the ``claude`` path the upstream can still be
+redirected by the caller through the ``env`` dict -- the same
+``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN`` injection used for chats.
 
 Calls are intentionally bare: custom system prompt, no filesystem
 settings/skills, no tools, no MCP discovery. Titles, insights, critique,
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, cast
@@ -35,10 +37,9 @@ class OneShotError(RuntimeError):
     ``detail`` carries the composed upstream error (status / subtype /
     stop_reason / body) so callers -- the titler, ``job_runs`` -- can
     surface it instead of a bare "One-shot query failed". ``transient``
-    marks failures worth retrying: empty-body / gateway errors from an
-    Anthropic-compatible backend (e.g. Ollama Cloud intermittently
-    returns contentless ``is_error`` results) succeed on a second try,
-    whereas auth / subscription / bad-model errors will fail again.
+    marks failures worth retrying: empty-body / gateway errors succeed on a
+    second try, whereas auth / subscription / bad-model errors will fail
+    again.
     """
 
     def __init__(
@@ -79,9 +80,9 @@ _NON_TRANSIENT_MARKERS = (
 def _result_error_detail(msg: ResultMessage) -> tuple[str, int | None]:
     """Compose a human-readable detail string from an error ResultMessage.
 
-    Ollama Cloud's known failure mode is a contentless ``is_error`` result
-    (empty body, no status), so the parts are all best-effort and we fall
-    back to an explicit "empty error result" marker when nothing is set.
+    A gateway can return a contentless ``is_error`` result (empty body, no
+    status), so the parts are all best-effort and we fall back to an explicit
+    "empty error result" marker when nothing is set.
     """
     status = getattr(msg, "api_error_status", None)
     parts: list[str] = []
@@ -221,6 +222,52 @@ async def _run_codex_oneshot(
         await codex.disconnect()
 
 
+async def _run_opencode_oneshot(
+    prompt: str,
+    *,
+    system_prompt: str,
+    model: str,
+    env: dict[str, str] | None,
+    cwd: Path | None,
+) -> str:
+    from ciao.models import AgentRequest, ResultEvent
+    from ciao.providers.opencode import OpencodeProvider
+
+    # One-shot routines have a no-tools contract. Keep the server in a fresh
+    # empty directory so opencode cannot discover project instructions,
+    # configs, or MCP registrations from the workspace. Its deny-all session
+    # permission rules also prevent read/glob/grep/list from reaching files.
+    with tempfile.TemporaryDirectory(prefix="ciaobot-opencode-oneshot-") as isolated:
+        opencode = OpencodeProvider(
+            Path(isolated),
+            developer_instructions=system_prompt,
+            tools_enabled=False,
+        )
+        try:
+            async for event in opencode.run_streaming(
+                AgentRequest(
+                    prompt=prompt,
+                    model=model,
+                    mode="plan",
+                    provider="opencode",
+                    extra_env=env or {},
+                ),
+                lambda _handle: None,
+            ):
+                if isinstance(event, ResultEvent):
+                    if event.is_error:
+                        detail = (event.result or "").strip() or "opencode one-shot failed"
+                        # opencode reports a rejected prompt or a dead server as a
+                        # terminal ResultEvent; it does not distinguish retriable
+                        # upstream flakes, so do not double-retry here.
+                        raise OneShotError(detail, transient=False)
+                    return event.result
+            return ""
+        finally:
+            await opencode.delete_current_session()
+            await opencode.disconnect()
+
+
 async def run_oneshot(
     prompt: str,
     *,
@@ -239,8 +286,8 @@ async def run_oneshot(
     caller decides how to handle it. ``timeout_s`` wraps each attempt via
     :func:`asyncio.wait_for`.
 
-    On a transient failure (an empty-body / ``is_error`` result, the known
-    Ollama Cloud gateway flake) the call is retried up to ``max_retries``
+    On a transient failure (an empty-body / ``is_error`` result) the call is
+    retried up to ``max_retries``
     times with exponential backoff; non-transient failures (auth /
     subscription / bad-model) and timeouts are raised immediately. On
     failure an :class:`OneShotError` carrying the upstream ``detail`` is
@@ -282,6 +329,15 @@ async def run_oneshot(
     if provider == "codex":
         async def _attempt() -> str:
             return await _run_codex_oneshot(
+                prompt,
+                system_prompt=system_prompt,
+                model=model,
+                env=env,
+                cwd=cwd,
+            )
+    elif provider == "opencode":
+        async def _attempt() -> str:
+            return await _run_opencode_oneshot(
                 prompt,
                 system_prompt=system_prompt,
                 model=model,

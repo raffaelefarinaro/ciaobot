@@ -41,8 +41,11 @@ const ChatCommentPopoverStub = defineComponent({
 const MODELS_RESPONSE = {
   models: ['sonnet', 'opus'],
   default: 'sonnet',
-  provider_models: { claude: ['sonnet', 'opus'] },
-  provider_defaults: { claude: 'sonnet' },
+  provider_models: {
+    claude: ['sonnet', 'opus'],
+    opencode: ['anthropic/claude-sonnet-4-6'],
+  },
+  provider_defaults: { claude: 'sonnet', opencode: 'anthropic/claude-sonnet-4-6' },
   thinking_levels: {},
   model_reasoning_levels: {},
   model_options: {},
@@ -322,6 +325,74 @@ describe('ChatPanel workspace breadcrumb', () => {
     expect(crumb.attributes('data-workspace-color')).toBe('emerald')
     expect(wrapper.find('.breadcrumb-key').exists()).toBe(false)
     expect(crumb.attributes('title')).toContain('press 1')
+    wrapper.unmount()
+  })
+
+  // Workspace and project are one unit - the scope the chat sits in - so they
+  // share a wrapper with a single divider between them and the title. That
+  // grouping is what lets the narrow header stack the scope on one line above
+  // the title instead of breaking into a line per crumb.
+  it('groups workspace and project into one scope crumb, divided from the title', async () => {
+    const { wrapper } = await mountPanel()
+    const scope = wrapper.find('.breadcrumb-scope')
+    expect(scope.exists()).toBe(true)
+    expect(scope.find('.breadcrumb-workspace').text()).toBe('personal')
+    expect(scope.find('.breadcrumb-project').text()).toBe('Upwordo')
+    // One divider inside the scope, one between the scope and the title.
+    expect(wrapper.findAll('.breadcrumb-separator').length).toBe(2)
+    expect(wrapper.findAll('.breadcrumb-separator--title').length).toBe(1)
+    wrapper.unmount()
+  })
+
+  // 'General' is the project every workspace has implicitly, so naming it in the
+  // breadcrumb says nothing. The scope keeps the workspace and loses the divider
+  // that would otherwise dangle after it.
+  it('drops the project crumb for the implicit General project', async () => {
+    const { wrapper } = await mountPanel(store => {
+      store.projects = [{ ...store.projects[0], name: 'General' }]
+    })
+    expect(wrapper.find('.breadcrumb-project').exists()).toBe(false)
+    expect(wrapper.find('.breadcrumb-scope .breadcrumb-workspace').text()).toBe('personal')
+    expect(wrapper.findAll('.breadcrumb-separator').length).toBe(1)
+    expect(wrapper.findAll('.breadcrumb-separator--title').length).toBe(1)
+    wrapper.unmount()
+  })
+
+  // The close control is one of the header's icon buttons, not a `&times;`
+  // character: same 18px icon in the same box as the actions across the header,
+  // which is what keeps it on their line and at their size.
+  it('closes the chat from a labelled icon button', async () => {
+    const { wrapper } = await mountPanel()
+    const close = wrapper.find('.close-btn')
+    expect(close.classes()).toContain('btn-icon')
+    expect(close.attributes('aria-label')).toBe('Close chat')
+    expect(close.find('svg').exists()).toBe(true)
+    expect(close.text()).toBe('')
+    await close.trigger('click')
+    expect(wrapper.emitted('close')?.length).toBe(1)
+    wrapper.unmount()
+  })
+})
+
+describe('ChatPanel model summary', () => {
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+  })
+  afterEach(() => vi.restoreAllMocks())
+
+  it('shows a provider default for legacy chats and hides the auto thinking label', async () => {
+    const { wrapper } = await mountPanel(store => {
+      store.chats = [makeChat('chat-1', {
+        model: '',
+        provider: 'opencode',
+        mode: 'auto',
+        thinking_level: 'auto',
+      })]
+    })
+
+    const summary = wrapper.get('.model-picker-summary')
+    expect(summary.text()).toContain('anthropic/claude-sonnet-4-6')
+    expect(summary.text()).not.toContain('think:auto')
     wrapper.unmount()
   })
 })

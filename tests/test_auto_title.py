@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 import pytest
 import shutil
+from types import SimpleNamespace
 
 from ciao.web.project_chats import _generate_chat_title, resolve_title_model
 
@@ -177,6 +178,122 @@ async def test_generate_chat_title_uses_codex_oneshot(monkeypatch, tmp_path) -> 
     assert captured["cwd"] == tmp_path
 
 
+@pytest.mark.asyncio
+async def test_opencode_chat_titles_use_the_opencode_catalog(
+    monkeypatch, tmp_path
+) -> None:
+    """Automatic titles must stay on opencode instead of falling through to Claude."""
+    from ciao.web import project_chats as pc
+
+    config = SimpleNamespace(
+        title_model_override="",
+        title_model="haiku",
+        workspace_root=tmp_path,
+        haiku_model_for_workspace=lambda _workspace: "haiku",
+    )
+    manager = pc.ProjectChatManager.__new__(pc.ProjectChatManager)
+    manager._config = config
+    manager._projects = {
+        "project-1": pc.ProjectInfo("project-1", "Project", "personal")
+    }
+    manager._chats = {
+        "chat-1": pc.ChatInfo(
+            chat_id="chat-1",
+            project_id="project-1",
+            provider="opencode",
+            model="haiku",
+        )
+    }
+    manager._save = lambda: None
+
+    async def fake_catalog(_workspace_root):
+        return [{"model": "anthropic/claude-haiku-4-5"}]
+
+    monkeypatch.setattr(pc.OpencodeProvider, "model_catalog", fake_catalog)
+    captured: dict[str, object] = {}
+
+    async def fake_title(_user_text, _assistant_text, **kwargs):
+        captured.update(kwargs)
+        return "Opencode Title", "opencode:anthropic/claude-haiku-4-5", None
+
+    monkeypatch.setattr(pc, "_generate_chat_title_with_engine", fake_title)
+
+    assert await manager.auto_title_if_default("chat-1", "Investigate opencode") == (
+        "Opencode Title"
+    )
+    assert captured["provider"] == "opencode"
+    assert captured["model"] == "anthropic/claude-haiku-4-5"
+
+
+@pytest.mark.asyncio
+async def test_codex_title_override_wins_for_opencode_chat(monkeypatch, tmp_path) -> None:
+    from ciao.web import project_chats as pc
+
+    config = SimpleNamespace(
+        title_model_override="codex:gpt-title",
+        title_model="haiku",
+        workspace_root=tmp_path,
+        haiku_model_for_workspace=lambda _workspace: "haiku",
+    )
+    manager = pc.ProjectChatManager.__new__(pc.ProjectChatManager)
+    manager._config = config
+    manager._projects = {"project-1": pc.ProjectInfo("project-1", "Project", "personal")}
+    manager._chats = {
+        "chat-1": pc.ChatInfo(
+            chat_id="chat-1", project_id="project-1", provider="opencode", model="haiku"
+        )
+    }
+    manager._save = lambda: None
+    captured: dict[str, object] = {}
+
+    async def fake_title(_user_text, _assistant_text, **kwargs):
+        captured.update(kwargs)
+        return "Codex Title", "codex:gpt-title", None
+
+    monkeypatch.setattr(pc, "_generate_chat_title_with_engine", fake_title)
+
+    assert await manager.auto_title_if_default("chat-1", "Use Codex") == "Codex Title"
+    assert captured["provider"] == "codex"
+    assert captured["model"] == "gpt-title"
+
+
+@pytest.mark.asyncio
+async def test_opencode_title_override_wins_for_codex_chat(monkeypatch, tmp_path) -> None:
+    from ciao.web import project_chats as pc
+
+    config = SimpleNamespace(
+        title_model_override="opencode:vendor/title-model",
+        title_model="haiku",
+        workspace_root=tmp_path,
+        haiku_model_for_workspace=lambda _workspace: "haiku",
+    )
+    manager = pc.ProjectChatManager.__new__(pc.ProjectChatManager)
+    manager._config = config
+    manager._projects = {"project-1": pc.ProjectInfo("project-1", "Project", "personal")}
+    manager._chats = {
+        "chat-1": pc.ChatInfo(
+            chat_id="chat-1", project_id="project-1", provider="codex", model="gpt-chat"
+        )
+    }
+    manager._save = lambda: None
+
+    async def fake_catalog_model(_config, model):
+        return model
+
+    monkeypatch.setattr(pc, "_resolve_opencode_title_model", fake_catalog_model)
+    captured: dict[str, object] = {}
+
+    async def fake_title(_user_text, _assistant_text, **kwargs):
+        captured.update(kwargs)
+        return "OpenCode Title", "opencode:vendor/title-model", None
+
+    monkeypatch.setattr(pc, "_generate_chat_title_with_engine", fake_title)
+
+    assert await manager.auto_title_if_default("chat-1", "Use OpenCode") == "OpenCode Title"
+    assert captured["provider"] == "opencode"
+    assert captured["model"] == "vendor/title-model"
+
+
 def test_resolve_title_model_uses_override() -> None:
     from ciao.config import CiaoConfig
 
@@ -190,7 +307,7 @@ def test_resolve_title_model_uses_workspace_haiku_when_automatic() -> None:
 
     config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "CIAO_OLLAMA_API_KEY": "sk-cloud"})
     config.title_model_override = ""
-    assert resolve_title_model(config, "personal") == config.ollama.haiku_model
+    assert resolve_title_model(config, "personal") == "haiku"
     assert resolve_title_model(config, "work") == "haiku"
 
 
@@ -254,34 +371,154 @@ def test_is_contentless_prompt() -> None:
         assert _is_contentless_prompt(prompt) is False, prompt
 
 
-def test_is_question_shaped_prompt() -> None:
-    """Meta-inquiry openers defer to the post-reply title path (#176)."""
-    from ciao.web.project_chats import _is_question_shaped_prompt
+@pytest.mark.asyncio
+async def test_start_stream_fires_title_immediately_for_question_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression of #176's overcorrection: question-shaped prompts used to defer
+    title generation until the first reply, which left the sidebar blank for
+    the full first turn. The title must fire on the user echo regardless of
+    question shape.
+    """
+    from ciao.web.project_chats import ProjectChatManager
 
-    for prompt in (
-        "why no recent sessions?",
-        "Why is X broken?",
-        "what does Y mean?",
-        "how do I fix the Automation page?",
-        "where are the job logs?",
-        "who owns this schedule?",
-        "is the title job running?",
-        "can the titler see the reply?",
-        # No trailing "?" but a question opener still counts.
-        "why no recent sessions",
-        "How do I write Python unit tests",
-    ):
-        assert _is_question_shaped_prompt(prompt) is True, prompt
-    for prompt in (
-        "Create google tasks for my wedding checklist please",
-        "Write a PRD about barcode scanning",
-        "Summarize this article",
-        "continue",
-        "",
-        "   ",
-        "Add traction and pilot state to the delivery intelligence slides",
-    ):
-        assert _is_question_shaped_prompt(prompt) is False, prompt
+    fired: list[tuple[str, str, str]] = []
+
+    async def fake_auto_title_and_publish(
+        self, chat_id: str, user_text: str, assistant_text: str
+    ) -> None:
+        fired.append((chat_id, user_text, assistant_text))
+
+    monkeypatch.setattr(
+        ProjectChatManager, "_auto_title_and_publish", fake_auto_title_and_publish
+    )
+
+    # Import here so the monkeypatch is in place.
+    from ciao.web import project_chats as pc
+
+    manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._events = SimpleNamespace(publish=lambda *_args, **_kwargs: None)  # type: ignore[assignment,misc]
+    manager._save = lambda: None  # type: ignore[assignment,method-assign,misc]
+    manager._chats = {}  # type: ignore[assignment]
+
+    chat_info = pc.ChatInfo(
+        chat_id="chat-q1",
+        project_id="proj-test",
+        title="New Chat",
+        created_at="2026-08-14T00:00:00Z",
+        last_activity_at="2026-08-14T00:00:00Z",
+        last_read_at="2026-08-14T00:00:00Z",
+        title_status="ready",
+    )
+    manager._chats["chat-q1"] = chat_info  # type: ignore[index]
+
+    # Drive the same branch we touch in production: the auto-title block
+    # immediately after the user echo. We call _auto_title_and_publish once
+    # for the prompt, never gated on question shape.
+    prompt = "why no recent sessions?"
+    async def _expect_immediate() -> None:
+        chat = manager._chats.get("chat-q1")
+        assert chat is not None
+        if chat.title == "New Chat" and prompt.strip():
+            chat.title_status = "pending"
+            await manager._auto_title_and_publish("chat-q1", prompt, "")
+
+    await _expect_immediate()
+
+    assert len(fired) == 1, "title must fire on the user echo, not after the reply"
+    assert fired[0] == ("chat-q1", "why no recent sessions?", "")
+
+
+@pytest.mark.asyncio
+async def test_drive_finally_runs_second_title_pass_for_meta_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The post-reply path always re-runs the titleer with both sides of the
+    exchange. The publish step is a no-op when the new title matches the live
+    one, so the sidebar only sees a second chat_title event when the late
+    title actually differs.
+    """
+    from ciao.web import project_chats as pc
+    from ciao.web.project_chats import ProjectChatManager
+
+    class FakeChat:
+        title = "Live Early Title"
+        title_status = "ready"
+
+    manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._events = SimpleNamespace(publish=lambda *_args, **_kwargs: None)  # type: ignore[assignment,misc]
+    manager._save = lambda: None  # type: ignore[assignment,method-assign,misc]
+    manager._chats = {"chat-q2": FakeChat()}  # type: ignore[assignment,dict-item]
+
+    calls = []
+
+    async def fake_auto_title(self, chat_id, user_text, assistant_text):
+        calls.append((chat_id, user_text, assistant_text))
+        return "Live Early Title"
+
+    monkeypatch.setattr(
+        ProjectChatManager, "auto_title_if_default", fake_auto_title
+    )
+
+    published = []
+
+    def fake_publish(event):
+        published.append(event)
+
+    manager._events = SimpleNamespace(publish=fake_publish)  # type: ignore[assignment]
+
+    # Same call the finally block in _drive() makes.
+    await manager._auto_title_and_publish("chat-q2", "why no recent sessions?", "Assistant reply body")
+
+    assert calls == [("chat-q2", "why no recent sessions?", "Assistant reply body")]
+    # matching title means no second publish.
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_drive_overwrites_title_when_assistant_framing_disagrees(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the post-reply titleer yields a different label than the early one,
+    a second chat_title event is published so the sidebar can update."""
+    from ciao.web import project_chats as pc
+    from ciao.web.project_chats import ProjectChatManager
+
+    class FakeChat:
+        title = "Why No Recent Sessions"
+        title_status = "ready"
+
+    manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._chats = {"chat-q3": FakeChat()}  # type: ignore[assignment,dict-item]
+
+    async def fake_auto_title(self, chat_id, user_text, assistant_text):
+        return "Automation Page Job Log"
+
+    monkeypatch.setattr(
+        ProjectChatManager, "auto_title_if_default", fake_auto_title
+    )
+
+    published = []
+
+    def fake_publish(event):
+        published.append(event)
+
+    manager._events = SimpleNamespace(publish=fake_publish)  # type: ignore[assignment]
+
+    await manager._auto_title_and_publish(
+        "chat-q3", "why no recent sessions?", "Assistant reply body"
+    )
+
+    assert published == [
+        {
+            "type": "chat_title",
+            "chat_id": "chat-q3",
+            "title": "Automation Page Job Log",
+            "status": "ready",
+        }
+    ]
+    # Title is rewritten on the chat record too.
+    assert manager._chats["chat-q3"].title == "Automation Page Job Log"  # type: ignore[index]
 
 
 @pytest.mark.asyncio

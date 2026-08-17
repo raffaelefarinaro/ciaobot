@@ -86,6 +86,46 @@ def test_transcript_store_handles_missing_archive_root(tmp_path: Path) -> None:
     assert store.current_path(CTX).exists()
 
 
+def test_current_messages_hide_the_injected_context_envelope(tmp_path: Path) -> None:
+    """The stored prompt keeps the envelope (chat recovery parses it), but the
+    rendered chat rows must show only what the user typed."""
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "archives")
+    envelope = "[CIAO_CONTEXT_BEGIN]\n[Project: \"General\"]\n[CIAO_CONTEXT_END]\n\n"
+    request = AgentRequest(
+        prompt=f"{envelope}hello",
+        model="opencode/big-pickle",
+        mode="auto",
+        provider="opencode",
+        display_prompt=f"{envelope}hello",
+    )
+
+    store.record_turn(
+        request,
+        ctx=CTX,
+        response_text="world",
+        effective_model="opencode/big-pickle",
+        session_id="ses_1",
+        usage={},
+        quota={},
+        input_kind="text",
+        provider="opencode",
+    )
+    rows = store.current_messages(CTX, "opencode")
+
+    assert rows[0]["role"] == "user"
+    assert rows[0]["content"] == "hello"
+    assert rows[1] == {
+        "role": "assistant",
+        "content": "world",
+        "sent_at": rows[1]["sent_at"],
+        "effective_model": "opencode/big-pickle",
+    }
+    # The envelope is still on disk for recovery.
+    assert "[CIAO_CONTEXT_BEGIN]" in store.current_path(CTX, "opencode").read_text(
+        encoding="utf-8"
+    )
+
+
 def _write_first_line(path: Path, record: dict) -> None:
     """Write a single-line JSONL used only for the entrypoint peek."""
     path.parent.mkdir(parents=True, exist_ok=True)

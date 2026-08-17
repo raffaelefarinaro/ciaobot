@@ -145,37 +145,16 @@ def tier_order() -> tuple[str, ...]:
 def _tier_slot_for_model(model: str) -> str | None:
     """Return which tier slot ``model`` corresponds to, or None.
 
-    Matches both bare aliases (``opus``, ``fable``) and the per-backend
-    configured model ids for Ollama/OpenRouter. Used by
-    :func:`next_tier_for_failure` to find the failing model's position on
-    the ladder.
+    Matches bare aliases only (``opus``, ``fable``, ...). A concrete provider
+    model id has no place on the ladder -- ``claude-opus-4-8`` returns None --
+    so the capability fallback applies to tier-pinned chats and leaves an
+    explicitly pinned model alone.
     """
     if not model:
         return None
     low = model.lower().strip()
     if low in _TIER_ORDER:
         return low
-    return None
-
-
-def _tier_slot_for_configured(
-    model: str, config: object, backend: str
-) -> str | None:
-    """Match a configured per-backend model id to its tier slot.
-
-    Looks up the failing model against the operator-configured per-tier
-    ids for the resolved backend (Ollama, OpenRouter). Returns the tier
-    name (``"haiku"``/``"sonnet"``/...) when found, ``None`` otherwise.
-    """
-    if not model or not config:
-        return None
-    settings = getattr(config, backend, None) if backend in ("ollama", "openrouter") else None
-    if settings is None:
-        return None
-    for tier in _TIER_ORDER:
-        configured = getattr(settings, f"{tier}_model", "")
-        if configured and configured == model:
-            return tier
     return None
 
 
@@ -194,115 +173,29 @@ def is_capability_error(result_text: str) -> bool:
     return any(needle in text for needle in _CAPABILITY_ERROR_PATTERNS)
 
 
-def model_supports_vision(model: str) -> bool:
-    """True when ``model`` supports image (vision) input."""
-    if not model:
-        return True
-    low = model.lower().strip()
-    if low in _TIER_ORDER or low.startswith("claude-") or "claude" in low:
-        return True
-    if any(k in low for k in ("minimax-m3", "vision", "gpt-4o", "gemini", "pixtral")):
-        return True
-    if any(k in low for k in ("kimi-", "deepseek-", "glm-", "llama-", "qwen-", "code")):
-        return False
-    return True
+def next_tier_for_failure(model: str) -> str | None:
+    """Pick the next tier to try when ``model`` failed with a capability error.
 
+    Walks the tier ladder in both directions, preferring the cheaper slot:
+    ``fable`` fails → ``opus``; ``opus`` → ``sonnet``; ``sonnet`` → ``haiku``;
+    ``haiku`` → ``sonnet`` (escalate, the only direction left). Returns
+    ``None`` when the failing model is not a bare tier alias, so a chat pinned
+    to a concrete model id is never silently swapped to a different one.
 
-def model_vision_ambiguous(model: str) -> bool:
-    """True when the fast-path vision table cannot classify ``model``.
-
-    :func:`model_supports_vision` returns its default ``True`` for ids it
-    has no token for — an unknown Ollama/OpenRouter id. Those ids are
-    ambiguous: they may or may not accept image input. The image
-    pre-flight uses this to decide when a live, cached capability lookup
-    is worth a probe round-trip. Known-good (tier aliases, ``claude-*``,
-    ``minimax-m3``, ``gemini``, ...) and known-bad (``llama-``, ``qwen-``,
-    ...) ids return False here because the table already classified them.
+    Tier aliases are provider-agnostic: whichever provider runs the chat
+    resolves the returned alias against its own catalog.
     """
-    if not model:
-        return False
-    low = model.lower().strip()
-    if low in _TIER_ORDER or "claude" in low:
-        return False
-    if any(k in low for k in ("minimax-m3", "vision", "gpt-4o", "gemini", "pixtral")):
-        return False
-    if any(k in low for k in ("kimi-", "deepseek-", "glm-", "llama-", "qwen-", "code")):
-        return False
-    return True
-
-
-def next_tier_for_failure(model: str, config: object) -> str | None:
-    """Pick the next model id to try when ``model`` failed with a capability error.
-
-    Walks the tier ladder in both directions, picking the nearest neighbor
-    with a preference for the cheaper slot:
-    ``fable`` fails → ``opus``; ``opus`` fails → ``sonnet``; ``sonnet``
-    fails → ``haiku``; ``haiku`` fails → ``sonnet`` (escalate, the only
-    available direction). Returns the resolved model id for the caller's
-    intended backend, or ``None`` when the failing model isn't on the
-    ladder (e.g. a one-off id with no other tier configured).
-
-    ``config`` is the runtime :class:`ciao.config.CiaoConfig`; the helper
-    reads ``config.ollama`` and ``config.openrouter`` for per-backend tier
-    resolution and falls back to bare tier names for the Anthropic path.
-    A backend with fewer than two distinct tier slots returns ``None`` so
-    a single-model config does not retry the failing model against itself.
-    """
-    # Detect intended backend from the failing model's shape. Defaults to
-    # anthropic so a bare-alias caller still walks the ladder.
-    from ciao.providers.routing import intended_backend
-    backend = intended_backend(model)
-
-    # Match the failing model to a tier slot. First try the bare-alias
-    # fast path (works for Anthropic-direct and bare tier names), then
-    # fall back to the configured per-backend model id lookup (Ollama
-    # and OpenRouter use concrete model ids, not the bare aliases).
-    slot = _tier_slot_for_model(model) or _tier_slot_for_configured(
-        model, config, backend
-    )
+    slot = _tier_slot_for_model(model)
     if slot is None:
         return None
     idx = _TIER_ORDER.index(slot)
-
-    # Pick the nearest neighbor. Default order is "down" (cheaper tier
-    # first), then "up" (more capable). The cheaper slot is the natural
-    # fallback for capability errors (e.g. a non-vision model could not
-    # read the image, so we try a different non-vision model that's
-    # cheaper and known to support images). The up direction is the
-    # safety net for the bottom of the ladder: a failing haiku can only
-    # escalate to sonnet.
-    candidates: list[str] = []
+    # Cheaper first: a capability error usually means "this model cannot do
+    # that", and the neighbour below is the natural retry. Escalating is the
+    # safety net for the bottom of the ladder.
     for delta in (-1, 1):
-        neighbor_idx = idx + delta
-        if 0 <= neighbor_idx < len(_TIER_ORDER):
-            candidates.append(_TIER_ORDER[neighbor_idx])
-
-    # Resolve each candidate to a model id under the caller's intended
-    # backend. Bare aliases and Claude-direct ids pass through as-is.
-    ollama = getattr(config, "ollama", None)
-    openrouter = getattr(config, "openrouter", None)
-
-    def _resolve(backend: str, tier: str) -> str:
-        if backend == "ollama" and ollama is not None:
-            return tier_model(
-                tier,
-                haiku=getattr(ollama, "haiku_model", "haiku"),
-                sonnet=getattr(ollama, "sonnet_model", "sonnet"),
-                opus=getattr(ollama, "opus_model", "opus"),
-                fable=getattr(ollama, "fable_model", "fable"),
-            )
-        if backend == "openrouter" and openrouter is not None:
-            return tier_model(
-                tier,
-                haiku=getattr(openrouter, "haiku_model", "haiku"),
-                sonnet=getattr(openrouter, "sonnet_model", "sonnet"),
-                opus=getattr(openrouter, "opus_model", "opus"),
-                fable=getattr(openrouter, "fable_model", "fable"),
-            )
-        return tier  # anthropic-direct: bare alias
-
-    for tier in candidates:
-        candidate = _resolve(backend, tier)
-        if candidate and candidate != model:
-            return candidate
+        neighbor = idx + delta
+        if 0 <= neighbor < len(_TIER_ORDER):
+            candidate = _TIER_ORDER[neighbor]
+            if candidate != model:
+                return candidate
     return None

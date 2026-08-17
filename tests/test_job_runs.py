@@ -186,9 +186,10 @@ def test_summary_includes_never_run_jobs(tmp_path: Path) -> None:
     jr.record_run(jr.JobRun(job="title", label="Title", status="ok", duration_ms=5))
     summary = {item["job"]: item for item in jr.automation_summary()}
     # every registry job is present, except bulk variants (nested under their
-    # parent) — a never-installed schedule only filters when the caller says so
+    # parent) and pipeline steps (nested under the job that owns the pipeline)
+    # — a never-installed schedule only filters when the caller says so
     for spec in jr.REGISTRY:
-        if spec.parent:
+        if spec.parent or spec.step_of:
             assert spec.job not in summary
         else:
             assert spec.job in summary
@@ -204,7 +205,18 @@ def test_summary_includes_never_run_jobs(tmp_path: Path) -> None:
     assert summary["startup_sync"]["produces_outcome"] is False
     # every row can answer "when does this run?"
     assert summary["title"]["trigger"]
-    assert summary["trajectory"]["trigger"]
+    # the archive pipeline reports as one group of steps in execution order,
+    # not four peers each claiming its own trigger
+    assert summary["insights"]["pipeline_label"] == "When you archive a chat"
+    step_jobs = [step["job"] for step in summary["insights"]["steps"]]
+    assert step_jobs == ["project_doc_update", "trajectory", "memory_proposals"]
+    # a step explains when it is skipped instead of faking a trigger
+    assert all(step["step_condition"] for step in summary["insights"]["steps"])
+    # the bulk variant stays a sub_job, not a step: it is the same work on a
+    # different trigger, which is a different relationship
+    assert [sub["job"] for sub in summary["insights"]["sub_jobs"]] == [
+        "backfill_insights"
+    ]
 
 
 def test_summary_hides_retired_jobs(tmp_path: Path) -> None:
@@ -226,23 +238,14 @@ def test_summary_hides_jobs_whose_only_schedule_is_not_installed(tmp_path: Path)
         for item in jr.automation_summary(installed_schedules=installed)
     }
     assert "skill_evolution" in summary
-    # no system-dependency-review schedule here, so nothing can trigger it
-    assert "dependency_review" not in summary
     # jobs with another trigger stay visible even without their schedule
     assert "insights" in summary
     assert "vault_index" in summary  # also runs on startup
-    assert "memory_proposals" in summary  # also runs after insights
-
-
-def test_summary_keeps_a_recorded_run_for_an_uninstalled_schedule(tmp_path: Path) -> None:
-    """History stays reachable even when the row is hidden."""
-    jr.record_run(jr.JobRun(job="dependency_review", label="depcheck:installed",
-                            status="ok", duration_ms=5))
-    summary = {
-        item["job"]: item for item in jr.automation_summary(installed_schedules=set())
-    }
-    assert "dependency_review" not in summary
-    assert jr.load_runs()["dependency_review"]["stats"]["total_runs"] == 1
+    # memory_proposals has a schedule but is a step of the archive pipeline, so
+    # it is reported inside that group rather than as a row of its own
+    assert "memory_proposals" not in summary
+    steps = {step["job"]: step for step in summary["insights"]["steps"]}
+    assert steps["memory_proposals"]["schedule_id"] == "system-memory-curation"
 
 
 def test_summary_nests_the_insights_backfill_under_session_insights(tmp_path: Path) -> None:
@@ -253,3 +256,85 @@ def test_summary_nests_the_insights_backfill_under_session_insights(tmp_path: Pa
     subs = summary["insights"]["sub_jobs"]
     assert [s["job"] for s in subs] == ["backfill_insights"]
     assert subs[0]["last_run"]["status"] == "ok"
+
+
+# ── Live state: in-flight registry + publisher ────────────────────────────
+
+
+def test_inflight_registers_during_the_block_and_clears_after() -> None:
+    """The recorder only wrote on completion, so nothing could say "running"."""
+    assert jr.inflight_runs() == []
+    with jr.track_sync("insights", "Session insights", extra={"chat_id": "c1"}):
+        live = jr.inflight_runs()
+        assert [(r["job"], r["chat_id"]) for r in live] == [("insights", "c1")]
+        assert live[0]["started_at"]
+    assert jr.inflight_runs() == []
+
+
+def test_inflight_clears_even_when_the_job_raises() -> None:
+    with pytest.raises(RuntimeError):
+        with jr.track_sync("insights", "Session insights"):
+            raise RuntimeError("boom")
+    # A crashed job that stayed "running" forever would pin a spinner on.
+    assert jr.inflight_runs() == []
+
+
+def test_publisher_sees_start_and_finish_with_status() -> None:
+    events: list[dict] = []
+    jr.set_publisher(events.append)
+    with jr.track_sync("trajectory", "Trajectory capture",
+                       extra={"chat_id": "c9"}) as run:
+        run.extra["path"] = "/x.json"
+    assert [e["event"] for e in events] == ["started", "finished"]
+    assert events[0]["job"] == "trajectory"
+    assert events[0]["chat_id"] == "c9"
+    assert events[1]["status"] == "ok"
+    # Extras collected inside the block ride along on the finish event, which is
+    # how a surface learns *what* the step produced.
+    assert events[1]["extra"]["path"] == "/x.json"
+
+
+def test_publisher_reports_a_failed_step() -> None:
+    events: list[dict] = []
+    jr.set_publisher(events.append)
+    with pytest.raises(ValueError), jr.track_sync("insights", "Session insights"):
+        raise ValueError("nope")
+    assert events[-1]["status"] == "error"
+    assert "nope" in events[-1]["error"]
+
+
+def test_publisher_marks_a_skipped_step() -> None:
+    events: list[dict] = []
+    jr.set_publisher(events.append)
+    with jr.track_sync("memory_proposals", "Memory proposals") as run:
+        run.skip("nothing to propose")
+    assert events[-1]["status"] == "skipped"
+
+
+def test_a_broken_publisher_never_breaks_the_job() -> None:
+    def explode(_event: dict) -> None:
+        raise RuntimeError("subscriber is broken")
+
+    jr.set_publisher(explode)
+    with jr.track_sync("insights", "Session insights") as run:
+        run.extra["ok"] = True
+    # The durable record is what matters; a bad subscriber must not cost it.
+    assert jr.load_runs()["insights"]["last_run"]["extra"] == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_async_track_reports_live_state_too() -> None:
+    events: list[dict] = []
+    jr.set_publisher(events.append)
+    assert jr.inflight_runs() == []
+    async with jr.track("insights", "Session insights", extra={"chat_id": "c2"}):
+        assert [r["chat_id"] for r in jr.inflight_runs()] == ["c2"]
+    assert jr.inflight_runs() == []
+    assert [e["event"] for e in events] == ["started", "finished"]
+
+
+def test_summary_marks_a_running_job(tmp_path: Path) -> None:
+    with jr.track_sync("insights", "Session insights"):
+        summary = {item["job"]: item for item in jr.automation_summary()}
+        assert summary["insights"]["running"] is True
+        assert summary["title"]["running"] is False

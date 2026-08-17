@@ -31,6 +31,7 @@ if sys.version_info < (3, 12):
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -38,10 +39,21 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Legacy credential directories. Every other account uses secrets/gws-<slug>,
+# matching ciao.gws_auth.profile_config_dir and scripts/gws-profile.sh.
 PROFILE_CONFIGS = {
     "personal": REPO_ROOT / "secrets" / "gws-personal",
     "work": REPO_ROOT / "secrets" / "gws",
 }
+
+
+def profile_config_dir(profile: str) -> Path:
+    if profile in PROFILE_CONFIGS:
+        return PROFILE_CONFIGS[profile]
+    slug = re.sub(r"[^a-z0-9_-]+", "-", profile.strip().lower()).strip("-")
+    if not slug:
+        raise SystemExit(f"'{profile}' is not a usable profile name")
+    return REPO_ROOT / "secrets" / f"gws-{slug}"
 
 # Full scope set requested for every profile. OAuth has no "all scopes" wildcard,
 # so this enumerates every core Workspace service gws supports. Google only grants
@@ -191,7 +203,7 @@ def fix_encryption_key_permissions(config_dir: Path) -> None:
 
 
 def validate_profile(profile: str) -> Path:
-    config_dir = PROFILE_CONFIGS[profile]
+    config_dir = profile_config_dir(profile)
     if not config_dir.exists():
         print(f"Creating {config_dir}")
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -200,7 +212,10 @@ def validate_profile(profile: str) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Interactive GWS OAuth helper")
-    parser.add_argument("profile", choices=["personal", "work"], help="GWS profile to authenticate")
+    parser.add_argument(
+        "profile",
+        help="GWS profile (Google account name) to authenticate",
+    )
     parser.add_argument(
         "--redirect-url",
         help="Full redirect URL from the browser. When given, skip the interactive "

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from ciao import provider_registry
+
 ExecutionMode = Literal["provider_prompt", "provider_cli_arg", "bot_handler"]
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
 ControlSurface = Literal["legacy", "mcp", "auto"]
@@ -88,13 +90,12 @@ class ImageAttachment:
 
 # Native thinking/reasoning levels per provider, surfaced as-is in the PWA
 # model picker. Empty string = provider default: no flag/option is sent.
-# Maps to ``ClaudeAgentOptions.effort``.
-THINKING_LEVELS: dict[str, tuple[str, ...]] = {
-    "claude": ("low", "medium", "high", "xhigh", "max"),
-    # The model catalog is authoritative and the API narrows this per model.
-    # This union is the validation fallback when discovery is unavailable.
-    "codex": ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
-}
+# Claude's maps to ``ClaudeAgentOptions.effort``.
+#
+# Sourced from ``ciao.provider_registry`` so the level ladders live beside the
+# rest of each provider's static facts. Kept as a module-level dict because
+# this is a hot import and callers subscript it directly.
+THINKING_LEVELS: dict[str, tuple[str, ...]] = provider_registry.thinking_levels()
 
 
 @dataclass(slots=True)
@@ -108,7 +109,7 @@ class AgentRequest:
     # example Codex slash-command expansion) changes the model-facing prompt.
     display_prompt: str = ""
     # Routing key for ProviderService. Public builds currently accept
-    # "claude"; backend choice is handled by model/model_bucket routing.
+    # "claude". Which models are reachable is the provider's own business.
     provider: str = "claude"
     resume_session: str | None = None
     # Fork the resumed provider session into a new durable session before the
@@ -138,6 +139,14 @@ class AgentRequest:
     mcp_url: str = ""
     mcp_token: str = ""
     mcp_required: bool = False
+    # Stable routing context is committed to the chat registry only after the
+    # provider reports a native session. Keeping these values on the request
+    # lets a pre-session failure retry with the full capsule.
+    context_digest: str = ""
+    context_session_id: str = ""
+    # Full stable context held aside for providers that have to replace a
+    # missing/invalid resumed session after the request was built.
+    stable_context_prefix: str = ""
 
 
 @dataclass(slots=True)

@@ -26,8 +26,79 @@ USAGE
 }
 
 fail() {
+    if [ "${terminal_output:-0}" -eq 1 ]; then
+        printf '\n'
+    fi
     echo "Ciaobot installer: $*" >&2
     exit 1
+}
+
+terminal_output=0
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    terminal_output=1
+fi
+
+if [ "$terminal_output" -eq 1 ]; then
+    installer_accent=$(printf '\033[38;5;209m')
+    installer_soft=$(printf '\033[38;5;223m')
+    installer_ok=$(printf '\033[38;5;114m')
+    installer_muted=$(printf '\033[38;5;245m')
+    installer_reset=$(printf '\033[0m')
+else
+    installer_accent=
+    installer_soft=
+    installer_ok=
+    installer_muted=
+    installer_reset=
+fi
+
+installer_step() {
+    percent=$1
+    message=$2
+    if [ "$terminal_output" -eq 1 ]; then
+        printf '\r  %s[%3d%%]%s %s%s%s' \
+            "$installer_accent" "$percent" "$installer_reset" \
+            "$installer_accent" "$message" "$installer_reset"
+    else
+        printf '  [%3d%%] %s\n' "$percent" "$message"
+    fi
+}
+
+installer_done() {
+    if [ "$terminal_output" -eq 1 ]; then
+        printf ' %s✓%s\n' "$installer_ok" "$installer_reset"
+    else
+        printf '           ok\n'
+    fi
+}
+
+installer_header() {
+    printf '\n'
+    printf '%s╭────────────────────────────────────────────────────────────╮%s\n' \
+        "$installer_accent" "$installer_reset"
+    printf '%s│%s  %s› ciao%s  %s· first install%s                         %s│%s\n' \
+        "$installer_accent" "$installer_reset" "$installer_soft" "$installer_reset" \
+        "$installer_muted" "$installer_reset" "$installer_accent" "$installer_reset"
+    printf '%s╰────────────────────────────────────────────────────────────╯%s\n' \
+        "$installer_accent" "$installer_reset"
+    printf '\n'
+    printf '  %sWelcome! Let’s get Ciaobot ready for its first hello.%s\n' \
+        "$installer_soft" "$installer_reset"
+    printf '  %sThe signed app will be installed for this user only.%s\n\n' \
+        "$installer_muted" "$installer_reset"
+}
+
+installer_greetings() {
+    printf '\n'
+    printf '  %s✦ ciao%s       %sItalian%s\n' "$installer_accent" "$installer_reset" "$installer_muted" "$installer_reset"
+    printf '  %s✦ hello%s      %sEnglish%s\n' "$installer_accent" "$installer_reset" "$installer_muted" "$installer_reset"
+    printf '  %s✦ hola%s       %sSpanish%s\n' "$installer_accent" "$installer_reset" "$installer_muted" "$installer_reset"
+    printf '  %s✦ salut%s      %sFrench%s\n' "$installer_accent" "$installer_reset" "$installer_muted" "$installer_reset"
+    printf '  %s✦ hallo%s      %sGerman%s\n' "$installer_accent" "$installer_reset" "$installer_muted" "$installer_reset"
+    printf '  %s✦ olá%s        %sPortuguese%s\n' "$installer_accent" "$installer_reset" "$installer_muted" "$installer_reset"
+    printf '  %s✦ こんにちは%s  %sJapanese%s\n' "$installer_accent" "$installer_reset" "$installer_muted" "$installer_reset"
+    printf '  %s✦ 안녕하세요%s  %sKorean%s\n' "$installer_accent" "$installer_reset" "$installer_muted" "$installer_reset"
+    printf '  %s✦ مرحبا%s      %sArabic%s\n' "$installer_accent" "$installer_reset" "$installer_muted" "$installer_reset"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -101,26 +172,49 @@ xml_escape() {
 }
 
 if [ "$dry_run" -eq 1 ]; then
-    echo "Would download: $base/$archive_name"
-    echo "Would install into: $app_dir/Ciaobot.app"
+    installer_header
+    installer_step 20 "checking macOS and architecture"
+    installer_done
+    installer_step 45 "would download the signed release"
+    installer_done
+    installer_step 70 "would verify and unpack the app"
+    installer_done
+    installer_step 100 "would install into $app_dir/Ciaobot.app"
+    installer_done
+    installer_greetings
+    printf '\n  %sDry run complete — no files were changed.%s\n' "$installer_soft" "$installer_reset"
     exit 0
 fi
 
 archive="$tmp/$archive_name"
 signature="$tmp/$signature_name"
 verifier="$tmp/$verifier_name"
+installer_header
+installer_step 8 "checking macOS and architecture"
+installer_done
+installer_step 25 "downloading the signed release"
 download "$base/$archive_name" "$archive" || fail "could not download $archive_name"
+installer_done
+installer_step 32 "downloading the release signature"
 download "$base/$signature_name" "$signature" || fail "could not download $signature_name"
+installer_done
+installer_step 39 "downloading the native verifier"
 download "$base/$verifier_name" "$verifier" || fail "could not download $verifier_name"
+installer_done
 
 expected_verifier_sha=__VERIFIER_SHA256__
 placeholder=__VERIFIER_SHA"256__"
+installer_step 47 "checking the verifier checksum"
 [ "$expected_verifier_sha" != "$placeholder" ] || fail "installer verifier checksum was not embedded"
 actual_verifier_sha=$(shasum -a 256 "$verifier" | awk '{print $1}')
 [ "$actual_verifier_sha" = "$expected_verifier_sha" ] || fail "installer verifier checksum mismatch"
 chmod 755 "$verifier"
+installer_done
+installer_step 55 "verifying the release signature"
 "$verifier" "$archive" "$signature" >/dev/null || fail "release signature verification failed"
+installer_done
 
+installer_step 66 "unpacking the bundled runtime"
 mkdir -p "$app_dir"
 destination="$app_dir/Ciaobot.app"
 stage="$app_dir/.Ciaobot.app.new.$$"
@@ -133,6 +227,7 @@ extracted="$stage/Ciaobot.app"
 [ -x "$extracted/Contents/Resources/ciao-runtime/bin/ciao" ] || fail "archive does not contain Ciaobot's bundled runtime"
 "$extracted/Contents/Resources/ciao-runtime/bin/ciao" --help >/dev/null \
     || fail "bundled Ciaobot runtime self-check failed"
+installer_done
 
 if [ -e "$destination" ]; then
     # A manually launched app is not necessarily owned by the LaunchAgent, so
@@ -154,12 +249,14 @@ if [ -e "$destination" ]; then
     rm -rf "$backup"
     mv "$destination" "$backup" || fail "could not move the existing Ciaobot.app aside"
 fi
+installer_step 82 "installing Ciaobot.app"
 if ! mv "$extracted" "$destination"; then
     [ ! -e "$destination" ] || rm -rf "$destination"
     [ ! -e "$backup" ] || mv "$backup" "$destination"
     fail "could not install Ciaobot.app"
 fi
 rm -rf "$stage"
+installer_done
 
 engine="$destination/Contents/Resources/ciao-runtime/bin/ciao"
 plist="$HOME/Library/LaunchAgents/com.ciao.server.plist"
@@ -193,6 +290,7 @@ desktop_plist_tmp="$desktop_plist.tmp.$$"
     printf '%s\n' '</dict></plist>'
 } > "$desktop_plist_tmp"
 mv "$desktop_plist_tmp" "$desktop_plist"
+installer_step 89 "preserving the local workspace"
 
 if [ -n "$workspace" ]; then
     if [ "$no_start" -eq 0 ]; then
@@ -210,8 +308,10 @@ if [ -n "$workspace" ]; then
             >/dev/null
     fi
 fi
+installer_done
 
 if [ "$no_start" -eq 0 ]; then
+    installer_step 96 "starting the menu-bar app"
     uid=$(id -u)
     # Reload the app agent after an update so launchd does not retain the old
     # executable path. kickstart without -k starts it only when it is absent.
@@ -241,8 +341,16 @@ if [ "$no_start" -eq 0 ]; then
         sleep 1
     done
     launchctl kickstart "gui/$uid/Ciaobot" >/dev/null 2>&1 || true
+    installer_done
+else
+    installer_step 96 "leaving the app stopped (--no-start)"
+    installer_done
 fi
 
+installer_step 100 "finishing the first hello"
+installer_done
+installer_greetings
+printf '\n'
 echo "Ciaobot installed at $destination"
 if [ -n "$workspace" ]; then
     echo "Workspace: $workspace"

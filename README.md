@@ -66,7 +66,7 @@ Ciaobot started from the limits of Claude Cowork. Cowork is genuinely good at *d
 
 Ciaobot is the other bet — differences that are structural, not features:
 
-- **Any model, local or cloud.** Claude Code, OpenAI Codex, Ollama (local or cloud), or OpenRouter — the second brain outlives any single model, and lighter tasks can run entirely on your own hardware.
+- **Any model, local or cloud.** Claude Code for Anthropic, Codex for OpenAI, and opencode for everything else — including models running on your own hardware. The second brain outlives any single model.
 - **Your machine's own power.** Voice is already wired to work on-device: dictation and read-aloud run on your computer (Apple Silicon) with no cloud round-trip needed.
 - **Accrual, not storage.** A memory system, baked in, that curates itself and compounds into *you* over time — not a pile of past sessions.
 - **Yours to keep.** That memory is plain markdown in a git repo you own outright — portable, and useful even if this app disappears.
@@ -86,7 +86,7 @@ Ciaobot is built for **knowledge work, not software development**: brainstorming
 
 ## The idea
 
-Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://github.com/anthropics/claude-code) or [OpenAI Codex](https://developers.openai.com/codex/cli/) in the background, on the bet that the vendors' own CLIs are the best-maintained agent harnesses available — they keep the model communication, tool use, and agentic loop optimized so this project doesn't have to. Ciaobot stays in control of the three things that matter to me:
+Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://github.com/anthropics/claude-code), [OpenAI Codex](https://developers.openai.com/codex/cli/), or [opencode](https://opencode.ai) in the background, on the bet that the vendors' own CLIs are the best-maintained agent harnesses available — they keep the model communication, tool use, and agentic loop optimized so this project doesn't have to. Ciaobot stays in control of the three things that matter to me:
 
 1. **The context** — deciding exactly what memory, notes, and project state the agent is fed each turn.
 2. **One interface** — the same UI regardless of which project or provider you're talking to.
@@ -101,7 +101,7 @@ What that looks like in practice:
 - **Skills, subagents, and commands** — packaged defaults, extensible from Settings or workspace files (see [What ships by default](#what-ships-by-default)).
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
 - **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app app updates. On macOS, `Ciaobot.app` owns the window, menu bar, native notifications, and desktop updates while the bundled engine runs as a background service.
-- **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
+- **Provider choice** — Claude Code, Codex, or opencode with your existing login, plus on-device models for lighter tasks (see [Providers](#providers)).
 - **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, delegates, schedules, loops, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
@@ -114,7 +114,7 @@ Ciaobot keeps memory in layers so the agent can recall what matters without stuf
 - **Your vault** (`memory-vault/`, or a separate vault root per sidebar workspace) — durable markdown you own: people, projects, ideas. Browse it in Obsidian or any editor; it stays useful even without Ciaobot.
 - **One behavior file for the install** — `<workspace>/CLAUDE.md` (and `AGENTS.md` for Codex) applies to every chat.
 
-When your message mentions a name that appears in the vault index, the agent gets a quiet hint — “this probably means `People/Emma`” — so it opens the right note without you repeating context. And when a chat is archived, a pipeline turns it into durable knowledge: session insights are extracted, memory proposals are drafted, and daily/weekly curation runs update vault pages — but nothing is promoted into long-term memory without review, and Ciaobot never discards or rewrites an existing notes folder during onboarding. Track the background steps under **Settings → Automation**, and see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
+When your message mentions a name that appears in the vault index, the agent gets a quiet hint — “this probably means `People/Emma`” — so it opens the right note without you repeating context. And when a chat is archived, a pipeline turns it into durable knowledge: session insights are extracted, memory proposals are drafted, and daily/weekly curation runs update vault pages. Existing-folder onboarding also starts with an initial inventory and curation chat; it preserves the source notes, reorganizes only clear classifications, and reports ambiguous material. Nothing is promoted into long-term memory without review, and Ciaobot never discards or rewrites an existing notes folder during onboarding. Track the background steps under **Settings → Automation**, and see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
 
 ## Features
 
@@ -162,7 +162,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 **Providers and models**
 
-- Claude Code or OpenAI Codex with the subscription login you already have; Ollama (cloud or local) and OpenRouter as API backends.
+- Claude Code, OpenAI Codex, or opencode with the subscription login you already have. Anything else — Ollama, OpenRouter, a local OpenAI-compatible server — is reached by configuring it in opencode, which Ciaobot picks up automatically.
 - Claude shell commands stay attached to the active turn until they return a result. Background subagents remain asynchronous and visible in the chat while they run.
 - haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models (Apple Intelligence, no install required).
 - Image-capability pre-flight: when a turn carries images and the selected model can't see them, the chat pauses and offers same-backend vision models to switch to, instead of failing mid-turn or silently dropping the images.
@@ -193,14 +193,13 @@ Specialized roles the main agent can delegate to ([ciao/stock/agents/](ciao/stoc
 
 ### Slash commands
 
-Type these in any chat ([ciao/stock/commands/](ciao/stock/commands/)):
+Type these in any chat; they ship in [ciao/stock/commands/](ciao/stock/commands/):
 
 | Command | What it does |
 |---|---|
 | [/remember](ciao/stock/commands/remember.md) | Saves a durable fact or learning to the right memory layer (agent memory, user profile, or a vault page). |
 | [/interrogation](ciao/stock/commands/interrogation.md) | Asks a few targeted questions to turn a vague project, person, or idea into a useful canonical vault note. |
 | [/critique](ciao/stock/commands/critique.md) | Multi-model adversarial review of a plan or draft, via the `adversarial_review` MCP tool. |
-| `/plan` | Enters read-only plan mode, then returns to the chat's previous mode (or auto if unavailable). |
 
 ### System routines
 
@@ -212,7 +211,7 @@ Recurring schedules that ship enabled ([ciao/stock/schedules.json](ciao/stock/sc
 | Workspace hygiene | Weekly (Sun) | Regenerates the vault index with `ciao vault-index --write`, then runs `ciao os-audit --json`. It can repair low-risk link and index drift, then verifies the remaining findings. |
 | Skill evolution | Weekly (Sun) | Drafts skill-improvement proposals from recent usage; never applies them automatically. |
 
-Your own schedules live alongside these in the workspace (`.runtime/schedules.json`), with in-chat loops in `.runtime/loops.json`; both are managed from the UI's Automations page. Packaged **skills** (vault search, Google Workspace, web research, and more) are browsable under **Settings → Assets** and live in [ciao/stock/skills/](ciao/stock/skills/).
+Your own schedules live alongside these in the workspace (`.runtime/schedules.json`), with in-chat loops in `.runtime/loops.json`; both are managed from the UI's Automations page. Packaged **skills** (Google Workspace, web research, and more) are browsable under **Settings → Assets** and live in [ciao/stock/skills/](ciao/stock/skills/).
 
 ## Providers
 
@@ -220,8 +219,7 @@ Use the access you already have:
 
 - **Claude Code** — CLI-managed Claude subscription or Anthropic Console authentication.
 - **OpenAI Codex** — `codex login`, including eligible ChatGPT subscription accounts.
-- **Ollama** — cloud or local daemon.
-- **OpenRouter** — `OPENROUTER_API_KEY`.
+- **opencode** — the open-source agent CLI, bring-your-own model provider (`opencode auth login` or the config you already have). This is the path to everything Anthropic and OpenAI do not serve: Ollama, OpenRouter, or any OpenAI-compatible endpoint. Configure it in opencode and its models appear in Ciaobot's pickers automatically — Ciaobot reads whatever opencode reports as connected.
 - **On-device models** — for lightweight tasks where available: chat titles via Apple's on-device Foundation Model, dictation and read-aloud via the built-in macOS speech frameworks. All of it ships with macOS; none of it needs installing.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for env vars, OAuth, and per-task model routing (titles, insights, voice).

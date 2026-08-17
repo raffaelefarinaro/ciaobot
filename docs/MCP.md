@@ -122,13 +122,13 @@ telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog contains 42 explicit tools. The MCP `tools/list` response is the
+The catalog contains 46 explicit tools. The MCP `tools/list` response is the
 live list, so clients do not need to infer it from documentation. The catalog
 holds *capabilities* — orchestration and search that a shell can't cheaply
 replicate. Plain plumbing that the managed Claude Code/Codex session can do
 with its own shell and filesystem is not duplicated as an MCP tool:
 
-- **Bounded memory** → Edit the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. MCP only lists/dismisses proposals (`memory_proposals_list`, `memory_proposal_resolve`).
+- **Bounded memory** → The native source remains the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. Use `memory_status` for usage, `memory_update` for a typed bounded edit, and the proposal tools for review/dismissal.
 - **Vault maintenance** → `ciao index` (index refresh) and `ciao lint`.
   `vault_search` stays — it wraps a maintained FTS5 index a file tool can't
   replicate.
@@ -152,11 +152,13 @@ an in-place new session, `schedule_action`, `loop_action`).
 | Domain | Tools |
 |---|---|
 | Context | `context_get` (includes `system` status) |
-| Bounded memory | `memory_proposals_list`, `memory_proposal_resolve` |
+| Bounded memory | `memory_status`, `memory_update`, `memory_proposals_list`, `memory_proposal_resolve` |
 | Vault | `vault_search` |
 | Projects | `projects_list`, `project_get`, `project_create`, `project_update`, `project_complete`, `project_restore`, `project_delete`, `project_files_list` |
+| Workspaces | `workspaces_list`, `workspace_create`, `workspace_update`, `workspace_delete` |
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
 | Delegates | `delegate_spawn`, `delegates_list` |
+| Background runs | `background_run_start`, `background_run_status`, `background_run_cancel` |
 | Adversarial review | `adversarial_review` |
 | Schedules | `schedules_list`, `schedule_preview`, `schedule_create`, `schedule_update`, `schedule_action` |
 | Loops | `loops_list`, `loop_create`, `loop_update`, `loop_action` |
@@ -174,9 +176,31 @@ SDK's `allowed_tools` (see `AUTO_APPROVED_MCP_TOOLS` in
 app's own control plane: these are the programmatic twins of PWA buttons, scoped
 by bearer token, and visible/reversible in the UI. The `_DESTRUCTIVE` tools
 (`project_complete`, `project_delete`, `chat_delete`, `chat_stop`,
-`schedule_action`, `loop_action`) are deliberately excluded and
+`background_run_start`, `background_run_cancel`, `schedule_action`,
+`loop_action`, `workspace_delete`) are deliberately excluded and
 still prompt. Plan mode gets no allowlist at all. `tests/test_mcp_server.py`
 fails if a new tool is added without placing it on one side of that line.
+
+`background_run_start` is the one tool in the catalog whose annotation is not
+about reversibility. It executes a command, and an auto-approved
+arbitrary-command tool would be a strictly wider hole than the `Bash` call it
+wraps, since a Bash call in Auto mode still passes the SDK classifier. Issue
+#282 proposed `_WRITE` while describing it as "Auto-mode approval required";
+in this codebase `_DESTRUCTIVE` is the annotation that actually delivers that.
+Only the read half (`background_run_status`) is auto-approved.
+
+**Background runs.** `background_run_start(cmd, cwd, env, timeout_s, label)`
+launches one command in a tracked subprocess and returns immediately with a
+`run_id`, `pid`, and `log_path`; the calling chat ends its turn and is woken
+when the process exits. `cmd` is an argv list — a string is rejected, because
+splitting it would mean a shell. `cwd` is relative to the workspace root and
+confined to it. `env` may not set dynamic-loader hooks or
+`CIAO_MCP_SESSION_TOKEN`, and the child never inherits the server's own
+credentials. A run belongs to the chat that started it: another chat passing
+its `run_id` to `background_run_status` or `background_run_cancel` gets
+`run_not_found`, not `forbidden`. See `docs/ARCHITECTURE.md` → "Schedules and
+background automation" for the storage layout, log rotation, and restart
+behaviour.
 
 The catalog covers application actions that are safe and meaningful for a
 scoped agent. Browser-session administration, login/OAuth secrets, Web Push
@@ -197,15 +221,11 @@ MCP replaces transport recipes, not behavioral knowledge.
 - Provider and integration skills—Google Workspace, research, document
   authoring, role/persona workflows—remain useful because MCP does not encode
   those domain decisions.
-- The legacy CLI/curl/direct-JSON recipes have been removed from the default
-  generated prompt and the Ciaobot-owned skills. They now survive only in the
-  base `ciao/system_prompt.md`, which feeds the hidden legacy fallback, so the
-  fallback path still carries CLI references. They can be deleted entirely only
-  after every supported provider has a decisive MCP result and the rollback
-  window has passed.
-- A minimal system prompt always remains: security/approval rules, workspace
-  identity, memory semantics, project context, and cross-provider behavior are
-  application policy rather than tool descriptions.
+- The default generated prompt is intentionally compact. Provider-native guides
+  still load from `CLAUDE.md`/`AGENTS.md`; the Ciaobot core carries only
+  security/approval, workspace routing, memory semantics, retrieval, and
+  cross-provider behavior. Detailed URL, GWS, issue, and artifact procedures
+  live in skills, while the typed MCP catalog owns application operations.
 
 ## Validation status
 
@@ -229,8 +249,13 @@ server-wide via `config.control_surface` rather than per provider.
 
 ### Promotion / `auto` status (2026-07-18)
 
-No provider has been promoted through the formal 240-turn release evaluation, so
-`auto` continues to resolve to `legacy`. This is independent of the default
+`auto` is a per-chat value, not a server default: a chat on `auto` resolves at
+dispatch through `.runtime/control_surface_decision.json`
+(`ciao/control_surfaces.py`), which records the promoted per-provider decision
+from the latest release evaluation, and falls back to `legacy` when no provider
+has been promoted. As of the record below no provider has been promoted through
+the formal 240-turn release evaluation, so `auto` resolves to `legacy`. This is
+independent of the default
 above: the default governs chats that do not opt into `auto`.
 
 The Codex release run attempted all 120 turns. Three final scenario pairs were

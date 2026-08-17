@@ -17,7 +17,7 @@ export function classifyError(errorText: string): ErrorAttribution {
   if (/\b(?:http|status|status code)\s*[45]\d{2}\b|\b[45]\d{2}\s+(?:error|bad gateway|gateway timeout)\b/.test(text)) {
     return { kind: 'remote-http', label: 'Remote service error', copy: 'A remote service returned an HTTP error.' }
   }
-  if (/\b(provider|anthropic|claude|ollama|openrouter|codex|model|quota|rate limit|token)\b/.test(text)) {
+  if (/\b(provider|anthropic|claude|codex|opencode|model|quota|rate limit|token)\b/.test(text)) {
     return { kind: 'provider', label: 'Provider error', copy: 'The selected AI provider could not complete the request.' }
   }
   return { kind: 'unknown', label: 'Unknown error', copy: 'The operation did not complete.' }

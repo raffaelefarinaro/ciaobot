@@ -11,7 +11,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie.
-- All `/api/*` routes except `POST /api/auth`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, `GET /api/setup/inspect-folder`, and `POST /api/setup/mkdir` require the signed session cookie. All `/ws/*` routes require the signed session cookie.
+- All `/api/*` routes except `POST /api/auth`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, but it only answers in bootstrap mode, where protection is off anyway.) All `/ws/*` routes require the signed session cookie.
 - `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer (off-localhost requests get a 403 pointing at `http://localhost:<port>`). Body: `workspace` (required — the root folder holding the vault plus app data), `vault_root` (optional, default `<workspace>/memory-vault`; absolute or `~` paths are honored for an existing notes folder elsewhere), `password` (required — the dashboard password, at least 4 characters; setup always enables protection), plus optional `vault_mode`, `workspace_name`, `push_contact`, `port`, `python`, `launch_agents_dir`, `app_dir`, and `restart`. It writes the real workspace config, ensures workspace and vault are (in) git repos, creates local launch artifacts, and asks the supervisor to restart into the configured workspace. When the chosen folder already contains nested workspace directories (`memory-vault/<name>/` with a `MEMORY.md` inside), those are adopted as the workspace registry and `workspace_name` is ignored.
 - `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces, has_env}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
@@ -90,7 +90,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror |
 | PATCH, DELETE | `/api/agent-assets/commands/{name}` | Update or delete a custom workspace-owned slash command |
 | GET | `/api/rate-limits` | Read Claude rate-limit snapshots |
-| GET | `/api/models` | List configured models |
+| GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, project MCP servers (env-key status + observed tools), and active-session counts (no credentials) |
 | GET | `/api/mcp/usage` | Embedded Ciaobot MCP per-tool call/error counters (no credentials) |
@@ -116,8 +116,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
-| GET, PATCH | `/api/settings/providers` | Read or update direct keys and the tracked custom provider definitions (tokens are stored locally and redacted) |
-| POST | `/api/settings/providers/custom/probe` | Discover models from an unsaved OpenAI-compatible custom endpoint |
+| GET, PATCH | `/api/settings/providers` | Read or update provider/service key status and the GitHub-skill refresh setting; credentials are redacted |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or Codex CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
@@ -125,6 +124,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/integrations/gws/auth-url` | Generate Google OAuth authorization URL for a profile |
 | POST | `/api/integrations/gws/exchange` | Complete Google OAuth flow and exchange code for credentials |
 | POST | `/api/integrations/gws/disconnect` | Disconnect Google profile and clean up local credentials/client_secret |
+| POST | `/api/integrations/gws/profiles/add` | Register a Google account (`name`, optional `label`) so workspaces can link to it |
+| POST | `/api/integrations/gws/profiles/remove` | Forget a Google account: delete its credential directory and unlink workspaces |
 | POST | `/api/integrations/gws/relogin/start` | Start a server-managed OAuth re-login; returns the consent URL and keeps a loopback callback listener alive in-process |
 | GET | `/api/integrations/gws/relogin/status` | Poll a pending re-login (pending/completed/error/none) |
 | POST | `/api/integrations/gws/relogin/cancel` | Cancel a pending re-login and tear down its loopback listener |
@@ -226,20 +227,6 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record"
 ```
 
-**Custom compatible provider**
-
-```bash
-# Probe an unsaved compatible endpoint for model ids.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/settings/providers/custom/probe" \
-  -H 'content-type: application/json' \
-  -d '{"id":"lm-studio","name":"LM Studio","url":"http://localhost:1234/v1","runner":"claude","token":""}'
-
-# Save one or more endpoints. Omit `token` on an existing id to retain its stored token.
-curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/providers" \
-  -H 'content-type: application/json' \
-  -d '{"custom_providers":[{"id":"lm-studio","name":"LM Studio","url":"http://localhost:1234/v1","runner":"claude","models":"qwen2.5-coder"}]}'
-```
-
 **Projects**
 
 ```bash
@@ -289,21 +276,21 @@ downloads rather than executable inline content.
 **Chats**
 
 ```bash
-# Create — title/model/mode/provider/model_bucket all optional.
-# provider is `claude` or `codex`. model_bucket only controls Claude backends:
+# Create — title/model/mode/provider all optional.
+# provider is any id from the registry (`claude`, `codex`, `opencode`); see
+# GET /api/models -> providers[] for the live list and per-provider
 # '' = auto from the project's configured workspace bucket. Legacy
-# work/personal buckets still work; anthropic/ollama are the clearer
 # configured names. Unknown buckets are rejected unless a workspace config
 # defines them.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/$PID/chats" \
   -H 'content-type: application/json' \
   -d '{"title":"Tile layout"}'
 
-# Update — title, model, provider, model_bucket, mode, project_id (to move
+# Update — title, model, provider, mode, project_id (to move
 # between projects), thinking_level. thinking_level is provider-native
 # ('' = provider default, allowed values per provider in GET /api/models →
 # thinking_levels) and is safe to change mid-chat; it resets to '' on
-# handover. Changing model/provider/model_bucket across a routing boundary
+# handover. Changing provider
 # on a started chat returns 400; use handover instead.
 # control_surface (legacy|mcp|auto|'') is still accepted here as an escape
 # hatch, but it is engine-controlled now (MCP by default, legacy fallback);
@@ -312,12 +299,12 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
 
 # Handover — switch model/backend inside the same visible chat.
-# Body keys: provider = claude|codex, model, model_bucket (Claude only), messages
+# Body keys: provider = claude|codex|opencode, model, messages
 # (visible rows). Starts the next provider turn as a fresh session seeded
 # with those messages.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/handover" \
   -H 'content-type: application/json' \
-  -d '{"provider":"claude","model":"sonnet","model_bucket":"anthropic","messages":[{"role":"user","content":"continue this task"},{"role":"assistant","content":"current state"}]}'
+  -d '{"provider":"claude","model":"sonnet","messages":[{"role":"user","content":"continue this task"},{"role":"assistant","content":"current state"}]}'
 
 # Fork — create a new independent chat in the same project continuing from a completed turn.
 # Body keys: messages (visible rows up to and including the target assistant answer),
@@ -406,7 +393,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider, default_model,
-# gws_profile, model_bucket, color (pink|cyan|amber|emerald|violet; default
+# gws_profile, color (pink|cyan|amber|emerald|violet; default
 # pink — PWA accent only), disallowed_tools (extra non-connector tools,
 # CSV or list, null = defaults), claude_ai_mcps (true|false|null where null
 # = per-workspace default: personal off, else on). The effective denylist is
@@ -504,9 +491,9 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 **Routine settings (Settings → Models tab)**
 
 ```bash
-# Read internal-routine settings: title, insights, and critique model overrides
-# (plus the effective models after defaults), transcription engine + cloud
-# model, and grouped model options (anthropic / ollama_cloud / ollama_local).
+# Read internal-routine settings: title, insights, and critique model
+# overrides, the per-provider tier pins (provider_routing plus a flat
+# {provider}_{tier}_model mirror), and the effective models after defaults.
 #
 # title_model_effective / insights_model_effective are the PRIMARY workspace's
 # answer only. With no override both routines resolve from the chat's own
@@ -517,13 +504,11 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
 # live config immediately (no restart). Empty string clears an override back
-# to the env default. transcription_engine ∈ {cloud, local}; "local" uses
-# mlx-whisper on-device (free). Cloud transcription model (default
-# gpt-transcribe) can be overridden via transcription_model or the
-# CIAO_TRANSCRIPTION_MODEL env var; it is surfaced as transcription.cloud_model.
+# to the env default. "apple" routes a routine to the on-device Foundation
+# Model (title_model / insights_model).
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","transcription_engine":"local"}'
+  -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5"}'
 ```
 
 **Project MCP servers (Settings → Providers tab)**
@@ -597,6 +582,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_title`: auto-title finished.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
+- `chat_postprocess`: the post-archive pipeline reporting itself. Archiving a chat dispatches one task that extracts session insights, folds the project doc, writes a trajectory and files memory proposals (`ciao/insights.py:extract_and_append`); this event fires when the pipeline starts, as each step finishes, and when it settles. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{state: "running"|"done", step, expected: [job_id], steps: {job_id: {status, extra}}, started_at, updated_at, interrupted?}`. The same object is persisted on the chat and returned as `ChatInfo.postprocess`, so an archived chat can still report what was learned from it after a reload — the PWA renders it as a muted activity signal while `state` is `running` and as a settled one-line summary afterwards. `interrupted` marks a pipeline a restart killed mid-flight. The connect `snapshot` carries `postprocessing: [chat_id]` for pipelines already in flight, so a client that joins between the start and finish events still shows them.
 - `loops_changed`: a loop was created, edited, started, stopped, or deleted (REST route, Schedules page, or the `loop_*` MCP tools mid-turn). No payload; the client refetches `GET /api/loops`, which is where the computed `running` / `next_run` fields are assembled. Without it a loop created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
 
@@ -606,7 +592,7 @@ Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (w
 
 **Queue management**: while the assistant is streaming, the client can queue follow-up messages (mode `queue`). Each queued item gets an `id` and is flushed as its own user turn once the prior turn finishes. When that turn starts, its `user_echo` includes `entry_id` so the client removes only the flushed item and keeps later queue entries visible. The client can also send `queue_reorder {entry_id, before_id}` (move `entry_id` before `before_id`, or to the end when `before_id` is null), `queue_edit {entry_id, text, images?}`, and `queue_remove {entry_id}`. The server confirms with `queue_state {queue: [{id, text, images?}]}` so connected clients stay in sync.
 
-**Auto tier-fallback status events**: when the primary model returns a capability error (image input, tool use, context length, etc.), the server emits a `status` event with a "retrying on &lt;model&gt;" message, then runs the retry and emits the normal `result` for the new model. The terminal `result.effective_model` is the retry target's id. Rate limits, auth errors, content filters, and 5xx do NOT trigger this path; only Claude, Ollama, and OpenRouter backends participate.
+**Auto tier-fallback status events**: when the primary model returns a capability error (image input, tool use, context length, etc.), the server emits a `status` event with a "retrying on &lt;model&gt;" message, then runs the retry and emits the normal `result` for the new model. The terminal `result.effective_model` is the retry target's id. Rate limits, auth errors, content filters, and 5xx do NOT trigger this path; only Claude chats pinned to a bare tier alias participate.
 
 **Message timings**
 

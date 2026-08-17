@@ -457,6 +457,13 @@ def _current_branch(root: Path) -> str:
 
 def _run_checks(root: Path, *, skip_frontend: bool) -> list[str]:
     commands: list[tuple[list[str], Path, str]] = [
+        # mypy first, and blocking, because CI's `test` job blocks on it while
+        # this suite did not: a type error passed every local gate and first
+        # appeared as a red release PR, after the branch was cut and pushed.
+        # The other CI steps it does not mirror - pip-audit, eslint, npm audit -
+        # are all `|| true` there, so gating on them here would make a release
+        # stricter than the thing it is trying to predict.
+        ([sys.executable, "-m", "mypy", "ciao"], root, "mypy ciao"),
         ([sys.executable, "-m", "pytest", "tests/"], root, "pytest tests/"),
     ]
     if not skip_frontend:
@@ -503,7 +510,37 @@ def _run_checks(root: Path, *, skip_frontend: bool) -> list[str]:
     for cmd, cwd, label in commands:
         _run(cmd, cwd=cwd)
         labels.append(label)
+    if not skip_frontend:
+        _check_built_pwa(root)
+        labels.append("built PWA shell references existing assets")
     return labels
+
+
+def _check_built_pwa(root: Path) -> None:
+    """Fail the release if the built PWA shell is missing or incoherent.
+
+    ``ciao/web/static/index.html`` is generated and untracked, and the wheel
+    takes it from the filesystem rather than from git, so nothing else would
+    notice a release packaged without a frontend build - the app would install
+    and then serve a 404 where the UI should be. A shell that points at bundles
+    which are not on disk fails the same way, and is what a stale build looks
+    like after a branch switch.
+    """
+    index = root / "ciao" / "web" / "static" / "index.html"
+    if not index.is_file():
+        raise ReleaseError(
+            f"{index} is missing: run `cd web && npm run build` before releasing"
+        )
+    html = index.read_text(encoding="utf-8")
+    referenced = set(re.findall(r'(?:src|href)="(/assets/[^"]+)"', html))
+    missing = sorted(
+        ref for ref in referenced if not (root / "ciao" / "web" / "static" / ref.lstrip("/")).is_file()
+    )
+    if missing:
+        raise ReleaseError(
+            "the built PWA shell references assets that are not on disk "
+            f"({', '.join(missing)}): rebuild with `cd web && npm run build`"
+        )
 
 
 def _pr_body(
@@ -547,7 +584,7 @@ def _pr_body(
 def _check_dependency_updates(root: Path) -> list:
     """Return available dependency updates, or [] if the check cannot run."""
     try:
-        from ciao.dependency_review import check_available_updates
+        from ciao.dependency_updates import check_available_updates
 
         return check_available_updates(root)
     except Exception as exc:  # noqa: BLE001 - never block a release on this
@@ -569,11 +606,17 @@ def _print_dependency_updates(updates: list) -> None:
         print(
             f"  - {u.key} [{u.ecosystem}] {u.current} -> {u.latest} ({', '.join(flags)})"
         )
-    auto = [u.key for u in updates if u.auto]
+    auto = [u.key for u in updates if u.auto and u.is_safe]
+    skipped_auto = [u.key for u in updates if u.auto and not u.is_safe]
     if auto:
         print(
             f"  (auto: {', '.join(auto)} will be bumped on --apply; "
             "review the rest and update manually if it makes sense)"
+        )
+    if skipped_auto:
+        print(
+            f"  (auto candidates with major updates are skipped: {', '.join(skipped_auto)}; "
+            "review and update manually if needed)"
         )
 
 
@@ -581,7 +624,7 @@ def _apply_auto_dependency_updates(root: Path, updates: list, *, reinstall: bool
     if not any(getattr(u, "auto", False) for u in updates):
         return
     try:
-        from ciao.dependency_review import apply_auto_updates
+        from ciao.dependency_updates import apply_auto_updates
 
         applied = apply_auto_updates(root, updates, reinstall=reinstall)
     except Exception as exc:  # noqa: BLE001 - never block a release on this

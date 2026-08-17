@@ -426,6 +426,8 @@ _WORKSPACE_GITIGNORE_ENTRIES = (
     ".claude/",
     ".agents/",
     ".codex/",
+    ".opencode/",
+    "opencode.json",
     "*.log",
 )
 
@@ -791,11 +793,6 @@ def setup_workspace(
     # workspace registry instead of creating one synthetic workspace that points
     # at the whole vault.
     provider = (default_provider or "claude").strip().lower()
-    model_bucket = {
-        "codex": "",
-        "ollama": "personal",
-        "openrouter": "openrouter",
-    }.get(provider, "anthropic")
     scaffold_vaults: list[tuple[str, Path]]
     if registered_vaults is not None:
         # The registry, not today's CLI defaults or filesystem discovery, is
@@ -819,8 +816,10 @@ def setup_workspace(
                     "name": ws_name,
                     "vault_root": stored_root,
                     "default_provider": provider,
-                    "gws_profile": ws_name,
-                    "model_bucket": model_bucket,
+                    # No Google account is linked at scaffold time: which
+                    # accounts exist is the user's choice, made in Settings →
+                    # Workspaces after setup.
+                    "gws_profile": "",
                 }
             )
             _write_if_missing(
@@ -853,8 +852,7 @@ def setup_workspace(
                         "name": name,
                         "vault_root": stored_root,
                         "default_provider": provider,
-                        "gws_profile": name,
-                        "model_bucket": model_bucket,
+                        "gws_profile": "",
                     }
                 ],
                 indent=2,
@@ -1021,9 +1019,22 @@ def _setup_command(args: argparse.Namespace) -> int:
     if args.load_launchd:
         rc = 0
         for plist in plists:
-            subprocess.run(["launchctl", "unload", str(plist)], check=False)
+            # The unload is a probe: during an install the agent is normally
+            # not loaded, and launchctl says so on stderr ("Unload failed: 5:
+            # Input/output error"). check=False swallows the status but not the
+            # output, and install.sh redirects only stdout - so that expected
+            # non-event was the first line a user saw when re-running the
+            # installer over a configured workspace, ahead of the success lines.
+            subprocess.run(
+                ["launchctl", "unload", str(plist)],
+                check=False,
+                stderr=subprocess.DEVNULL,
+            )
+            # Keep a real load failure visible to the installer and preserve
+            # its status as the setup result.
             rc = subprocess.run(
-                ["launchctl", "load", "-w", str(plist)], check=False
+                ["launchctl", "load", "-w", str(plist)],
+                check=False,
             ).returncode or rc
         _print_setup_summary(root, args.port)
         return rc
@@ -1051,23 +1062,26 @@ def _setup_url_command(args: argparse.Namespace) -> int:
 def _auth_command_for_provider(
     provider: str, *, device_auth: bool = False
 ) -> list[str]:
-    if provider == "claude":
-        from ciao.providers.claude import get_bundled_claude_path
+    # Runtime providers carry their own login command in the registry.
+    # is a routing backend with no provider module, so it stays inline.
+    from ciao import provider_registry
 
-        binary = get_bundled_claude_path() or shutil.which("claude")
-        if not binary:
-            raise FileNotFoundError("Claude CLI not found")
-        return [binary, "login"]
-    if provider == "codex":
-        from ciao.providers.codex import resolve_codex_binary
-
-        binary = resolve_codex_binary()
-        if not binary:
-            raise FileNotFoundError("Codex CLI not found")
-        return [binary, "login", "--device-auth"] if device_auth else [binary, "login"]
-    if provider == "ollama":
-        return ["ollama", "signin"]
+    descriptor = provider_registry.get(provider)
+    if descriptor is not None:
+        return descriptor.auth_command(device_auth=device_auth)
     raise ValueError(f"Unknown provider '{provider}'")
+
+
+def _runtime_provider_choices() -> tuple[str, ...]:
+    """Runtime providers accepted by ``--provider`` flags."""
+    from ciao import provider_registry
+
+    return provider_registry.provider_ids()
+
+
+def _auth_provider_choices() -> list[str]:
+    """Providers ``ciao auth`` accepts."""
+    return list(_runtime_provider_choices())
 
 
 def _auth_command(args: argparse.Namespace) -> int:
@@ -1076,7 +1090,17 @@ def _auth_command(args: argparse.Namespace) -> int:
             args.provider,
             device_auth=bool(getattr(args, "device_auth", False)),
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        # ``--print-only`` is useful for setup instructions even on a machine
+        # where the provider CLI is not installed yet. Keep the real command
+        # path strict, but provide opencode's documented executable name for
+        # the copy/paste form.
+        if args.print_only and args.provider == "opencode":
+            print("opencode auth login")
+            return 0
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     if args.print_only:
@@ -1570,7 +1594,6 @@ def _create_chat_command(args: argparse.Namespace) -> int:
         "title": args.title or "New Chat",
         "model": args.model or os.environ.get("CIAO_MODEL") or None,
         "provider": args.provider or os.environ.get("CIAO_PROVIDER") or None,
-        "model_bucket": args.model_bucket or os.environ.get("CIAO_MODEL_BUCKET") or None,
     }
     chat_info = _make_json_request(
         opener,
@@ -1839,7 +1862,7 @@ def build_parser() -> argparse.ArgumentParser:
         "auth",
         help="Run a provider OAuth/login command for first-run setup.",
     )
-    auth_parser.add_argument("provider", choices=["claude", "codex", "ollama"])
+    auth_parser.add_argument("provider", choices=_auth_provider_choices())
     auth_parser.add_argument(
         "--print-only",
         action="store_true",
@@ -2050,12 +2073,8 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--model", help="Model override. Inherits CIAO_MODEL.")
     chat_parser.add_argument(
         "--provider",
-        choices=["claude", "codex"],
+        choices=list(_runtime_provider_choices()),
         help="Provider override. Inherits CIAO_PROVIDER.",
-    )
-    chat_parser.add_argument(
-        "--model-bucket",
-        help="Model bucket override. Inherits CIAO_MODEL_BUCKET.",
     )
     chat_parser.add_argument(
         "--base-url",
@@ -2184,7 +2203,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_parser.add_argument(
         "--provider",
-        choices=["claude", "codex"],
+        choices=list(_runtime_provider_choices()),
         help="Provider override applied above scenario and suite defaults.",
     )
     eval_parser.add_argument(

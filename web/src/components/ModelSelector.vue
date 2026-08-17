@@ -317,6 +317,10 @@ onBeforeUnmount(() => {
       role="listbox"
       :aria-multiselectable="multiple"
     >
+      <div v-if="$slots.header" class="model-selector__header">
+        <slot name="header" />
+      </div>
+
       <div v-if="searchable" class="model-selector__search-wrap">
         <input
           ref="searchRef"
@@ -692,6 +696,14 @@ onBeforeUnmount(() => {
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   background: var(--bg2);
   border-radius: 0 0 var(--radius) var(--radius);
+}
+
+.model-selector__header {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: var(--bg2);
+  border-radius: var(--radius) var(--radius) 0 0;
 }
 
 @media (max-width: 768px) {

@@ -16,8 +16,9 @@ on this system).
 ## 1. Why this exists
 
 The app already has a good token layer and a global primitive layer. The problem
-is that neither is *binding*: every one of the 30 components in
-`web/src/components/` uses `<style scoped>`, and a large fraction re-specifies
+is that neither is *binding*: every one of the 36 components in
+`web/src/components/` (33 top-level + 3 in `settings/`) uses `<style scoped>`,
+and a large fraction re-specifies
 values the tokens already define. Measured on 2026-08-11:
 
 | Signal | Off-system | On-system | Verdict |
@@ -26,7 +27,7 @@ values the tokens already define. Measured on 2026-08-11:
 | `font-size` | 191 hardcoded px | 264 via `--text-*` | 42% off-system |
 | Hex colours in scoped styles | 106 | — | all off-system |
 | Distinct button class names in markup | 47 | — | no shared vocabulary |
-| Components referencing `.theme-light` | 4 of 30 | — | see §5 |
+| Components referencing `.theme-light` | 4 of 36 | — | see §5 |
 
 Two of those rows are functional bugs, not taste:
 
@@ -136,7 +137,7 @@ Existing and wanted:
 
 | Component | Owns | Status |
 |---|---|---|
-| `ChatSignals` | chat state marks (needs-you / working / unread / loop / quiet) | **exists, all 4 call sites** |
+| `ChatSignals` | chat state marks (needs-you / working / unread / loop / quiet) | **exists, all 5 call sites** |
 | `AppIcon` | the SVG icon set (see Rule S4) | **exists** |
 | `TierLabel` | a priority tier heading with its hairline rule | wanted |
 | `CountTile` | one number + label, urgency-ordered (project stats, lane summary) | wanted — pattern now used in 2 places |
@@ -186,8 +187,11 @@ part of the signal spec.
 A transient *working* mark where the work originates, and a persistent
 *needs you* count where its output waits. One without the other either hides
 that anything happened, or hides that something is now pending. See
-`docs/plans/MEMORY_VISIBILITY_PLAN.md` for the worked example — the insights and
-memory-proposal pipeline currently has neither.
+`docs/plans/MEMORY_VISIBILITY_PLAN.md` for the worked example. Half of the
+insights/memory-proposal pipeline is covered now: post-archive work shows a
+transient `tidying` working signal (ChatSignals + `chatIsPostprocessing` in
+the store), but there is still no persistent "needs you" surface where memory
+proposals wait — that half remains open.
 
 **Rule S5 — Counts are real counts.**
 `chatUnread()` returns 0 or 1 by design. Never render it as a digit; a per-chat
@@ -196,12 +200,24 @@ badge would always read `1`. Chat-level unread is carried by **title weight**
 `workspaceUnread`, which sum those binary values into real numbers.
 
 **Rule S6 — Absence is reported, not implied.**
-An empty tier or lane says `// nothing needs you here` rather than vanishing. A
-shorter list is not an answer.
+An empty tier or lane says `// no active chats` (or the equivalent for the
+surface) rather than vanishing. A shorter list is not an answer.
 
 **Rule S7 — One meaning per key.**
 Unmodified `1`–`9` mean `switchWorkspace`, in every view. Do not fork a shortcut
 per screen; give the screen a visible reaction instead.
+
+The one exception, and the shape any future one must take: a **blocking prompt
+that prints the digits on itself** owns them while it is up. The open
+`AskUserQuestion` card renders a `1`…`9` badge per option and answers the model
+with them; the turn is stopped until it is answered, so "switch workspace" is
+not a reading anyone intends there. The key still has exactly one meaning at any
+moment — *pick the numbered thing in front of you* — and the badges are the
+visible reaction the rule asks for. A screen may not claim the digits because
+they would be convenient: it must be blocking, transient, and it must show the
+numbers. The claim lives in `ChatLayout.onUnreservedKeydown`, which offers the
+key to `ChatPanel.handleQuestionShortcut` before spending it, so there is still
+one listener and one place to read the precedence.
 
 ---
 
@@ -232,10 +248,10 @@ is semantically right.
 the current eyebrow label, plus an `actions` slot. Migrate ProjectView first (6
 sites), then settings incrementally per tab. Do not big-bang 28 cards.
 
-### 4b. It is a 7,098-line monolith
+### 4b. It is a 7,171-line monolith
 
-`SettingsView.vue` is the largest file in the app: a 2,144-line template and
-2,900 lines of scoped CSS covering seven routed tabs. The routes already exist
+`SettingsView.vue` is the largest file in the app: a 2,210-line template and
+2,051 lines of scoped CSS covering seven routed tabs. The routes already exist
 (`/settings/providers`, `/settings/workspaces`, `/settings/models`,
 `/settings/context`, `/settings/skills`, `/settings/automations`), so the tabs
 are separable with no router change — each becomes its own SFC. This is also
@@ -259,9 +275,9 @@ and label should agree — rename the route or the label.
 `:root.theme-light` in `App.vue` redefines tokens. Components should therefore
 need **no** theme-specific CSS: style through tokens and both themes work.
 
-Only 4 of 30 components mention `.theme-light`, and that is the *correct* number
-— the other 26 rely on tokens, which is the intended design. The problem is not
-the missing 26; it is the 106 hex literals that silently opt out of theming.
+Only 4 of 36 components mention `.theme-light`, and that is the *correct* number
+— the other 32 rely on tokens, which is the intended design. The problem is not
+the missing 32; it is the 106 hex literals that silently opt out of theming.
 
 **Rule T1** — Do not add `.theme-light` overrides to a component. If a component
 needs one, a token is missing or a literal is being used.
@@ -274,7 +290,7 @@ workspace and a light theme together are the case that breaks.
 
 Read this before assuming a component is on-system.
 
-`41c1506 feat(pwa): add workspace lanes to home` landed steps 1–3 of the home
+`7ba915e feat(pwa): add workspace lanes to home` landed steps 1–3 of the home
 plan: `ChatSignals.vue`, `lib/relativeTime.ts`, `lib/homeLanes.ts`, lanes and
 tiers in `HomeRecentChats.vue`, `ChatSignals` adopted in `ProjectSidebar.vue`,
 `workspaceNeedsInput` in the store. 145 tests pass across 25 files.
@@ -294,10 +310,13 @@ shape recurs:
    helper now takes `{ suffix, absoluteAfterDays }` so prose and file-listing
    forms come from one implementation, and the private copy is gone.
 
-**Current state:** all four `ChatSignals` call sites migrated; one
-`formatRelative`. `ChatPanel.vue` and `ProjectView.vue` are otherwise still
-off-system (see §3 Rule S4 on emoji, and the chat-page proposals) — the state
-chain is fixed, the rest of those views is not.
+**Current state:** all five `ChatSignals` call sites migrated (HomeRecentChats,
+ProjectSidebar ×2, ProjectView, ChatPanel). The unified opts-based
+`formatRelative` lives in `lib/relativeTime.ts`; one prose-only dialect remains
+in `lib/time.ts` (the settings automation rows), which predates the unification
+and has not been folded in. `ChatPanel.vue` and `ProjectView.vue` are otherwise
+still off-system (see §3 Rule S4 on emoji, and the chat-page proposals) — the
+state chain is fixed, the rest of those views is not.
 
 ### Test suite: Node floor (resolved)
 
@@ -319,7 +338,7 @@ Fixed by declaring the constraint and making violations loud:
 - `web/scripts/check-node.mjs`, run as the first step of `npm test`, which exits 1
   with an explanation rather than letting a partial run report success
 
-On a supported Node the full suite is 42 files / 345 tests green.
+On a supported Node the full suite is 61 test files green.
 
 **Rule V1** — Never trust a green vitest summary without checking the file count
 against `find web/src -name '*.test.ts' | wc -l`. A worker that fails to start is

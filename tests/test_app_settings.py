@@ -8,8 +8,6 @@ import pytest
 
 from ciao.app_settings import AppSettings, AppSettingsStore
 from ciao.providers.codex import CodexSettings
-from ciao.providers.ollama import OllamaSettings
-from ciao.providers.openrouter import OpenRouterSettings
 
 
 class FakeConfig:
@@ -18,24 +16,15 @@ class FakeConfig:
     def __init__(self) -> None:
         self.title_model_override = ""
         self.insights_model_override = ""
-        self.insights_model = "deepseek-v4-flash:0731-cloud"
+        self.insights_model = "sonnet"
+        # Beta feature, off by default (the env default here is False).
+        self.apple_intelligence_enabled = False
 
         self.transcription_locale = "en-US"
         self.tts_local_voice = "af_heart"
         self.critique_models = ""
-        self.ollama = OllamaSettings(
-            haiku_model="deepseek-v4-flash:0731-cloud",
-            sonnet_model="kimi-k2.7-code:cloud",
-            opus_model="minimax-m3:cloud",
-            fable_model="glm-5.2:cloud",
-        )
-        self.openrouter = OpenRouterSettings(
-            api_key="sk-or",
-            haiku_model="anthropic/claude-haiku-4.5",
-            sonnet_model="anthropic/claude-sonnet-4.5",
-            opus_model="anthropic/claude-opus-4.8",
-            fable_model="anthropic/claude-fable-latest",
-        )
+        # Per-provider default modes; no env-backed default.
+        self.provider_default_modes: dict[str, str] = {}
         # No env-backed defaults: empty = automatic catalog mapping.
         self.codex = CodexSettings()
 
@@ -61,18 +50,6 @@ def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
     assert store.settings.insights_model == ""
 
 
-def test_load_ignores_non_object_custom_routing(tmp_path):
-    path = tmp_path / "app_settings.json"
-    path.write_text(
-        json.dumps({"title_model": " gemma4:12b-it-qat ", "custom_routing": "bad"})
-    )
-
-    settings = AppSettingsStore(path).settings
-
-    assert settings.title_model == "gemma4:12b-it-qat"
-    assert settings.custom_routing is None
-
-
 def test_load_corrupt_file_gives_defaults(tmp_path):
     path = tmp_path / "app_settings.json"
     path.write_text("{not json")
@@ -94,6 +71,59 @@ def test_update_rejects_a_non_string_value(tmp_path):
     # what is left.
     with pytest.raises(ValueError):
         store.update({"title_model": 3})
+
+
+def test_apple_intelligence_defaults_to_unset_and_off(tmp_path):
+    # No override persisted and no env default: applying leaves it off.
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+    store.apply_to_config(config)
+    assert store.settings.apple_intelligence_enabled is None
+    assert config.apple_intelligence_enabled is False
+    # And nothing was written just by applying.
+    assert not (tmp_path / "app_settings.json").exists()
+
+
+def test_apple_intelligence_toggle_persists_and_roundtrips(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    store.update({"apple_intelligence_enabled": True})
+    assert json.loads((tmp_path / "app_settings.json").read_text()) == {
+        "apple_intelligence_enabled": True
+    }
+    assert AppSettingsStore(tmp_path / "app_settings.json").settings.apple_intelligence_enabled is True
+
+    store.update({"apple_intelligence_enabled": False})
+    assert AppSettingsStore(tmp_path / "app_settings.json").settings.apple_intelligence_enabled is False
+
+
+def test_apple_intelligence_update_rejects_a_non_boolean(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    with pytest.raises(ValueError):
+        store.update({"apple_intelligence_enabled": "yes"})
+
+
+def test_apple_intelligence_apply_respects_explicit_toggle(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+
+    store.update({"apple_intelligence_enabled": True})
+    store.apply_to_config(config)
+    assert config.apple_intelligence_enabled is True
+
+    # Explicit False wins over the (False) env default — and also lets an
+    # operator force it off when the env default is on.
+    store.update({"apple_intelligence_enabled": False})
+    store.apply_to_config(config)
+    assert config.apple_intelligence_enabled is False
+
+
+def test_apple_intelligence_apply_uses_env_default_when_not_toggled(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+    config.apple_intelligence_enabled = True  # e.g. CIAO_APPLE_INTELLIGENCE=1
+
+    store.apply_to_config(config)
+    assert config.apple_intelligence_enabled is True
 
 
 def test_apply_overlays_and_clear_restores_defaults(tmp_path):
@@ -139,57 +169,12 @@ def test_title_override_applies(tmp_path):
 def test_critique_models_override_applies(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     config = FakeConfig()
-    store.update({"critique_models": "openrouter/anthropic/claude-3.7-sonnet"})
+    store.update({"critique_models": "opus,codex:fable"})
     store.apply_to_config(config)
-    assert config.critique_models == "openrouter/anthropic/claude-3.7-sonnet"
+    assert config.critique_models == "opus,codex:fable"
     store.update({"critique_models": ""})
     store.apply_to_config(config)
     assert config.critique_models == ""
-
-
-def test_tier_model_overrides_apply_and_clear(tmp_path):
-    store = AppSettingsStore(tmp_path / "app_settings.json")
-    config = FakeConfig()
-
-    store.update(
-        {
-            "ollama_sonnet_model": "qwen3:8b",
-            "openrouter_opus_model": "anthropic/claude-opus-4.9",
-            "ollama_fable_model": "minimax-m3:cloud",
-            "openrouter_fable_model": "anthropic/claude-fable-5",
-        }
-    )
-    store.apply_to_config(config)
-    assert store.tier_model_defaults() == {
-        "ollama": {
-            "haiku": "deepseek-v4-flash:0731-cloud",
-            "sonnet": "kimi-k2.7-code:cloud",
-            "opus": "minimax-m3:cloud",
-            "fable": "glm-5.2:cloud",
-        },
-        "openrouter": {
-            "haiku": "anthropic/claude-haiku-4.5",
-            "sonnet": "anthropic/claude-sonnet-4.5",
-            "opus": "anthropic/claude-opus-4.8",
-            "fable": "anthropic/claude-fable-latest",
-        },
-    }
-    assert config.ollama.sonnet_model == "qwen3:8b"
-    assert config.openrouter.opus_model == "anthropic/claude-opus-4.9"
-    assert config.ollama.fable_model == "minimax-m3:cloud"
-    assert config.openrouter.fable_model == "anthropic/claude-fable-5"
-
-    store.update({
-        "ollama_sonnet_model": "",
-        "openrouter_opus_model": "",
-        "ollama_fable_model": "",
-        "openrouter_fable_model": "",
-    })
-    store.apply_to_config(config)
-    assert config.ollama.sonnet_model == "kimi-k2.7-code:cloud"
-    assert config.openrouter.opus_model == "anthropic/claude-opus-4.8"
-    assert config.ollama.fable_model == "glm-5.2:cloud"
-    assert config.openrouter.fable_model == "anthropic/claude-fable-latest"
 
 
 def test_codex_tier_pins_apply_and_clear(tmp_path):
@@ -211,3 +196,72 @@ def test_codex_tier_pins_apply_and_clear(tmp_path):
     store.update({"codex_sonnet_model": "", "codex_haiku_model": ""})
     store.apply_to_config(config)
     assert config.codex == CodexSettings()
+
+
+def test_provider_default_modes_persist_and_apply(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+
+    store.update({"provider_default_modes": {"opencode": "bypass", "codex": "plan"}})
+    store.apply_to_config(config)
+    assert config.provider_default_modes == {"opencode": "bypass", "codex": "plan"}
+    path = tmp_path / "app_settings.json"
+    assert json.loads(path.read_text()) == {
+        "provider_default_modes": {"opencode": "bypass", "codex": "plan"}
+    }
+    # Fresh instance sees the persisted map.
+    assert AppSettingsStore(path).settings.provider_default_modes == {
+        "opencode": "bypass",
+        "codex": "plan",
+    }
+
+    # Clearing a provider's entry (empty string) removes the override.
+    store.update({"provider_default_modes": {"opencode": "bypass", "codex": ""}})
+    store.apply_to_config(config)
+    assert config.provider_default_modes == {"opencode": "bypass"}
+
+
+def test_provider_default_modes_reject_bad_mode_and_non_objects(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    with pytest.raises(ValueError, match="auto, bypass, normal, plan"):
+        store.update({"provider_default_modes": {"opencode": "nope"}})
+    with pytest.raises(ValueError, match="must be an object"):
+        store.update({"provider_default_modes": "bypass"})
+
+
+def test_provider_default_modes_load_ignores_junk(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "provider_default_modes": {
+                    "opencode": "bypass",
+                    "codex": "sideways",
+                    "bogus": "auto",
+                }
+            }
+        )
+    )
+    store = AppSettingsStore(path)
+    assert store.settings.provider_default_modes == {"opencode": "bypass"}
+
+
+def test_default_mode_for_provider_builtin_defaults(tmp_path):
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+    )
+    # New opencode chats require approval by default; bypass is explicit.
+    assert config.default_mode_for_provider("opencode") == "normal"
+    assert config.default_mode_for_provider("codex") == "auto"
+    assert config.default_mode_for_provider("claude") == "auto"
+
+    # An operator pin wins over the built-in default.
+    config.provider_default_modes = {"opencode": "auto", "claude": "plan"}
+    assert config.default_mode_for_provider("opencode") == "auto"
+    assert config.default_mode_for_provider("codex") == "auto"
+    assert config.default_mode_for_provider("claude") == "plan"

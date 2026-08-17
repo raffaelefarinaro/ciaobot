@@ -29,7 +29,7 @@ _SAMPLE_INSIGHTS = """
 - Bash failed: command not found -> installed via brew. [idx=4]
 
 ## User corrections
-- User said: "no em dashes" -> assistant rewrote with commas. [idx=12]
+- User said: "no em dashes" -> assistant rewrote with commas. Durable rule: Avoid em dashes; use commas instead. [idx=12]
 
 ## New entities
 - person: Manager Example - the user's direct manager. [idx=2]
@@ -176,6 +176,29 @@ def test_proposals_from_archive_returns_none_when_no_insights(tmp_path: Path) ->
     assert out is None
 
 
+def test_proposals_from_archive_reports_a_count_via_stats(tmp_path: Path) -> None:
+    """The archived chat says "3 memory proposals"; a path cannot express that."""
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        f"# chat\n\nsome turns here.\n\n## Session insights\n{_SAMPLE_INSIGHTS}",
+        encoding="utf-8",
+    )
+    stats: dict[str, int] = {}
+    out = mp.proposals_from_archive(archive, vault, stats=stats)
+    assert out is not None
+    assert stats["proposed"] > 0
+
+
+def test_proposals_stats_stay_zero_when_nothing_is_filed(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text("# chat\n\nonly turns\n", encoding="utf-8")
+    stats: dict[str, int] = {}
+    assert mp.proposals_from_archive(archive, vault, stats=stats) is None
+    assert stats.get("proposed", 0) == 0
+
+
 # ── Auto-promotion of user corrections ────────────────────────────────────
 #
 # Promotion now writes straight into the fenced `ciao:memory` / `ciao:profile`
@@ -189,10 +212,11 @@ def test_promote_writes_corrections_and_keeps_the_rest(tmp_path: Path) -> None:
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
     remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
 
-    assert len(promoted) == 1
-    assert "no em dashes" in promoted[0]
+    assert promoted == ["Avoid em dashes; use commas instead."]
     mem_entries, _diags = mt.read_region(guide, "memory")
-    assert any("no em dashes" in entry for entry in mem_entries)
+    # Only the state-shaped rule lands in the region, not the chat event.
+    assert "Avoid em dashes; use commas instead." in mem_entries
+    assert all("User said" not in entry for entry in mem_entries)
     # Decisions and entities are untouched and still reviewable.
     remaining_texts = [p.text for p in remaining]
     assert any("Chose OpenRouter over Anthropic" in t for t in remaining_texts)
@@ -201,14 +225,70 @@ def test_promote_writes_corrections_and_keeps_the_rest(tmp_path: Path) -> None:
 
 def test_promote_drops_exact_duplicates(tmp_path: Path) -> None:
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    correction = next(p for p in proposals if p.source_section == "User corrections")
-    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=[correction.text])
+    # The region holds the state-shaped rule the bullet would promote to.
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Avoid em dashes; use commas instead."],
+    )
 
     remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
 
     assert promoted == []
     # Already remembered: not promoted, not proposed again.
     assert all(p.source_section != "User corrections" for p in remaining)
+
+
+def test_promote_holds_back_event_shaped_corrections(tmp_path: Path) -> None:
+    """A correction with no durable rule never lands in a bounded region.
+
+    The regions are a state surface and memory-audit flags the
+    "User said X -> assistant did Y" shape as rot; writing it verbatim just
+    paid a nightly curation run to undo the archive-time write.
+    """
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        '- User said: "implementt it directly" -> assistant switched from '
+        "drafting an issue to coding the fix. [idx=62]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == []
+    mem_entries, _diags = mt.read_region(guide, "memory")
+    assert mem_entries == []
+    # Still reviewable: the curator rephrases it on the next pass.
+    assert any(p.source_section == "User corrections" for p in remaining)
+
+
+def test_promote_ignores_echoed_rule_placeholder(tmp_path: Path) -> None:
+    """A model echoing the template placeholder must not pollute the region."""
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        '- User said: "use tabs" -> assistant reformatted the file. '
+        "Durable rule: <present-tense standing preference, if any>. [idx=3]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == []
+    mem_entries, _diags = mt.read_region(guide, "memory")
+    assert mem_entries == []
+    assert any(p.source_section == "User corrections" for p in remaining)
+
+
+def test_promote_state_shaped_correction_without_rule_clause(tmp_path: Path) -> None:
+    """A bullet already phrased as standing state promotes verbatim."""
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        "- Prefers terse replies without preamble in code reviews. [idx=9]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    _remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == ["Prefers terse replies without preamble in code reviews."]
 
 
 def test_promote_falls_back_to_proposals_when_no_guide(tmp_path: Path) -> None:
@@ -254,12 +334,54 @@ def test_proposals_from_archive_auto_promotes_corrections(tmp_path: Path) -> Non
     )
 
     mem_entries, _diags = mt.read_region(guide, "memory")
-    assert any("no em dashes" in entry for entry in mem_entries)
+    assert "Avoid em dashes; use commas instead." in mem_entries
     # The promoted correction is not duplicated into the proposals file.
     assert out is not None
     proposals_text = out.read_text(encoding="utf-8")
     assert "no em dashes" not in proposals_text
     assert "Chose OpenRouter over Anthropic" in proposals_text
+
+
+def test_extract_ignores_quoted_marker_mid_transcript(tmp_path: Path) -> None:
+    """A transcript that quotes the header is not mistaken for the section.
+
+    Curation chats quote insights sections verbatim; the old first-occurrence
+    match re-ingested the quoted (already reviewed) bullets as fresh proposals.
+    """
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\n## Turn 1\n\nquoting a prior archive:\n\n"
+        "## Session insights\n\n## Decisions\n"
+        "- Chose already-reviewed thing over alternative because reviewed. [idx=1]\n\n"
+        "## Turn 2\n\nmore discussion.\n",
+        encoding="utf-8",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is None
+
+
+def test_extract_prefers_appended_section_over_quoted_marker(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\n## Turn 1\n\nquoting a prior archive:\n\n"
+        "## Session insights\n\n## Decisions\n"
+        "- Chose already-reviewed thing over alternative because reviewed. [idx=1]\n\n"
+        "## Turn 2\n\nmore discussion.\n\n"
+        "<!-- ciao:session-insights -->\n## Session insights\n\n## Decisions\n"
+        "- Chose the fresh decision over the alternative because it is new. [idx=7]\n",
+        encoding="utf-8",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    text = out.read_text(encoding="utf-8")
+    assert "fresh decision" in text
+    assert "already-reviewed thing" not in text
 
 
 def test_proposals_from_archive_default_leaves_memory_untouched(tmp_path: Path) -> None:
@@ -277,3 +399,78 @@ def test_proposals_from_archive_default_leaves_memory_untouched(tmp_path: Path) 
     mem_entries, _diags = mt.read_region(guide, "memory")
     assert mem_entries == []
     assert "no em dashes" in out.read_text(encoding="utf-8")
+
+
+def test_promote_holds_back_no_op_rule_clause(tmp_path: Path) -> None:
+    """'Durable rule: None.' style fillers never land in a bounded region."""
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        '- User said: "revert that" -> assistant restored the file. '
+        "Durable rule: None. [idx=4]\n"
+        '- User said: "use x" -> assistant switched the tool. '
+        "Durable rule: N/A. [idx=5]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == []
+    mem_entries, _diags = mt.read_region(guide, "memory")
+    assert mem_entries == []
+    assert sum(p.source_section == "User corrections" for p in remaining) == 2
+
+
+def test_promote_survives_multi_index_citation(tmp_path: Path) -> None:
+    """A `[idx=12,34]` tag must not block promotion of a well-formed rule.
+
+    Models improvise multi-index citations (memory_audit's own comment and
+    fixtures use them); a tag that survives parsing trips the audit's
+    transcript-citation pattern and silently held the rule back.
+    """
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        '- User said: "no em dashes" -> assistant rewrote with commas. '
+        "Durable rule: Avoid em dashes; use commas instead. [idx=12,34]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    _remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == ["Avoid em dashes; use commas instead."]
+
+
+def test_promote_accepts_rule_containing_if_any(tmp_path: Path) -> None:
+    """A genuine rule that happens to contain 'if any' still promotes."""
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        '- User said: "do not just run everything" -> assistant asked first. '
+        "Durable rule: Ask which tests to run, if any, before starting. [idx=7]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    _remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == ["Ask which tests to run, if any, before starting."]
+
+
+def test_promote_ignores_rule_label_quoted_inside_user_text(tmp_path: Path) -> None:
+    """A lowercase in-quote 'durable rule:' fragment is not a rule clause."""
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    insights = (
+        "## User corrections\n"
+        '- User said: "write it as a durable rule: prefer pnpm over npm" '
+        "and wanted shorter replies. [idx=8]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+
+    assert promoted == []
+    assert any(p.source_section == "User corrections" for p in remaining)
+
+
+def test_durable_rule_label_matches_extraction_prompts() -> None:
+    """The prompts and the consumer regex share one label; drift must fail."""
+    from ciao import insights as insights_mod
+
+    assert mp.DURABLE_RULE_LABEL in insights_mod._INSIGHTS_SYSTEM_PROMPT
+    assert mp.DURABLE_RULE_LABEL in insights_mod._TEXT_MODE_SYSTEM_PROMPT

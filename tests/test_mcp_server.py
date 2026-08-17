@@ -247,8 +247,12 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
 
     assert {
         "context_get",
+        "memory_status",
+        "memory_update",
         "vault_search",
         "project_create",
+        "workspace_create",
+        "workspace_delete",
         "chat_create",
         "schedule_create",
         "schedule_action",
@@ -401,11 +405,12 @@ def test_current_project_complete_and_delete_are_deferred() -> None:
 
 
 class _ChatCreatePcm:
-    def __init__(self) -> None:
+    def __init__(self, *, parent_mode: str = "auto") -> None:
         self.projects = {
             "project-1": SimpleNamespace(project_id="project-1", name="Ciaobot Improvements", workspace="personal"),
             "project-2": SimpleNamespace(project_id="project-2", name="Research", workspace="personal"),
         }
+        self.parent_mode = parent_mode
         self.created: list[dict] = []
         self.queued: list[tuple[str, str]] = []
         self.started: list[tuple[str, str]] = []
@@ -415,6 +420,11 @@ class _ChatCreatePcm:
 
     def list_projects(self, workspace: str | None = None):
         return [p for p in self.projects.values() if workspace is None or p.workspace == workspace]
+
+    def get_chat(self, chat_id: str):
+        if chat_id == "chat-1":
+            return SimpleNamespace(chat_id=chat_id, mode=self.parent_mode)
+        return None
 
     def create_chat(self, project_id, **kwargs):
         self.created.append({"project_id": project_id, **kwargs})
@@ -523,6 +533,15 @@ def test_chat_create_with_prompt_sends_first_turn_immediately() -> None:
     assert pcm.started == [("chat-new", "Let's research the new API changes.")]
 
 
+def test_chat_create_clamps_child_mode_to_calling_chat() -> None:
+    pcm = _ChatCreatePcm(parent_mode="normal")
+    control_plane = _chat_create_control_plane(pcm)
+
+    control_plane.chat_create(_chat_create_principal(), mode="bypass")
+
+    assert pcm.created[-1]["mode"] == "normal"
+
+
 def test_schedule_create_resolves_project_by_name(tmp_path: Path) -> None:
     from ciao.schedules import ScheduleManager, ScheduleStore
 
@@ -577,6 +596,7 @@ def test_schedule_create_defaults_to_callers_project_and_workspace(tmp_path: Pat
     assert result["data"]["project_name"] == "AI-NATIVE-SDK"
     stored = schedules.list_entries()[0]
     assert stored.web_project_id == "project-work"
+    assert stored.web_project_name == "AI-NATIVE-SDK"
     assert stored.workspace == "work"
 
 
@@ -680,7 +700,7 @@ def test_adversarial_review_synthesizes_panel_results(monkeypatch) -> None:
     )
     principal = _chat_create_principal(project_id=None, chat_id=None)
 
-    async def fake_oneshot(prompt, *, system_prompt, model, env, timeout_s=120.0, provider="claude", cwd=None):
+    async def fake_oneshot(prompt, *, system_prompt, model, timeout_s=120.0, provider="claude", cwd=None):
         return json.dumps({"verdict": "revise", "confidence": 4, "summary": "solid but needs work", "issues": []})
 
     monkeypatch.setattr("ciao.critique.run_oneshot", fake_oneshot)
@@ -813,6 +833,207 @@ def test_project_and_chat_resolution_defaults() -> None:
     pf_res = control_plane.project_files_list(principal, "")
     assert pf_res["ok"] is True
     assert pf_res["data"] == ["file1.md"]
+
+
+# ── workspace registry tools ────────────────────────────────────────────
+
+
+def _workspace_control_plane(tmp_path: Path, *, workspaces: tuple[str, ...] = ("personal", "work")) -> tuple[CiaoControlPlane, Any, list[str]]:
+    """Control plane over a real CiaoConfig registry; returns (plane, config, refreshes)."""
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+            for name in workspaces
+        },
+    )
+    refreshes: list[str] = []
+    pcm = SimpleNamespace(
+        refresh_workspaces=lambda: refreshes.append("refresh"),
+        active_chat_ids=lambda: [],
+    )
+    plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+    return plane, config, refreshes
+
+
+def test_workspaces_list_lists_all_configured_workspaces(tmp_path: Path) -> None:
+    plane, _config, _refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    result = plane.workspaces_list(principal)
+
+    assert result["ok"] is True
+    names = [item["name"] for item in result["data"]["workspaces"]]
+    assert names == ["personal", "work"]
+    personal = result["data"]["workspaces"][0]
+    assert personal["vault_root"].endswith("memory-vault/personal")
+    assert personal["default_provider"] == "claude"
+
+
+def test_workspace_create_registers_and_persists(tmp_path: Path) -> None:
+    plane, config, refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    result = plane.workspace_create(
+        principal,
+        name="research",
+        default_provider="opencode",
+        default_model="opencode/big-pickle",
+        gws_profile="work",
+        disallowed_tools=["Bash"],
+        claude_ai_mcps=False,
+        color="cyan",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["name"] == "research"
+    assert result["data"]["default_provider"] == "opencode"
+    assert result["data"]["disallowed_tools"] == ["Bash"]
+    assert result["data"]["claude_ai_mcps"] is False
+    assert result["data"]["color"] == "cyan"
+    assert refreshes == ["refresh"]
+    assert config.workspace("research") is not None
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
+    assert {item["name"] for item in stored} == {"personal", "work", "research"}
+
+
+def test_workspace_create_rejects_conflicts_and_bad_provider(tmp_path: Path) -> None:
+    plane, config, _refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    with pytest.raises(ValueError, match="conflicts with existing workspace"):
+        plane.workspace_create(principal, name="Personal")
+
+    with pytest.raises(ValueError, match="default_provider must be one of"):
+        plane.workspace_create(principal, name="research", default_provider="ollama")
+
+    assert config.workspace("research") is None
+
+
+def test_workspace_update_distinguishes_omitted_and_null_denylist(
+    tmp_path: Path,
+) -> None:
+    plane, config, _refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    plane.workspace_update(
+        principal,
+        name="work",
+        disallowed_tools=["Bash"],
+    )
+    assert config.workspace("work").disallowed_tools == ["Bash"]
+
+    # Omitted keeps the existing workspace-specific denylist.
+    plane.workspace_update(principal, name="work")
+    assert config.workspace("work").disallowed_tools == ["Bash"]
+
+    # Explicit null resets it so inherited defaults can apply again.
+    result = plane.workspace_update(
+        principal,
+        name="work",
+        disallowed_tools=None,
+    )
+    assert result["data"]["disallowed_tools"] is None
+    assert config.workspace("work").disallowed_tools is None
+
+
+def test_workspace_update_preserves_omitted_fields(tmp_path: Path) -> None:
+    plane, config, refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    result = plane.workspace_update(
+        principal, name="personal", default_model="sonnet", color="violet"
+    )
+
+    assert result["ok"] is True
+    updated = config.workspace("personal")
+    assert updated is not None
+    assert updated.default_model == "sonnet"
+    assert updated.color == "violet"
+    assert updated.default_provider == "claude"
+    assert updated.vault_root.endswith("memory-vault/personal")
+    assert refreshes == ["refresh"]
+
+
+def test_workspace_update_explicit_null_resets_connector_toggle(tmp_path: Path) -> None:
+    plane, config, _refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    plane.workspace_update(principal, name="personal", claude_ai_mcps=False)
+    assert config.workspace("personal").claude_ai_mcps is False
+
+    result = plane.workspace_update(
+        principal, name="personal", claude_ai_mcps=None
+    )
+
+    assert result["data"]["claude_ai_mcps"] is None
+    assert config.workspace("personal").claude_ai_mcps is None
+
+
+def test_workspace_update_omitted_connector_toggle_preserves_value(
+    tmp_path: Path,
+) -> None:
+    plane, config, _refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    plane.workspace_update(principal, name="personal", claude_ai_mcps=False)
+    plane.workspace_update(principal, name="personal", default_model="sonnet")
+
+    assert config.workspace("personal").claude_ai_mcps is False
+
+
+def test_workspace_update_unknown_workspace_fails(tmp_path: Path) -> None:
+    plane, _config, _refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    with pytest.raises(ControlPlaneError, match="not found"):
+        plane.workspace_update(principal, name="research", default_model="sonnet")
+
+
+def test_workspace_delete_rejects_last_workspace(tmp_path: Path) -> None:
+    plane, _config, _refreshes = _workspace_control_plane(tmp_path, workspaces=("personal",))
+    principal = _chat_create_principal()
+
+    with pytest.raises(ControlPlaneError, match="last workspace"):
+        plane.workspace_delete(principal, name="personal")
+
+
+def test_workspace_delete_other_workspace_applies_immediately(tmp_path: Path) -> None:
+    plane, config, refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal(workspace="personal")
+
+    result = plane.workspace_delete(principal, name="work")
+
+    assert result["ok"] is True
+    assert result["data"]["deleted"] == "work"
+    assert config.workspace("work") is None
+    assert refreshes == ["refresh"]
+
+
+def test_workspace_delete_own_workspace_is_deferred_until_idle(tmp_path: Path) -> None:
+    asyncio.run(_assert_own_workspace_delete_is_deferred(tmp_path))
+
+
+async def _assert_own_workspace_delete_is_deferred(tmp_path: Path) -> None:
+    plane, config, _refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal(workspace="personal")
+
+    result = plane.workspace_delete(principal, name="personal")
+
+    assert result["data"]["deferred"] is True
+    assert config.workspace("personal") is not None
+    await asyncio.sleep(0)
+    assert config.workspace("personal") is None
 
 
 

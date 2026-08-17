@@ -1,10 +1,54 @@
 export type WorkspaceName = string
-export type WorkspaceProvider = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
+
+/**
+ * A runtime provider id, enumerated by the backend registry
+ * (`ciao/provider_registry.py`). The `(string & {})` arm keeps editor
+ * autocomplete for the providers that ship today while still accepting any id
+ * the backend reports, so adding a provider does not mean editing this union.
+ */
+export type RuntimeProvider = 'claude' | 'codex' | (string & {})
+
+/**
+ * What a runtime provider supports, mirroring `ProviderCapabilities` in
+ * `ciao/providers/base.py`. The PWA gates affordances on these rather than on
+ * provider ids — e.g. no "steer" control renders for a provider that reports
+ * `steer: false`.
+ */
+export interface ProviderCapabilities {
+  resume: boolean
+  fork: boolean
+  images: boolean
+  stop: boolean
+  steer: boolean
+  permissions: boolean
+  structured_questions: boolean
+  dynamic_models: boolean
+  thinking_levels: boolean
+  usage: boolean
+  quota: boolean
+  subagents: boolean
+  background_subagents: boolean
+  subagent_messages: boolean
+  session_history: boolean
+  schedule_unattended: boolean
+}
+
+/** One runtime provider as described by the backend registry. */
+export interface ProviderDescriptor {
+  id: RuntimeProvider
+  label: string
+  short_label: string
+  capabilities: ProviderCapabilities
+}
+
+// Every selectable provider is a runtime provider now; the alias survives
+// because workspace payloads and pickers name it throughout.
+export type WorkspaceProvider = RuntimeProvider
 
 export interface WorkspaceProviderOption {
   value: WorkspaceProvider
   label: string
-  runner?: 'claude' | 'codex'
+  runner?: RuntimeProvider
   default_model?: string
 }
 
@@ -19,7 +63,6 @@ export interface WorkspaceInfo {
   // effective denylist; disallowed_tools covers the extra tools.
   claude_ai_mcps?: boolean | null
   gws_profile: string
-  model_bucket: string
   // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
   color?: string
 }
@@ -106,13 +149,11 @@ export interface ChatInfo {
   project_id: string
   title: string
   model: string
-  // Runtime provider. Claude also covers Ollama/OpenRouter env-injection;
-  // Codex uses the authenticated OpenAI CLI app-server session.
-  provider: 'claude' | 'codex'
-  // Claude routing bucket. Legacy values: 'work'/'anthropic' pin Anthropic,
-  // 'personal'/'ollama' pin Ollama routing. '' = auto from project workspace.
-  // Only meaningful when provider is 'claude'.
-  model_bucket?: string
+  // Runtime provider: which CLI runs the turn.
+  provider: RuntimeProvider
+  // Vestigial. Named which upstream a tier alias resolved to, back when
+  // Ollama/OpenRouter ran through Claude Code by env injection. Still carried
+  // on existing chats and accepted by the API, but nothing reads it.
   mode: string
   // Provider-native thinking/reasoning level ('' = provider default).
   // Allowed values per provider come from ModelsResponse.thinking_levels.
@@ -155,6 +196,31 @@ export interface ChatInfo {
   spawned_from_chat_id?: string
   // Shared tag across delegates dispatched as one batch.
   delegation_id?: string
+  // What the post-archive pipeline is doing, or did. Present only on archived
+  // chats that ran it. Drives the greyed activity signal and the settled
+  // "here is what was learned from this chat" line.
+  postprocess?: ChatPostprocess | null
+}
+
+/** One step of the post-archive pipeline, as reported by ciao/job_runs.py. */
+export interface ChatPostprocessStep {
+  status: 'ok' | 'error' | 'skipped'
+  extra?: Record<string, unknown>
+}
+
+export interface ChatPostprocess {
+  /** 'running' while the pipeline task is alive; 'done' once it settles. */
+  state: 'running' | 'done'
+  /** Job id of the step that is running, or the last one that ran. */
+  step?: string
+  /** Steps that can run for this chat, in execution order. */
+  expected?: string[]
+  /** Outcome per step, keyed by job id. Only finished steps appear. */
+  steps?: Record<string, ChatPostprocessStep>
+  started_at?: string
+  updated_at?: string
+  /** Set when a server restart killed the pipeline mid-flight. */
+  interrupted?: boolean
 }
 
 // One sidebar chat row. Delegates follow their supervisor and render indented,
@@ -309,7 +375,7 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; restarting?: boolean }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; postprocessing?: string[]; restarting?: boolean }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
@@ -319,6 +385,7 @@ export type EventsWsMessage =
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
   | { type: 'chat_moved'; chat_id: string; project_id: string; old_project_id: string }
   | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
+  | { type: 'chat_postprocess'; chat_id: string; project_id: string; postprocess: ChatPostprocess | null }
   | { type: 'chat_deleted'; chat_id: string; project_id: string; reason?: string }
   | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
   | { type: 'project_created'; project: ProjectInfo }
@@ -343,6 +410,11 @@ export interface InAppToast {
   variant?: 'info' | 'error'
   // Raw error log used to seed a fix chat when variant === 'error'.
   errorText?: string
+  // When set on an error toast, the Fix action navigates to this route instead
+  // of opening a fix chat — for errors whose remediation lives in Settings.
+  fixRoute?: string
+  // Button label for the Fix action when fixRoute is set.
+  fixLabel?: string
 }
 
 // A pending approval surfaced to the user by Auto mode's classifier. One
@@ -382,6 +454,10 @@ export interface Schedule {
   days_of_week: string[] | null
   thread_id: number | null
   context_label: string
+  // Whether the schedule's target project/chat still resolves. Explicit
+  // because context_label is always set, so its truthiness says nothing
+  // about whether the target is still there.
+  context_available?: boolean
   frequency: 'daily' | 'weekly' | 'monthly' | 'manual' | 'once'
   day_of_month: number | null
   run_at_date: string | null
@@ -389,9 +465,9 @@ export interface Schedule {
   web_project_id: string | null
   workspace: WorkspaceName
   model: string
-  provider?: 'claude' | 'codex'
+  provider?: RuntimeProvider
   effective_model?: string
-  effective_provider?: 'claude' | 'codex'
+  effective_provider?: RuntimeProvider
   next_run: string | null
   last_expected_run: string | null
   missed: boolean
@@ -433,23 +509,17 @@ export interface StatusResponse {
 export interface ModelsResponse {
   models: string[]
   default: string
-  // Keyed by picker bucket (claude_work, claude_personal, openrouter).
+  // Keyed by provider id: claude, codex, opencode.
   provider_models: Record<string, string[]>
   provider_defaults: Record<string, string>
-  // Names listed in CIAO_OLLAMA_MODELS, repeated here so the UI can
-  // derive a chat's active bucket from (provider, model) without an
-  // extra round-trip.
-  ollama_models?: string[]
-  // Subset of ollama_models served by the local Ollama daemon (free,
-  // on-device); the picker can badge these as "local".
-  ollama_local_models?: string[]
-  // OpenRouter owner/model ids available as a backend.
-  openrouter_models?: string[]
   // Account-visible Codex models and their app-server metadata.
   codex_models?: string[]
-  custom_providers?: Array<CustomProviderSettings & {
-    model_labels?: Record<string, string>
-  }>
+  // Models reachable through opencode's connected backends, already
+  // namespaced as `providerID/modelID`. Empty when nothing is authenticated.
+  opencode_models?: string[]
+  // Registry-driven provider descriptors, so the PWA never has to hard-code
+  // the set of runtime providers. See `ciao/provider_registry.py`.
+  providers?: ProviderDescriptor[]
   codex_model_metadata?: Record<string, {
     display_name: string
     description: string
@@ -477,21 +547,22 @@ export interface RoutineSettings {
   insights_model: string
 
   critique_models: string
-  ollama_haiku_model: string
-  ollama_sonnet_model: string
-  ollama_opus_model: string
-  ollama_fable_model: string
-  openrouter_haiku_model: string
-  openrouter_sonnet_model: string
-  openrouter_opus_model: string
-  openrouter_fable_model: string
-  // Codex per-tier pins; empty = automatic catalog mapping. Effective
-  // values come from /api/models (alias_tiers.codex).
+  // Per-runtime-provider tier pins, keyed by provider id then tier; a missing
+  // entry = automatic catalog mapping. This is the canonical shape — PATCH it
+  // rather than the flat keys below. Effective values come from /api/models
+  // (alias_tiers.<provider>).
+  provider_routing?: Record<string, Record<string, string>>
+  // Per-provider default execution mode for new chats (Settings → Providers).
+  // Missing entry = built-in default (opencode → normal, others → auto).
+  provider_default_modes?: Record<string, string>
+  // Resolved effective default mode per provider, after built-in defaults.
+  provider_default_modes_effective?: Record<string, string>
+  // Flat mirror of the same Codex pins, still emitted and accepted for
+  // clients written before provider_routing existed.
   codex_haiku_model: string
   codex_sonnet_model: string
   codex_opus_model: string
   codex_fable_model: string
-  custom_routing?: Record<string, Record<string, string>>
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string
@@ -508,6 +579,11 @@ export interface RoutineSettings {
   // Intelligence on. Nothing installable, so Settings shows the reason.
   apple_model_available?: boolean
   apple_model_unavailable_reason?: string
+  // Apple Intelligence is a beta feature, off by default; the Settings → Models
+  // toggle PATCHes apple_intelligence_enabled to switch it on. When off, the
+  // "apple" option reports unavailable and routines fall back to cloud models.
+  apple_intelligence_enabled?: boolean
+  apple_intelligence_beta?: boolean
   // Voice is on-device only: Apple dictation (macOS 26+) and
   // AVSpeechSynthesizer, both via the bundled sidecar. There is no engine to
   // choose any more, so the payload reports availability and a reason rather
@@ -526,10 +602,6 @@ export interface RoutineSettings {
   }
   model_options: {
     anthropic: string[]
-    ollama_cloud: string[]
-    ollama_local: string[]
-    openrouter?: string[]
-    custom_providers?: Array<CustomProviderSettings & { model_labels?: Record<string, string> }>
   }
   backends?: Record<string, boolean>
   workspace_context?: {
@@ -540,6 +612,10 @@ export interface RoutineSettings {
 
 export interface ProviderConnection {
   name: string
+  // Display names from the backend registry, so the Settings card never has to
+  // map provider ids to product names itself.
+  label?: string
+  short_label?: string
   ok: boolean
   auth: string
   command: string
@@ -549,15 +625,12 @@ export interface ProviderConnection {
   protocol?: string
   mcps?: string[]
   skills?: string[]
-}
-
-export interface CustomProviderSettings {
-  id: string
-  name: string
-  url: string
-  runner: 'claude' | 'codex'
-  models: string[]
-  token_configured: boolean
+  /** Docs page for installing the CLI, set when `auth === 'not_installed'`. */
+  install_url?: string
+  /** Desktop app found while the CLI is missing. */
+  app_path?: string
+  /** Absolute path of the CLI binary Ciaobot would run. */
+  cli_path?: string
 }
 
 export interface ProviderConfigSettings {
@@ -574,7 +647,6 @@ export interface ProviderConfigSettings {
     auth_method?: string
   }>
   connections?: Record<string, ProviderConnection>
-  custom_providers?: CustomProviderSettings[]
   auto_update_github_skills?: boolean
   requires_restart: boolean
   env_path: string
@@ -815,6 +887,19 @@ export interface AutomationProcess {
   // Bulk/manual variants of this job (Session insights carries the backfill),
   // reported nested so the page keeps one row per automation.
   sub_jobs?: AutomationProcess[]
+  // Steps that run inside this job's task, on this job's trigger, in execution
+  // order. A step is not an automation — it has no trigger of its own — so it is
+  // reported here rather than as a peer row. Session insights owns the four-step
+  // archive pipeline; everything else has none.
+  steps?: AutomationProcess[]
+  // Name of the whole pipeline, set only on the job that owns one
+  // ("When you archive a chat"). The job keeps `label` for its own step.
+  pipeline_label?: string
+  // Set on a step: when it is skipped, in the user's terms. A step answers this
+  // instead of "when does this run?", which its pipeline already answers.
+  step_condition?: string
+  // True while this job is inside a tracked run right now.
+  running?: boolean
   last_run: JobRun | null
   recent: JobRun[]
   stats: AutomationStats
@@ -888,6 +973,7 @@ export interface ArchivedSubchat {
 export interface ArchiveChatResponse {
   ok?: boolean
   archived_to?: string | null
+  postprocess?: ChatPostprocess | null
   archived_chat_ids?: string[]
   stopped_chat_ids?: string[]
   failed_chat_ids?: string[]
@@ -926,6 +1012,12 @@ export interface SetupProviderStatus {
   auth?: string
   command?: string
   detail?: string
+  /** Documentation page for installing the provider CLI (`auth: 'not_installed'`). */
+  install_url?: string
+  /** Desktop app found while the CLI is missing, so setup can say which step is left. */
+  app_path?: string
+  /** Absolute path of the CLI binary Ciaobot would run. */
+  cli_path?: string
 }
 
 /** One requirement row inside {@link SetupStatus}. */

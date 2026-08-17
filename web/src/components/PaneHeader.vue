@@ -1,7 +1,11 @@
 <template>
-  <header class="pane-header">
+  <header class="pane-header" :class="{ 'pane-header--no-center': !hasCenter }">
     <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+      <!-- 18px at stroke 2, the size and weight every other icon in this header
+           and in the sidebar uses (see the .btn-icon block below). At 22px and
+           stroke 2.2 it read as a heavier glyph than the actions it shares the
+           row with. -->
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <line x1="4" y1="7" x2="20" y2="7"/>
         <line x1="4" y1="12" x2="20" y2="12"/>
         <line x1="4" y1="17" x2="20" y2="17"/>
@@ -35,7 +39,7 @@ import { computed, useSlots } from 'vue'
 import NotificationBell from './NotificationBell.vue'
 import BrandMark from './BrandMark.vue'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   activeBgAgents?: number
   /** Short marker for the current view: 'home', 'settings', 'automations', … */
   pageTag?: string
@@ -49,6 +53,9 @@ const slots = useSlots()
 // a second row. Views with no title of their own (home, settings, the automations
 // list) drop the element and let the page tag name them instead.
 const hasTitle = computed(() => !!slots.title)
+// The middle track only earns its symmetric siblings when it has something
+// to centre.
+const hasCenter = computed(() => props.brand || !!props.pageTag)
 </script>
 
 <style scoped>
@@ -76,6 +83,17 @@ const hasTitle = computed(() => !!slots.title)
   column-gap: var(--space-2);
   flex-shrink: 0;
   box-sizing: border-box;
+}
+
+/* Nothing in the middle column to centre, so there is nothing for the symmetric
+   side tracks to buy - and they are not free: `1fr` on the trailing track holds
+   back half the spare width for actions that only need their own size, while
+   the title ellipses in the other half. The chat header is exactly this case
+   (`:brand="false"`, no page tag), which is where a title truncated to "Hourly
+   skills page m..." sat next to an empty stretch of header. Size the trail to
+   its content and give the remainder to the title. */
+.pane-header--no-center {
+  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 .header-title {
   grid-column: 1;
@@ -108,17 +126,21 @@ const hasTitle = computed(() => !!slots.title)
 
 /* A wide viewport can still leave this pane narrow when the sidebar has been
    dragged near its maximum. The header's action trail is unshrinkable, so
-   hide the decorative brand/tag based on the pane width as well as the
-   viewport width. */
+   let the mark shrink to the available column rather than overflow into the
+   hamburger or actions. Same trade on mobile: the wordmark stays, sized down
+   so it fits between the hamburger and the bell. Hiding it left the home
+   screen with an empty header strip and no click target to reload the app. */
 @container chat-pane (max-width: 460px) {
-  .header-center { display: none; }
+  .header-center { min-width: 0; }
 }
 
-/* Very narrow viewports: drop the mark outright rather than clip it. The trail's
-   controls cannot shrink, so something has to go, and the mark is the only thing
-   here that is not an action. */
+/* Same idea at viewport level: keep the wordmark on mobile (it is the only
+   reload entry point the home screen has), and shrink it instead of clipping.
+   font-size lands on --text-sm, the same size the mobile title uses. */
 @media (max-width: 460px) {
-  .header-center { display: none; }
+  .header-center { min-width: 0; }
+  .header-center :deep(.brand) { font-size: var(--text-sm); }
+  .header-center :deep(.brand-label) { min-width: 5ch; }
 }
 /* Kept in the document, not on the screen. The page now names itself next to
    its own nav icon in the sidebar, which is where it was asked for, so a second

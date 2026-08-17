@@ -18,10 +18,13 @@ from ciao.eval_runner import (
     IsolatedChatServer,
     run_chat_turn,
 )
+from ciao import provider_registry
 from ciao.sync_skills import _install_codex_agents, sync_workspace_skills
 
 TargetKind: TypeAlias = Literal["skill", "subagent"]
-ProviderName: TypeAlias = Literal["claude", "codex"]
+# Validated at runtime against ciao.provider_registry; the alias stays a plain
+# str so adding a provider does not require editing a Literal.
+ProviderName: TypeAlias = str
 SurfaceName: TypeAlias = Literal["legacy", "mcp"]
 EvalStatus: TypeAlias = Literal["pending", "passed", "failed", "interrupted"]
 AssertionKind: TypeAlias = Literal[
@@ -34,7 +37,7 @@ AssertionKind: TypeAlias = Literal[
 ]
 
 _TARGET_KINDS = ("skill", "subagent")
-_PROVIDERS = ("claude", "codex")
+_PROVIDERS = provider_registry.provider_ids()
 _SURFACES = ("legacy", "mcp")
 _ASSERTION_FIELDS = (
     "output_contains",
@@ -660,6 +663,7 @@ def _prune_provider_targets(isolated_root: Path, target: EvalTarget) -> None:
         (isolated_root / instruction_name).unlink(missing_ok=True)
     _remove_unselected_entries(isolated_root / "commands", frozenset())
     _remove_unselected_entries(isolated_root / ".claude" / "commands", frozenset())
+    _remove_unselected_entries(isolated_root / ".opencode" / "commands", frozenset())
     if target.kind == "skill":
         _remove_unselected_entries(
             isolated_root / ".claude" / "skills",
@@ -675,6 +679,10 @@ def _prune_provider_targets(isolated_root: Path, target: EvalTarget) -> None:
         )
         _remove_unselected_entries(
             isolated_root / ".codex" / "agents",
+            frozenset(),
+        )
+        _remove_unselected_entries(
+            isolated_root / ".opencode" / "agents",
             frozenset(),
         )
         _install_codex_agents(isolated_root)
@@ -695,6 +703,10 @@ def _prune_provider_targets(isolated_root: Path, target: EvalTarget) -> None:
     _remove_unselected_entries(
         isolated_root / ".codex" / "agents",
         frozenset({f"{target.name}.toml"}),
+    )
+    _remove_unselected_entries(
+        isolated_root / ".opencode" / "agents",
+        frozenset({f"{target.name}.md"}),
     )
     # Recompile the managed config block after stock agent projections are
     # removed, otherwise Codex would retain registrations for absent files.

@@ -164,10 +164,11 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.find('input[type="radio"][value="existing"]').exists()).toBe(false)
     expect(wrapper.find('input[type="radio"][value="scratch"]').exists()).toBe(false)
     expect(wrapper.text()).toContain("detects what's inside and adjusts automatically")
-    // the first logical workspace is named here, defaulting to "personal"
+    // The logical workspace name is chosen here, defaulting to "personal".
     const nameInput = wrapper.find('#setup-workspace-name')
     expect(nameInput.exists()).toBe(true)
     expect((nameInput.element as HTMLInputElement).value).toBe('personal')
+    expect(wrapper.text()).toContain('Logical Workspace Name')
   })
 
   it('hides the "First Workspace" field and shows chips when the folder already has nested workspaces', async () => {
@@ -262,6 +263,114 @@ describe('LoginView setup wizard tests', () => {
     await nextTick()
     expect(wrapper.find('.picker-modal').exists()).toBe(false)
     expect((wrapper.find('#setup-workspace').element as HTMLInputElement).value).toBe('/Users/me/ciaobot')
+  })
+
+  it('steps into a folder it just created so the confirm button names it', async () => {
+    const home = {
+      path: '/Users/me',
+      display_path: '~',
+      parent: '/Users',
+      dirs: [] as Array<{ name: string; path: string }>,
+      home: '/Users/me',
+    }
+    const created = {
+      path: '/Users/me/ciaobot',
+      display_path: '~/ciaobot',
+      parent: '/Users/me',
+      dirs: [],
+      home: '/Users/me',
+    }
+    mockApiGet.mockImplementation((path: string) => {
+      if (path === `/api/setup/list-dirs?path=${encodeURIComponent('/Users/me/ciaobot')}`) {
+        return Promise.resolve(created)
+      }
+      if (path.startsWith('/api/setup/list-dirs')) return Promise.resolve(home)
+      return Promise.resolve({
+        configured: false,
+        bootstrap: true,
+        mode: 'bootstrap',
+        providers: {},
+      })
+    })
+    // The server answers mkdir with the *parent* listing, which is what used to
+    // leave the picker pointing at the home directory.
+    mockApiPost.mockImplementation((path: string) => {
+      if (path === '/api/setup/mkdir') {
+        return Promise.resolve({
+          ...home,
+          dirs: [{ name: 'ciaobot', path: '/Users/me/ciaobot' }],
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    const wrapper = await mountLoginView()
+    await wrapper.find('#setup-workspace-browse').trigger('click')
+    await flushPromises()
+
+    await wrapper.find('.picker-new input').setValue('ciaobot')
+    await wrapper.find('.picker-new button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.picker-path').text()).toBe('~/ciaobot')
+    expect(wrapper.find('.picker-select').text()).toContain('ciaobot')
+
+    await wrapper.find('.picker-select').trigger('click')
+    await nextTick()
+    expect((wrapper.find('#setup-workspace').element as HTMLInputElement).value).toBe(
+      '/Users/me/ciaobot',
+    )
+  })
+
+  it('asks for an install, with a docs link, when the provider CLI is missing', async () => {
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {
+        claude: {
+          name: 'claude',
+          ok: false,
+          auth: 'not_installed',
+          command: 'curl -fsSL https://claude.ai/install.sh | bash',
+          detail: 'Claude Code is not installed on this machine.',
+          install_url: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
+        },
+      },
+    })
+
+    const wrapper = await mountLoginView()
+
+    expect(wrapper.text()).toContain('[!] Not Installed')
+    expect(wrapper.text()).toContain('curl -fsSL https://claude.ai/install.sh | bash')
+    expect(wrapper.text()).toContain('Not installed yet.')
+    const link = wrapper.find('.install-link')
+    expect(link.attributes('href')).toBe(
+      'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
+    )
+  })
+
+  it('points at the desktop app when only the CLI is missing', async () => {
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {
+        claude: {
+          name: 'claude',
+          ok: false,
+          auth: 'not_installed',
+          command: 'curl -fsSL https://claude.ai/install.sh | bash',
+          detail: 'The Claude desktop app is installed (/Applications/Claude.app), but…',
+          install_url: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
+          app_path: '/Applications/Claude.app',
+        },
+      },
+    })
+
+    const wrapper = await mountLoginView()
+
+    expect(wrapper.text()).toContain('The desktop app is installed, but Ciaobot drives the CLI.')
   })
 
   it('finishes setup without collecting a notification email', async () => {

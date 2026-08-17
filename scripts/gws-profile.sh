@@ -1,34 +1,54 @@
 #!/usr/bin/env bash
-# GWS dual-account profile wrapper.
-# Usage: gws-profile <work|personal> <gws-args...>
-# Or: GWS_PROFILE=work gws-profile <gws-args...>
+# GWS account profile wrapper.
+# Usage: gws-profile <profile> <gws-args...>
+# Or: GWS_PROFILE=<profile> gws-profile <gws-args...>
 #
-# Profiles:
-#   personal → ~/.config/gws-personal/
-#   work     → ~/.config/gws/
+# Credential directories (under the workspace root):
+#   personal → secrets/gws-personal/   (legacy name, kept for existing installs)
+#   work     → secrets/gws/            (legacy name, kept for existing installs)
+#   <other>  → secrets/gws-<other>/
+#
+# Profiles are whatever the user added in Settings → Workspaces; this wrapper
+# does not keep a list of its own.
 
-PROFILE="${1:-${GWS_PROFILE:-personal}}"
+PROFILE="${1:-${GWS_PROFILE:-}}"
 
-# If first arg looks like a profile name, consume it; otherwise treat all args as gws args
+# A first arg that starts with `-` or names a gws service is not a profile, so
+# fall back to the environment and pass every arg through to gws. Settings
+# rejects these service names as account slugs because this positional syntax
+# cannot otherwise distinguish the profile from the service argument.
 case "$PROFILE" in
-  work|personal)
-    shift
+  ""|-*|gmail|calendar|drive|docs|sheets|slides|tasks|contacts|forms|auth)
+    PROFILE="${GWS_PROFILE:-}"
     ;;
   *)
-    PROFILE="${GWS_PROFILE:-personal}"
+    shift
     ;;
 esac
+
+if [ -z "$PROFILE" ]; then
+  echo "gws-profile: no profile given and GWS_PROFILE is unset" >&2
+  exit 2
+fi
 
 # Resolve repo root (where this script lives)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-case "$PROFILE" in
+# Same slug rule as ciao.gws_auth.slugify_profile: lowercase, and anything
+# outside [a-z0-9_-] collapses to a dash.
+SLUG="$(printf '%s' "$PROFILE" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]\{1,\}/-/g' -e 's/^-*//' -e 's/-*$//')"
+
+case "$SLUG" in
   work)
     export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${REPO_ROOT}/secrets/gws"
     ;;
+  "")
+    echo "gws-profile: '$PROFILE' is not a usable profile name" >&2
+    exit 2
+    ;;
   *)
-    export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${REPO_ROOT}/secrets/gws-personal"
+    export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${REPO_ROOT}/secrets/gws-${SLUG}"
     ;;
 esac
 

@@ -6,6 +6,8 @@ import asyncio
 import json
 from unittest.mock import AsyncMock
 
+import pytest
+
 import ciao.critique as crt
 
 
@@ -52,51 +54,56 @@ def test_render_markdown_includes_failures_and_verdicts() -> None:
 
 
 def test_review_one_routes_via_oneshot(monkeypatch) -> None:
-    """Each panel model is called through run_oneshot with routing env."""
+    """An unprefixed panel entry runs through Claude Code."""
     from ciao.config import CiaoConfig
 
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "OPENROUTER_API_KEY": "sk-or"})
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
 
     captured: dict = {}
 
-    async def fake_oneshot(prompt, *, system_prompt, model, env, timeout_s=120.0, provider="claude", cwd=None):
+    async def fake_oneshot(prompt, *, system_prompt, model, timeout_s=120.0, provider="claude", cwd=None):
         captured["model"] = model
-        captured["env"] = env
         captured["provider"] = provider
+        captured["cwd"] = cwd
         return json.dumps({"verdict": "ship", "confidence": 5, "summary": "solid"})
 
     monkeypatch.setattr("ciao.critique.run_oneshot", fake_oneshot)
-    result = asyncio.run(crt._review_one("anthropic/claude-haiku-4.5", "x", "prompt", config, 60.0))
+    result = asyncio.run(crt._review_one("opus", "x", "prompt", config, 60.0))
     assert result.ok is True
     assert result.review == {"verdict": "ship", "confidence": 5, "summary": "solid"}
-    assert captured["model"] == "anthropic/claude-haiku-4.5"
+    assert captured["model"] == "opus"
     assert captured["provider"] == "claude"
-    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-or"
+    # Only the app-server providers need a working directory.
+    assert captured["cwd"] is None
 
 
-def test_review_one_routes_codex_entry_through_codex_provider(monkeypatch) -> None:
-    """A ``codex:`` panel entry dispatches via the Codex provider, no routing env."""
+@pytest.mark.parametrize(
+    ("entry", "provider"),
+    [("codex:fable", "codex"), ("opencode:fable", "opencode")],
+)
+def test_review_one_routes_prefixed_entry_to_its_provider(
+    monkeypatch, entry, provider
+) -> None:
+    """A provider prefix dispatches there and is stripped from the model id."""
     from ciao.config import CiaoConfig
 
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "OPENROUTER_API_KEY": "sk-or"})
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
 
     captured: dict = {}
 
-    async def fake_oneshot(prompt, *, system_prompt, model, env, timeout_s=120.0, provider="claude", cwd=None):
+    async def fake_oneshot(prompt, *, system_prompt, model, timeout_s=120.0, provider="claude", cwd=None):
         captured["model"] = model
-        captured["env"] = env
         captured["provider"] = provider
         captured["cwd"] = cwd
         return json.dumps({"verdict": "revise", "confidence": 4})
 
     monkeypatch.setattr("ciao.critique.run_oneshot", fake_oneshot)
-    result = asyncio.run(crt._review_one("codex:fable", "x", "prompt", config, 60.0))
+    result = asyncio.run(crt._review_one(entry, "x", "prompt", config, 60.0))
     assert result.ok is True
-    # The prefix is stripped before dispatch, but preserved for display/ordering.
     assert captured["model"] == "fable"
-    assert result.model == "codex:fable"
-    assert captured["provider"] == "codex"
-    assert captured["env"] == {}
+    assert captured["provider"] == provider
+    # The prefix is stripped before dispatch but kept for display/ordering.
+    assert result.model == entry
     assert captured["cwd"] == config.workspace_root
 
 
@@ -105,36 +112,13 @@ def test_review_one_records_failure_on_exception(monkeypatch) -> None:
 
     config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
 
-    async def boom(prompt, *, system_prompt, model, env, timeout_s=120.0, provider="claude", cwd=None):
+    async def boom(prompt, *, system_prompt, model, timeout_s=120.0, provider="claude", cwd=None):
         raise OSError("no upstream")
 
     monkeypatch.setattr("ciao.critique.run_oneshot", boom)
-    result = asyncio.run(crt._review_one("anthropic/claude-haiku-4.5", "x", "p", config, 60.0))
+    result = asyncio.run(crt._review_one("opus", "x", "p", config, 60.0))
     assert result.ok is False
     assert "no upstream" in (result.error or "")
-
-
-def test_print_panel_uses_openrouter_default_when_key_set(monkeypatch) -> None:
-    import sys
-    from contextlib import redirect_stdout
-    import io
-
-    monkeypatch.setattr(crt, "is_anthropic_available", lambda: False)
-    monkeypatch.setattr(crt, "is_codex_available", lambda: False)
-    monkeypatch_env = {"PWA_AUTH_TOKEN": "t", "OPENROUTER_API_KEY": "sk-or"}
-    # CiaoConfig.from_env reads os.environ; patch it.
-    import os
-    old = os.environ.copy()
-    os.environ.update(monkeypatch_env)
-    buf = io.StringIO()
-    try:
-        with redirect_stdout(buf):
-            rc = crt.main(["--print-panel"])
-    finally:
-        os.environ.clear()
-        os.environ.update(old)
-    assert rc == 0
-    assert "anthropic/claude-opus-latest" in buf.getvalue()
 
 
 def test_resolve_critique_panel_uses_settings_override() -> None:
@@ -153,62 +137,58 @@ def test_resolve_critique_panel_cli_override_wins() -> None:
     assert crt.resolve_critique_panel(config, override="only-this") == ["only-this"]
 
 
-def test_default_critique_panel_prioritizes_anthropic(monkeypatch) -> None:
+def _panel(
+    monkeypatch, *, codex: bool, opencode: bool, anthropic: bool = True
+) -> list[str]:
+    """Resolve the default panel with each vendor probe pinned."""
     from ciao.config import CiaoConfig
 
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "OPENROUTER_API_KEY": "sk-or"})
-    # Mock is_anthropic_available to return True
-    monkeypatch.setattr(crt, "is_anthropic_available", lambda: True)
-    monkeypatch.setattr(crt, "is_codex_available", lambda: False)
+    monkeypatch.setattr(crt, "is_anthropic_available", lambda: anthropic)
+    monkeypatch.setattr(crt, "is_codex_available", lambda: codex)
+    monkeypatch.setattr(crt, "is_opencode_available", lambda: opencode)
+    return crt.default_critique_panel(CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"}))
 
-    panel = crt.default_critique_panel(config)
+
+def test_default_critique_panel_is_anthropic_only_when_nothing_else_signed_in(
+    monkeypatch,
+) -> None:
+    assert _panel(monkeypatch, codex=False, opencode=False) == ["opus", "fable"]
+
+
+def test_default_critique_panel_drops_anthropic_when_it_is_not_signed_in(
+    monkeypatch,
+) -> None:
+    """Every entry is gated, Anthropic included."""
+    panel = _panel(monkeypatch, codex=True, opencode=True, anthropic=False)
+    assert panel == ["codex:fable", "opencode:fable"]
+
+
+def test_default_critique_panel_never_resolves_empty(monkeypatch) -> None:
+    """With nothing signed in, report a real auth error rather than review nothing."""
+    panel = _panel(monkeypatch, codex=False, opencode=False, anthropic=False)
     assert panel == ["opus", "fable"]
 
 
-def test_default_critique_panel_uses_openrouter_when_anthropic_unavailable(monkeypatch) -> None:
-    from ciao.config import CiaoConfig
+def test_default_critique_panel_adds_one_voice_per_signed_in_vendor(
+    monkeypatch,
+) -> None:
+    """The point of the panel is disagreement, so prefer vendor diversity.
 
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "OPENROUTER_API_KEY": "sk-or"})
-    # Mock is_anthropic_available to return False
-    monkeypatch.setattr(crt, "is_anthropic_available", lambda: False)
-    monkeypatch.setattr(crt, "is_codex_available", lambda: False)
-
-    panel = crt.default_critique_panel(config)
-    assert panel == ["anthropic/claude-opus-latest", "anthropic/claude-fable-latest"]
-
-
-def test_default_critique_panel_includes_ollama_when_available(monkeypatch) -> None:
-    from ciao.config import CiaoConfig
-
-    config = CiaoConfig.from_env({
-        "PWA_AUTH_TOKEN": "t",
-        "CIAO_OLLAMA_API_KEY": "sk-ollama",
-    })
-    monkeypatch.setattr(crt, "is_anthropic_available", lambda: True)
-    monkeypatch.setattr(crt, "is_codex_available", lambda: False)
-
-    panel = crt.default_critique_panel(config)
-    assert "minimax-m3:cloud" in panel
-    assert "glm-5.2:cloud" in panel
+    Three Anthropic models would largely agree with each other; Codex and
+    opencode each contribute a genuinely different model.
+    """
+    assert _panel(monkeypatch, codex=True, opencode=True) == [
+        "opus",
+        "fable",
+        "codex:fable",
+        "opencode:fable",
+    ]
 
 
-def test_default_critique_panel_appends_codex_fable_when_signed_in(monkeypatch) -> None:
-    from ciao.config import CiaoConfig
+def test_default_critique_panel_omits_vendors_that_are_signed_out(monkeypatch) -> None:
+    """An unavailable provider would put a guaranteed failure in the panel."""
+    codex_only = _panel(monkeypatch, codex=True, opencode=False)
+    assert codex_only == ["opus", "fable", "codex:fable"]
 
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
-    monkeypatch.setattr(crt, "is_anthropic_available", lambda: True)
-    monkeypatch.setattr(crt, "is_codex_available", lambda: True)
-
-    panel = crt.default_critique_panel(config)
-    assert panel == ["opus", "fable", "codex:fable"]
-
-
-def test_default_critique_panel_omits_codex_when_signed_out(monkeypatch) -> None:
-    from ciao.config import CiaoConfig
-
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
-    monkeypatch.setattr(crt, "is_anthropic_available", lambda: True)
-    monkeypatch.setattr(crt, "is_codex_available", lambda: False)
-
-    panel = crt.default_critique_panel(config)
-    assert "codex:fable" not in panel
+    opencode_only = _panel(monkeypatch, codex=False, opencode=True)
+    assert opencode_only == ["opus", "fable", "opencode:fable"]

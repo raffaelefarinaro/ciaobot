@@ -72,7 +72,6 @@ def test_legacy_workspaces_are_exposed_as_workspace_configs(tmp_path: Path) -> N
 
     assert list(config.workspaces) == ["personal", "work"]
     assert config.workspace("personal").vault_root == "memory-vault/personal"
-    assert config.workspace("personal").model_bucket == "personal"
     assert config.workspace("work").gws_profile == "work"
     assert config.default_model_for_workspace("personal") == "deepseek-v4-flash:0731-cloud"
     assert config.default_model_for_workspace("work") == "opus"
@@ -88,14 +87,12 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
                 "default_model": "haiku",
                 "disallowed_tools": ["Bash", "mcp__example"],
                 "gws_profile": "personal",
-                "model_bucket": "ollama",
             },
             {
                 "name": "client",
                 "vault_root": "/tmp/client-vault",
                 "default_model": "opus",
                 "gws_profile": "work",
-                "model_bucket": "anthropic",
             },
         ]
     )
@@ -106,7 +103,6 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
     assert config.workspace_names() == ["home", "client"]
     assert config.workspace("home").vault_root == "memory-vault/home"
     assert config.workspace("home").gws_profile == "personal"
-    assert config.workspace("home").model_bucket == "ollama"
     assert config.default_model_for_workspace("home") == "haiku"
     assert config.disallowed_tools_for_workspace("home") == ["Bash", "mcp__example"]
     assert config.default_model_for_workspace("client") == "opus"
@@ -127,7 +123,6 @@ def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> N
                     "name": "default",
                     "vault_root": "memory-vault",
                     "default_model": "haiku",
-                    "model_bucket": "anthropic",
                 }
             ]
         ),

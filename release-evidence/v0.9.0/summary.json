@@ -1,0 +1,2812 @@
+{
+  "comparison": {
+    "advisory": true,
+    "flags": [
+      {
+        "delta": 0.17402759791006117,
+        "key": [
+          "capabilities-hierarchy",
+          "codex",
+          "restart"
+        ],
+        "kind": "advisory_regression",
+        "metric": "elapsed_ms"
+      },
+      {
+        "delta": 0.1753760343802862,
+        "key": [
+          "capabilities-hierarchy",
+          "codex",
+          "restart"
+        ],
+        "kind": "advisory_regression",
+        "metric": "provider_duration_ms"
+      },
+      {
+        "delta": 0.145780051150895,
+        "key": [
+          "capabilities-hierarchy",
+          "codex",
+          "restart"
+        ],
+        "kind": "advisory_regression",
+        "metric": "context_pct"
+      },
+      {
+        "delta": 0.2413793103448276,
+        "key": [
+          "researcher-delegation",
+          "codex",
+          "warm"
+        ],
+        "kind": "advisory_regression",
+        "metric": "output_tokens"
+      }
+    ]
+  },
+  "complete": true,
+  "generated_at": "2026-08-17T00:20:39.529235+00:00",
+  "groups": [
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_growth_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_peak_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 15124.0,
+        "median": 14883.0,
+        "min": 13296.0,
+        "p95": 15124.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 3,
+        "max": 3.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 3.0
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "cold",
+      "output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "passed": 3,
+      "provider": "claude",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 14859.0,
+        "median": 14531.0,
+        "min": 12889.0,
+        "p95": 14859.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 6.0,
+        "median": 6.0,
+        "min": 6.0,
+        "p95": 6.0
+      },
+      "reasoning_output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "repetitions": 3,
+      "scenario": "capabilities-hierarchy",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 7.0,
+        "median": 7.0,
+        "min": 7.0,
+        "p95": 7.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_growth_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_peak_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 15102.0,
+        "median": 13307.0,
+        "min": 13046.0,
+        "p95": 15102.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 3,
+        "max": 3.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 3.0
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "restart",
+      "output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "passed": 3,
+      "provider": "claude",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 14858.0,
+        "median": 12902.0,
+        "min": 12668.0,
+        "p95": 14858.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 6.0,
+        "median": 6.0,
+        "min": 6.0,
+        "p95": 6.0
+      },
+      "reasoning_output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "repetitions": 3,
+      "scenario": "capabilities-hierarchy",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 7.0,
+        "median": 7.0,
+        "min": 7.0,
+        "p95": 7.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_growth_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_peak_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 10655.0,
+        "median": 10647.0,
+        "min": 10168.0,
+        "p95": 10655.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 3,
+        "max": 3.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 3.0
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "warm",
+      "output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "passed": 3,
+      "provider": "claude",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 10333.0,
+        "median": 10302.0,
+        "min": 9812.0,
+        "p95": 10333.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      },
+      "reasoning_output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "repetitions": 3,
+      "scenario": "capabilities-hierarchy",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 3.0,
+        "median": 3.0,
+        "min": 3.0,
+        "p95": 3.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 3,
+        "max": 0.9618567487872158,
+        "median": 0.9599622062123538,
+        "min": 0.9395533937652001,
+        "p95": 0.9618567487872158
+      },
+      "context_growth_pct": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "context_pct": {
+        "count": 3,
+        "max": 50.2,
+        "median": 31.0,
+        "min": 29.8,
+        "p95": 50.2
+      },
+      "context_peak_pct": {
+        "count": 3,
+        "max": 50.2,
+        "median": 31.0,
+        "min": 29.8,
+        "p95": 50.2
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 22930.0,
+        "median": 18965.0,
+        "min": 18546.0,
+        "p95": 22930.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 3,
+        "max": 33868.0,
+        "median": 22615.0,
+        "min": 21026.0,
+        "p95": 33868.0
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 3,
+        "max": 2.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "cold",
+      "output_tokens": {
+        "count": 3,
+        "max": 184.0,
+        "median": 175.0,
+        "min": 169.0,
+        "p95": 184.0
+      },
+      "passed": 3,
+      "provider": "codex",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 22359.0,
+        "median": 18492.0,
+        "min": 18051.0,
+        "p95": 22359.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 3.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 3.0
+      },
+      "reasoning_output_tokens": {
+        "count": 3,
+        "max": 50.0,
+        "median": 33.0,
+        "min": 31.0,
+        "p95": 50.0
+      },
+      "repetitions": 3,
+      "scenario": "capabilities-hierarchy",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 4.0,
+        "median": 3.0,
+        "min": 3.0,
+        "p95": 4.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 3,
+        "max": 0.964163433006163,
+        "median": 0.9608132868372835,
+        "min": 0.948077210833458,
+        "p95": 0.964163433006163
+      },
+      "context_growth_pct": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "context_pct": {
+        "count": 3,
+        "max": 50.2,
+        "median": 44.8,
+        "min": 44.5,
+        "p95": 50.2
+      },
+      "context_peak_pct": {
+        "count": 3,
+        "max": 50.2,
+        "median": 44.8,
+        "min": 44.5,
+        "p95": 50.2
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 26686.0,
+        "median": 26290.0,
+        "min": 22644.0,
+        "p95": 26686.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 3,
+        "max": 33838.0,
+        "median": 26732.0,
+        "min": 26286.0,
+        "p95": 33838.0
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "restart",
+      "output_tokens": {
+        "count": 3,
+        "max": 247.0,
+        "median": 224.0,
+        "min": 209.0,
+        "p95": 247.0
+      },
+      "passed": 3,
+      "provider": "codex",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 26253.0,
+        "median": 25709.0,
+        "min": 22161.0,
+        "p95": 26253.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 3.0,
+        "median": 3.0,
+        "min": 3.0,
+        "p95": 3.0
+      },
+      "reasoning_output_tokens": {
+        "count": 3,
+        "max": 91.0,
+        "median": 71.0,
+        "min": 60.0,
+        "p95": 91.0
+      },
+      "repetitions": 3,
+      "scenario": "capabilities-hierarchy",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 4.0,
+        "median": 4.0,
+        "min": 4.0,
+        "p95": 4.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 3,
+        "max": 0.9764400622729632,
+        "median": 0.9601946340474421,
+        "min": 0.956993230727781,
+        "p95": 0.9764400622729632
+      },
+      "context_growth_pct": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "context_pct": {
+        "count": 3,
+        "max": 85.4,
+        "median": 68.4,
+        "min": 68.1,
+        "p95": 85.4
+      },
+      "context_peak_pct": {
+        "count": 3,
+        "max": 85.4,
+        "median": 68.4,
+        "min": 68.1,
+        "p95": 85.4
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 12589.0,
+        "median": 11294.0,
+        "min": 11014.0,
+        "p95": 12589.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 3,
+        "max": 38540.0,
+        "median": 29693.0,
+        "min": 29594.0,
+        "p95": 38540.0
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "warm",
+      "output_tokens": {
+        "count": 3,
+        "max": 131.0,
+        "median": 131.0,
+        "min": 122.0,
+        "p95": 131.0
+      },
+      "passed": 3,
+      "provider": "codex",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 12142.0,
+        "median": 10790.0,
+        "min": 10420.0,
+        "p95": 12142.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      },
+      "reasoning_output_tokens": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "repetitions": 3,
+      "scenario": "capabilities-hierarchy",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 3.0,
+        "median": 3.0,
+        "min": 3.0,
+        "p95": 3.0
+      }
+    },
+    {
+      "assertion_count": 9,
+      "assertion_rate": 1.0,
+      "assertions_passed": 9,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_growth_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_peak_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 11460.0,
+        "median": 11201.0,
+        "min": 11169.0,
+        "p95": 11460.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "cold",
+      "output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "passed": 3,
+      "provider": "claude",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 11233.0,
+        "median": 11113.0,
+        "min": 11016.0,
+        "p95": 11233.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      },
+      "reasoning_output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "repetitions": 3,
+      "scenario": "researcher-delegation",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      }
+    },
+    {
+      "assertion_count": 9,
+      "assertion_rate": 1.0,
+      "assertions_passed": 9,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_growth_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_peak_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 12025.0,
+        "median": 10646.0,
+        "min": 9896.0,
+        "p95": 12025.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "restart",
+      "output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "passed": 3,
+      "provider": "claude",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 11769.0,
+        "median": 10554.0,
+        "min": 9777.0,
+        "p95": 11769.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      },
+      "reasoning_output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "repetitions": 3,
+      "scenario": "researcher-delegation",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      }
+    },
+    {
+      "assertion_count": 9,
+      "assertion_rate": 1.0,
+      "assertions_passed": 9,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_growth_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_peak_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 9663.0,
+        "median": 9401.0,
+        "min": 8336.0,
+        "p95": 9663.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "warm",
+      "output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "passed": 3,
+      "provider": "claude",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 9613.0,
+        "median": 9148.0,
+        "min": 8291.0,
+        "p95": 9613.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      },
+      "reasoning_output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "repetitions": 3,
+      "scenario": "researcher-delegation",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      }
+    },
+    {
+      "assertion_count": 9,
+      "assertion_rate": 1.0,
+      "assertions_passed": 9,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 3,
+        "max": 0.9494609830877262,
+        "median": 0.9491324336348806,
+        "min": 0.937554314090627,
+        "p95": 0.9494609830877262
+      },
+      "context_growth_pct": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "context_pct": {
+        "count": 3,
+        "max": 38.7,
+        "median": 38.7,
+        "min": 30.7,
+        "p95": 38.7
+      },
+      "context_peak_pct": {
+        "count": 3,
+        "max": 38.7,
+        "median": 38.7,
+        "min": 30.7,
+        "p95": 38.7
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 32040.0,
+        "median": 28831.0,
+        "min": 27036.0,
+        "p95": 32040.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 3,
+        "max": 20229.0,
+        "median": 20222.0,
+        "min": 16110.0,
+        "p95": 20229.0
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "cold",
+      "output_tokens": {
+        "count": 3,
+        "max": 67.0,
+        "median": 63.0,
+        "min": 58.0,
+        "p95": 67.0
+      },
+      "passed": 3,
+      "provider": "codex",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 31050.0,
+        "median": 27710.0,
+        "min": 25777.0,
+        "p95": 31050.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 4.0,
+        "median": 3.0,
+        "min": 2.0,
+        "p95": 4.0
+      },
+      "reasoning_output_tokens": {
+        "count": 3,
+        "max": 32.0,
+        "median": 28.0,
+        "min": 20.0,
+        "p95": 32.0
+      },
+      "repetitions": 3,
+      "scenario": "researcher-delegation",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 4.0,
+        "median": 3.0,
+        "min": 2.0,
+        "p95": 4.0
+      }
+    },
+    {
+      "assertion_count": 9,
+      "assertion_rate": 1.0,
+      "assertions_passed": 9,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 3,
+        "max": 0.9862479274358724,
+        "median": 0.9485697346969023,
+        "min": 0.9469790382244143,
+        "p95": 0.9862479274358724
+      },
+      "context_growth_pct": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "context_pct": {
+        "count": 3,
+        "max": 46.8,
+        "median": 46.3,
+        "min": 38.7,
+        "p95": 46.8
+      },
+      "context_peak_pct": {
+        "count": 3,
+        "max": 46.8,
+        "median": 46.3,
+        "min": 38.7,
+        "p95": 46.8
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 32485.0,
+        "median": 28622.0,
+        "min": 28394.0,
+        "p95": 32485.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 3,
+        "max": 20506.0,
+        "median": 20275.0,
+        "min": 20241.0,
+        "p95": 20506.0
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "restart",
+      "output_tokens": {
+        "count": 3,
+        "max": 87.0,
+        "median": 61.0,
+        "min": 53.0,
+        "p95": 87.0
+      },
+      "passed": 3,
+      "provider": "codex",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 31352.0,
+        "median": 27534.0,
+        "min": 27216.0,
+        "p95": 31352.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 4.0,
+        "median": 3.0,
+        "min": 3.0,
+        "p95": 4.0
+      },
+      "reasoning_output_tokens": {
+        "count": 3,
+        "max": 49.0,
+        "median": 33.0,
+        "min": 12.0,
+        "p95": 49.0
+      },
+      "repetitions": 3,
+      "scenario": "researcher-delegation",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 4.0,
+        "median": 3.0,
+        "min": 3.0,
+        "p95": 4.0
+      }
+    },
+    {
+      "assertion_count": 9,
+      "assertion_rate": 1.0,
+      "assertions_passed": 9,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 3,
+        "max": 0.9830838032276881,
+        "median": 0.9784701727224345,
+        "min": 0.9775715390564579,
+        "p95": 0.9830838032276881
+      },
+      "context_growth_pct": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "context_pct": {
+        "count": 3,
+        "max": 70.2,
+        "median": 62.6,
+        "min": 62.3,
+        "p95": 70.2
+      },
+      "context_peak_pct": {
+        "count": 3,
+        "max": 70.2,
+        "median": 62.6,
+        "min": 62.3,
+        "p95": 70.2
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 17572.0,
+        "median": 13682.0,
+        "min": 11631.0,
+        "p95": 17572.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 3,
+        "max": 20688.0,
+        "median": 20669.0,
+        "min": 20572.0,
+        "p95": 20688.0
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_leakage": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_persistence": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_retrieval": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "memory_source_accuracy": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mode": "warm",
+      "output_tokens": {
+        "count": 3,
+        "max": 41.0,
+        "median": 36.0,
+        "min": 33.0,
+        "p95": 41.0
+      },
+      "passed": 3,
+      "provider": "codex",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 16256.0,
+        "median": 12404.0,
+        "min": 10570.0,
+        "p95": 16256.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "reasoning_output_tokens": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "repetitions": 3,
+      "scenario": "researcher-delegation",
+      "source_paths": [],
+      "source_recall": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 2.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_growth_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_peak_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 6997.0,
+        "median": 6209.0,
+        "min": 5738.0,
+        "p95": 6997.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 5,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "memory_leakage": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "memory_persistence": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_retrieval": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_source_accuracy": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mode": "cold",
+      "output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "passed": 3,
+      "provider": "claude",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 6644.0,
+        "median": 5942.0,
+        "min": 5432.0,
+        "p95": 6644.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 4.0,
+        "median": 4.0,
+        "min": 2.0,
+        "p95": 4.0
+      },
+      "reasoning_output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "repetitions": 3,
+      "scenario": "vault-recall-and-persistence",
+      "source_paths": [
+        "personal/Workspace/People/Ada.md"
+      ],
+      "source_recall": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 6.0,
+        "median": 6.0,
+        "min": 3.0,
+        "p95": 6.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_growth_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_peak_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 6992.0,
+        "median": 6227.0,
+        "min": 5189.0,
+        "p95": 6992.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 5,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      },
+      "memory_leakage": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "memory_persistence": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_retrieval": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_source_accuracy": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mode": "restart",
+      "output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "passed": 3,
+      "provider": "claude",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 6759.0,
+        "median": 5933.0,
+        "min": 4797.0,
+        "p95": 6759.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 4.0,
+        "median": 4.0,
+        "min": 2.0,
+        "p95": 4.0
+      },
+      "reasoning_output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "repetitions": 3,
+      "scenario": "vault-recall-and-persistence",
+      "source_paths": [
+        "personal/Workspace/People/Ada.md"
+      ],
+      "source_recall": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 6.0,
+        "median": 6.0,
+        "min": 3.0,
+        "p95": 6.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_growth_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "context_peak_pct": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 7273.0,
+        "median": 5463.0,
+        "min": 4687.0,
+        "p95": 7273.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 4,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "memory_leakage": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "memory_persistence": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_retrieval": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_source_accuracy": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mode": "warm",
+      "output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "passed": 3,
+      "provider": "claude",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 6981.0,
+        "median": 5095.0,
+        "min": 4226.0,
+        "p95": 6981.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 4.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 4.0
+      },
+      "reasoning_output_tokens": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "repetitions": 3,
+      "scenario": "vault-recall-and-persistence",
+      "source_paths": [
+        "personal/Workspace/People/Ada.md"
+      ],
+      "source_recall": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 6.0,
+        "median": 3.0,
+        "min": 3.0,
+        "p95": 6.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 3,
+        "max": 0.9556042205853076,
+        "median": 0.9540846750149076,
+        "min": 0.9428403064230996,
+        "p95": 0.9556042205853076
+      },
+      "context_growth_pct": {
+        "count": 3,
+        "max": 15.700000000000003,
+        "median": 15.5,
+        "min": 15.5,
+        "p95": 15.700000000000003
+      },
+      "context_pct": {
+        "count": 3,
+        "max": 53.6,
+        "median": 53.1,
+        "min": 53.1,
+        "p95": 53.6
+      },
+      "context_peak_pct": {
+        "count": 3,
+        "max": 53.6,
+        "median": 53.1,
+        "min": 53.1,
+        "p95": 53.6
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 6290.0,
+        "median": 5265.0,
+        "min": 5006.0,
+        "p95": 6290.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 3,
+        "max": 20364.0,
+        "median": 20124.0,
+        "min": 20092.0,
+        "p95": 20364.0
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_leakage": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "memory_persistence": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_retrieval": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_source_accuracy": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mode": "cold",
+      "output_tokens": {
+        "count": 3,
+        "max": 17.0,
+        "median": 17.0,
+        "min": 16.0,
+        "p95": 17.0
+      },
+      "passed": 3,
+      "provider": "codex",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 5901.0,
+        "median": 4705.0,
+        "min": 4506.0,
+        "p95": 5901.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "reasoning_output_tokens": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "repetitions": 3,
+      "scenario": "vault-recall-and-persistence",
+      "source_paths": [
+        "personal/Workspace/People/Ada.md"
+      ],
+      "source_recall": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 3,
+        "max": 0.988018928080008,
+        "median": 0.9871244635193133,
+        "min": 0.9683891977237591,
+        "p95": 0.988018928080008
+      },
+      "context_growth_pct": {
+        "count": 3,
+        "max": 35.2,
+        "median": 23.1,
+        "min": 23.099999999999994,
+        "p95": 35.2
+      },
+      "context_pct": {
+        "count": 3,
+        "max": 92.5,
+        "median": 72.1,
+        "min": 72.0,
+        "p95": 92.5
+      },
+      "context_peak_pct": {
+        "count": 3,
+        "max": 92.5,
+        "median": 72.1,
+        "min": 72.0,
+        "p95": 92.5
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 9160.0,
+        "median": 6570.0,
+        "min": 5267.0,
+        "p95": 9160.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 3,
+        "max": 30401.0,
+        "median": 29824.0,
+        "min": 29797.0,
+        "p95": 30401.0
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 4,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_leakage": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "memory_persistence": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_retrieval": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_source_accuracy": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mode": "restart",
+      "output_tokens": {
+        "count": 3,
+        "max": 17.0,
+        "median": 16.0,
+        "min": 16.0,
+        "p95": 17.0
+      },
+      "passed": 3,
+      "provider": "codex",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 8614.0,
+        "median": 6030.0,
+        "min": 4886.0,
+        "p95": 8614.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "reasoning_output_tokens": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "repetitions": 3,
+      "scenario": "vault-recall-and-persistence",
+      "source_paths": [
+        "personal/Workspace/People/Ada.md"
+      ],
+      "source_recall": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 4.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 4.0
+      }
+    },
+    {
+      "assertion_count": 15,
+      "assertion_rate": 1.0,
+      "assertions_passed": 15,
+      "cache_read_share": {
+        "count": 0,
+        "max": null,
+        "median": null,
+        "min": null,
+        "p95": null
+      },
+      "cached_input_share": {
+        "count": 3,
+        "max": 0.9810407422347721,
+        "median": 0.9747698827892193,
+        "min": 0.9685359896556678,
+        "p95": 0.9810407422347721
+      },
+      "context_growth_pct": {
+        "count": 3,
+        "max": 19.19999999999999,
+        "median": 16.099999999999994,
+        "min": 5.0,
+        "p95": 19.19999999999999
+      },
+      "context_pct": {
+        "count": 3,
+        "max": 100.0,
+        "median": 99.6,
+        "min": 85.1,
+        "p95": 100.0
+      },
+      "context_peak_pct": {
+        "count": 3,
+        "max": 100.0,
+        "median": 99.6,
+        "min": 85.1,
+        "p95": 100.0
+      },
+      "elapsed_ms": {
+        "count": 3,
+        "max": 4989.0,
+        "median": 4744.0,
+        "min": 4487.0,
+        "p95": 4989.0
+      },
+      "failed": 0,
+      "input_tokens": {
+        "count": 3,
+        "max": 30202.0,
+        "median": 24790.0,
+        "min": 20881.0,
+        "p95": 30202.0
+      },
+      "mcp_errors": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "mcp_tool_count": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mcp_tool_duration_ms": {
+        "count": 3,
+        "max": 2.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 2.0
+      },
+      "memory_leakage": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "memory_persistence": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_retrieval": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "memory_source_accuracy": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "mode": "warm",
+      "output_tokens": {
+        "count": 3,
+        "max": 17.0,
+        "median": 16.0,
+        "min": 16.0,
+        "p95": 17.0
+      },
+      "passed": 3,
+      "provider": "codex",
+      "provider_duration_ms": {
+        "count": 3,
+        "max": 4527.0,
+        "median": 4181.0,
+        "min": 3994.0,
+        "p95": 4527.0
+      },
+      "provider_tool_count": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "reasoning_output_tokens": {
+        "count": 3,
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "repetitions": 3,
+      "scenario": "vault-recall-and-persistence",
+      "source_paths": [
+        "personal/Workspace/People/Ada.md"
+      ],
+      "source_recall": {
+        "count": 3,
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0,
+        "p95": 1.0
+      },
+      "tool_count": {
+        "count": 3,
+        "max": 2.0,
+        "median": 2.0,
+        "min": 2.0,
+        "p95": 2.0
+      }
+    }
+  ],
+  "modes": [
+    "cold",
+    "warm",
+    "restart"
+  ],
+  "providers": [
+    "claude",
+    "codex"
+  ],
+  "repetitions": 3,
+  "revision": "82490771a724919651db2cb375e33f7e5694c5c5",
+  "suite": "Ciaobot public release scorecard",
+  "version": "0.9.0"
+}

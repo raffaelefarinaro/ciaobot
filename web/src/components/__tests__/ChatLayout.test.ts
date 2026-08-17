@@ -117,6 +117,64 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+  it('reports post-archive tidying in the home attention summary', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    // The status line renders next to the compact face even when the tidied
+    // chat is the only chat left. It counts neither as attention nor as a
+    // working agent — only in the muted tidying fragment.
+    store.chats = [{
+      chat_id: 'tidy-chat',
+      project_id: 'project-1',
+      title: 'Archived chat',
+      archived: true,
+      local: true,
+      last_activity_at: '2026-08-12T11:00:00Z',
+      last_read_at: '2026-08-12T11:00:00Z',
+      postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+    }] as unknown as typeof store.chats
+    store.activeChatId = null
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.empty-status-text').text()).toBe('nothing needs your attention. no agents working. 1 chat tidying up.')
+    wrapper.unmount()
+  })
+
   it('keeps the mobile sidebar closed when the chat close button is clicked', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
@@ -187,9 +245,9 @@ describe('ChatLayout', () => {
 
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
-      { name: 'client', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
+      { name: 'client', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
     ]
     store.activeWorkspace = 'personal'
     store.bootstrapped = true
@@ -242,8 +300,8 @@ describe('ChatLayout', () => {
 
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
     ]
     store.activeWorkspace = 'personal'
     store.bootstrapped = true
@@ -741,6 +799,11 @@ describe('ChatLayout', () => {
 
 describe('ChatLayout home arrow navigation', () => {
   beforeEach(() => {
+    // The store restores the persisted active workspace on creation, and an
+    // earlier test persists 'work' via switchWorkspace. Without a clean slate
+    // the arrow-anchoring tests here would start on a different lane than the
+    // fixture describes, depending on which tests ran first in the file.
+    localStorage.clear()
     setActivePinia(createPinia())
     if (!Element.prototype.scrollIntoView) {
       Element.prototype.scrollIntoView = () => {}
@@ -771,8 +834,8 @@ describe('ChatLayout home arrow navigation', () => {
 
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
     ]
     store.projects = [
       { project_id: 'personal-project', name: 'General', workspace: 'personal' },

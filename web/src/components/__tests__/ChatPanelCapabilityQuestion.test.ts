@@ -63,7 +63,6 @@ function makeChat(overrides: Partial<ChatInfo> = {}): ChatInfo {
     title: 'cap test',
     model: 'deepseek-v4-flash:cloud',
     provider: 'claude',
-    model_bucket: 'ollama',
     mode: 'bypass',
     session_id: 'sess-1',
     created_at: '2026-08-11T00:00:00Z',

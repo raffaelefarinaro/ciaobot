@@ -10,7 +10,7 @@ metadata:
 > **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 ```bash
-scripts/gws-profile.sh <personal|work> gmail <resource> <method> [flags]
+scripts/gws-profile.sh "$GWS_PROFILE" gmail <resource> <method> [flags]
 ```
 
 ## Helper Commands
@@ -45,10 +45,10 @@ Before calling any API method, inspect it:
 
 ```bash
 # Browse resources and methods
-scripts/gws-profile.sh <personal|work> gmail --help
+scripts/gws-profile.sh "$GWS_PROFILE" gmail --help
 
 # Inspect a method's required params, types, and defaults
-scripts/gws-profile.sh <personal|work> schema gmail.<resource>.<method>
+scripts/gws-profile.sh "$GWS_PROFILE" schema gmail.<resource>.<method>
 ```
 
 Use `gws schema` output to build your `--params` and `--json` flags.

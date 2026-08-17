@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { api } from '../lib/api'
 import type {
   Loop,
+  RuntimeProvider,
   Schedule,
   StatusResponse,
   ModelsResponse,
@@ -30,7 +31,7 @@ export interface ScheduleUpdate {
   web_project_id?: string | null
   workspace?: string
   model?: string
-  provider?: 'claude' | 'codex' | ''
+  provider?: RuntimeProvider | ''
   enabled?: boolean
   archive_policy?: ScheduleArchivePolicy
   title?: string
@@ -107,7 +108,7 @@ export const useTaskStore = defineStore('tasks', () => {
     model?: string,
     runAtDate?: string | null,
     archivePolicy?: ScheduleArchivePolicy,
-    provider?: 'claude' | 'codex',
+    provider?: RuntimeProvider,
   ) {
     const body: Record<string, unknown> = { time, prompt, timezone, days_of_week: daysOfWeek, frequency, day_of_month: dayOfMonth }
     if (archivePolicy) body.archive_policy = archivePolicy

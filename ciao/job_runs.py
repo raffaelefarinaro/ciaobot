@@ -18,11 +18,12 @@ log pattern in ``ciao/error_log.py``.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -45,6 +46,56 @@ def configure(runtime_dir: Path | str) -> None:
     regardless of the process cwd. Tests can point it at a temp dir."""
     global _runtime_dir_override
     _runtime_dir_override = Path(runtime_dir)
+
+
+# ── Live state ─────────────────────────────────────────────────────────────
+# The recorder above only writes when a job *finishes*, which is why nothing
+# in the app could ever say "this is running right now". These two additions
+# close that gap: an in-memory registry of runs currently inside a ``track``
+# block, and an optional publisher the server sets at startup so any tracked
+# job anywhere emits start/end without every call site needing the event bus.
+#
+# Both are strictly best-effort. A live-state error must never break the job
+# it is describing, so everything here swallows exceptions like the recorder.
+
+Publisher = Callable[[dict[str, Any]], None]
+
+_publisher: Publisher | None = None
+_inflight: dict[int, dict[str, Any]] = {}
+_run_token = itertools.count(1)
+
+
+def set_publisher(fn: Publisher | None) -> None:
+    """Install the sink for live job events. Called once at server startup,
+    alongside :func:`configure`. Passing ``None`` detaches it again, which is
+    what tests and the CLI want: without a publisher the tracking below is
+    pure bookkeeping."""
+    global _publisher
+    _publisher = fn
+
+
+def inflight_runs() -> list[dict[str, Any]]:
+    """Runs currently inside a ``track`` block, oldest first.
+
+    Read by ``/api/automation`` so a page load (or a reconnect that missed the
+    start event) still shows what is running, rather than waiting for the next
+    event to arrive."""
+    try:
+        return sorted(_inflight.values(), key=lambda r: r.get("started_at") or "")
+    except Exception:  # noqa: BLE001 — never break a caller over live state
+        logger.debug("Failed to read in-flight runs", exc_info=True)
+        return []
+
+
+def _publish(event: dict[str, Any]) -> None:
+    """Hand one live event to the publisher. Never raises."""
+    fn = _publisher
+    if fn is None:
+        return
+    try:
+        fn(event)
+    except Exception:  # noqa: BLE001 — a bad subscriber must not break the job
+        logger.debug("Job-run publisher failed for %s", event.get("job"), exc_info=True)
 
 
 def _runtime_dir() -> Path:
@@ -97,43 +148,71 @@ class JobSpec:
     # Bulk/manual variant of another job. Reported nested under the parent so
     # the page has one row per thing the user recognises.
     parent: str = ""
+    # Step of a larger pipeline. A step is not an automation: it has no trigger
+    # of its own, it runs inside another job's task on that job's trigger. The
+    # page used to list these as peers, which is why three of the four
+    # archive-time rows had a "trigger" reading "After session insights" — a
+    # position in a sequence, not a trigger. Reported nested under `step_of`.
+    step_of: str = ""
+    # When this step is skipped, in the user's terms. Shown on the nested row
+    # in place of a trigger sentence, because "when does this run?" is already
+    # answered by the pipeline it belongs to.
+    step_condition: str = ""
+    # Set on the job that *owns* a pipeline: the plain-language name of the
+    # whole thing, which is what the user recognises. The owning job keeps its
+    # own label for its own row inside the group.
+    pipeline_label: str = ""
 
 
 REGISTRY: tuple[JobSpec, ...] = (
     JobSpec("title", "Title generation", "content",
             "Names a chat from its first message.", True, True,
             trigger="When a new chat gets its first message."),
+    # The archive pipeline. All four run inside one `extract_and_append` task
+    # (ciao/insights.py), spawned once when a chat is archived — so they share
+    # one trigger and are reported as one group with four steps, in the order
+    # they actually execute.
     JobSpec("insights", "Session insights", "content",
             "Extracts durable insights from an archived session transcript.", True, True,
-            trigger="When a chat is archived."),
+            trigger="When a chat is archived.",
+            pipeline_label="When you archive a chat"),
     JobSpec("project_doc_update", "Project doc update", "content",
             "Folds a session's decisions and open loops into the project document.",
             True, True,
-            trigger="After session insights, for chats that belong to a project."),
+            trigger="After session insights, for chats that belong to a project.",
+            step_of="insights",
+            step_condition="if the chat belongs to a real project"),
+    JobSpec("trajectory", "Trajectory capture", "content",
+            "Records a structured trajectory of the session for skill mining.", False, True,
+            trigger="When a chat is archived. Feeds Skill evolution.",
+            step_of="insights",
+            # Runs in a `finally`, so a failed extraction still leaves a
+            # trajectory; and `run_archive_postprocess` writes one directly
+            # when insights is off or the chat is under the size gate.
+            step_condition="always — also runs standalone"),
     JobSpec("memory_proposals", "Memory proposals", "content",
             "Proposes durable facts from a session's insights.", False, True,
             trigger=(
                 "After session insights. The daily system-memory-curation "
                 "schedule then promotes them."
             ),
-            schedule_id="system-memory-curation"),
-    JobSpec("trajectory", "Trajectory capture", "content",
-            "Records a structured trajectory of the session for skill mining.", False, True,
-            trigger="When a chat is archived. Feeds Skill evolution."),
+            schedule_id="system-memory-curation",
+            step_of="insights",
+            step_condition="if insights produced output"),
     JobSpec("skill_evolution", "Skill evolution", "content",
             "Weekly: proposes skill edits from underperforming trajectories.", True, True,
             trigger="Weekly, via the system-skill-evolution schedule.",
             schedule_id="system-skill-evolution", schedule_only=True),
-    JobSpec("dependency_review", "Dependency review", "content",
-            "Weekly: reviews tracked dependency releases against the baseline.", True, True,
-            trigger="Weekly, via the system-dependency-review schedule.",
-            schedule_id="system-dependency-review", schedule_only=True),
     JobSpec("schedule_dispatch", "Scheduled dispatch", "content",
             "Fires scheduled chat turns and evaluates auto-archival.", True, True,
             trigger="Every time a schedule or routine is due."),
     JobSpec("schedule_attention_classifier", "Schedule attention classifier", "content",
             "Decides whether an auto-archive schedule result needs user attention.", True, False,
             trigger="After a scheduled run that auto-archives its chat."),
+    JobSpec("background_run", "Background command runs", "system",
+            "Runs one command in a tracked subprocess and wakes the chat that "
+            "started it.", False, True,
+            trigger="When a chat starts one with the background_run_start tool."),
     JobSpec("startup_sync", "Startup git sync", "system",
             "Commits and pulls the workspace on server startup.", False, False,
             trigger="On server startup."),
@@ -299,9 +378,35 @@ class RunHandle:
             self.extra.setdefault("skip_reason", reason)
 
 
+def _begin(handle: RunHandle, started_at: datetime) -> int:
+    """Register a run as in-flight and announce it. Never raises.
+
+    ``chat_id`` is lifted out of ``extra`` because that is how every live
+    surface keys this: the archive pipeline reports per chat. It must be in the
+    ``extra`` passed to ``track``, not set on the handle inside the block —
+    this event fires before the body runs."""
+    token = next(_run_token)
+    try:
+        record = {
+            "token": token,
+            "job": handle.job,
+            "label": handle.label,
+            "category": handle.category,
+            "model": handle.model,
+            "provider": handle.provider,
+            "started_at": started_at.isoformat(),
+            "chat_id": str(handle.extra.get("chat_id") or ""),
+        }
+        _inflight[token] = record
+        _publish({"event": "started", **record})
+    except Exception:  # noqa: BLE001 — live state must never break a job
+        logger.debug("Failed to open in-flight run %s", handle.job, exc_info=True)
+    return token
+
+
 def _finalize(
     handle: RunHandle, started_at: datetime, started_perf: float,
-    exc: BaseException | None,
+    exc: BaseException | None, token: int = 0,
 ) -> None:
     duration_ms = int((time.perf_counter() - started_perf) * 1000)
     status = handle.status
@@ -322,6 +427,24 @@ def _finalize(
         error=error,
         extra=handle.extra,
     ))
+    # Clear the live registry *after* the durable record is written, so a
+    # reader can never observe a job as neither running nor ever having run.
+    try:
+        _inflight.pop(token, None)
+        _publish({
+            "event": "finished",
+            "token": token,
+            "job": handle.job,
+            "label": handle.label,
+            "category": handle.category,
+            "status": status,
+            "error": error,
+            "duration_ms": duration_ms,
+            "chat_id": str(handle.extra.get("chat_id") or ""),
+            "extra": dict(handle.extra),
+        })
+    except Exception:  # noqa: BLE001 — live state must never break a job
+        logger.debug("Failed to close in-flight run %s", handle.job, exc_info=True)
 
 
 @contextmanager
@@ -336,6 +459,7 @@ def track_sync(
     handle = RunHandle(job, label, category, model, provider, extra)
     started_at = datetime.now(UTC)
     started_perf = time.perf_counter()
+    token = _begin(handle, started_at)
     exc: BaseException | None = None
     try:
         yield handle
@@ -343,7 +467,7 @@ def track_sync(
         exc = e
         raise
     finally:
-        _finalize(handle, started_at, started_perf, exc)
+        _finalize(handle, started_at, started_perf, exc, token)
 
 
 @asynccontextmanager
@@ -355,6 +479,7 @@ async def track(
     handle = RunHandle(job, label, category, model, provider, extra)
     started_at = datetime.now(UTC)
     started_perf = time.perf_counter()
+    token = _begin(handle, started_at)
     exc: BaseException | None = None
     try:
         yield handle
@@ -362,7 +487,7 @@ async def track(
         exc = e
         raise
     finally:
-        _finalize(handle, started_at, started_perf, exc)
+        _finalize(handle, started_at, started_perf, exc, token)
 
 
 def record_startup_phase(phase: Any) -> None:
@@ -520,14 +645,22 @@ def automation_summary(
 
     Registry jobs appear even when they never ran, so the page can explain
     them. Recorded jobs missing from the registry are kept for forward
-    compatibility. Three things are deliberately *not* reported as rows:
+    compatibility. Four things are deliberately *not* reported as rows:
 
     * retired jobs (:data:`RETIRED_JOBS`) — the code that ran them is gone;
     * a schedule-only job whose schedule is not installed here, when
       *installed_schedules* is supplied — nothing can trigger it;
-    * bulk variants of another job — reported as the parent's ``sub_jobs``.
+    * bulk variants of another job — reported as the parent's ``sub_jobs``;
+    * pipeline steps — reported as the owning job's ``steps``, because a step
+      shares its pipeline's trigger instead of having one of its own.
+
+    In-flight runs are merged in as ``running`` so a page load shows what is
+    happening now, not only what happened last time.
     """
     grouped = load_runs(limit_per_job)
+    running_jobs = {
+        str(run.get("job") or "") for run in inflight_runs()
+    }
     empty_stats = {
         "total_runs": 0,
         "success_rate": None,
@@ -547,6 +680,9 @@ def automation_summary(
             "schedule_id": spec.schedule_id,
             "schedule_only": spec.schedule_only,
             "one_time": spec.one_time,
+            "step_condition": spec.step_condition,
+            "pipeline_label": spec.pipeline_label,
+            "running": spec.job in running_jobs,
             "last_run": g["last_run"] if g else None,
             "recent": g["recent"] if g else [],
             "stats": g["stats"] if g else dict(empty_stats),
@@ -556,11 +692,15 @@ def automation_summary(
     by_job: dict[str, dict] = {}
     seen: set[str] = set()
     children: list[tuple[JobSpec, dict | None]] = []
+    steps: list[tuple[JobSpec, dict | None]] = []
     for spec in REGISTRY:
         seen.add(spec.job)
         g = grouped.get(spec.job)
         if spec.parent:
             children.append((spec, g))
+            continue
+        if spec.step_of:
+            steps.append((spec, g))
             continue
         if (
             spec.schedule_only
@@ -579,6 +719,14 @@ def automation_summary(
             out.append(entry(spec, g))
             continue
         parent.setdefault("sub_jobs", []).append(entry(spec, g))
+    # Steps keep REGISTRY order, which is execution order, so the group reads
+    # top-to-bottom as the pipeline actually runs.
+    for spec, g in steps:
+        owner = by_job.get(spec.step_of)
+        if owner is None:
+            out.append(entry(spec, g))
+            continue
+        owner.setdefault("steps", []).append(entry(spec, g))
     for job, g in grouped.items():
         if job in seen:
             continue
@@ -601,6 +749,9 @@ def automation_summary(
             "schedule_id": "",
             "schedule_only": False,
             "one_time": False,
+            "step_condition": "",
+            "pipeline_label": "",
+            "running": job in running_jobs,
             "last_run": g["last_run"],
             "recent": g["recent"],
             "stats": g["stats"],

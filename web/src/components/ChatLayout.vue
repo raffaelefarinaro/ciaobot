@@ -46,14 +46,14 @@
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
-            <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
+            <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
               <div class="empty-home-header">
-                <!-- With chats on screen the mark is decoration beside a status line, so it
+                <!-- With active chats or post-archive work on screen the mark is decoration beside a status line, so it
                      is a plain image: no button, no hover handlers, no greeting bubble. The
                      bubble belongs to the big first-run face below, where it is the only
                      thing on the screen and has room to be a greeting. Next to a sentence
                      that already reads "nothing needs you" it just collided with it. -->
-                <template v-if="store.activeChatsAll.length">
+                <template v-if="hasHomeActivity">
                   <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
                   <span class="empty-status-text">{{ homeStatus }}</span>
                 </template>
@@ -132,14 +132,14 @@
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
           <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
-          <div class="empty-state" :class="{ 'empty-state--active': store.activeChatsAll.length > 0 }">
+          <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
             <div class="empty-home-header">
-              <!-- With chats on screen the mark is decoration beside a status line, so it
+              <!-- With active chats or post-archive work on screen the mark is decoration beside a status line, so it
                    is a plain image: no button, no hover handlers, no greeting bubble. The
                    bubble belongs to the big first-run face below, where it is the only
                    thing on the screen and has room to be a greeting. Next to a sentence
                    that already reads "nothing needs you" it just collided with it. -->
-              <template v-if="store.activeChatsAll.length">
+              <template v-if="hasHomeActivity">
                 <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
                 <span class="empty-status-text">{{ homeStatus }}</span>
               </template>
@@ -200,6 +200,7 @@ import HomeRecentChats from './HomeRecentChats.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
+import { pendingPrompt } from '../lib/prompt'
 import { isDesktopApp } from '../lib/desktop'
 import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
 
@@ -432,6 +433,7 @@ const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings'>(() => {
 const viewShortcutsActive = computed(() =>
   viewMode.value !== 'settings'
   && !pendingConfirm.value
+  && !pendingPrompt.value
   && !fileViewer.isOpen,
 )
 const shortcutsActive = computed(() =>
@@ -455,6 +457,13 @@ const currentProjectId = computed(() => {
 // spent on something non-blocking, which the design system reserves for
 // "needs the user".
 const showGlobalNewChatActions = computed(() => !store.activeChatsAll.length)
+
+// Keep Home visibly alive while an archived chat is still being processed.
+// Post-archive work is not part of activeChatsAll, but it is still something
+// the home surface should report before the user starts a new chat.
+const hasHomeActivity = computed(() => (
+  store.activeChatsAll.length > 0 || store.postprocessingChats().length > 0
+))
 
 const generalWorkspaceActions = computed(() => {
   return store.workspaceOptions
@@ -484,6 +493,10 @@ const homeStatus = computed(() => {
   const working = chats.filter(chat =>
     store.isChatStreaming(chat.chat_id) || store.chatHasBackgroundAgents(chat.chat_id),
   ).length
+  // Post-archive tidying is background work too, just quieter: it never needs
+  // the user, so it reports itself in the same muted register as the lane
+  // headers' "N tidying up" fragment.
+  const tidying = store.postprocessingChats().length
   const needVerb = needs === 1 ? 'needs' : 'need'
   const needText = needs
     ? `${needs} chat${needs === 1 ? '' : 's'} ${needVerb} your attention`
@@ -491,7 +504,10 @@ const homeStatus = computed(() => {
   const workingText = working
     ? `${working} agent${working === 1 ? '' : 's'} still working`
     : 'no agents working'
-  return `${needText}. ${workingText}.`
+  const tidyingText = tidying
+    ? `${tidying} chat${tidying === 1 ? '' : 's'} tidying up`
+    : ''
+  return [needText, workingText, tidyingText].filter(Boolean).join('. ') + '.'
 })
 
 function workspaceLabel(name: string): string {
@@ -655,12 +671,29 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
+  const bare = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+
   // Workspace navigation is also useful from the automations view, where the
   // chat-only shortcuts are disabled. Match the visible workspace order and
   // keep the shortcut out of text fields so numbers remain typeable.
-  if (viewShortcutsActive.value && !isTypingTarget(e.target)
-    && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
-    && /^[1-9]$/.test(e.key)) {
+  //
+  // An open AskUserQuestion card gets first refusal on the same digits. Two
+  // features want 1-9, and the card wins *while it is up*: the model is blocked
+  // on that prompt, the numbers are printed on the options right there, and
+  // switching workspace mid-question is not what anyone means by pressing them.
+  // The claim is scoped to the card's lifetime instead of a global mode flag,
+  // so workspace switching is untouched the rest of the time and this function
+  // keeps no "is a card open" state. Same delegation shape as the home grid's
+  // arrows below: the child says whether it used the key, and only then do we
+  // preventDefault. Both branches stay inside the existing viewShortcutsActive
+  // and typing-target gates, so a confirm dialog or the file viewer still
+  // swallows the digit and the composer still types it.
+  if (viewShortcutsActive.value && !isTypingTarget(e.target) && !e.defaultPrevented
+    && bare && /^[1-9]$/.test(e.key)) {
+    if (chatPanelRef.value?.handleQuestionShortcut?.(e)) {
+      e.preventDefault()
+      return
+    }
     const workspace = store.workspaceOptions[Number(e.key) - 1]
     if (workspace) {
       e.preventDefault()
@@ -668,6 +701,18 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       void store.switchWorkspace(workspace.name, {
         transition: viewMode.value !== 'schedules',
       })
+      return
+    }
+  }
+
+  // Enter submits a single-select question card that already has an answer
+  // picked, so digit-then-Enter never has to reach for the mouse. ChatPanel
+  // declines the key whenever a control is focused, which leaves Tab+Enter on
+  // the card's own buttons alone.
+  if (e.key === 'Enter' && viewShortcutsActive.value && !isTypingTarget(e.target)
+    && !e.defaultPrevented && bare) {
+    if (chatPanelRef.value?.handleQuestionShortcut?.(e)) {
+      e.preventDefault()
       return
     }
   }
@@ -683,7 +728,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // bell), so this never steals the key from them.
   if (e.key === 'Escape') {
     // The confirm dialog and the file viewer own Esc while they are up.
-    if (pendingConfirm.value || fileViewer.isOpen) return
+    if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
     // A nested control that handled the key already, without claiming it. Popups
     // like ModelSelector close on Esc but do not stopPropagation, and treating
     // that press as "go home" both discarded their dismissal and navigated away

@@ -18,7 +18,9 @@ from importlib import resources
 from pathlib import Path
 from typing import IO, Any, Iterable, Literal
 
-Provider = Literal["claude", "codex"]
+# Validated at runtime against ciao.provider_registry; a plain str so adding a
+# provider does not require editing a Literal.
+Provider = str
 Surface = Literal["legacy", "mcp"]
 
 
@@ -181,7 +183,6 @@ class IsolatedChatServer:
                 "CIAO_BENCHMARK_MODE": "true",
                 "CIAO_AUTO_SYNC_ON_START": "false",
                 "CIAO_AUTO_VAULT_INDEX": "false",
-                "CIAO_OLLAMA_LOCAL_DISCOVERY": "false",
                 "CIAO_INSIGHTS_DISABLED": "1",
                 "CIAO_TRAJECTORIES_DISABLED": "1",
                 "CIAO_SKILL_EVOLUTION_DISABLED": "1",
@@ -272,8 +273,6 @@ class IsolatedChatServer:
             "mode": "bypass",
             "control_surface": surface,
         }
-        if provider == "claude":
-            payload["model_bucket"] = "work"
         result: dict[str, Any] = _json_request(
             self.base_url,
             f"/api/projects/{project_id}/chats",

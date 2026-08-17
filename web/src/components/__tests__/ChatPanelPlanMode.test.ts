@@ -5,7 +5,6 @@ import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h, nextTick } from 'vue'
 import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
 import { api } from '../../lib/api'
-import { readChatDraft, writeChatDraft } from '../../lib/chatDrafts'
 import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
@@ -25,6 +24,18 @@ const ChildStub = defineComponent({
   name: 'ChildStub',
   setup() {
     return () => h('div')
+  },
+})
+
+// The Mode row lives in the model picker's header slot, so the stub has to
+// render slots for the mode chips to be reachable from these tests.
+const ModelSelectorStub = defineComponent({
+  name: 'ModelSelectorStub',
+  setup(_, { slots }) {
+    return () => h('div', { class: 'model-selector' }, [
+      slots.header?.(),
+      slots.footer?.(),
+    ])
   },
 })
 
@@ -156,7 +167,7 @@ async function mountPanel(options: {
       plugins: [pinia],
       stubs: {
         PaneHeader: PaneHeaderStub,
-        ModelSelector: ChildStub,
+        ModelSelector: ModelSelectorStub,
         VoiceRecorder: ChildStub,
         SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
@@ -173,7 +184,15 @@ function textareaValue(wrapper: VueWrapper): string {
   return (wrapper.get('textarea.chat-input').element as HTMLTextAreaElement).value
 }
 
-describe('ChatPanel /plan interactions', () => {
+/** Open the model picker and click a Mode row chip by its visible label. */
+async function pickMode(wrapper: VueWrapper, label: string): Promise<void> {
+  await wrapper.get('button.model-picker-btn').trigger('click')
+  const chip = wrapper.findAll('button.mode-row-chip').find(button => button.text() === label)
+  if (!chip) throw new Error(`no mode chip labelled ${label}`)
+  await chip.trigger('click')
+}
+
+describe('ChatPanel plan mode', () => {
   beforeEach(() => {
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
@@ -187,12 +206,11 @@ describe('ChatPanel /plan interactions', () => {
     localStorage.clear()
   })
 
-  it('updates the originating chat and never sends /plan as a message', async () => {
+  it('enters plan mode from the Mode row in the model picker', async () => {
     const { wrapper, updateChat, sendMessage } = await mountPanel()
     updateChat.mockResolvedValue()
 
-    await wrapper.get('textarea.chat-input').setValue('/plan')
-    await wrapper.get('button.send-btn').trigger('click')
+    await pickMode(wrapper, 'Plan')
     await flushPromises()
 
     expect(updateChat).toHaveBeenCalledWith('chat-1', { mode: 'plan' })
@@ -200,39 +218,17 @@ describe('ChatPanel /plan interactions', () => {
     wrapper.unmount()
   })
 
-  it('keeps staged images, file comments, and chat comments after a successful toggle', async () => {
-    const { wrapper, store, updateChat } = await mountPanel()
-    store.pendingImages = ['image-ref']
-    store.pendingComments = [{
-      id: 'file-comment',
-      path: 'notes.md',
-      selection: 'line',
-      comment: 'Check this',
-    }]
-    store.pendingChatComments = [{
-      id: 'chat-comment',
-      selection: 'reply',
-      comment: 'Follow up',
-      messageId: 'message-1',
-      messageIndex: 0,
-      messageRole: 'assistant',
-      occurrenceIndex: 0,
-      paragraphIndex: 0,
-    }]
-    const before = {
-      images: [...store.pendingImages],
-      comments: [...store.pendingComments],
-      chatComments: [...store.pendingChatComments],
-    }
-    updateChat.mockResolvedValue()
+  it('sends /plan as an ordinary message now that the command is gone', async () => {
+    const { wrapper, updateChat, sendMessage } = await mountPanel()
+    sendMessage.mockResolvedValue()
 
     await wrapper.get('textarea.chat-input').setValue('/plan')
     await wrapper.get('button.send-btn').trigger('click')
     await flushPromises()
 
-    expect(store.pendingImages).toEqual(before.images)
-    expect(store.pendingComments).toEqual(before.comments)
-    expect(store.pendingChatComments).toEqual(before.chatComments)
+    expect(updateChat).not.toHaveBeenCalled()
+    expect(sendMessage).toHaveBeenCalled()
+    expect(String(sendMessage.mock.calls[0]?.[1] ?? '')).toBe('/plan')
     wrapper.unmount()
   })
 
@@ -260,92 +256,43 @@ describe('ChatPanel /plan interactions', () => {
     wrapper.unmount()
   })
 
-  it('does not erase a new message typed while the PATCH is pending', async () => {
-    const { wrapper, updateChat } = await mountPanel()
-    const pending = deferred<void>()
-    updateChat.mockReturnValue(pending.promise)
-
-    await wrapper.get('textarea.chat-input').setValue('/plan')
-    await wrapper.get('button.send-btn').trigger('click')
-    await wrapper.get('textarea.chat-input').setValue('next message')
-    pending.resolve()
-    await flushPromises()
-
-    expect(textareaValue(wrapper)).toBe('next message')
-    expect(readChatDraft('chat-1')).toBe('next message')
-    wrapper.unmount()
-  })
-
-  it('does not clear another chat draft when the active chat changes while pending', async () => {
+  it('shows an error and stays out of plan mode when the PATCH fails', async () => {
     const { wrapper, store, updateChat } = await mountPanel()
-    const pending = deferred<void>()
-    updateChat.mockReturnValue(pending.promise)
+    updateChat.mockRejectedValueOnce(new Error('PATCH failed')).mockResolvedValueOnce()
 
-    await wrapper.get('textarea.chat-input').setValue('/plan')
-    await wrapper.get('button.send-btn').trigger('click')
-    store.activeChatId = 'chat-2'
-    writeChatDraft('chat-2', 'draft in chat two')
-    pending.resolve()
+    await pickMode(wrapper, 'Plan')
     await flushPromises()
 
-    expect(readChatDraft('chat-2')).toBe('draft in chat two')
-    wrapper.unmount()
-  })
-
-  it('retains /plan and shows an error on failure, then allows retry', async () => {
-    const { wrapper, store, updateChat } = await mountPanel()
-    store.pendingImages = ['image-ref']
-    store.pendingComments = [{
-      id: 'file-comment',
-      path: 'notes.md',
-      selection: 'line',
-      comment: 'Check this',
-    }]
-    store.pendingChatComments = [{
-      id: 'chat-comment',
-      selection: 'reply',
-      comment: 'Follow up',
-      messageId: 'message-1',
-      messageIndex: 0,
-      messageRole: 'assistant',
-      occurrenceIndex: 0,
-      paragraphIndex: 0,
-    }]
-    const before = {
-      images: [...store.pendingImages],
-      comments: [...store.pendingComments],
-      chatComments: [...store.pendingChatComments],
-    }
-    const error = new Error('PATCH failed')
-    updateChat.mockRejectedValueOnce(error).mockResolvedValueOnce()
-
-    await wrapper.get('textarea.chat-input').setValue('/plan')
-    await wrapper.get('button.send-btn').trigger('click')
-    await flushPromises()
-
-    expect(textareaValue(wrapper)).toBe('/plan')
     expect(store.toasts.at(-1)).toMatchObject({
       title: 'Could not change plan mode',
       variant: 'error',
     })
-    expect(store.pendingImages).toEqual(before.images)
-    expect(store.pendingComments).toEqual(before.comments)
-    expect(store.pendingChatComments).toEqual(before.chatComments)
 
-    await wrapper.get('button.send-btn').trigger('click')
+    await pickMode(wrapper, 'Plan')
     await flushPromises()
 
     expect(updateChat).toHaveBeenNthCalledWith(2, 'chat-1', { mode: 'plan' })
-    expect(textareaValue(wrapper)).toBe('')
     wrapper.unmount()
   })
 
-  it('keeps the built-in /plan picker entry when the command API fails', async () => {
+  it('leaves the composer untouched when the mode changes', async () => {
+    const { wrapper, updateChat } = await mountPanel()
+    updateChat.mockResolvedValue()
+
+    await wrapper.get('textarea.chat-input').setValue('half-written prompt')
+    await pickMode(wrapper, 'Plan')
+    await flushPromises()
+
+    expect(textareaValue(wrapper)).toBe('half-written prompt')
+    wrapper.unmount()
+  })
+
+  it('leaves the slash picker empty when the command API fails', async () => {
     const { wrapper } = await mountPanel({ commandsFail: true })
 
     await wrapper.get('textarea.chat-input').setValue('/')
 
-    expect(wrapper.find('.commands-picker-name').text()).toBe('/plan')
+    expect(wrapper.find('.commands-picker-name').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -390,12 +337,11 @@ describe('ChatPanel /plan interactions', () => {
     wrapper.unmount()
   })
 
-  it('restores auto after /plan enters and exits plan mode', async () => {
+  it('restores auto after the picker enters and the chip exits plan mode', async () => {
     const first = await mountPanel({ mode: 'auto' })
     first.updateChat.mockResolvedValue()
 
-    await first.wrapper.get('textarea.chat-input').setValue('/plan')
-    await first.wrapper.get('button.send-btn').trigger('click')
+    await pickMode(first.wrapper, 'Plan')
     await flushPromises()
 
     expect(first.updateChat).toHaveBeenCalledWith('chat-1', { mode: 'plan' })
@@ -403,27 +349,24 @@ describe('ChatPanel /plan interactions', () => {
 
     const second = await mountPanel({ mode: 'plan' })
     second.updateChat.mockResolvedValue()
-    await second.wrapper.get('textarea.chat-input').setValue('/plan')
-    await second.wrapper.get('button.send-btn').trigger('click')
+    await second.wrapper.get('button.plan-mode-chip').trigger('click')
     await flushPromises()
 
     expect(second.updateChat).toHaveBeenCalledWith('chat-1', { mode: 'auto' })
     second.wrapper.unmount()
   })
 
-  it('restores normal after /plan enters, reloads, and exits plan mode', async () => {
+  it('restores normal after entering plan, reloading, and exiting', async () => {
     const first = await mountPanel({ mode: 'normal' })
     first.updateChat.mockResolvedValue()
 
-    await first.wrapper.get('textarea.chat-input').setValue('/plan')
-    await first.wrapper.get('button.send-btn').trigger('click')
+    await pickMode(first.wrapper, 'Plan')
     await flushPromises()
     first.wrapper.unmount()
 
     const second = await mountPanel({ mode: 'plan' })
     second.updateChat.mockResolvedValue()
-    await second.wrapper.get('textarea.chat-input').setValue('/plan')
-    await second.wrapper.get('button.send-btn').trigger('click')
+    await second.wrapper.get('button.plan-mode-chip').trigger('click')
     await flushPromises()
 
     expect(second.updateChat).toHaveBeenCalledWith('chat-1', { mode: 'normal' })
@@ -435,8 +378,7 @@ describe('ChatPanel /plan interactions', () => {
     const { wrapper, updateChat } = await mountPanel({ mode: 'plan' })
     updateChat.mockResolvedValue()
 
-    await wrapper.get('textarea.chat-input').setValue('/plan')
-    await wrapper.get('button.send-btn').trigger('click')
+    await wrapper.get('button.plan-mode-chip').trigger('click')
     await flushPromises()
 
     expect(updateChat).toHaveBeenCalledWith('chat-1', { mode: 'auto' })
@@ -447,15 +389,13 @@ describe('ChatPanel /plan interactions', () => {
     const first = await mountPanel({ mode: 'bypass' })
     first.updateChat.mockResolvedValue()
 
-    await first.wrapper.get('textarea.chat-input').setValue('/plan')
-    await first.wrapper.get('button.send-btn').trigger('click')
+    await pickMode(first.wrapper, 'Plan')
     await flushPromises()
     first.wrapper.unmount()
 
     const second = await mountPanel({ mode: 'plan' })
     second.updateChat.mockResolvedValue()
-    await second.wrapper.get('textarea.chat-input').setValue('/plan')
-    await second.wrapper.get('button.send-btn').trigger('click')
+    await second.wrapper.get('button.plan-mode-chip').trigger('click')
     await flushPromises()
 
     expect(second.updateChat).toHaveBeenCalledWith('chat-1', { mode: 'bypass' })
@@ -474,13 +414,25 @@ describe('ChatPanel /plan interactions', () => {
     wrapper.unmount()
   })
 
+  it('drops the return marker when the picker leaves plan for another mode', async () => {
+    localStorage.setItem(planReturnModeStorageKey('chat-1'), 'bypass')
+    const { wrapper, updateChat } = await mountPanel({ mode: 'plan' })
+    updateChat.mockResolvedValue()
+
+    await pickMode(wrapper, 'Manual')
+    await flushPromises()
+
+    expect(updateChat).toHaveBeenCalledWith('chat-1', { mode: 'normal' })
+    expect(localStorage.getItem(planReturnModeStorageKey('chat-1'))).toBeNull()
+    wrapper.unmount()
+  })
+
   it('removes any return marker when entering plan mode fails', async () => {
     localStorage.setItem(planReturnModeStorageKey('chat-1'), 'bypass')
     const { wrapper, updateChat } = await mountPanel({ mode: 'auto' })
     updateChat.mockRejectedValue(new Error('PATCH failed'))
 
-    await wrapper.get('textarea.chat-input').setValue('/plan')
-    await wrapper.get('button.send-btn').trigger('click')
+    await pickMode(wrapper, 'Plan')
     await flushPromises()
 
     expect(localStorage.getItem(planReturnModeStorageKey('chat-1'))).toBeNull()
@@ -492,14 +444,12 @@ describe('ChatPanel /plan interactions', () => {
     const { wrapper, updateChat } = await mountPanel({ mode: 'plan' })
     updateChat.mockRejectedValueOnce(new Error('PATCH failed')).mockResolvedValueOnce()
 
-    await wrapper.get('textarea.chat-input').setValue('/plan')
-    await wrapper.get('button.send-btn').trigger('click')
+    await wrapper.get('button.plan-mode-chip').trigger('click')
     await flushPromises()
 
     expect(localStorage.getItem(planReturnModeStorageKey('chat-1'))).toBe('bypass')
-    expect(textareaValue(wrapper)).toBe('/plan')
 
-    await wrapper.get('button.send-btn').trigger('click')
+    await wrapper.get('button.plan-mode-chip').trigger('click')
     await flushPromises()
 
     expect(updateChat).toHaveBeenNthCalledWith(2, 'chat-1', { mode: 'bypass' })

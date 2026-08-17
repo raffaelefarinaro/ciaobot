@@ -1,4 +1,8 @@
-import type { ModelsResponse, RoutineSettings } from './types'
+import type { ModelsResponse, RuntimeProvider } from './types'
+
+export function providerForModelSection(sectionKey: string): RuntimeProvider {
+  return sectionKey === 'anthropic' ? 'claude' : (sectionKey as RuntimeProvider)
+}
 
 export interface ModelSection {
   key: string
@@ -111,9 +115,6 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
   if (!response) return []
   const sections: ModelSection[] = []
 
-  const ollamaModels = orderedUnique(response.ollama_models || [])
-  const openrouterModels = orderedUnique(response.openrouter_models || [])
-
   sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS })
 
   const codexModels = orderedUnique(response.codex_models || response.provider_models?.codex || [])
@@ -148,95 +149,18 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
     })
   }
 
-  // Ollama: cloud allowlist plus locally discovered daemon models.
-  const local = orderedUnique(response.ollama_local_models || [])
-  const allOllama = orderedUnique([...local, ...ollamaModels])
-  if (allOllama.length) {
-    const modelBadges = providerModelBadges('ollama', allOllama, response.alias_tiers, local)
+  // opencode is bring-your-own-provider: its catalog is whatever backends the
+  // user connected, already namespaced as `providerID/modelID`.
+  const opencodeModels = orderedUnique(
+    response.opencode_models || response.provider_models?.opencode || [],
+  )
+  if (opencodeModels.length) {
+    const modelBadges = providerModelBadges('opencode', opencodeModels, response.alias_tiers)
     sections.push({
-      key: 'ollama',
-      label: 'Ollama',
-      models: sortModelsByTier(allOllama, modelBadges),
+      key: 'opencode',
+      label: 'opencode',
+      models: sortModelsByTier(opencodeModels, modelBadges),
       modelBadges,
-    })
-  }
-
-  if (openrouterModels.length) {
-    const modelBadges = providerModelBadges('openrouter', openrouterModels, response.alias_tiers)
-    sections.push({
-      key: 'openrouter',
-      label: 'OpenRouter',
-      models: sortModelsByTier(openrouterModels, modelBadges),
-      modelBadges,
-    })
-  }
-
-  for (const provider of response.custom_providers || []) {
-    const models = orderedUnique(provider.models || [])
-    if (!models.length) continue
-    sections.push({
-      key: `custom:${provider.id}`,
-      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
-      models,
-      modelLabels: provider.model_labels,
-    })
-  }
-
-  return sections
-}
-
-/**
- * Build sections for the settings pickers from `/api/settings/routines`.
- */
-export function sectionsFromModelOptions(
-  options: RoutineSettings['model_options'] | undefined | null,
-  backends: Record<string, boolean> = {},
-  aliasTiers: AliasTierMap | undefined | null = undefined,
-): ModelSection[] {
-  if (!options) return []
-  const sections: ModelSection[] = []
-
-  if (options.anthropic?.length) {
-    sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS })
-  }
-
-  const ollamaAvailable = !!backends.ollama
-  const local = orderedUnique(options.ollama_local || [])
-  const ollama = orderedUnique([...local, ...(options.ollama_cloud || [])])
-  if (ollama.length) {
-    const modelBadges = providerModelBadges('ollama', ollama, aliasTiers, local)
-    sections.push({
-      key: 'ollama',
-      label: 'Ollama',
-      models: sortModelsByTier(ollama, modelBadges),
-      modelBadges,
-      disabled: !ollamaAvailable,
-      hint: ollamaAvailable ? undefined : 'Set an Ollama API key or install local models to enable this section.',
-    })
-  }
-
-  const openrouterAvailable = !!backends.openrouter
-  const openrouter = orderedUnique(options.openrouter || [])
-  if (openrouter.length) {
-    const modelBadges = providerModelBadges('openrouter', openrouter, aliasTiers)
-    sections.push({
-      key: 'openrouter',
-      label: 'OpenRouter',
-      models: sortModelsByTier(openrouter, modelBadges),
-      modelBadges,
-      disabled: !openrouterAvailable,
-      hint: openrouterAvailable ? undefined : 'Set OPENROUTER_API_KEY to enable OpenRouter models.',
-    })
-  }
-
-  for (const provider of options.custom_providers || []) {
-    const models = orderedUnique(provider.models || [])
-    if (!models.length) continue
-    sections.push({
-      key: `custom:${provider.id}`,
-      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
-      models,
-      modelLabels: provider.model_labels,
     })
   }
 

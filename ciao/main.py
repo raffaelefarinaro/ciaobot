@@ -232,9 +232,12 @@ def _ensure_tool_dirs_on_path() -> None:
     if os.environ.get("CIAO_BUNDLED_APP") == "1":
         # The bundled launcher puts its own bin first on purpose, so child
         # `ciao` commands resolve to the interpreter that owns the bundled
-        # site-packages. Prepending ahead of it would hand those children a
-        # Homebrew `ciao` running a different CPython against 3.12 extension
-        # modules. Appending still finds npm/node/git.
+        # site-packages, and stay on the same engine and version as the app.
+        # Appending still finds npm/node/git. This is no longer load-bearing
+        # for importability - the bundled interpreter attaches its own
+        # dependency tree via its ciao_bundled_site hook rather than through an
+        # exported PYTHONPATH, so a child on a different CPython is merely a
+        # different install now, not a crash.
         os.environ["PATH"] = os.pathsep.join([*parts, *missing])
     else:
         os.environ["PATH"] = os.pathsep.join([*missing, *parts])
@@ -269,21 +272,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # error log (asyncio would otherwise log them at ERROR). See issue #163.
     install_asyncio_noise_filter()
 
-    # Discover models installed on the local Ollama daemon (best-effort,
-    # 2s timeout) and surface them in the model pickers alongside the cloud
-    # allowlist. Models already in the cloud allowlist keep their cloud
-    # routing so discovery never silently changes existing behaviour. Also
-    # re-run whenever the Settings → Models tab loads (routes_api), so a
-    # freshly pulled model shows up without a restart.
-    from ciao.config import (
-        refresh_local_ollama_models,
-        refresh_cloud_ollama_models,
-        refresh_openrouter_models,
-    )
-
-    refresh_local_ollama_models(config)
-    refresh_cloud_ollama_models(config)
-    refresh_openrouter_models(config)
+    # No model discovery at startup: each provider serves its own catalog on
+    # demand (Codex and opencode) or has a fixed tier vocabulary (Claude Code),
+    # so there is no allowlist to warm here.
 
     # Runtime-mutable settings overlay (PWA Settings → Models tab). Applied
     # on top of the env-backed config so PATCHes take effect without a
@@ -300,6 +291,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     job_runs.configure(config.state_path.parent)
     tracker = StartupTracker(on_finish=job_runs.record_startup_phase)
+    # Live job events reach the PWA through the chat manager's event bus, so a
+    # surface can show background work as it happens rather than only after it
+    # lands in the run log. Attached once the manager exists (see below).
 
     # Start provider checks in the background
     tracker.start("connect_claude_code")
@@ -333,21 +327,35 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     asyncio.create_task(check_claude_code())
 
-    tracker.start("connect_codex")
+    # Every other runtime provider reports readiness through its registry
+    # status probe, so a new provider gets a startup phase for free. Claude
+    # keeps the hand-written check above because its phase id
+    # (`connect_claude_code`) predates the registry and is a UI contract.
+    from ciao import provider_registry
 
-    async def check_codex():
-        try:
-            from ciao.providers.codex import codex_login_status
+    def _start_provider_check(descriptor) -> None:
+        phase = f"connect_{descriptor.id}"
+        tracker.start(phase)
 
-            status = await asyncio.to_thread(codex_login_status)
-            if status.get("ok"):
-                tracker.done("connect_codex", str(status.get("detail") or "connected"))
-            else:
-                tracker.fail("connect_codex", str(status.get("detail") or "not connected"))
-        except Exception as exc:
-            tracker.fail("connect_codex", f"not found: {exc}")
+        async def check() -> None:
+            try:
+                status = await asyncio.to_thread(
+                    descriptor.status_probe, os.environ
+                )
+                detail = str(status.get("detail") or "")
+                if status.get("ok"):
+                    tracker.done(phase, detail or "connected")
+                else:
+                    tracker.fail(phase, detail or "not connected")
+            except Exception as exc:  # a probe must never block startup
+                tracker.fail(phase, f"not found: {exc}")
 
-    asyncio.create_task(check_codex())
+        asyncio.create_task(check())
+
+    for descriptor in provider_registry.descriptors():
+        if descriptor.id == "claude" or not descriptor.status_probe_path:
+            continue
+        _start_provider_check(descriptor)
 
     # Sync workspace before anything else
     if config.auto_sync_on_start:
@@ -420,6 +428,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         transcript_store=transcripts,
         path=config.state_path.parent / "web_projects.json",
     )
+    # Now that a manager exists, let tracked background jobs announce themselves
+    # through its event bus (see job_runs.set_publisher).
+    pcm.attach_job_runs_publisher()
 
     # Schedule manager with web-only dispatch
     async def _dispatch_to_web(entry, model, mode, provider, *, target_chat_id=None):
@@ -481,6 +492,29 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         is_node_active=node_state_manager.is_active,
     )
 
+    # Background command runs (issue #282): a subprocess-only sibling of
+    # delegates. Completions wake the chat that started the run through the
+    # same coalescing path delegates use.
+    from ciao.background import BackgroundRun, BackgroundRunner, BackgroundRunStore
+
+    def _background_finished(run: BackgroundRun, tail: list[str]) -> None:
+        pcm.queue_background_wake(
+            run.parent_chat_id,
+            run_id=run.run_id,
+            label=run.label,
+            status=run.status,
+            exit_code=run.exit_code,
+            last_lines=tail,
+            log_path=str(background_runner.log_path(run.run_id)),
+            error=run.error,
+        )
+
+    background_runner = BackgroundRunner(
+        BackgroundRunStore(config.state_path.parent),
+        workspace_root=config.workspace_root,
+        on_finish=_background_finished,
+    )
+
     # Create and wire up web app. MCP stays available while legacy remains
     # the default so controlled A/B runs can select a surface per chat.
     from ciao.mcp_server import CiaoMcpService
@@ -492,8 +526,22 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
     app.state.node_state_manager = node_state_manager
+    # Stamp the target project's name on schedules that only recorded its id,
+    # while those ids still resolve. After a fresh init they would not, and the
+    # run would fall back to General with the user's choice lost.
+    try:
+        schedule_manager.backfill_project_names(
+            lambda pid: (lambda p: p.name if p else None)(pcm.get_project(pid))
+        )
+    except Exception:
+        logger.warning("Could not backfill schedule project names", exc_info=True)
+
     app.state.schedule_manager = schedule_manager
     app.state.loop_manager = loop_manager
+    app.state.background_runner = background_runner
+    # Lets the wake flusher defer runs to the runner when the restart drain
+    # blocks delivery, so the next start replays those wakes.
+    pcm._background_runner = background_runner
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
@@ -529,6 +577,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             app_settings=app_settings,
             startup_tracker=tracker,
             connection_tracker=connection_tracker,
+            background_runner=background_runner,
         )
         mcp_service.bind(control_plane)
         pcm._mcp_service = mcp_service
@@ -687,6 +736,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         # stopped until started from the Automations page. No catch-up pass:
         # missed poll iterations from downtime are worthless, cadence just resumes.
         loop_manager.start()
+
+        # Resolve any background run left non-terminal by a crash (the
+        # graceful path terminates them on shutdown, so this normally finds
+        # nothing), replay wakes deferred by a draining restart, prune expired
+        # ones, and arm the janitor. Orphans are woken here rather than left
+        # sitting in `running` forever.
+        orphaned = background_runner.start()
+        if orphaned:
+            logger.warning(
+                "Resolved %d orphaned/replayed background run(s) after restart: %s",
+                len(orphaned), ", ".join(run.run_id for run in orphaned),
+            )
 
         # Fire each schedule once when its latest expected occurrence was missed
         # (for example while the server was down). This does not replay every
@@ -1020,6 +1081,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             await asyncio.gather(*(_one(s) for s in services), return_exceptions=True)
 
     app.add_event_handler("shutdown", _shutdown_providers)
+
+    async def _shutdown_background_runs() -> None:
+        # Terminate every live background command before the loop closes. This
+        # is what makes "a restart does not leak orphan processes" true on the
+        # graceful path: without it, a detached child (own session, by design,
+        # so cancel can reach its whole tree) would survive the engine and the
+        # next boot could only report it, never reclaim it.
+        try:
+            await background_runner.stop()
+        except Exception:
+            logger.exception("Background runner shutdown failed")
+
+    app.add_event_handler("shutdown", _shutdown_background_runs)
 
     try:
         await server.serve()

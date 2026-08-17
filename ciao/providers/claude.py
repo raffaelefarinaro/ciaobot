@@ -5,13 +5,10 @@ Three SDK features worth knowing when you touch this file:
 - ``fallback_model``: picked by ``_fallback_model_for(primary)``. Opus → Sonnet,
   Sonnet → Haiku, Haiku → none. Keeps schedules alive when the primary tier is
   rate-limited.
-- ``hooks={"UserPromptSubmit": ...}``: registers a Python callback
-  (``ciao/observability/hooks.py``) that fires before every user turn. Injects
-  today's date, workspace, GWS profile, and any vault entities mentioned in the
-  prompt. Entity matching is index-backed via ``memory-vault/INDEX.md``; no
-  full-text scan. Env vars the hook reads per turn: ``CIAO_ACTIVE_WORKSPACE``,
-  ``CIAO_ACTIVE_PROJECT``, ``GWS_PROFILE``. ``CIAO_WORKSPACE`` remains the
-  filesystem workspace root.
+- ``hooks={"PreToolUse": ...}``: keeps Claude Bash jobs in the active turn.
+  Workspace/project/date/entity context is already supplied by the shared
+  request capsule, so Claude does not receive a duplicate UserPromptSubmit
+  injection.
 - ``setting_sources=["user", "project", "local"]``: makes the CLI auto-discover
   ``.claude/skills/``, ``.claude/agents/``, and ``.claude/commands/`` (including
   ciao-native commands like ``/remember``).
@@ -69,11 +66,9 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.execution_modes import auto_approved_mcp_tool_names, harness_skill_overrides
-from ciao.memory_injector import build_memory_block, system_prompt_payload
+from ciao.memory_injector import system_prompt_payload
 from ciao.observability.hooks import (
     build_foreground_bash_hook,
-    build_user_prompt_submit_hook,
-    build_web_search_post_tooluse_hook,
 )
 from ciao.providers.permission_gate import PermissionGate
 from ciao.providers.base import (
@@ -147,7 +142,7 @@ def _is_connection_drop_text(text: str) -> bool:
 # A name-resolution / connect failure surfaces from the Claude CLI as a generic
 # "API Error: Unable to connect to API (ENOTFOUND)" with no host and no error
 # category, so an operator reading a failed schedule can't tell which endpoint
-# failed to resolve (the Anthropic API, an OpenRouter/Ollama gateway, a custom
+# failed to resolve (the Anthropic API, a custom
 # ANTHROPIC_BASE_URL...) or whether it was DNS, a refused connection, a timeout,
 # or auth. We know the endpoint the turn was pointed at, so annotate the error
 # with it and classify the failure. See issues #162 and #178. The annotation
@@ -161,7 +156,7 @@ from ciao.providers.connect_errors import (  # noqa: E402
 def _resolve_api_host(env: dict[str, str]) -> str:
     """Hostname the spawned CLI will talk to for this turn.
 
-    Prefers the per-turn ``ANTHROPIC_BASE_URL`` override (Ollama / OpenRouter
+    Prefers the per-turn ``ANTHROPIC_BASE_URL`` override (a self-hosted gateway
     routing) and falls back to the process env, then Anthropic's default.
     """
     base = (
@@ -220,6 +215,19 @@ def get_bundled_claude_path() -> str | None:
     except Exception:
         pass
     return None
+
+
+def auth_command(*, device_auth: bool = False) -> list[str]:
+    """Interactive login command, for ``ciao auth claude`` and the PWA.
+
+    ``device_auth`` has no Claude equivalent and is ignored.
+    """
+    import shutil
+
+    binary = get_bundled_claude_path() or shutil.which("claude")
+    if not binary:
+        raise FileNotFoundError("Claude CLI not found")
+    return [binary, "login"]
 
 
 # Patterns from the bundled Claude Code CLI's stderr that are harmless noise
@@ -438,9 +446,6 @@ class ClaudeProvider(BaseSDKProvider):
             getattr(config, "state_path", workspace_root / ".runtime" / "state.json")
         ).parent
         self._rate_limit_store = RateLimitStore(path=default_store_path(runtime_root))
-        self._vault_root = Path(
-            getattr(config, "vault_root", workspace_root / "memory-vault")
-        )
         # One gate per provider. Each turn rebinds ``emit`` to the turn's
         # merge queue so late approvals can't land in a stale stream.
         self._permission_gate = PermissionGate()
@@ -455,15 +460,6 @@ class ClaudeProvider(BaseSDKProvider):
     def permission_gate(self) -> PermissionGate:
         """Expose the gate so route handlers can deliver user replies."""
         return self._permission_gate
-
-    def _memory_config(self) -> dict[str, Any]:
-        """Pull memory knobs off CiaoConfig with safe fallbacks for tests."""
-        cfg = getattr(self, "config", None)
-        return {
-            "memory_limit": int(getattr(cfg, "memory_char_limit", 2200)),
-            "user_limit": int(getattr(cfg, "user_char_limit", 1375)),
-            "guide_path": self.workspace_root / "CLAUDE.md",
-        }
 
     @property
     def current_session_id(self) -> str | None:
@@ -517,23 +513,8 @@ class ClaudeProvider(BaseSDKProvider):
         logger.info("Using bundled Claude Code CLI: %s", system_cli)
 
 
-        # Bounded memory regions from CLAUDE.md appended to Claude Code's
-        # default system prompt. Edits go through Edit on the guide; they
-        # persist immediately but only appear in this block on the next
-        # session, which keeps the prefix cache stable.
-        memory_cfg = self._memory_config()
-        memory_block = ""
-        try:
-            memory_block = build_memory_block(
-                guide_path=memory_cfg["guide_path"],
-                memory_char_limit=memory_cfg["memory_limit"],
-                user_char_limit=memory_cfg["user_limit"],
-            )
-        except Exception:  # noqa: BLE001 — never block a chat on memory wiring
-            logger.exception("memory block failed; continuing without it")
-            memory_block = ""
         system_prompt = system_prompt_payload(
-            memory_block, control_surface=request.control_surface
+            "", control_surface=request.control_surface
         )
 
         options = ClaudeAgentOptions(
@@ -560,8 +541,9 @@ class ClaudeProvider(BaseSDKProvider):
             # the model's context entirely, since Ciaobot's own schedules and
             # loops supersede them. See HARNESS_DISABLED_SKILLS.
             settings=json.dumps({"skillOverrides": harness_skill_overrides()}),
-            # Per-turn runtime context + vault entity tags. Fires before
-            # each user prompt reaches the model. See ciao/observability/hooks.py.
+            # The request already carries the provider-neutral context capsule.
+            # Keep hooks for process behavior only; injecting context here as
+            # well would duplicate it and make prompt caching less effective.
             hooks={
                 # Background Bash jobs are owned by the managed CLI process.
                 # Ending the turn kills them, and Claude does not report that
@@ -570,26 +552,6 @@ class ClaudeProvider(BaseSDKProvider):
                 "PreToolUse": [HookMatcher(
                     matcher="Bash",
                     hooks=[build_foreground_bash_hook()],
-                )],
-                "UserPromptSubmit": [HookMatcher(
-                    hooks=[build_user_prompt_submit_hook(
-                        self._vault_root,
-                        request.extra_env or {},
-                    )],
-                )],
-                # Backfill WebSearch on Ollama- and OpenRouter-routed chats.
-                # Their Anthropic-compat layers don't execute the server-side
-                # web_search tool, so WebSearch returns an empty boilerplate;
-                # this PostToolUse hook reruns the query against the backend's
-                # own search surface (Ollama /api/web_search, OpenRouter web
-                # plugin) and injects the real results. No-op on the Anthropic
-                # path and when WebSearch already returned results. See
-                # ciao/observability/hooks.py.
-                "PostToolUse": [HookMatcher(
-                    matcher="WebSearch",
-                    hooks=[build_web_search_post_tooluse_hook(
-                        request.extra_env or {},
-                    )],
                 )],
             },
             # Auto mode's classifier handles most tool calls silently, but

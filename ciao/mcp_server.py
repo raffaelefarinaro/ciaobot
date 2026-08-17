@@ -23,7 +23,12 @@ from pydantic import AnyHttpUrl
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+from ciao.control_plane import (
+    CiaoControlPlane,
+    ControlPlaneError,
+    McpPrincipal,
+    _UNSET,
+)
 from ciao.web.routes_mcp import (
     _observed_project_mcp_tools,
     _probe_http_mcp_tools,
@@ -892,8 +897,39 @@ class CiaoMcpService:
 
             return await self._invoke("context_get", _op)
 
-        # Bounded memory is edited in CLAUDE.md regions; MCP only keeps the
-        # proposal-review flow (dismiss after the agent Edits the region).
+        # Bounded memory remains in CLAUDE.md. These tools expose usage and a
+        # small typed edit path for providers that cannot reliably express an
+        # in-file edit; they never create a second memory store.
+        @tool(name="memory_status", annotations=_READ, structured_output=True)
+        async def memory_status() -> dict[str, Any]:
+            """Report bounded native-guide memory usage and diagnostics."""
+            return await self._invoke("memory_status", lambda cp, p: cp.memory_status(p))
+
+        @tool(name="memory_update", annotations=_WRITE, structured_output=True)
+        async def memory_update(
+            region: str,
+            action: str,
+            entry: str = "",
+            match: str = "",
+        ) -> dict[str, Any]:
+            """Add, replace, or remove one entry in native CLAUDE.md memory.
+
+            ``region`` is ``memory`` or ``profile``. Use ``match`` for
+            replace/remove; use ``entry`` for add/replace. The operation
+            enforces the configured bounded-region limit.
+            """
+            return await self._invoke(
+                "memory_update",
+                lambda cp, p: cp.memory_update(
+                    p,
+                    region,
+                    action=action,  # type: ignore[arg-type]
+                    entry=entry,
+                    match=match,
+                ),
+                mutating=True,
+            )
+
         @tool(name="memory_proposals_list", annotations=_READ, structured_output=True)
         async def memory_proposals_list() -> dict[str, Any]:
             """List reviewable memory proposals produced from archived chats."""
@@ -974,6 +1010,97 @@ class CiaoMcpService:
             """List files inside a project's vault folder. Omit project_id for active project."""
             return await self._invoke("project_files_list", lambda cp, p: cp.project_files_list(p, project_id))
 
+        @tool(name="workspaces_list", annotations=_READ, structured_output=True)
+        async def workspaces_list() -> dict[str, Any]:
+            """List all configured logical workspaces — names, vault roots, and
+            defaults — not just the active one."""
+            return await self._invoke("workspaces_list", lambda cp, p: cp.workspaces_list(p))
+
+        @tool(name="workspace_create", annotations=_WRITE, structured_output=True)
+        async def workspace_create(
+            name: str,
+            default_provider: str = "claude",
+            default_model: str = "",
+            gws_profile: str = "",
+            disallowed_tools: Any = _UNSET,
+            claude_ai_mcps: Any = _UNSET,
+            color: str = "",
+        ) -> dict[str, Any]:
+            """Create a new logical workspace.
+
+            Args:
+                name: Letters, numbers, dashes, or underscores. The vault
+                    folder is the standard one under the vault root.
+                default_provider: claude, codex, or opencode.
+                default_model: Empty inherits the app-wide default.
+                gws_profile: Linked Google Workspace profile, or empty.
+                disallowed_tools: Extra tools to deny in this workspace;
+                    null resets the workspace-specific list to inherited defaults.
+                claude_ai_mcps: claude.ai connector toggle (null = default).
+                color: Workspace accent (pink, cyan, amber, emerald, violet).
+            """
+            return await self._invoke(
+                "workspace_create",
+                lambda cp, p: cp.workspace_create(
+                    p,
+                    name=name,
+                    default_provider=default_provider,
+                    default_model=default_model,
+                    gws_profile=gws_profile,
+                    disallowed_tools=disallowed_tools,
+                    claude_ai_mcps=claude_ai_mcps,
+                    color=color,
+                ),
+                mutating=True,
+            )
+
+        @tool(name="workspace_update", annotations=_WRITE, structured_output=True)
+        async def workspace_update(
+            name: str,
+            default_provider: str | None = None,
+            default_model: str | None = None,
+            gws_profile: str | None = None,
+            disallowed_tools: Any = _UNSET,
+            claude_ai_mcps: Any = _UNSET,
+            color: str = "",
+        ) -> dict[str, Any]:
+            """Update a configured workspace. Omitted fields keep their values.
+
+            Args:
+                name: The workspace to update.
+                default_provider: claude, codex, or opencode.
+                default_model: Empty inherits the app-wide default.
+                gws_profile: Linked Google Workspace profile, or empty.
+                disallowed_tools: Extra tools to deny in this workspace;
+                    null resets the workspace-specific list to inherited defaults.
+                claude_ai_mcps: claude.ai connector toggle (null = default).
+                color: Workspace accent (pink, cyan, amber, emerald, violet).
+            """
+            return await self._invoke(
+                "workspace_update",
+                lambda cp, p: cp.workspace_update(
+                    p,
+                    name=name,
+                    default_provider=default_provider,
+                    default_model=default_model,
+                    gws_profile=gws_profile,
+                    disallowed_tools=disallowed_tools,
+                    claude_ai_mcps=claude_ai_mcps,
+                    color=color,
+                ),
+                mutating=True,
+            )
+
+        @tool(name="workspace_delete", annotations=_DESTRUCTIVE, structured_output=True)
+        async def workspace_delete(name: str) -> dict[str, Any]:
+            """Delete a configured workspace. The last workspace cannot be
+            deleted; chats keep their history but lose workspace routing."""
+            return await self._invoke(
+                "workspace_delete",
+                lambda cp, p: cp.workspace_delete(p, name=name),
+                mutating=True,
+            )
+
         @tool(name="chats_list", annotations=_READ, structured_output=True)
         async def chats_list(project_id: str = "") -> dict[str, Any]:
             """List active and archived chats in the active workspace or one project."""
@@ -1032,7 +1159,6 @@ class CiaoMcpService:
             mode: str | None = None,
             thinking_level: str | None = None,
             project_id: str | None = None,
-            model_bucket: str | None = None,
             control_surface: str | None = None,
         ) -> dict[str, Any]:
             """Update chat metadata and same-backend model settings. Omit chat_id for calling chat."""
@@ -1047,7 +1173,6 @@ class CiaoMcpService:
                     mode=mode,
                     thinking_level=thinking_level,
                     project_id=project_id,
-                    model_bucket=model_bucket,
                     control_surface=control_surface,
                 ),
                 mutating=True,
@@ -1085,7 +1210,6 @@ class CiaoMcpService:
             provider: str = "",
             model: str = "",
             messages: list[dict[str, Any]] | None = None,
-            model_bucket: str = "",
         ) -> dict[str, Any]:
             """Continue a chat on a fresh provider session with optional visible
             history. With provider and model both empty, this just clears the
@@ -1100,7 +1224,6 @@ class CiaoMcpService:
                     provider=provider,
                     model=model,
                     messages=messages,
-                    model_bucket=model_bucket,
                 )
 
             return await self._invoke("chat_handover", _op, mutating=True)
@@ -1152,7 +1275,6 @@ class CiaoMcpService:
             title: str = "",
             provider: str | None = None,
             model: str | None = None,
-            model_bucket: str | None = None,
             mode: str | None = None,
             delegation_id: str = "",
             project_id: str | None = None,
@@ -1182,7 +1304,7 @@ class CiaoMcpService:
                 title: Short sidebar label, e.g. "Fix #238 NSIRD drop".
                 model: Model for the delegate, e.g. a cheaper or specialized
                     one. Must be in the configured model set for the resolved
-                    provider (Ollama local/cloud, OpenRouter, or Anthropic
+                    provider (Anthropic, OpenAI via Codex, or opencode
                     tier alias). Unknown ids are rejected with `invalid_model`
                     and a list of valid alternatives. Omit to inherit the
                     workspace default.
@@ -1197,7 +1319,6 @@ class CiaoMcpService:
                     title=title,
                     provider=provider,
                     model=model,
-                    model_bucket=model_bucket,
                     mode=mode,
                     delegation_id=delegation_id,
                     project_id=project_id,
@@ -1216,6 +1337,88 @@ class CiaoMcpService:
             """
             return await self._invoke(
                 "delegates_list", lambda cp, p: cp.delegates_list(p, chat_id)
+            )
+
+        # ── background command runs ──────────────────────────────────────
+        # Deliberately _DESTRUCTIVE rather than _WRITE (issue #282 proposed
+        # _WRITE, describing it as "Auto-mode approval required"). In this
+        # codebase _WRITE means the opposite: it puts the tool on
+        # AUTO_APPROVED_MCP_TOOLS, which bypasses the PermissionGate entirely.
+        # Since a Bash call in Auto mode still goes through the classifier, an
+        # auto-approved arbitrary-command tool would be a strictly wider hole
+        # than the shell it wraps. _DESTRUCTIVE is what actually delivers the
+        # approval the issue asked for.
+        @tool(name="background_run_start", annotations=_DESTRUCTIVE, structured_output=True)
+        async def background_run_start(
+            cmd: list[str],
+            cwd: str = "",
+            env: dict[str, str] | None = None,
+            timeout_s: int = 1800,
+            label: str = "",
+        ) -> dict[str, Any]:
+            """Run one command in a tracked background subprocess and get woken
+            when it exits.
+
+            Sits between a plain `nohup` (survives the turn, but you lose track
+            of it) and delegate_spawn (a whole chat with a model loop). Use it
+            when the work is a single script that takes minutes: a fetch, a
+            build, a data enrichment pass. There is no model in the loop and no
+            tool access — it runs the command, nothing else.
+
+            This call does NOT block: it returns as soon as the process starts.
+            End your turn after starting one. Do not poll; Ciaobot sends you a
+            fresh turn with the status, exit code, log tail, and log path when
+            it finishes. background_run_status is for the rare case where you
+            need the state mid-turn.
+
+            Args:
+                cmd: Argv list, e.g. ["./scripts/report.sh", "--full"]. A
+                    single string is rejected: there is no shell, so nothing
+                    would split it. For shell features, run
+                    ["bash", "-lc", "..."] explicitly and own that choice.
+                cwd: Directory for the run, relative to the workspace root.
+                    Defaults to the workspace root. Paths outside it are
+                    rejected.
+                env: Extra environment variables. Loader hooks (LD_PRELOAD and
+                    friends) and Ciaobot's own session token are rejected.
+                timeout_s: Wall-clock ceiling; the process tree is terminated
+                    past it and the run reports as failed. Default 1800.
+                label: Short name for the wake report, e.g. "adoption report".
+            """
+            return await self._invoke(
+                "background_run_start",
+                lambda cp, p: cp.background_run_start(
+                    p, cmd=cmd, cwd=cwd, env=env, timeout_s=timeout_s, label=label
+                ),
+                mutating=True,
+            )
+
+        @tool(name="background_run_status", annotations=_READ, structured_output=True)
+        async def background_run_status(run_id: str, lines: int = 50) -> dict[str, Any]:
+            """Status, exit code, and log tail for a background run this chat
+            started.
+
+            Prefer waiting for the wake turn. Only reach for this when you need
+            the state inside the current turn — a run started by another chat
+            reports as not found.
+            """
+            return await self._invoke(
+                "background_run_status",
+                lambda cp, p: cp.background_run_status(p, run_id, lines),
+            )
+
+        @tool(name="background_run_cancel", annotations=_DESTRUCTIVE, structured_output=True)
+        async def background_run_cancel(run_id: str) -> dict[str, Any]:
+            """Stop a background run: SIGTERM to its process group, then
+            SIGKILL after a short grace period.
+
+            Idempotent — cancelling an already-finished run returns its final
+            state unchanged.
+            """
+            return await self._invoke(
+                "background_run_cancel",
+                lambda cp, p: cp.background_run_cancel(p, run_id),
+                mutating=True,
             )
 
         @tool(name="schedules_list", annotations=_READ, structured_output=True)

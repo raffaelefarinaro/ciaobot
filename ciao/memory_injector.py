@@ -1,10 +1,10 @@
-"""Render bounded memory regions from the workspace ``CLAUDE.md`` into the system prompt.
+"""Render the compact Ciaobot core into provider system prompts.
 
-Used by Claude and Codex providers at session start. The returned block is
-appended to Claude Code's default system prompt via the SDK's
-``SystemPromptPreset`` ``append`` field, so CLAUDE.md body, skills, and agent
-discovery keep working untouched. Codex receives the same block as appended
-instructions.
+Used by Claude, Codex, and OpenCode at session start. Native provider guide
+loaders read ``CLAUDE.md``/``AGENTS.md`` separately; bounded memory is not
+rendered here. The returned block is appended to Claude Code's default system
+prompt via the SDK's ``SystemPromptPreset`` ``append`` field, and is passed as
+developer instructions to the other providers.
 
 Frozen-snapshot rule: this block is captured once per session. In-session
 ``Edit`` of the regions lands on disk immediately, but the model only sees
@@ -27,6 +27,9 @@ from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
     DEFAULT_USER_CHAR_LIMIT,
     SECTION_SEP,
+    entry_expiration_date,
+    expiration_tag_error,
+    is_entry_expired,
     read_region,
     serialize_entries,
     total_chars,
@@ -51,50 +54,6 @@ _EMPTY_STATE_NUDGE = (
     f"with '{SECTION_SEP}' on its own line. Edits persist immediately and "
     "appear in this block from the next session on."
 )
-
-_EXPIRATION_TAG_RE = re.compile(r"\[expires:\s*([^\]]*)\]", re.IGNORECASE)
-_EXPIRATION_TAG_PREFIX_RE = re.compile(r"\[expires\s*:", re.IGNORECASE)
-_EXPIRATION_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-
-
-def entry_expiration_date(entry: str) -> datetime.date | None:
-    """Return the single valid ``[expires: YYYY-MM-DD]`` date in *entry*."""
-    if expiration_tag_error(entry) is not None:
-        return None
-    match = _EXPIRATION_TAG_RE.search(entry)
-    if not match:
-        return None
-    return datetime.date.fromisoformat(match.group(1).strip())
-
-
-def expiration_tag_error(entry: str) -> str | None:
-    """Return a validation message for a malformed expiration tag."""
-    matches = list(_EXPIRATION_TAG_RE.finditer(entry))
-    prefixes = list(_EXPIRATION_TAG_PREFIX_RE.finditer(entry))
-    if len(prefixes) > len(matches):
-        return "malformed expiration tag; expected a closing ']'"
-    if not matches:
-        return None
-    if len(matches) > 1:
-        return "multiple expiration tags are not allowed on one entry"
-    raw = matches[0].group(1).strip()
-    if _EXPIRATION_DATE_RE.fullmatch(raw) is None:
-        return f"invalid expiration date {raw!r}; expected YYYY-MM-DD"
-    try:
-        datetime.date.fromisoformat(raw)
-    except ValueError:
-        return f"invalid expiration date {raw!r}; expected YYYY-MM-DD"
-    return None
-
-
-def is_entry_expired(entry: str, today: datetime.date | None = None) -> bool:
-    """Check if an entry contains `[expires: YYYY-MM-DD]` and whether that date has passed."""
-    exp_date = entry_expiration_date(entry)
-    if exp_date is None:
-        return False
-    current = today or datetime.date.today()
-    return current > exp_date
-
 
 def _section(
     title: str,
@@ -236,7 +195,7 @@ def system_prompt_payload(
     parts = []
     if existing_append:
         parts.append(existing_append)
-    parts.append("[SYSTEM EXPERTISE: SOPs & Durable Memory]")
+    parts.append("[SYSTEM EXPERTISE: Ciaobot core]")
     instructions = _system_instructions()
     if control_surface == "mcp":
         instructions = _mcp_system_instructions(instructions)

@@ -16,6 +16,7 @@ from ciao.web.project_chats import (
     ChatInfo,
     ProjectChatManager,
     RestartDrainingError,
+    UnknownModelError,
 )
 
 
@@ -511,6 +512,40 @@ def test_delegate_spawn_refuses_past_the_concurrency_cap(tmp_path: Path) -> None
     assert excinfo.value.code == "delegate_limit_reached"
 
 
+def test_delegate_spawn_clamps_child_mode_to_parent(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor", mode="normal")
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    manager.queue_message = lambda _chat_id, _text: True  # type: ignore[method-assign]
+    plane = _control_plane(manager)
+
+    result = plane.delegate_spawn(
+        _principal(parent.chat_id, project.project_id),
+        prompt="do the thing",
+        mode="bypass",
+    )
+
+    child = manager.get_chat(result["data"]["chat_id"])
+    assert child is not None
+    assert child.mode == "normal"
+
+
+def test_chat_update_cannot_upgrade_mode_through_mcp(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor", mode="normal")
+    plane = _control_plane(manager)
+
+    plane.chat_update(
+        _principal(parent.chat_id, project.project_id),
+        "",
+        mode="bypass",
+    )
+
+    assert manager.get_chat(parent.chat_id).mode == "normal"
+
+
 def test_finished_delegates_free_their_slot(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Delegates", workspace="work")
@@ -705,27 +740,6 @@ def test_create_chat_validates_the_workspace_default_model(tmp_path: Path) -> No
         manager.create_chat(project.project_id, title="New Chat")
 
 
-def test_create_chat_validates_an_inherited_ollama_alias(tmp_path: Path) -> None:
-    """An inherited Ollama bucket must validate the resolved tier target."""
-    from ciao.providers.ollama import OllamaSettings
-
-    manager = _make_manager(
-        tmp_path,
-        ollama=OllamaSettings(api_key="", models=()),
-        workspaces={
-            "client": WorkspaceConfig(
-                name="client",
-                vault_root="vaults/client",
-                model_bucket="ollama",
-            )
-        },
-    )
-    project = manager.create_project("Delegates", workspace="client")
-
-    with pytest.raises(ValueError, match="Unknown model 'minimax-m3:cloud'"):
-        manager.create_chat(project.project_id, model="opus")
-
-
 def test_create_chat_invalid_model_does_not_cleanup_empty_chats(
     tmp_path: Path,
 ) -> None:
@@ -767,254 +781,6 @@ def test_delegate_spawn_preserves_non_model_errors(tmp_path: Path) -> None:
     assert "Unknown provider 'bogus'" in str(excinfo.value)
 
 
-def test_create_chat_rejects_unknown_ollama_cloud_model(tmp_path: Path) -> None:
-    """A ``:tag``-shaped id not in the Ollama catalog must be rejected.
-
-    The routing shape predicate (``is_ollama_model``) accepts any
-    ``:tag``-shaped id when cloud is configured; validation must check
-    catalog membership instead so a typo can't create a chat that fails
-    on its first turn (#259).
-    """
-    from ciao.providers.ollama import OllamaSettings
-
-    manager = _make_manager(
-        tmp_path,
-        ollama=OllamaSettings(
-            api_key="test-key",
-            models=("kimi-k2.7-code:cloud", "minimax-m3:cloud"),
-        ),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(ValueError, match="Unknown model 'typo-does-not-exist:cloud'"):
-        manager.create_chat(project.project_id, model="typo-does-not-exist:cloud")
-
-    # A catalog member passes.
-    chat = manager.create_chat(project.project_id, model="minimax-m3:cloud")
-    assert chat.model == "minimax-m3:cloud"
-
-
-def test_create_chat_accepts_statically_configured_openrouter_model(
-    tmp_path: Path,
-) -> None:
-    """A statically configured OpenRouter model stays valid without discovery.
-
-    ``CIAO_OPENROUTER_MODELS`` models live in ``config.openrouter.models``
-    but are only merged into ``claude_models`` when catalog discovery
-    succeeds; the validator must accept them directly so a catalog outage
-    doesn't block OpenRouter chat creation (#259).
-    """
-    from ciao.providers.openrouter import OpenRouterSettings
-
-    manager = _make_manager(
-        tmp_path,
-        openrouter=OpenRouterSettings(
-            api_key="test-key",
-            models=("anthropic/claude-sonnet-latest", "meta-llama/llama-4-maverick"),
-        ),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    chat = manager.create_chat(
-        project.project_id, model="meta-llama/llama-4-maverick"
-    )
-    assert chat.model == "meta-llama/llama-4-maverick"
-
-
-def test_create_chat_rejects_openrouter_id_in_fallback_without_api_key(
-    tmp_path: Path,
-) -> None:
-    """An OpenRouter-shaped fallback id requires OpenRouter credentials."""
-    from ciao.providers.openrouter import OpenRouterSettings
-
-    manager = _make_manager(
-        tmp_path,
-        claude_models=["opus", "sonnet", "haiku", "vendor/model"],
-        openrouter=OpenRouterSettings(api_key=""),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(ValueError, match="Unknown model 'vendor/model'"):
-        manager.create_chat(project.project_id, model="vendor/model")
-
-
-def _write_custom_provider(
-    tmp_path: Path, *, provider_id: str, models: list[str], runner: str = "claude"
-) -> None:
-    """Register a custom provider in the worktree config's tracked file."""
-    path = tmp_path / ".ciao" / "custom_providers.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({
-            "providers": [{
-                "id": provider_id,
-                "name": provider_id,
-                "url": "http://localhost:1234/v1",
-                "runner": runner,
-                "models": models,
-            }]
-        }),
-        encoding="utf-8",
-    )
-
-
-def test_create_chat_custom_provider_requires_member_model(tmp_path: Path) -> None:
-    """A ``custom:<id>:<model>`` id must name one of the provider's models.
-
-    ``provider_for_model`` only verifies the provider id exists; the
-    validator must also check the encoded model against the provider's
-    configured list, else the typo reaches the endpoint on the first
-    turn (#259).
-    """
-    _write_custom_provider(tmp_path, provider_id="lm-studio", models=["qwen2.5-coder"])
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(ValueError, match="Unknown model 'custom:lm-studio:typo'"):
-        manager.create_chat(project.project_id, model="custom:lm-studio:typo")
-
-    chat = manager.create_chat(project.project_id, model="custom:lm-studio:qwen2.5-coder")
-    assert chat.model == "custom:lm-studio:qwen2.5-coder"
-
-
-def test_create_chat_custom_provider_without_model_list_accepts_any(
-    tmp_path: Path,
-) -> None:
-    """An empty custom-provider model list means no catalog to check.
-
-    Endpoints like LM Studio serve dynamic model names, so an operator
-    may configure a provider without enumerating models; any id for that
-    provider stays valid (#259).
-    """
-    _write_custom_provider(tmp_path, provider_id="lm-studio", models=[])
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Delegates", workspace="work")
-
-    chat = manager.create_chat(project.project_id, model="custom:lm-studio:anything")
-    assert chat.model == "custom:lm-studio:anything"
-
-
-def test_create_chat_validates_custom_bucket_alias_target(tmp_path: Path) -> None:
-    """Custom routing buckets must validate their resolved tier target."""
-    _write_custom_provider(tmp_path, provider_id="lm-studio", models=["qwen2.5-coder"])
-    manager = _make_manager(
-        tmp_path,
-        custom_routing={
-            "lm-studio": {"opus": "custom:lm-studio:removed-model"},
-        },
-        workspaces={
-            "client": WorkspaceConfig(
-                name="client",
-                vault_root="vaults/client",
-                model_bucket="custom:lm-studio",
-            )
-        },
-    )
-    project = manager.create_project("Delegates", workspace="client")
-
-    with pytest.raises(
-        ValueError, match="Unknown model 'custom:lm-studio:removed-model'"
-    ):
-        manager.create_chat(project.project_id, model="opus")
-
-    manager._config.custom_routing = {
-        "lm-studio": {"opus": "custom:lm-studio:qwen2.5-coder"},
-    }
-    chat = manager.create_chat(project.project_id, model="opus")
-    assert chat.model == "custom:lm-studio:qwen2.5-coder"
-
-
-def test_create_chat_rejects_ollama_tier_target_without_backend(
-    tmp_path: Path,
-) -> None:
-    """A default Ollama tier target must not pass when no backend is available.
-
-    Default tier targets like ``minimax-m3:cloud`` are filled in even when
-    no Ollama backend is configured; accepting them unconditionally would
-    let the id reach a Claude provider with no Ollama routing overrides
-    and fail on its first turn (#259).
-    """
-    from ciao.providers.ollama import OllamaSettings
-
-    manager = _make_manager(
-        tmp_path,
-        ollama=OllamaSettings(
-            # No cloud key, no local daemon: no Ollama backend at all.
-            api_key="",
-            models=(),
-        ),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(ValueError, match="Unknown model 'minimax-m3:cloud'"):
-        manager.create_chat(project.project_id, model="minimax-m3:cloud")
-
-
-def test_create_chat_accepts_ollama_tier_target_with_backend(
-    tmp_path: Path,
-) -> None:
-    """A tier target is valid when the corresponding backend is available."""
-    from ciao.providers.ollama import OllamaSettings
-
-    manager = _make_manager(
-        tmp_path,
-        ollama=OllamaSettings(
-            api_key="test-key",
-            models=("kimi-k2.7-code:cloud",),
-            sonnet_model="kimi-k2.7-code:cloud",
-        ),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    chat = manager.create_chat(project.project_id, model="kimi-k2.7-code:cloud")
-    assert chat.model == "kimi-k2.7-code:cloud"
-
-
-def test_create_chat_rejects_cloud_ollama_tier_with_only_local_backend(
-    tmp_path: Path,
-) -> None:
-    """A local daemon must not make cloud-only tier targets valid."""
-    from ciao.providers.ollama import OllamaSettings
-
-    manager = _make_manager(
-        tmp_path,
-        ollama=OllamaSettings(
-            api_key="",
-            local_models=("llama3.1:latest",),
-            opus_model="minimax-m3:cloud",
-        ),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(ValueError, match="Unknown model 'minimax-m3:cloud'"):
-        manager.create_chat(project.project_id, model="minimax-m3:cloud")
-
-
-def test_create_chat_rejects_unmatched_custom_codex_model(tmp_path: Path) -> None:
-    """Custom Codex models still need their provider's membership check.
-
-    The native Codex exemption must not bypass ``provider_for_model``'s
-    enumeration, else ``custom:my-provider:typo`` against a codex-routed
-    provider configured for a different model passes validation and the
-    typo reaches the endpoint on its first turn (#259).
-    """
-    _write_custom_provider(
-        tmp_path, provider_id="my-codex", models=["gpt-5.6"], runner="codex"
-    )
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(ValueError, match="Unknown model 'custom:my-codex:typo'"):
-        manager.create_chat(
-            project.project_id, provider="codex", model="custom:my-codex:typo"
-        )
-
-    chat = manager.create_chat(
-        project.project_id, provider="codex", model="custom:my-codex:gpt-5.6"
-    )
-    assert chat.model == "custom:my-codex:gpt-5.6"
-
-
 def test_create_chat_codex_exemption_only_for_native_ids(tmp_path: Path) -> None:
     """A bare id on the codex provider stays exempt.
 
@@ -1029,200 +795,43 @@ def test_create_chat_codex_exemption_only_for_native_ids(tmp_path: Path) -> None
     assert chat.model == "gpt-5.6"
 
 
-def test_create_chat_rejects_unregistered_custom_id(tmp_path: Path) -> None:
-    """A ``custom:``-prefixed id with no registered provider must be rejected.
-
-    Without this guard, ``provider_for_model`` returns ``None`` for an
-    unregistered provider, and the native Codex exemption would rescue
-    the bogus id and forward it to the Codex CLI on its first turn (#259).
-    """
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(ValueError, match="Unknown custom model 'custom:missing:foo'"):
-        manager.create_chat(
-            project.project_id, provider="codex", model="custom:missing:foo"
-        )
-
-    # Same id on the default Claude path is also rejected: it cannot be
-    # routed to anything.
-    with pytest.raises(ValueError, match="Unknown custom model 'custom:missing:foo'"):
-        manager.create_chat(project.project_id, model="custom:missing:foo")
+# ── model validation ────────────────────────────────────────────────────
+# Every model now belongs to a runtime provider that owns its own catalog, so
+# validation is a much smaller question than it was under env-routed backends.
 
 
-def test_create_chat_rejects_ollama_cloud_entry_without_cloud_key(
+def test_create_chat_rejects_an_unconfigured_free_text_model(tmp_path: Path) -> None:
+    """A typo must be caught here, not at the provider's first turn."""
+    manager = _make_manager(tmp_path, claude_models=["opus", "sonnet"])
+    project = manager.create_project("p", workspace="work")
+    with pytest.raises(UnknownModelError):
+        manager.create_chat(project.project_id, model="sonnett")
+
+
+def test_create_chat_accepts_a_tier_alias_and_a_configured_model(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path, claude_models=["opus", "sonnet"])
+    project = manager.create_project("p", workspace="work")
+    for model in ("haiku", "sonnet", "opus", "fable", "  Opus  "):
+        chat = manager.create_chat(project.project_id, model=model)
+        assert chat.model
+
+
+def test_create_chat_exempts_providers_that_serve_their_own_catalog(
     tmp_path: Path,
 ) -> None:
-    """Cloud catalog membership requires a real cloud API key.
+    """Codex and opencode discover models asynchronously.
 
-    ``CIAO_OLLAMA_MODELS`` may list cloud-shaped ids regardless of whether
-    a key is configured. Without ``cloud_available`` the id would skip the
-    routing override and reach the Claude provider on its first turn (#259).
+    A synchronous validator has nothing to check them against, and both CLIs
+    reject an unknown id with a clear error on the first turn, so an id Ciaobot
+    has never heard of must still be accepted for them.
     """
-    from ciao.providers.ollama import OllamaSettings
-
-    manager = _make_manager(
-        tmp_path,
-        ollama=OllamaSettings(
-            api_key="",  # no cloud key
-            models=("minimax-m3:cloud",),
-        ),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(ValueError, match="Unknown model 'minimax-m3:cloud'"):
-        manager.create_chat(project.project_id, model="minimax-m3:cloud")
-
-
-def test_create_chat_accepts_ollama_cloud_entry_with_cloud_key(
-    tmp_path: Path,
-) -> None:
-    """A cloud catalog entry is valid when the cloud API key is configured."""
-    from ciao.providers.ollama import OllamaSettings
-
-    manager = _make_manager(
-        tmp_path,
-        ollama=OllamaSettings(
-            api_key="test-key",
-            models=("minimax-m3:cloud",),
-        ),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    chat = manager.create_chat(project.project_id, model="minimax-m3:cloud")
-    assert chat.model == "minimax-m3:cloud"
-
-
-def test_create_chat_rejects_openrouter_tier_target_without_api_key(
-    tmp_path: Path,
-) -> None:
-    """OpenRouter tier targets require a configured API key.
-
-    Tier defaults like ``anthropic/claude-sonnet-latest`` are filled in
-    even when no ``OPENROUTER_API_KEY`` is set. Without ``openrouter.available``
-    the id would pass validation and reach the Claude provider, where
-    Anthropic would reject the ``owner/model`` shape on its first turn (#259).
-    """
-    from ciao.providers.openrouter import OpenRouterSettings
-
-    manager = _make_manager(
-        tmp_path,
-        openrouter=OpenRouterSettings(api_key=""),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(
-        ValueError, match="Unknown model 'anthropic/claude-sonnet-latest'"
+    manager = _make_manager(tmp_path, claude_models=["opus"])
+    project = manager.create_project("p", workspace="work")
+    for provider, model in (
+        ("codex", "gpt-5.6-terra"),
+        ("opencode", "some-provider/some-model"),
     ):
-        manager.create_chat(
-            project.project_id, model="anthropic/claude-sonnet-latest"
+        chat = manager.create_chat(
+            project.project_id, provider=provider, model=model
         )
-
-
-def test_create_chat_accepts_openrouter_tier_target_with_api_key(
-    tmp_path: Path,
-) -> None:
-    """An OpenRouter tier target is valid when an API key is configured."""
-    from ciao.providers.openrouter import OpenRouterSettings
-
-    manager = _make_manager(
-        tmp_path,
-        openrouter=OpenRouterSettings(api_key="test-key"),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    chat = manager.create_chat(
-        project.project_id, model="anthropic/claude-sonnet-latest"
-    )
-    assert chat.model == "anthropic/claude-sonnet-latest"
-
-
-def test_create_chat_rejects_ollama_cloud_id_in_claude_models_without_cloud_key(
-    tmp_path: Path,
-) -> None:
-    """An Ollama-shaped id in ``claude_models`` is gated on cloud availability.
-
-    ``CiaoConfig.from_env()`` merges ``CIAO_OLLAMA_MODELS`` into
-    ``claude_models``, so a cloud id can land in that fallback set even
-    when no cloud API key is set. The validator must filter the set down
-    to entries the configured backend can actually serve, otherwise the
-    id reaches a Claude provider and fails on its first turn (#259).
-    """
-    from ciao.providers.ollama import OllamaSettings
-
-    manager = _make_manager(
-        tmp_path,
-        ollama=OllamaSettings(api_key=""),
-        claude_models=["opus", "sonnet", "haiku", "minimax-m3:cloud"],
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(ValueError, match="Unknown model 'minimax-m3:cloud'"):
-        manager.create_chat(project.project_id, model="minimax-m3:cloud")
-
-
-def test_create_chat_accepts_ollama_cloud_id_in_claude_models_with_cloud_key(
-    tmp_path: Path,
-) -> None:
-    """A cloud id in ``claude_models`` stays valid when the cloud key is set."""
-    from ciao.providers.ollama import OllamaSettings
-
-    manager = _make_manager(
-        tmp_path,
-        ollama=OllamaSettings(api_key="test-key"),
-        claude_models=["opus", "sonnet", "haiku", "minimax-m3:cloud"],
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    chat = manager.create_chat(project.project_id, model="minimax-m3:cloud")
-    assert chat.model == "minimax-m3:cloud"
-
-
-def test_create_chat_rejects_openrouter_static_model_without_api_key(
-    tmp_path: Path,
-) -> None:
-    """An OpenRouter static allowlist entry is gated on credential availability.
-
-    ``CIAO_OPENROUTER_MODELS`` populates ``openrouter.models`` even when
-    no ``OPENROUTER_API_KEY`` is set; ``openrouter_env_for_model`` returns
-    no overrides in that case, so the ``owner/model`` id would fail at
-    the Anthropic endpoint on its first turn (#259).
-    """
-    from ciao.providers.openrouter import OpenRouterSettings
-
-    manager = _make_manager(
-        tmp_path,
-        openrouter=OpenRouterSettings(
-            api_key="",
-            models=("meta-llama/llama-4-maverick",),
-        ),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    with pytest.raises(
-        ValueError, match="Unknown model 'meta-llama/llama-4-maverick'"
-    ):
-        manager.create_chat(
-            project.project_id, model="meta-llama/llama-4-maverick"
-        )
-
-
-def test_create_chat_accepts_openrouter_static_model_with_api_key(
-    tmp_path: Path,
-) -> None:
-    """A static OpenRouter model is valid when the API key is configured."""
-    from ciao.providers.openrouter import OpenRouterSettings
-
-    manager = _make_manager(
-        tmp_path,
-        openrouter=OpenRouterSettings(
-            api_key="test-key",
-            models=("meta-llama/llama-4-maverick",),
-        ),
-    )
-    project = manager.create_project("Delegates", workspace="work")
-
-    chat = manager.create_chat(
-        project.project_id, model="meta-llama/llama-4-maverick"
-    )
-    assert chat.model == "meta-llama/llama-4-maverick"
+        assert chat.model == model

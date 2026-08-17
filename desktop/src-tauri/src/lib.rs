@@ -85,13 +85,52 @@ const DROP_IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 // never close; a promise-backed drag of something else can be.
 const DROP_STAGING_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// True for a promise-backed drag the Python server will not be able to read.
+// `SF_DATALESS`, from `sys/stat.h`. macOS sets it on a cloud file whose bytes
+// live only in the provider: `stat` reports the real size, `st_blocks` is 0, and
+// a read has to materialise the file first.
+const SF_DATALESS: u32 = 0x4000_0000;
+
+/// True for `st_flags` marking a file the File Provider has not materialised.
 ///
-/// Dragging straight from the macOS screenshot thumbnail hands over a path in
-/// `.../TemporaryItems/NSIRD_screencaptureui_*/`. macOS grants that read to the
-/// app which received the drop, this process, and denies it to every other one,
-/// so the server's `read_bytes()` failed with `EPERM` and the screenshot was
-/// dropped on the floor (issue #238).
+/// Split out from the `stat` call so the bit test is unit-testable: a dataless
+/// file cannot be created in a temp dir.
+fn flags_are_dataless(flags: u32) -> bool {
+    flags & SF_DATALESS != 0
+}
+
+#[cfg(target_os = "macos")]
+fn is_dataless(metadata: &std::fs::Metadata) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    flags_are_dataless(metadata.st_flags())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_dataless(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// True for a drop the Python server will not be able to read itself.
+///
+/// Two cases, both of which left the drop on the floor as a raw errno:
+///
+/// - Dragging straight from the macOS screenshot thumbnail hands over a path in
+///   `.../TemporaryItems/NSIRD_screencaptureui_*/`. macOS grants that read to
+///   the app which received the drop, this process, and denies it to every other
+///   one, so the server's `read_bytes()` failed with `EPERM` (issue #238).
+/// - Dragging a file out of iCloud Drive (or any other File Provider) hands over
+///   a path whose bytes are not on disk. Materialising it is refused for a
+///   process that may not talk to the provider, which the server is, so its
+///   `read_bytes()` failed with `EDEADLK` — "Resource deadlock avoided".
+///
+/// This app *is* allowed both reads, so staging a copy here is what makes the
+/// drop work at all. Gated rather than applied to every file so an ordinary
+/// local drag stays zero-copy, because staging a dataless file means waiting
+/// for iCloud to hand the bytes over. The NSIRD screenshot dir is a permissions
+/// quirk that only ever holds images — staging a non-image from it would break
+/// the agent's continuing read access — while a dataless File Provider file can
+/// be anything, so it is staged regardless of type. The caller keeps the wait
+/// off the window event thread and the size cap (`DROP_STAGING_MAX_BYTES`)
+/// applies to every staged copy.
 fn needs_drop_staging(path: &std::path::Path) -> bool {
     let is_image = path
         .extension()
@@ -99,13 +138,26 @@ fn needs_drop_staging(path: &std::path::Path) -> bool {
         .is_some_and(|extension| {
             DROP_IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
         });
-    is_image
-        && path.components().any(|component| {
-            component
-                .as_os_str()
-                .to_str()
-                .is_some_and(|name| name.starts_with("NSIRD_"))
-        })
+    let is_promise_backed = path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| name.starts_with("NSIRD_"))
+    });
+    should_stage(
+        is_image,
+        is_promise_backed,
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && is_dataless(&metadata)),
+    )
+}
+
+/// The staging decision, split out so the dataless branch is unit-testable: a
+/// dataless file cannot be created in a temp dir (see `flags_are_dataless`).
+fn should_stage(is_image: bool, is_promise_backed: bool, is_dataless: bool) -> bool {
+    if is_promise_backed {
+        return is_image;
+    }
+    is_dataless
 }
 
 /// Copy one dropped file into this grant's staging dir, returning the new path.
@@ -330,17 +382,81 @@ fn restart_engine_after_app_update(app: &AppHandle) -> Result<(), String> {
     }
 }
 
-// Second half of the unified update. There is no bundled window left to emit
-// progress to, so failures surface as a dialog. Only restart when something
-// actually changed — otherwise "Update…" would bounce a healthy app for nothing.
+// Second half of the unified update. The dedicated update window stays visible
+// while the engine and app halves move together, then the process restarts.
+// Only restart when something actually changed — otherwise "Update…" would
+// bounce a healthy app for nothing.
 async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), String> {
+    emit_update_progress(
+        &app,
+        54,
+        "checking the latest Ciaobot release",
+        vec![
+            "[ciao] local engine checked ....................... ok".into(),
+            "[ciao] checking the latest signed app release ...... in progress".into(),
+        ],
+        "running",
+    );
     let updater = app.updater().map_err(|error| error.to_string())?;
     let update = updater.check().await.map_err(|error| error.to_string())?;
     match update {
         Some(update) => {
             let version = update.version.clone();
+            emit_update_progress(
+                &app,
+                60,
+                &format!("downloading Ciaobot {version}"),
+                vec![
+                    "[ciao] local engine checked ....................... ok".into(),
+                    format!("[ciao] downloading signed Ciaobot {version} ........ in progress"),
+                ],
+                "running",
+            );
+            let download_app = app.clone();
+            let download_version = version.clone();
             update
-                .download_and_install(|_, _| {}, || {})
+                .download_and_install(
+                    move |chunk, total| {
+                        let percent = total
+                            .map(|total| {
+                                if total == 0 {
+                                    72
+                                } else {
+                                    (60 + ((chunk as u64).saturating_mul(28) / total).min(28)) as u8
+                                }
+                            })
+                            .unwrap_or(70);
+                        emit_update_progress(
+                            &download_app,
+                            percent,
+                            &format!("downloading Ciaobot {download_version}"),
+                            vec![
+                                "[ciao] local engine checked ....................... ok".into(),
+                                format!(
+                                    "[ciao] downloading signed Ciaobot {download_version} ........ {percent}%"
+                                ),
+                            ],
+                            "running",
+                        );
+                    },
+                    {
+                        let install_app = app.clone();
+                        let install_version = version.clone();
+                        move || {
+                            emit_update_progress(
+                                &install_app,
+                                90,
+                                "installing the signed app bundle",
+                                vec![
+                                    "[ciao] local engine checked ....................... ok".into(),
+                                    format!("[ciao] downloaded signed Ciaobot {install_version} ........ ok"),
+                                    "[ciao] installing the signed app bundle ........... in progress".into(),
+                                ],
+                                "running",
+                            );
+                        }
+                    },
+                )
                 .await
                 .map_err(|error| format!("Update {version} could not be installed: {error}"))?;
             // The bundle has already been swapped on disk at this point, so the
@@ -370,11 +486,36 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
                     ),
                 );
             }
+            emit_update_progress(
+                &app,
+                98,
+                "restarting Ciaobot with the latest version",
+                vec![
+                    "[ciao] local engine checked ....................... ok".into(),
+                    format!("[ciao] downloaded signed Ciaobot {version} ........ ok"),
+                    "[ciao] installed app bundle ........................ ok".into(),
+                    "[ciao] restarting Ciaobot .......................... in progress".into(),
+                ],
+                "running",
+            );
             app.restart()
         }
         // The engine moved but the app did not: restart so both halves come
         // back on the version the engine is now running.
-        None if engine_updated => app.restart(),
+        None if engine_updated => {
+            emit_update_progress(
+                &app,
+                98,
+                "restarting Ciaobot with the updated engine",
+                vec![
+                    "[ciao] local engine updated ....................... ok".into(),
+                    "[ciao] no newer app bundle was needed ................ ok".into(),
+                    "[ciao] restarting Ciaobot .......................... in progress".into(),
+                ],
+                "running",
+            );
+            app.restart()
+        }
         None => Ok(()),
     }
 }
@@ -383,7 +524,18 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
 // without the other is what produces an opaque desktop-service mismatch.
 fn run_full_update(app: AppHandle, force: bool) {
     thread::spawn(move || {
+        show_update_screen(
+            &app,
+            4,
+            "checking active work before updating",
+            vec![
+                "[ciao] opening the update flow ..................... ok".into(),
+                "[ciao] checking active chats ........................ in progress".into(),
+            ],
+        );
         let Some(binary) = service::resolve_ciao(env::var("PATH").ok().as_deref()) else {
+            hide_update_window(&app);
+            show_window(&app, "main");
             show_error(
                 &app,
                 "Ciaobot engine unavailable",
@@ -391,25 +543,64 @@ fn run_full_update(app: AppHandle, force: bool) {
             );
             return;
         };
-        for window in app.webview_windows().values() {
+        if let Some(window) = app.get_webview_window("main") {
             let _ = window.hide();
         }
-        hide_dock_unless_pinned(&app);
+        emit_update_progress(
+            &app,
+            12,
+            "updating the local engine",
+            vec![
+                "[ciao] opening the update flow ..................... ok".into(),
+                "[ciao] active chats checked ........................ ok".into(),
+                "[ciao] updating the local engine ................... in progress".into(),
+            ],
+            "running",
+        );
         let extra = if force { &["--force"][..] } else { &[][..] };
         let engine_updated = match service::invoke(&binary, "update-engine", extra) {
-            Ok(result) if result.ok => true,
-            Ok(result) if engine_already_current(&result) => false,
+            Ok(result) if result.ok => {
+                emit_update_progress(
+                    &app,
+                    48,
+                    "local engine updated; checking the app release",
+                    vec![
+                        "[ciao] active chats checked ........................ ok".into(),
+                        "[ciao] local engine updated ....................... ok".into(),
+                        "[ciao] checking the signed app release ............ in progress".into(),
+                    ],
+                    "running",
+                );
+                true
+            }
+            Ok(result) if engine_already_current(&result) => {
+                emit_update_progress(
+                    &app,
+                    48,
+                    "local engine is current; checking the app release",
+                    vec![
+                        "[ciao] active chats checked ........................ ok".into(),
+                        "[ciao] local engine is already current ............ ok".into(),
+                        "[ciao] checking the signed app release ............ in progress".into(),
+                    ],
+                    "running",
+                );
+                false
+            }
             Ok(result) if !force && requires_confirmation(&result) => {
+                hide_update_window(&app);
                 show_window(&app, "main");
                 prompt_forced_update(app.clone(), &result);
                 return;
             }
             Ok(result) => {
+                hide_update_window(&app);
                 show_window(&app, "main");
                 show_error(&app, "Could not update Ciaobot", result.message);
                 return;
             }
             Err(error) => {
+                hide_update_window(&app);
                 show_window(&app, "main");
                 show_error(&app, "Could not update Ciaobot", error);
                 return;
@@ -421,6 +612,7 @@ fn run_full_update(app: AppHandle, force: bool) {
                 // Nothing was installed and there is no restart coming, so put
                 // back the window the update hid on the way in.
                 Ok(()) => {
+                    hide_update_window(&updater_app);
                     show_window(&updater_app, "main");
                     show_info(
                         &updater_app,
@@ -429,6 +621,16 @@ fn run_full_update(app: AppHandle, force: bool) {
                     );
                 }
                 Err(error) => {
+                    emit_update_progress(
+                        &updater_app,
+                        60,
+                        "update failed",
+                        vec![format!(
+                            "[ciao] update failed ............................. {error}"
+                        )],
+                        "error",
+                    );
+                    hide_update_window(&updater_app);
                     show_window(&updater_app, "main");
                     show_error(&updater_app, "Could not update Ciaobot", error);
                 }
@@ -502,6 +704,35 @@ fn show_window(app: &AppHandle, label: &str) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn hide_update_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("update") {
+        let _ = window.hide();
+    }
+}
+
+fn emit_update_progress(
+    app: &AppHandle,
+    percent: u8,
+    message: &str,
+    lines: Vec<String>,
+    status: &str,
+) {
+    let detail = serde_json::json!({
+        "percent": percent,
+        "message": message,
+        "lines": lines,
+        "status": status,
+    });
+    if let Some(window) = app.get_webview_window("update") {
+        let _ = window.eval(browser_event_script("ciao:update-progress", &detail));
+    }
+}
+
+fn show_update_screen(app: &AppHandle, percent: u8, message: &str, lines: Vec<String>) {
+    show_window(app, "update");
+    emit_update_progress(app, percent, message, lines, "running");
 }
 
 fn url_with_segments(runtime: &RuntimeConfig, segments: &[&str]) -> Result<url::Url, String> {
@@ -731,14 +962,30 @@ fn build_windows(
                     ));
                 }
                 WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) => {
-                    let detail = match create_desktop_drop_grant(&runtime_root, paths) {
-                        Ok((grant_id, paths)) => serde_json::json!({
-                            "grantId": grant_id,
-                            "paths": paths,
-                        }),
-                        Err(error) => serde_json::json!({ "error": error }),
-                    };
-                    let _ = window.eval(browser_event_script("ciao:native-file-drop", &detail));
+                    // Off the window event thread, because building the grant
+                    // stages files and staging a cloud placeholder has to
+                    // materialise it first — a download, not a copy (see
+                    // `needs_drop_staging`). Run inline, that is the whole window
+                    // frozen until iCloud answers. Clear the drag highlight now
+                    // rather than leaving it lit for that wait; the page clears it
+                    // again when the grant lands.
+                    let _ = window.eval(browser_event_script(
+                        "ciao:native-file-drag-leave",
+                        &serde_json::json!({}),
+                    ));
+                    let window = window.clone();
+                    let runtime_root = runtime_root.clone();
+                    let paths = paths.clone();
+                    thread::spawn(move || {
+                        let detail = match create_desktop_drop_grant(&runtime_root, &paths) {
+                            Ok((grant_id, paths)) => serde_json::json!({
+                                "grantId": grant_id,
+                                "paths": paths,
+                            }),
+                            Err(error) => serde_json::json!({ "error": error }),
+                        };
+                        let _ = window.eval(browser_event_script("ciao:native-file-drop", &detail));
+                    });
                 }
                 WindowEvent::CloseRequested { api, .. } => {
                     // Closing the window leaves Ciaobot running in the menu bar;
@@ -749,6 +996,28 @@ fn build_windows(
                     hide_dock_unless_pinned(&window.app_handle().clone());
                 }
                 _ => {}
+            }
+        }
+    });
+
+    // Keep a native startup-style window ready for updates. The main webview
+    // loads the remote PWA, while this local page remains available even when
+    // the engine is being replaced or the PWA is no longer reachable.
+    let update = WebviewWindowBuilder::new(app, "update", WebviewUrl::App("startup.html".into()))
+        .title("Updating Ciaobot")
+        .inner_size(1180.0, 780.0)
+        .min_inner_size(760.0, 560.0)
+        .visible(false)
+        .build()?;
+    update.on_window_event({
+        let window = update.clone();
+        move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // The update cannot be cancelled safely after the bundle swap
+                // begins. Closing the window only hides the progress surface;
+                // the tray operation continues and the app will restart.
+                api.prevent_close();
+                let _ = window.hide();
             }
         }
     });
@@ -1471,8 +1740,8 @@ pub fn run() {
 mod tests {
     use super::{
         append_log, browser_event_script, create_desktop_drop_grant, engine_already_current,
-        engine_launch_action, is_external_link, is_trusted_main_navigation, needs_drop_staging,
-        requires_confirmation, should_show_main_window,
+        engine_launch_action, flags_are_dataless, is_external_link, is_trusted_main_navigation,
+        needs_drop_staging, requires_confirmation, should_show_main_window, should_stage,
     };
     use crate::service::ServiceResult;
 
@@ -1564,11 +1833,14 @@ mod tests {
         }
     }
 
-    // Only a promise-backed image drop gets copied. A screenshot outside an
-    // NSIRD dir, and a non-image inside one, both stay pass-through: the server
-    // can read the first, and the agent needs to keep reading the second.
+    // A drop the server cannot read itself gets copied: images from the
+    // NSIRD screenshot dir (permissions) and dataless File Provider files of
+    // any type (the server's read would deadlock). A readable local
+    // screenshot, and a non-image inside an NSIRD dir, both stay
+    // pass-through: the server can read the first, and the agent needs to
+    // keep reading the second.
     #[test]
-    fn only_a_promise_backed_image_drop_needs_staging() {
+    fn only_an_unreadable_drop_needs_staging() {
         let temporary =
             std::path::Path::new("/var/folders/zj/x/T/TemporaryItems/NSIRD_screencaptureui_1Pr326");
         assert!(needs_drop_staging(
@@ -1576,9 +1848,37 @@ mod tests {
         ));
         assert!(needs_drop_staging(&temporary.join("SHOT.JPEG")));
         assert!(!needs_drop_staging(&temporary.join("notes.pdf")));
-        assert!(!needs_drop_staging(std::path::Path::new(
-            "/Users/someone/Desktop/Screenshot.png"
-        )));
+
+        // An ordinary local image, on disk and materialised. Written for real
+        // rather than named: the dataless check stats the path, so a bare
+        // nonexistent path would pass this assertion without exercising it.
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("Screenshot.png");
+        std::fs::write(&local, b"\x89PNG\r\n\x1a\n").unwrap();
+        assert!(!needs_drop_staging(&local));
+    }
+
+    // The staging decision itself, covering the branches a temp dir cannot:
+    // a dataless PDF must be staged just like a dataless image, while an
+    // NSIRD non-image stays pass-through so the agent keeps reading it.
+    #[test]
+    fn staging_decision_covers_dataless_non_images() {
+        assert!(should_stage(false, false, true));
+        assert!(should_stage(true, false, true));
+        assert!(!should_stage(true, false, false));
+        assert!(should_stage(true, true, false));
+        assert!(!should_stage(false, true, false));
+    }
+
+    // The bit test behind the dataless check. macOS sets SF_DATALESS (0x40000000)
+    // on an iCloud file whose bytes are not on disk; the flags below are real
+    // values read off this machine, materialised and not.
+    #[test]
+    fn dataless_flags_are_recognised() {
+        assert!(flags_are_dataless(0x4000_0060));
+        assert!(flags_are_dataless(0x4000_0000));
+        assert!(!flags_are_dataless(0x0000_0060));
+        assert!(!flags_are_dataless(0));
     }
 
     #[test]

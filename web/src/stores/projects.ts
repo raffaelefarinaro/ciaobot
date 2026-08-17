@@ -7,18 +7,21 @@ import { formatChatComments, formatFileComments, type ChatCommentAnchor } from '
 import { isPlausibleFilePath } from '../lib/filePaths'
 import { useFileViewerStore } from './fileViewer'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
+import { readReentrySummaryEnabled } from '../composables/useReentrySummaryPreference'
 import {
   isRestartDrainMessage,
   reloadWhenServerReady,
   restartMessageForDisplay,
 } from '../lib/serverRestart'
-import { archiveFailedToast, archiveStoppedToast } from '../lib/archiveCopy'
+import { archiveFailedToast, archiveProcessingToast, archiveStoppedToast } from '../lib/archiveCopy'
 import { errorMessage } from '../lib/errorMessage'
 import { readChatDraft } from '../lib/chatDrafts'
+import { isPostprocessing } from '../lib/postprocessView'
 import type {
   ArchiveChatResponse,
   ProjectInfo,
   ChatInfo,
+  ChatPostprocess,
   ChatRow,
   ChatGroup,
   ChatMessage,
@@ -28,6 +31,7 @@ import type {
   VoiceResult,
   InAppToast,
   PendingPermission,
+  RuntimeProvider,
   WorkspaceInfo,
   WorkspaceName,
   WorkspaceProviderOption,
@@ -83,6 +87,11 @@ export const useProjectStore = defineStore('projects', () => {
   // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
   const messages = ref<Record<string, ChatMessage[]>>({})
+  // History is loaded independently after a chat becomes active. Keep this
+  // separate from `messages` so cached text can render immediately while the
+  // authoritative session history is still on the way.
+  const loadingMessages = ref<Record<string, boolean>>({})
+  const messageLoadGenerations = new Map<string, number>()
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and
   // after each streaming turn (subagents can be spawned mid-turn).
   const subagents = ref<Record<string, SubagentTranscript[]>>({})
@@ -94,7 +103,7 @@ export const useProjectStore = defineStore('projects', () => {
   // `thinking_delta` events: we accumulate the model's reasoning text and
   // commit it as a `kind: 'thinking'` timeline entry the moment a visible
   // text delta or tool_use starts (i.e. thinking has ended). Without this
-  // buffer, intermediate thinking blocks emitted by Ollama models would
+  // buffer, intermediate thinking blocks emitted by some models would
   // disappear entirely (they used to be silently dropped at end-of-stream).
   const streamingThinking = ref<Record<string, string>>({})
   // Per-chat live token totals for the in-flight turn, fed by `token_usage`
@@ -442,12 +451,11 @@ export const useProjectStore = defineStore('projects', () => {
         default_provider: 'claude',
         default_model: '',
         gws_profile: '',
-        model_bucket: '',
       }))
     }
     return [
-      { name: 'personal', vault_root: 'personal', default_provider: 'claude', default_model: '', gws_profile: 'personal', model_bucket: 'personal' },
-      { name: 'work', vault_root: 'work', default_provider: 'claude', default_model: '', gws_profile: 'work', model_bucket: 'work' },
+      { name: 'personal', vault_root: 'personal', default_provider: 'claude', default_model: '', gws_profile: 'personal' },
+      { name: 'work', vault_root: 'work', default_provider: 'claude', default_model: '', gws_profile: 'work' },
     ]
   })
 
@@ -463,6 +471,10 @@ export const useProjectStore = defineStore('projects', () => {
 
   const activeMessages = computed(() =>
     messages.value[activeChatId.value || ''] || []
+  )
+
+  const messageHistoryLoading = computed(() =>
+    Boolean(loadingMessages.value[activeChatId.value || ''])
   )
 
   const activeSubagents = computed<SubagentTranscript[]>(() =>
@@ -623,13 +635,76 @@ export const useProjectStore = defineStore('projects', () => {
     return (backgroundAgents.value[chatId] || 0) > 0
   }
 
+  // ── Post-archive pipeline ────────────────────────────────────────────────
+  // Archiving a chat starts insights extraction, a project-doc fold, a
+  // trajectory and memory proposals. The state lives on the chat itself (so an
+  // archived chat can still report what was learned from it after a reload);
+  // these are the read paths every surface shares.
+
+  function chatPostprocess(chatId: string): ChatPostprocess | null {
+    return chats.value.find(c => c.chat_id === chatId)?.postprocess || null
+  }
+
+  function chatIsPostprocessing(chatId: string): boolean {
+    return isPostprocessing(chatPostprocess(chatId))
+  }
+
+  /** Chats being tidied up in a workspace, for the home lane summary. */
+  function workspacePostprocessingCount(ws: WorkspaceName): number {
+    const wsProjectIds = new Set(
+      projects.value.filter(p => p.workspace === ws).map(p => p.project_id),
+    )
+    return chats.value.filter(
+      c => wsProjectIds.has(c.project_id) && isPostprocessing(c.postprocess),
+    ).length
+  }
+
+  // Archived chats still being tidied, newest archive first. Same predicate as
+  // workspacePostprocessingCount so the lane rows always add up to the lane's
+  // "N tidying up" count. Archived chats are excluded from activeChatsAll, so
+  // this is the one path that surfaces them while the pipeline runs.
+  function postprocessingChats(): ChatInfo[] {
+    return chats.value
+      .filter(c => isPostprocessing(c.postprocess))
+      .sort((a, b) =>
+        (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at),
+      )
+  }
+
+  function projectPostprocessingCount(projectId: string): number {
+    return chats.value.filter(
+      c => c.project_id === projectId && isPostprocessing(c.postprocess),
+    ).length
+  }
+
+  /**
+   * Reconcile against the server's list of live pipelines. A chat the server
+   * omits has settled: downgrade it to 'done' rather than dropping the record,
+   * because the outcomes it already collected are still worth showing.
+   */
+  function applyPostprocessingSnapshot(runningIds: string[]): void {
+    const running = new Set(runningIds)
+    for (const chat of chats.value) {
+      const pp = chat.postprocess
+      if (!pp) continue
+      if (pp.state === 'running' && !running.has(chat.chat_id)) {
+        chat.postprocess = { ...pp, state: 'done', step: '' }
+      }
+    }
+  }
+
   function projectIsStreaming(projectId: string): boolean {
-    return chats.value.some(c => c.project_id === projectId && isChatStreaming(c.chat_id))
+    // Same visibility rules as projectChats: a chat hidden from the sidebar
+    // (archived or remote) must never light the project header dot.
+    return chats.value.some(
+      c => c.project_id === projectId && !c.archived && c.local !== false && isChatStreaming(c.chat_id),
+    )
   }
 
   function workspaceIsStreaming(ws: WorkspaceName): boolean {
-    const wsProjectIds = new Set(projects.value.filter(p => p.workspace === ws).map(p => p.project_id))
-    return chats.value.some(c => wsProjectIds.has(c.project_id) && isChatStreaming(c.chat_id))
+    // Compose the project-level check so both dots follow the same
+    // visibility rules — a hidden chat must not light either level.
+    return projects.value.some(p => p.workspace === ws && projectIsStreaming(p.project_id))
   }
 
   function projectFor(chatId: string): ProjectInfo | null {
@@ -651,14 +726,21 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // Surface a failure as a persistent, actionable error toast. `errorText` is
-  // the raw log seeded into a fix chat when the user clicks "Fix".
-  function pushErrorToast(title: string, errorText: string): InAppToast {
+  // the raw log seeded into a fix chat when the user clicks "Fix". For errors
+  // whose remediation lives in Settings, pass opts.fixRoute so the Fix action
+  // navigates there instead of opening a fix chat.
+  function pushErrorToast(
+    title: string,
+    errorText: string,
+    opts?: { fixRoute?: string; fixLabel?: string },
+  ): InAppToast {
     return pushToast({
       chat_id: '',
       title,
       body: errorText,
       variant: 'error',
       errorText,
+      ...opts,
     })
   }
 
@@ -1610,9 +1692,8 @@ export const useProjectStore = defineStore('projects', () => {
     updates: {
       model?: string
       mode?: string
-      provider?: 'claude' | 'codex'
+      provider?: RuntimeProvider
       thinking_level?: string
-      model_bucket?: string
     },
   ) {
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, updates)
@@ -1622,7 +1703,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function handoverChat(
     chatId: string,
-    updates: { model: string; provider: 'claude' | 'codex'; model_bucket?: string },
+    updates: { model: string; provider: RuntimeProvider },
   ) {
     const visibleMessages = normalizeMessages(messages.value[chatId] || [])
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/handover`, {
@@ -1785,6 +1866,7 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function requestReentrySummaryIfUseful(chatId: string): void {
+    if (!readReentrySummaryEnabled()) return
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat || chat.archived) return
     // session_id covers chats whose history is still being hydrated; the
@@ -1794,6 +1876,18 @@ export const useProjectStore = defineStore('projects', () => {
     )
     if (hasHistory && !reentrySummaries.value[chatId]) {
       void requestReentrySummary(chatId)
+    }
+  }
+
+  // Toggling the preference off also evicts any cached summaries so the
+  // bubble disappears immediately rather than lingering for the rest of
+  // the session. Toggling on does nothing — the next chat open will fetch
+  // its own summary, no warm-up needed.
+  function setReentrySummaryEnabled(enabled: boolean): void {
+    if (!enabled) {
+      for (const chatId of Object.keys(reentrySummaries.value)) {
+        clearReentrySummary(chatId)
+      }
     }
   }
 
@@ -1830,7 +1924,20 @@ export const useProjectStore = defineStore('projects', () => {
       Array.isArray(res?.archived_chat_ids) ? res.archived_chat_ids : [chatId],
     )
     for (const chat of chats.value) {
-      if (confirmed.has(chat.chat_id)) chat.archived = true
+      if (confirmed.has(chat.chat_id)) {
+        chat.archived = true
+        if (chat.chat_id === chatId && res?.postprocess) {
+          // The response closes the race where the chat_postprocess event is
+          // emitted after the archive request has already cleared this pane.
+          chat.postprocess = res.postprocess
+        }
+      }
+    }
+    if (res?.postprocess?.state === 'running') {
+      const { title, body } = archiveProcessingToast(
+        (res.postprocess.expected || []).includes('insights'),
+      )
+      pushToast({ chat_id: chatId, title, body })
     }
     // A child the server did not archive is still running: put its socket back.
     for (const id of closedIds) {
@@ -1915,6 +2022,23 @@ export const useProjectStore = defineStore('projects', () => {
   // ── Message loading from server ──────────────────────────────────────
 
   async function loadMessages(chatId: string) {
+    const generation = (messageLoadGenerations.get(chatId) || 0) + 1
+    messageLoadGenerations.set(chatId, generation)
+    loadingMessages.value[chatId] = true
+    try {
+      await loadMessagesFromServer(chatId)
+    } finally {
+      // A refresh can overlap a chat switch or a reconnect. Only the newest
+      // request owns the loading flag, otherwise an older response can hide
+      // the indicator while the current history is still pending.
+      if (messageLoadGenerations.get(chatId) === generation) {
+        delete loadingMessages.value[chatId]
+        messageLoadGenerations.delete(chatId)
+      }
+    }
+  }
+
+  async function loadMessagesFromServer(chatId: string) {
     // Restore the AskUserQuestion picker before touching history. Runs on every
     // chat open / reconnect, so a reloaded chat paused on a question shows the
     // interactive picker again instead of the dead trace row. Independent of
@@ -2557,6 +2681,10 @@ export const useProjectStore = defineStore('projects', () => {
         // count left stale by a missed event (WS gap, server restart) heals
         // on reconnect.
         backgroundAgents.value = { ...(msg.background_agents || {}) }
+        // Post-archive pipelines still in flight. Authoritative like the counts
+        // above: a chat the server no longer lists as running has settled, so
+        // clear a stale 'running' rather than leaving it pulsing forever.
+        applyPostprocessingSnapshot(msg.postprocessing || [])
         if (msg.restarting) {
           beginServerRestart()
         }
@@ -2743,6 +2871,14 @@ export const useProjectStore = defineStore('projects', () => {
         }
         break
       }
+      case 'chat_postprocess': {
+        // The post-archive pipeline reporting itself: which step is running, and
+        // once it settles, what it produced. Written onto the chat so the
+        // archived transcript keeps the record after the events stop.
+        const chat = chats.value.find(c => c.chat_id === msg.chat_id)
+        if (chat) chat.postprocess = msg.postprocess || null
+        break
+      }
       case 'chat_deleted': {
         // Fires when the server prunes an empty chat (user created a "New
         // Chat" and never sent a message, then moved on) or when another
@@ -2809,10 +2945,14 @@ export const useProjectStore = defineStore('projects', () => {
       case 'gws_health': {
         // A Google Workspace login went dead (revoked/expired token). The
         // server debounces to one event per breakage; surface it as a
-        // persistent error toast whose "Fix" seeds a chat that can drive the
-        // server-managed re-login. The PWA push/menu-bar banner is the other
+        // persistent error toast. The fix is re-authentication in
+        // Settings → Workspaces, so the Fix action navigates there rather
+        // than seeding a chat. The PWA push/menu-bar banner is the other
         // channel (see push.py); this is the live in-app signal.
-        pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '')
+        pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '', {
+          fixRoute: '/settings/workspaces',
+          fixLabel: 'Fix in Settings',
+        })
         break
       }
     }
@@ -3568,9 +3708,16 @@ export const useProjectStore = defineStore('projects', () => {
     const msgs = messages.value[chatId] || []
 
     // A summary belongs only to the moment the user re-enters a quiet chat.
-    // Any message arriving over the socket makes that orientation stale,
-    // including messages from another device and assistant results.
-    if (event.type === 'user_echo' || event.type === 'queued' || event.type === 'steered' || event.type === 'result') {
+    // `queued` and `steered` always represent new user activity (a new prompt
+    // is now waiting or has been redirected at the current turn), so they
+    // always invalidate the summary.
+    //
+    // `user_echo` and `result` are handled inside their switch cases below:
+    // the broker replays them on every WS reconnect, and a no-op replay
+    // (turn already rendered, or no final text on a result) must NOT clear
+    // the summary. The user opens a chat, scrolls to re-orient, and the
+    // summary disappearing on a broker replay is the wrong behavior.
+    if (event.type === 'queued' || event.type === 'steered') {
       clearReentrySummary(chatId)
     }
 
@@ -3621,6 +3768,10 @@ export const useProjectStore = defineStore('projects', () => {
             // do reflect the implied streaming state.
             if (event.unattended) existingWithTurn.unattended = true
             if (!streaming.value[chatId]) streaming.value[chatId] = true
+            // This is a broker replay, not a new send: leave the re-entry
+            // summary alone. The whole reason a user re-enters a chat is
+            // orientation, and the summary must survive the WS-resume echo
+            // storm until the user actually types or sends.
             break
           }
           // Look for an optimistic user message with matching content but no
@@ -3680,6 +3831,10 @@ export const useProjectStore = defineStore('projects', () => {
         messages.value[chatId] = normalizeMessages([...msgs])
         // Flushed turn = we're streaming again. Make sure the flag reflects it.
         if (!streaming.value[chatId]) streaming.value[chatId] = true
+        // Brand-new echo (not a replay) is the user actually starting a turn.
+        // Clear the summary here so it disappears when the user sends, not on
+        // an unrelated broker replay.
+        clearReentrySummary(chatId)
         break
       }
 
@@ -3865,7 +4020,7 @@ export const useProjectStore = defineStore('projects', () => {
         // when the model switches to visible text or fires a tool_use
         // (those signal the end of this thinking block). For Anthropic
         // models thinking is usually short and the buffer flushes within
-        // the same turn; for Ollama-routed models (Kimi K2.6 etc.) the
+        // the same turn; for some models the
         // thinking block can be long and is the user's main view into
         // the model's actual reasoning, so dropping it would hurt.
         if (event.text) {
@@ -3951,8 +4106,14 @@ export const useProjectStore = defineStore('projects', () => {
         // partial event.text discard the rest.
         let text = (event.text || '').trim()
         const st = (streamingText.value[chatId] || '').trim()
-        if (st && !text.includes(st)) {
-          if (st.includes(text)) {
+        // Containment is checked whitespace-insensitively: the provider may
+        // re-join the same streamed parts with different separators (opencode
+        // joins text parts with a blank line, while the deltas were
+        // concatenated raw), and that must not read as new content — it would
+        // append both copies and render the answer twice.
+        const squash = (s: string) => s.replace(/\s+/g, '')
+        if (st && !squash(text).includes(squash(st))) {
+          if (squash(st).includes(squash(text))) {
             text = st
           } else {
             text = text ? text + '\n\n' + st : st
@@ -4010,6 +4171,12 @@ export const useProjectStore = defineStore('projects', () => {
           const chat = chats.value.find(c => c.chat_id === chatId)
           if (chat) chat.session_id = event.session_id
         }
+        // Clear the re-entry summary only when the result represents a turn
+        // that just finished while the user was watching. If `streaming` was
+        // already false, this is a broker replay for a turn the user has
+        // already been reading and the summary still applies. The summary
+        // also clears at user send (sendMessage / fresh user_echo).
+        const wasStreaming = streaming.value[chatId] === true
         if (text.trim() || event.is_error) {
           msgs.push({
             role: 'assistant',
@@ -4042,6 +4209,14 @@ export const useProjectStore = defineStore('projects', () => {
         // so a late click can't race a brand-new turn.
         delete pendingPermissions.value[chatId]
         persistMessages()
+        if (wasStreaming) {
+          // The result closed a turn that was actually in flight on this
+          // client. The re-entry summary no longer reflects the chat
+          // state, so drop it. Skipped on a broker replay (wasStreaming
+          // false) so a scroll-induced resume doesn't dismiss the summary
+          // for a turn the user is still re-reading.
+          clearReentrySummary(chatId)
+        }
         // Reconcile with the authoritative SDK session. Handles the reconnect
         // case where /messages already had this turn (dedups) and the race
         // where the SDK session file lags the result event (retries until the
@@ -4185,7 +4360,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, unread, reentrySummaries,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
@@ -4194,11 +4369,12 @@ export const useProjectStore = defineStore('projects', () => {
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
     chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, clearUnread, markRead, markAllRead,
     recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
+    chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
-    createChat, newChatInGeneral, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, requestReentrySummaryIfUseful, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest,
@@ -4210,7 +4386,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
-    loadMessages, loadSubagents,
+    loadMessages, loadSubagents, setReentrySummaryEnabled,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart,
     pushToast, pushErrorToast, dismissToast, fixError,

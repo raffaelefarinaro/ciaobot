@@ -168,7 +168,7 @@ def test_list_models_exposes_thinking_levels(monkeypatch) -> None:
 
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     config = CiaoConfig.from_env()
-    scope = {"type": "http", "method": "GET", "path": "/api/models", "headers": []}
+    scope = {"type": "http", "method": "GET", "path": "/api/models", "headers": [], "query_string": b""}
 
     class _App:
         class state:

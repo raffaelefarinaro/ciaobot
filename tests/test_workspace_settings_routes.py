@@ -16,6 +16,8 @@ from ciao.web.routes_api import (
     gws_auth_url,
     gws_exchange_code,
     gws_disconnect,
+    gws_add_profile,
+    gws_remove_profile,
     list_workspaces,
     provider_config_settings,
     upsert_workspace_setting,
@@ -35,7 +37,6 @@ def _client(tmp_path: Path, env_extra: dict[str, str] | None = None):
         "PWA_AUTH_TOKEN": "t",
         "CIAO_WORKSPACE": str(tmp_path),
         "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
-        "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
     }
     env.update(env_extra or {})
     config = CiaoConfig.from_env(env)
@@ -89,6 +90,16 @@ def _client(tmp_path: Path, env_extra: dict[str, str] | None = None):
                 gws_disconnect,
                 methods=["POST"],
             ),
+            Route(
+                "/api/integrations/gws/profiles/add",
+                gws_add_profile,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/integrations/gws/profiles/remove",
+                gws_remove_profile,
+                methods=["POST"],
+            ),
         ]
     )
     app.state.config = config
@@ -107,7 +118,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
             "default_provider": "claude",
             "default_model": "kimi-k2.7-code:cloud",
             "gws_profile": "work",
-            "model_bucket": "anthropic",
             "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         },
     )
@@ -126,6 +136,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
         {"value": "codex", "label": "OpenAI (via Codex)"},
+        {"value": "opencode", "label": "opencode"},
     ]
 
     stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
@@ -138,7 +149,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         "claude_ai_mcps": None,
         "gws_profile": "work",
-        "model_bucket": "anthropic",
         "color": "pink",
     }
 
@@ -170,7 +180,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "disallowed_tools": None,
             "claude_ai_mcps": None,
             "gws_profile": "personal",
-            "model_bucket": "personal",
             "color": "pink",
         },
         {
@@ -181,7 +190,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "disallowed_tools": None,
             "claude_ai_mcps": None,
             "gws_profile": "work",
-            "model_bucket": "work",
             "color": "pink",
         },
     ]
@@ -267,29 +275,116 @@ def test_workspace_validation_rejects_bad_name_and_provider(tmp_path):
     assert "provider" in bad_provider.json()["error"]
 
 
-def test_workspace_provider_options_follow_available_backends(tmp_path):
-    client, _config, _pcm = _client(
-        tmp_path,
-        {
-            "CIAO_OLLAMA_API_KEY": "sk-ollama",
-            "OPENROUTER_API_KEY": "sk-or",
-        },
-    )
+def test_workspace_provider_options_are_the_runtime_providers(tmp_path):
+    """The registry is the only source: no backend keys widen this list."""
+    client, _config, _pcm = _client(tmp_path)
 
     data = client.get("/api/workspaces").json()
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
         {"value": "codex", "label": "OpenAI (via Codex)"},
-        {"value": "ollama", "label": "Ollama (via Claude Code)"},
-        {"value": "openrouter", "label": "OpenRouter (via Claude Code)"},
+        {"value": "opencode", "label": "opencode"},
     ]
 
     resp = client.post(
         "/api/workspaces",
-        json={"name": "client-a", "default_provider": "openrouter"},
+        json={"name": "client-a", "default_provider": "opencode"},
     )
     assert resp.status_code == 201
-    assert resp.json()["workspaces"][-1]["default_provider"] == "openrouter"
+    assert resp.json()["workspaces"][-1]["default_provider"] == "opencode"
+
+
+def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
+    """A registry written by a pre-refactor release (provider "ollama", legacy
+    ``model_bucket`` key) must list with a registered provider — the PWA
+    renders it into a <select> limited to ``provider_options`` — and a PATCH
+    must round-trip instead of 400ing on the stale stored value."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "personal",
+                    "vault_root": "memory-vault/personal",
+                    "default_provider": "ollama",
+                    "default_model": "qwen3:latest",
+                    "model_bucket": "big",
+                    "gws_profile": "personal",
+                },
+                {
+                    "name": "work",
+                    "vault_root": "memory-vault/work",
+                    "default_provider": "claude",
+                    "gws_profile": "work",
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    client, config, _pcm = _client(tmp_path)
+    assert config.workspace("personal").default_provider == "ollama"
+
+    listed = client.get("/api/workspaces").json()
+    personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
+    option_values = {option["value"] for option in listed["provider_options"]}
+    # Coerced to the effective provider, mirroring default_provider_for_workspace.
+    assert personal["default_provider"] == "claude"
+    assert personal["default_provider"] in option_values
+
+    # A save that omits the provider keeps working despite the stale record.
+    untouched = client.patch(
+        "/api/workspaces/personal",
+        json={"default_model": "sonnet"},
+    )
+    assert untouched.status_code == 200
+
+    # Saving the coerced value back round-trips and rewrites a clean record.
+    resp = client.patch(
+        "/api/workspaces/personal",
+        json={"default_provider": personal["default_provider"]},
+    )
+    assert resp.status_code == 200
+    assert config.workspace("personal").default_provider == "claude"
+
+    stored = json.loads((runtime / "workspaces.json").read_text())
+    personal_stored = next(w for w in stored if w["name"] == "personal")
+    assert personal_stored["default_provider"] == "claude"
+    assert "model_bucket" not in personal_stored
+
+    # Explicitly invalid writes are still rejected.
+    bad = client.patch(
+        "/api/workspaces/personal",
+        json={"default_provider": "ollama"},
+    )
+    assert bad.status_code == 400
+
+
+def test_persist_workspace_registry_normalizes_stale_provider(tmp_path):
+    """Direct config persistence must not resurrect a removed provider."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{
+            "name": "personal",
+            "vault_root": "memory-vault/personal",
+            "default_provider": "ollama",
+        }]) + "\n",
+        encoding="utf-8",
+    )
+
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "t",
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(runtime),
+    })
+    assert config.workspace("personal").default_provider == "ollama"
+
+    config.persist_workspace_registry()
+
+    stored = json.loads((runtime / "workspaces.json").read_text())
+    assert stored[0]["default_provider"] == "claude"
 
 
 def test_claude_ai_mcps_toggle_persists_and_resolves(tmp_path):
@@ -377,58 +472,42 @@ def test_workspace_color_defaults_persists_and_validates(tmp_path):
     assert "color" in bad.json()["error"]
 
 
-def test_provider_config_status_and_write_only_patch(tmp_path, monkeypatch):
-    # This asserts CIAO_OLLAMA_API_KEY reads as unconfigured, so a real one in
-    # the ambient environment (any Ciaobot-spawned shell has it) must not leak
-    # in, and from_env() must not load a real workspace .env over the top.
-    monkeypatch.delenv("CIAO_OLLAMA_API_KEY", raising=False)
+def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
+    """Settings -> Providers has no key fields left to type into.
+
+    Every provider authenticates through its own CLI, so both key maps are
+    empty and a PATCH naming any key is rejected rather than silently written.
+    """
     monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
     env_path = tmp_path / ".env"
     env_path.write_text(
         "PWA_AUTH_TOKEN=t\nCIAO_PUSH_CONTACT=mailto:owner@example.com\nANTHROPIC_API_KEY=sk-anthropic\n",
         encoding="utf-8",
     )
-    client, _config, _pcm = _client(
-        tmp_path,
-        {
-            "ANTHROPIC_API_KEY": "sk-anthropic",
-            "CIAO_OLLAMA_API_KEY": "",
-        },
-    )
+    client, _config, _pcm = _client(tmp_path, {"ANTHROPIC_API_KEY": "sk-anthropic"})
 
     data = client.get("/api/settings/providers").json()
-    assert "ANTHROPIC_API_KEY" not in data["keys"]
+    assert data["keys"] == {}
     # service_keys is empty since voice moved on-device: OPENAI_API_KEY was
     # the only entry, and nothing in the app reads it any more.
     assert data["service_keys"] == {}
-    assert data["keys"]["CIAO_OLLAMA_API_KEY"]["configured"] is False
     assert data["auto_update_github_skills"] is False
     assert "sk-anthropic" not in json.dumps(data)
+    # The connection rows survive: they are how a provider is signed in.
+    assert set(data["connections"]) == {"claude", "codex", "opencode"}
 
     resp = client.patch(
         "/api/settings/providers",
-        json={
-            "keys": {
-                "CIAO_OLLAMA_API_KEY": "sk-ollama",
-                "UNSUPPORTED_KEY": "nope",
-            }
-        },
+        json={"keys": {"OPENROUTER_API_KEY": "sk-or"}},
     )
-
     assert resp.status_code == 400
 
     resp = client.patch(
         "/api/settings/providers",
-        json={
-            "keys": {"CIAO_OLLAMA_API_KEY": "sk-ollama"},
-            "auto_update_github_skills": False
-        },
+        json={"auto_update_github_skills": False},
     )
     assert resp.status_code == 200
-    env_text = env_path.read_text(encoding="utf-8")
-    assert "CIAO_OLLAMA_API_KEY=sk-ollama" in env_text
-    assert "CIAO_AUTO_UPDATE_GITHUB_SKILLS=false" in env_text
-    assert "sk-ollama" not in json.dumps(resp.json())
+    assert "CIAO_AUTO_UPDATE_GITHUB_SKILLS=false" in env_path.read_text(encoding="utf-8")
     assert resp.json()["auto_update_github_skills"] is False
 
 
@@ -458,9 +537,113 @@ def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch)
     assert profiles["personal"]["workspaces"] == ["personal"]
     assert profiles["personal"]["setup_command"] == "scripts/gws-profile.sh personal auth login --full"
 
-    assert profiles["work"]["configured"] is False
-    assert profiles["work"]["workspaces"] == ["work"]
     assert str(personal_dir) in profiles["personal"]["config_dir"]
+    # Accounts are the user's: only the connected one is listed. "work" has no
+    # credentials on disk and was never added, so it is not invented here.
+    assert "work" not in profiles
+
+
+def test_gws_integration_starts_with_no_google_accounts(tmp_path, monkeypatch):
+    """A fresh install shows an empty account list, not a personal/work pair."""
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    client, _config, _pcm = _client(tmp_path)
+
+    data = client.get("/api/integrations/gws").json()
+
+    assert data["profiles"] == []
+    assert data["default_profile"] == ""
+
+
+def test_gws_profile_add_and_remove_round_trip(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    client, config, _pcm = _client(tmp_path)
+
+    added = client.post(
+        "/api/integrations/gws/profiles/add",
+        json={"name": "Acme Corp", "label": "Acme (work)"},
+    )
+    assert added.status_code == 200
+    profiles = {profile["name"]: profile for profile in added.json()["profiles"]}
+    assert list(profiles) == ["acme-corp"]
+    assert profiles["acme-corp"]["label"] == "Acme (work)"
+    assert profiles["acme-corp"]["configured"] is False
+    assert (
+        profiles["acme-corp"]["setup_command"]
+        == "scripts/gws-profile.sh acme-corp auth login --full"
+    )
+
+    # Adding the same account twice is a user error, not a silent duplicate.
+    duplicate = client.post("/api/integrations/gws/profiles/add", json={"name": "acme-corp"})
+    assert duplicate.status_code == 400
+
+    # Credentials written by the OAuth flow are deleted along with the account.
+    config_dir = tmp_path / "secrets" / "gws-acme-corp"
+    config_dir.mkdir(parents=True)
+    (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+
+    removed = client.post(
+        "/api/integrations/gws/profiles/remove", json={"profile": "acme-corp"}
+    )
+    assert removed.status_code == 200
+    assert removed.json()["profiles"] == []
+    assert not config_dir.exists()
+
+
+def test_gws_profile_remove_unlinks_workspaces(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    client, config, _pcm = _client(tmp_path)
+    client.post("/api/integrations/gws/profiles/add", json={"name": "acme"})
+    workspace = next(iter(config.workspaces.values()))
+    workspace.gws_profile = "acme"
+
+    body = client.post(
+        "/api/integrations/gws/profiles/remove", json={"profile": "acme"}
+    ).json()
+
+    assert body["profiles"] == []
+    assert config.workspaces[workspace.name].gws_profile == ""
+
+
+def test_gws_profile_add_rejects_an_unusable_name(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    client, _config, _pcm = _client(tmp_path)
+
+    resp = client.post("/api/integrations/gws/profiles/add", json={"name": "///"})
+
+    assert resp.status_code == 400
+
+
+def test_gws_profile_add_rejects_gws_service_names(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    client, _config, _pcm = _client(tmp_path)
+
+    service_names = (
+        "Gmail",
+        "calendar",
+        "Drive",
+        "docs",
+        "sheets",
+        "slides",
+        "tasks",
+        "contacts",
+        "forms",
+        "auth",
+    )
+    for name in service_names:
+        resp = client.post("/api/integrations/gws/profiles/add", json={"name": name})
+
+        assert resp.status_code == 400
+        assert "reserved" in resp.json()["error"]
 
 
 def test_gws_install_when_already_present_is_noop(tmp_path, monkeypatch):
@@ -801,6 +984,7 @@ def test_gws_profile_payload_never_shows_a_raw_scope_url(tmp_path):
 
 def test_gws_profile_payload_falls_back_to_static_meta_when_no_scopes(tmp_path):
     client, config, _ = _client(tmp_path)
+    client.post("/api/integrations/gws/profiles/add", json={"name": "personal"})
     # No credentials.json on disk -> configured is false, but the static
     # purpose should still be sent so the user sees something before connecting.
     resp = client.get("/api/integrations/gws")

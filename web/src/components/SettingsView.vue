@@ -1,5 +1,9 @@
 <template>
   <div class="settings-pane">
+    <UpdateProgressView
+      v-if="packageUpdating"
+      :version="packageStatus?.latest_version"
+    />
     <PaneHeader page-tag="settings" @open-sidebar="emit('open-sidebar')" />
     <div class="pane-body">
 
@@ -100,7 +104,7 @@
               <span>Decrease the font size</span>
             </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
-            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
+            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats; stacked workspaces use up/down between lanes</span></li>
             <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
           </ul>
         </div>
@@ -398,6 +402,20 @@
               </div>
             </div>
           </div>
+          <div class="setting-row setting-row--inline setting-row--toggle">
+            <div class="routine-info">
+              <span class="routine-name">Re-entry summary</span>
+              <span class="routine-detail">Show a one-line Apple Intelligence orientation note when you reopen a quiet chat. The summary stays visible while you scroll and clears the moment you send a new message.</span>
+            </div>
+            <label class="settings-checkbox-hit">
+              <input
+                type="checkbox"
+                class="settings-checkbox"
+                v-model="reentrySummaryEnabled"
+                @change="onReentrySummaryToggle"
+              />
+            </label>
+          </div>
         </div>
 
         
@@ -463,13 +481,48 @@
           <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
         </template>
         <template v-else-if="routines">
+          <!-- Apple Intelligence (beta, off by default) -->
+          <div class="card">
+            <div class="settings-card-header settings-card-header--split">
+              <div>
+                <p class="section-title">
+                  Apple Intelligence
+                  <span v-if="routines?.apple_intelligence_beta" class="badge badge--warn">beta</span>
+                </p>
+                <p class="hint">
+                  Experimental on-device models for chat titles, Session insights, and re-entry
+                  summaries. Off by default. Requires macOS 26+, the Ciaobot desktop app, and
+                  Apple Intelligence switched on in System Settings. While it is off, the
+                  "Local (free)" options below are unavailable and routines use a cloud model.
+                </p>
+              </div>
+              <div class="settings-control">
+                <label class="settings-checkbox-hit">
+                  <input
+                    type="checkbox"
+                    class="settings-checkbox"
+                    :checked="appleIntelligenceEnabled"
+                    :disabled="routinesSaving"
+                    @change="toggleAppleIntelligence"
+                  />
+                </label>
+              </div>
+            </div>
+            <p
+              v-if="appleIntelligenceEnabled && routines?.apple_model_available === false"
+              class="hint hint--warn"
+            >
+              Enabled, but unusable on this machine: {{ routines?.apple_model_unavailable_reason }}
+            </p>
+          </div>
+
           <!-- Internal routines -->
           <div class="card">
             <div class="settings-card-header">
               <p class="section-title">internal models</p>
               <p class="hint">
                 These tasks use their own model setting, separate from the active chat model.
-                "Automatic" keeps the built-in default. Local Ollama models run on this machine.
+                "Automatic" keeps the built-in default.
                 System automations without a model picker are tracked on the Automations page.
               </p>
             </div>
@@ -501,7 +554,7 @@
                   @change="saveRoutineProvider('title_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option value="automatic">Automatic</option>
-                  <option value="apple">Local (free)</option>
+                  <option value="apple">Local (free) · beta</option>
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
@@ -593,7 +646,7 @@
                   @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option value="automatic">Automatic</option>
-                  <option value="apple">Local (free)</option>
+                  <option value="apple">Local (free) · beta</option>
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
@@ -767,7 +820,7 @@
               <div>
                 <p class="section-title">providers</p>
                 <p class="hint">
-                  Claude Code and Codex manage their own login and credentials. Ciaobot verifies each CLI connection.
+                  Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
                 </p>
               </div>
             </div>
@@ -776,11 +829,21 @@
               <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row">
                 <div class="setting-row-main setting-row-main--inline">
                   <div class="routine-info">
-                    <span class="routine-name">{{ connKey === 'codex' ? 'OpenAI Codex' : 'Claude Code' }}</span>
+                    <span class="routine-name">{{ conn.label || connKey }}</span>
                     <p class="hint hint--compact provider-connection-detail">
                       <span v-if="conn.version">{{ conn.version }}</span>
                       <span v-if="conn.account">{{ conn.account }}</span>
                       <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
+                    </p>
+                    <p v-if="conn.auth === 'not_installed'" class="hint hint--compact">
+                      {{ conn.detail }}
+                      Install it with <code>{{ conn.command }}</code>
+                      <a
+                        v-if="conn.install_url"
+                        :href="conn.install_url"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >installation guide ↗</a>
                     </p>
                   </div>
                   <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
@@ -789,35 +852,20 @@
                 </div>
                 <div class="provider-mcps-preview">
                   <div class="ws-connectors-header">
-                    <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connKey === 'claude' ? claudeConnectionMcps.length : codexConnectionMcps.length }})</span>
+                    <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connectionMcps(String(connKey)).length }})</span>
                   </div>
                   <div class="workspace-connector-pills">
-                    <template v-if="connKey === 'claude'">
-                      <template v-if="claudeConnectionMcps.length">
-                        <span
-                          v-for="mcpName in claudeConnectionMcps"
-                          :key="mcpName"
-                          class="connector-pill connector-pill--enabled"
-                          :title="`${mcpName} configured for Claude Code`"
-                        >
-                          <span class="pill-dot"></span> {{ mcpName }}
-                        </span>
-                      </template>
-                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
+                    <template v-if="connectionMcps(String(connKey)).length">
+                      <span
+                        v-for="mcpName in connectionMcps(String(connKey))"
+                        :key="mcpName"
+                        class="connector-pill connector-pill--enabled"
+                        :title="`${mcpName} configured for ${conn.label || connKey}`"
+                      >
+                        <span class="pill-dot"></span> {{ mcpName }}
+                      </span>
                     </template>
-                    <template v-else-if="connKey === 'codex'">
-                      <template v-if="codexConnectionMcps.length">
-                        <span
-                          v-for="mcpName in codexConnectionMcps"
-                          :key="mcpName"
-                          class="connector-pill connector-pill--enabled"
-                          :title="`${mcpName} MCP configured for Codex`"
-                        >
-                          <span class="pill-dot"></span> {{ mcpName }}
-                        </span>
-                      </template>
-                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
-                    </template>
+                    <span v-else class="hint hint--compact">No MCP servers enabled</span>
                   </div>
 
                   <!-- Platform System Skills -->
@@ -830,14 +878,9 @@
                         <span class="pill-dot"></span> {{ skill }}
                       </span>
                     </template>
-                    <template v-else-if="connKey === 'claude'">
-                      <span v-for="skill in ['web-search', 'code-analysis', 'git-workflow', 'bash-executor']" :key="skill" class="connector-pill connector-pill--enabled">
-                        <span class="pill-dot"></span> {{ skill }}
-                      </span>
-                    </template>
-                    <template v-else-if="connKey === 'codex'">
-                      <span v-for="skill in ['build-web-apps', 'stripe', 'supabase', 'browser']" :key="skill" class="connector-pill connector-pill--enabled">
-                        <span class="pill-dot"></span> {{ skill }}
+                    <template v-else>
+                      <span class="hint hint--compact">
+                        {{ conn.ok ? 'None reported by this CLI' : 'Connect to discover' }}
                       </span>
                     </template>
                   </div>
@@ -891,56 +934,6 @@
               />
             </div>
 
-            <div class="custom-providers-block">
-              <div class="settings-card-header">
-                <div>
-                  <p class="section-title">custom compatible providers</p>
-                  <p class="hint">
-                    Add any endpoint compatible with the selected CLI, including local Ollama, LM Studio, or Unsloth. Choose Claude Code or Codex as the runner. Tokens stay on this machine.
-                  </p>
-                </div>
-                <button class="btn-small" type="button" @click="addCustomProvider">Add provider</button>
-              </div>
-              <div v-if="!customProviderDrafts.length" class="hint hint--compact">No custom endpoints configured.</div>
-              <div v-for="draft in customProviderDrafts" :key="draft.id" class="custom-provider-row">
-                <div class="settings-field-grid custom-provider-grid">
-                  <label class="settings-field">
-                    <span class="ws-label">Name</span>
-                    <input class="routine-input" v-model="draft.name" @input="customProvidersDirty = true" placeholder="LM Studio" />
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Id</span>
-                    <input class="routine-input" v-model="draft.id" @input="customProvidersDirty = true" placeholder="lm-studio" />
-                  </label>
-                  <label class="settings-field custom-provider-url">
-                    <span class="ws-label">Base URL</span>
-                    <input class="routine-input" v-model="draft.url" @input="customProvidersDirty = true" placeholder="http://localhost:1234/v1" />
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Use with</span>
-                    <select class="routine-select" v-model="draft.runner" @change="customProvidersDirty = true">
-                      <option value="claude">Claude Code</option>
-                      <option value="codex">Codex</option>
-                    </select>
-                  </label>
-                  <label class="settings-field custom-provider-token">
-                    <span class="ws-label">Token</span>
-                    <input class="routine-input" type="password" v-model="draft.token" @input="customProvidersDirty = true" :placeholder="draft.token_configured ? '•••••••• (leave blank to keep)' : 'Optional for local servers'" />
-                  </label>
-                  <label class="settings-field custom-provider-models">
-                    <span class="ws-label">Models (optional)</span>
-                    <input class="routine-input" v-model="draft.models" @input="customProvidersDirty = true" placeholder="model-id, another-model" />
-                  </label>
-                </div>
-                <div class="action-row provider-connection-actions">
-                  <button class="btn-small" type="button" :disabled="customProviderProbePending === draft.id" @click="probeCustomProvider(draft)">
-                    {{ customProviderProbePending === draft.id ? 'Discovering…' : 'Discover models' }}
-                  </button>
-                  <button class="btn-small btn-danger" type="button" @click="removeCustomProvider(draft.id)">Remove</button>
-                </div>
-              </div>
-            </div>
-
 
             <div class="action-row settings-actions">
               <button class="btn-primary" @click="saveProviderKeys" :disabled="providerKeysSaving">
@@ -956,7 +949,7 @@
             <div class="settings-card-header">
               <p class="section-title">model routing</p>
               <p class="hint">
-                Ciaobot maps Haiku, Sonnet, Opus, and Fable to provider-specific models. OpenAI routes run through Codex; Ollama and OpenRouter routes run through Claude Code.
+                Ciaobot maps Haiku, Sonnet, Opus, and Fable to each provider's own models.
               </p>
             </div>
             <div class="alias-provider-bar">
@@ -993,11 +986,25 @@
                     disabled
                   />
                 </label>
+                <label class="settings-field">
+                  <span class="ws-label">Default mode</span>
+                  <select
+                    class="routine-select"
+                    :value="providerModeSelectorValue(selectedTierProviderSection.key)"
+                    :disabled="routinesSaving"
+                    @change="saveProviderMode(selectedTierProviderSection.key, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <option
+                      v-for="option in providerModeOptions(selectedTierProviderSection.key)"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </label>
               </div>
-              <p v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
-                OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; pick a model above to pin a tier. A pin falls back to the automatic mapping if its model disappears from the account.
-              </p>
-              <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
+              <p v-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
                 {{ tierProviderUnavailableHint }}
               </p>
             </div>
@@ -1013,7 +1020,9 @@
           :automation-error="automationError"
           :fetch-automation="fetchAutomation"
           :notify-saved="notifySaved"
+          :notify-failed="notifyFailed"
           :routines="routines"
+          :alias-tiers="workspaceModels?.alias_tiers"
           :provider-labels="aliasProviderLabels"
         />
       </template>
@@ -1075,7 +1084,7 @@
                     />
                   </div>
                 </div>
-                <label class="settings-field"><span class="ws-label">Provider</span>
+                <label class="settings-field"><span class="ws-label">{{ workspaceProviderFieldLabel }}</span>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
                     <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                       {{ provider.label }}
@@ -1098,13 +1107,13 @@
                       <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
                       <div class="field-info-panel">
                         <p>
-                          Selects the Google Workspace profile used by this workspace. Manage profiles and credentials below.
+                          Selects which Google account this workspace uses. Accounts are added and connected in the Google Workspace card below.
                         </p>
                       </div>
                     </details>
                   </div>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
-                    <option value="">Default ({{ defaultGwsProfileName }})</option>
+                    <option value="">{{ gwsUnlinkedOptionLabel }}</option>
                     <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
                       {{ profile.label }} ({{ profile.email || profile.name }})
                     </option>
@@ -1197,7 +1206,7 @@
                       />
                     </div>
                   </div>
-                  <label class="settings-field"><span class="ws-label">Provider</span>
+                  <label class="settings-field"><span class="ws-label">{{ workspaceProviderFieldLabel }}</span>
                     <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                         {{ provider.label }}
@@ -1220,13 +1229,13 @@
                         <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
                         <div class="field-info-panel">
                           <p>
-                            Selects the Google Workspace profile used by this workspace. Manage profiles and credentials below.
+                            Selects which Google account this workspace uses. Accounts are added and connected in the Google Workspace card below.
                           </p>
                         </div>
                       </details>
                     </div>
                     <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
-                      <option value="">Default ({{ defaultGwsProfileName }})</option>
+                      <option value="">{{ gwsUnlinkedOptionLabel }}</option>
                       <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
                         {{ profile.label }} ({{ profile.email || profile.name }})
                       </option>
@@ -1264,7 +1273,7 @@
               </div>
             </div>
 
-            <div v-if="workspacesResult" class="action-result">{{ workspacesResult }}</div>
+            <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
           </div>
 
           <!-- Google Workspace integration -->
@@ -1283,12 +1292,14 @@
                         Stock <code>gws-*</code> skills ship with the app once <code>gws</code> is installed and authenticated.
                       </p>
                       <p>
-                        Use separate <strong>personal</strong> and <strong>work</strong> profiles so a personal chat never inherits work Drive or calendar access.
-                        Each workspace picks its profile.
+                        Add one account per Google login you use, and keep them separate so a
+                        personal chat never inherits work Drive or calendar access. Each
+                        workspace picks which account it uses.
                       </p>
-                      <p><strong>One-time setup per profile</strong></p>
+                      <p><strong>One-time setup per account</strong></p>
                       <ol class="field-info-steps">
                         <li>Install <code>gws</code> (button below or <code>npm install -g @googleworkspace/cli</code>).</li>
+                        <li>Add the account below and give it a short name.</li>
                         <li>
                           In
                           <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console &rarr; Credentials</a>,
@@ -1305,8 +1316,10 @@
                   </details>
                 </div>
                 <p class="hint">
-                  Connect Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through separate local <code>gws</code> profiles.
-                  Workspaces choose which profile to use above.
+                  Add one account per Google login you use, then link each workspace to the
+                  account it should use (the <strong>Google profile</strong> field above).
+                  Accounts are local <code>gws</code> profiles: Gmail, Calendar, Drive, Docs,
+                  Sheets, Slides, and Tasks.
                 </p>
               </div>
               <span
@@ -1340,6 +1353,43 @@
                 </div>
                 <p v-if="gwsInstallResult" class="hint hint--compact gws-install-result">{{ gwsInstallResult }}</p>
               </div>
+              <div class="gws-account-add">
+                <span class="ws-label">Add a Google account</span>
+                <div class="gws-account-add-row">
+                  <input
+                    class="routine-input"
+                    v-model="newGwsProfileName"
+                    placeholder="short name (e.g. personal, acme)"
+                    :disabled="gwsProfileAdding"
+                    @keyup.enter="addGwsProfile"
+                  />
+                  <input
+                    class="routine-input"
+                    v-model="newGwsProfileLabel"
+                    placeholder="display name (optional)"
+                    :disabled="gwsProfileAdding"
+                    @keyup.enter="addGwsProfile"
+                  />
+                  <button
+                    class="btn-primary btn-small"
+                    :disabled="!newGwsProfileName.trim() || gwsProfileAdding"
+                    @click="addGwsProfile"
+                  >
+                    {{ gwsProfileAdding ? 'Adding…' : 'Add account' }}
+                  </button>
+                </div>
+                <p class="hint hint--compact">
+                  The short name identifies the account in chats and in
+                  <code>secrets/gws-&lt;name&gt;/</code>. You connect the Google login in the
+                  card that appears.
+                </p>
+                <p v-if="gwsProfileActionError" class="hint hint--warn">{{ gwsProfileActionError }}</p>
+              </div>
+
+              <p v-if="!gwsIntegration.profiles?.length" class="hint hint--compact">
+                No Google accounts yet. Workspaces run without Google access until you add one.
+              </p>
+
               <div class="gws-profile-list">
                 <div
                   v-for="profile in gwsIntegration.profiles"
@@ -1352,9 +1402,16 @@
                       <p v-if="profile.email" class="gws-profile-email">{{ profile.email }}</p>
                       <p class="hint hint--compact"><code>{{ profile.name }}</code> profile</p>
                     </div>
-                    <span class="badge" :class="gwsProfileBadgeClass(profile)">
-                      {{ gwsProfileStatus(profile) }}
-                    </span>
+                    <div class="gws-profile-header-actions">
+                      <span class="badge" :class="gwsProfileBadgeClass(profile)">
+                        {{ gwsProfileStatus(profile) }}
+                      </span>
+                      <button
+                        class="btn-small btn-danger"
+                        :disabled="gwsSavingProfile === profile.name"
+                        @click="removeGwsProfile(profile)"
+                      >Remove account</button>
+                    </div>
                   </div>
                   <p class="gws-profile-purpose">{{ profile.purpose }}</p>
                   <div v-if="profile.examples.length" class="gws-example-row">
@@ -2245,12 +2302,12 @@ import type {
   McpEnvKey,
   PromptAsset,
   ProviderConfigSettings,
-  CustomProviderSettings,
   RoutineSettings,
   SkillInventory,
   SlashCommand,
   SubagentAsset,
   WorkspaceInfo,
+  RuntimeProvider,
   WorkspaceHealthResponse,
   WorkspaceProvider,
   PackageStatus,
@@ -2264,9 +2321,11 @@ import { askConfirm } from '../lib/confirm'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import PaneHeader from './PaneHeader.vue'
+import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
 import { providerModelBadges, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 
 // The tray owns package updates and native notifications in the desktop app.
 const inDesktopApp = isDesktopApp()
@@ -2305,6 +2364,7 @@ const newMcpTransport = ref<'http' | 'stdio'>('http')
 const newMcpUrl = ref('')
 const newMcpCommand = ref('')
 const fastMcpEnabled = ref(true)
+const { reentrySummaryEnabled, setReentrySummaryEnabled } = useReentrySummaryPreference()
 const expandedMcp = ref<Record<string, boolean>>({})
 const mcpEnvInputs = ref<Record<string, string>>({})
 const mcpEnvSaving = ref(false)
@@ -2536,6 +2596,17 @@ function saveFastMcpToggle() {
   notifySaved(fastMcpEnabled.value ? 'Ciaobot FastMCP enabled.' : 'Ciaobot FastMCP disabled.')
 }
 
+function onReentrySummaryToggle() {
+  setReentrySummaryEnabled(reentrySummaryEnabled.value)
+  // The store action already evicts cached summaries when the toggle goes
+  // off. Persist to localStorage too so the choice survives reload.
+  if (reentrySummaryEnabled.value) {
+    notifySaved('Re-entry summary enabled.')
+  } else {
+    notifySaved('Re-entry summary disabled.')
+  }
+}
+
 async function createMcpViaChat() {
   const activeProj = projectStore.activeProject
   let projectId = activeProj?.project_id
@@ -2546,7 +2617,7 @@ async function createMcpViaChat() {
     projectId = projectStore.projects[0]?.project_id
   }
   if (!projectId) {
-    alert('Please create a project first before starting a chat.')
+    notifySaved('Create a project first, then start the chat.', 'No project yet')
     return
   }
 
@@ -2559,7 +2630,7 @@ async function createMcpViaChat() {
       })
     }
   } catch (e) {
-    alert(`Failed to create chat: ${errorMessage(e)}`)
+    notifyFailed('Could not create chat', errorMessage(e))
   }
 }
 
@@ -2617,7 +2688,7 @@ async function deleteCustomMcpServer(name: string) {
     delete mcpToolsError.value[name]
     notifySaved(`Removed MCP server ${name}.`)
   } catch (e) {
-    alert(errorMessage(e, `Failed to delete MCP server ${name}`))
+    notifyFailed(`Could not delete MCP server ${name}`, errorMessage(e, 'The request failed.'))
   }
 }
 
@@ -2741,9 +2812,13 @@ type InsightsComparison = {
 }
 const insightsComparison = ref<InsightsComparison | null>(null)
 
-type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
-type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
-type RoutingProviderKey = Exclude<AliasProviderKey, 'claude'>
+// Every provider with models or tier pins is a runtime provider now.
+type AliasProviderKey = RuntimeProvider
+// The Providers tab routing card shows every runtime provider; Claude is
+// included so its default-mode selector lives next to the others, even
+// though its tiers are the aliases themselves and cannot be re-pinned.
+type TierProviderKey = AliasProviderKey
+type RoutingProviderKey = AliasProviderKey
 type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
 type RoutineModelKey = 'title_model' | 'insights_model'
 type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
@@ -2753,52 +2828,17 @@ type AliasProviderSection = {
   label: string
   options: string[]
   configurable: boolean
-  // Whether the backend is configured (API key set, or for Ollama: local
-  // models OR cloud key). Routine selectors filter to available sections;
-  // the Providers tab tier card shows unavailable sections disabled.
+  // Whether the provider is signed in and reporting models. Routine selectors
+  // filter to available sections; the Providers tab tier card shows unavailable
+  // sections disabled with setup guidance.
   available: boolean
 }
-type TierSettingKey =
-  | 'ollama_haiku_model'
-  | 'ollama_sonnet_model'
-  | 'ollama_opus_model'
-  | 'ollama_fable_model'
-  | 'openrouter_haiku_model'
-  | 'openrouter_sonnet_model'
-  | 'openrouter_opus_model'
-  | 'openrouter_fable_model'
-  | 'codex_haiku_model'
-  | 'codex_sonnet_model'
-  | 'codex_opus_model'
-  | 'codex_fable_model'
-
 const modelTiers: { key: TierKey; label: string }[] = [
   { key: 'haiku', label: 'Haiku' },
   { key: 'sonnet', label: 'Sonnet' },
   { key: 'opus', label: 'Opus' },
   { key: 'fable', label: 'Fable' },
 ]
-
-const tierSettingKeys: Record<TierProviderKey, Record<TierKey, TierSettingKey>> = {
-  ollama: {
-    haiku: 'ollama_haiku_model',
-    sonnet: 'ollama_sonnet_model',
-    opus: 'ollama_opus_model',
-    fable: 'ollama_fable_model',
-  },
-  openrouter: {
-    haiku: 'openrouter_haiku_model',
-    sonnet: 'openrouter_sonnet_model',
-    opus: 'openrouter_opus_model',
-    fable: 'openrouter_fable_model',
-  },
-  codex: {
-    haiku: 'codex_haiku_model',
-    sonnet: 'codex_sonnet_model',
-    opus: 'codex_opus_model',
-    fable: 'codex_fable_model',
-  },
-}
 
 const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
   title_model: 'title_model_effective',
@@ -2833,6 +2873,15 @@ async function saveRoutines(patch: Record<string, unknown>) {
   }
 }
 
+// Apple Intelligence is a beta feature, off by default; this toggle is the
+// opt-in. While it is off, the "Local (free)" option below reports unavailable
+// and titles/insights fall back to their cloud model.
+const appleIntelligenceEnabled = computed(() => routines.value?.apple_intelligence_enabled === true)
+
+async function toggleAppleIntelligence(event: Event) {
+  await saveRoutines({ apple_intelligence_enabled: (event.target as HTMLInputElement).checked })
+}
+
 async function compareAppleInsights() {
   insightsComparisonPending.value = true
   insightsComparison.value = null
@@ -2865,14 +2914,29 @@ function serializeModelList(models: string[]): string {
   return parseModelList(models.join(',')).join(',')
 }
 
+// A panel entry may name the provider that runs it. Anthropic tiers are bare
+// aliases; Codex and opencode entries carry a `<provider>:` prefix, matching
+// what `ciao/critique.py::_split_provider` dispatches on.
 const critiqueModelSections = computed<ModelSection[]>(() => {
   const options = routines.value?.model_options
   if (!options) return []
+  const tiers = options.anthropic || []
+  const prefixed = (provider: string, models: string[]) =>
+    models.filter((m) => tiers.includes(m)).map((m) => `${provider}:${m}`)
+  const codexModels = workspaceModels.value?.codex_models || []
+  const opencodeModels = workspaceModels.value?.opencode_models || []
   return [
-    { key: 'ollama_local', label: 'Ollama (local, free)', models: options.ollama_local || [], badge: 'local' },
-    { key: 'ollama_cloud', label: 'Ollama cloud', models: options.ollama_cloud || [] },
-    { key: 'openrouter', label: 'OpenRouter', models: options.openrouter || [] },
-    { key: 'anthropic', label: 'Anthropic', models: options.anthropic || [] },
+    { key: 'anthropic', label: 'Anthropic', models: tiers },
+    {
+      key: 'codex',
+      label: 'OpenAI (via Codex)',
+      models: codexModels.length ? prefixed('codex', tiers) : [],
+    },
+    {
+      key: 'opencode',
+      label: 'opencode',
+      models: opencodeModels.length ? prefixed('opencode', tiers) : [],
+    },
   ].filter((section) => section.models.length > 0)
 })
 
@@ -2902,34 +2966,32 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
       available: true,
     },
   ]
-  if (settings.backends?.ollama) {
+  // Codex and opencode can serve routines too (see `_run_codex_oneshot` /
+  // `_run_opencode_oneshot`), so offer them once their catalog is non-empty.
+  const codexModels = parseModelList((
+    workspaceModels.value?.codex_models
+    || workspaceModels.value?.provider_models?.codex
+    || []
+  ).join(','))
+  if (codexModels.length) {
     sections.push({
-      key: 'ollama',
-      label: 'Ollama (via Claude Code)',
-      options: parseModelList([
-        ...(settings.model_options.ollama_local || []),
-        ...(settings.model_options.ollama_cloud || []),
-      ].join(',')),
+      key: 'codex',
+      label: 'OpenAI (via Codex)',
+      options: codexModels,
       configurable: true,
       available: true,
     })
   }
-  if (settings.backends?.openrouter) {
+  const opencodeModels = parseModelList((
+    workspaceModels.value?.opencode_models
+    || workspaceModels.value?.provider_models?.opencode
+    || []
+  ).join(','))
+  if (opencodeModels.length) {
     sections.push({
-      key: 'openrouter',
-      label: 'OpenRouter (via Claude Code)',
-      options: parseModelList((settings.model_options.openrouter || []).join(',')),
-      configurable: true,
-      available: true,
-    })
-  }
-  for (const provider of settings.model_options.custom_providers || []) {
-    const options = parseModelList((provider.models || []).join(','))
-    if (!options.length) continue
-    sections.push({
-      key: `custom:${provider.id}` as AliasProviderKey,
-      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
-      options,
+      key: 'opencode',
+      label: 'opencode',
+      options: opencodeModels,
       configurable: true,
       available: true,
     })
@@ -2937,21 +2999,32 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   return sections
 })
 
-// Provider-neutral routing overview for the Providers tab. OpenAI models and
-// their automatic tier mapping come from Codex discovery in `/api/models`;
-// Ollama and OpenRouter expose editable Claude Code tier routes. Unconfigured
-// backends stay visible with setup guidance instead of vanishing.
+// Provider-neutral routing overview for the Providers tab. Models and their
+// automatic tier mapping come from each provider's own discovery in
+// `/api/models`. A provider that is not signed in stays visible with setup
+// guidance instead of vanishing.
 const tierProviderSections = computed<AliasProviderSection[]>(() => {
-  const settings = routines.value
-  if (!settings) return []
+  if (!routines.value) return []
   const codexModels = parseModelList((
     workspaceModels.value?.codex_models
     || workspaceModels.value?.provider_models?.codex
     || []
   ).join(','))
-  const ollamaAvailable = !!settings.backends?.ollama
-  const openrouterAvailable = !!settings.backends?.openrouter
+  const opencodeModels = parseModelList((
+    workspaceModels.value?.opencode_models
+    || workspaceModels.value?.provider_models?.opencode
+    || []
+  ).join(','))
   return [
+    {
+      key: 'claude',
+      label: 'Anthropic (via Claude Code)',
+      // Claude's tiers are the aliases themselves; nothing to pin. The
+      // section exists so the default-mode selector covers every provider.
+      options: [],
+      configurable: false,
+      available: true,
+    },
     {
       key: 'codex',
       label: 'OpenAI (via Codex)',
@@ -2960,33 +3033,12 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
       available: codexModels.length > 0,
     },
     {
-      key: 'ollama',
-      label: 'Ollama (via Claude Code)',
-      options: ollamaAvailable
-        ? parseModelList([
-            ...(settings.model_options.ollama_local || []),
-            ...(settings.model_options.ollama_cloud || []),
-          ].join(','))
-        : [],
+      key: 'opencode',
+      label: 'opencode',
+      options: opencodeModels,
       configurable: true,
-      available: ollamaAvailable,
+      available: opencodeModels.length > 0,
     },
-    {
-      key: 'openrouter',
-      label: 'OpenRouter (via Claude Code)',
-      options: openrouterAvailable
-        ? parseModelList((settings.model_options.openrouter || []).join(','))
-        : [],
-      configurable: true,
-      available: openrouterAvailable,
-    },
-    ...(settings.model_options.custom_providers || []).map((provider) => ({
-      key: `custom:${provider.id}` as AliasProviderKey,
-      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
-      options: parseModelList((provider.models || []).join(',')),
-      configurable: true,
-      available: (provider.models || []).length > 0,
-    })),
   ]
 })
 
@@ -3009,18 +3061,13 @@ const selectedTierProviderSection = computed(() =>
 const tierModelSections = computed<ModelSection[]>(() => {
   const section = selectedTierProviderSection.value
   if (!section || !section.options.length) return []
-  const aliasTiers = section.key === 'codex'
-    ? workspaceModels.value?.alias_tiers
-    : routines.value?.alias_tiers
-  const localModels = section.key === 'ollama'
-    ? routines.value?.model_options.ollama_local || []
-    : []
+  const aliasTiers = workspaceModels.value?.alias_tiers
   return [
     {
       key: section.key,
       label: section.label,
       models: section.options,
-      modelBadges: providerModelBadges(section.key, section.options, aliasTiers, localModels),
+      modelBadges: providerModelBadges(section.key, section.options, aliasTiers),
       disabled: !section.available,
       hint: section.available ? undefined : tierProviderUnavailableHint.value,
     },
@@ -3033,11 +3080,8 @@ const tierProviderUnavailableHint = computed(() => {
   if (section.key === 'codex') {
     return 'Sign in to Codex to discover the available OpenAI models and their tier routing.'
   }
-  if (section.key === 'ollama') {
-    return 'Install local Ollama models or set the Ollama Cloud API key above to enable tier mapping.'
-  }
-  if (section.key === 'openrouter') {
-    return 'Set the OpenRouter API key above to enable tier mapping.'
+  if (section.key === 'opencode') {
+    return 'Sign in to opencode (and connect at least one of its providers) to enable tier mapping.'
   }
   return 'Configure this provider to enable tier mapping.'
 })
@@ -3045,19 +3089,13 @@ const tierProviderUnavailableHint = computed(() => {
 const DEFAULT_TIER_SELECTION = '__ciao_default__'
 
 function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
-  if (provider.startsWith('custom:')) {
-    const id = provider.slice('custom:'.length)
-    return routines.value?.custom_routing?.[id]?.[tier] || ''
-  }
-  const key = tierSettingKeys[provider][tier]
-  return routines.value?.[key] || ''
+  return routines.value?.provider_routing?.[provider]?.[tier] || ''
 }
 
 function tierEffectiveValue(provider: TierProviderKey, tier: TierKey): string {
-  // Codex effective tiers come from the account catalog, exposed by
-  // /api/models rather than the routines payload.
-  if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || ''
-  return routines.value?.alias_tiers?.[provider]?.[tier] || ''
+  // A runtime provider's effective tiers come from its account catalog,
+  // exposed by /api/models rather than the routines payload.
+  return workspaceModels.value?.alias_tiers?.[provider]?.[tier] || ''
 }
 
 function tierDefaultValue(provider: TierProviderKey, tier: TierKey): string {
@@ -3065,14 +3103,14 @@ function tierDefaultValue(provider: TierProviderKey, tier: TierKey): string {
     return workspaceModels.value?.codex_tier_defaults?.[tier]
       || tierEffectiveValue(provider, tier)
   }
-  return routines.value?.tier_defaults?.[provider]?.[tier]
-    || tierEffectiveValue(provider, tier)
+  return tierEffectiveValue(provider, tier)
 }
 
 function tierDefaultLabel(provider: TierProviderKey, tier: TierKey): string {
   const model = tierDefaultValue(provider, tier)
-  const word = provider === 'codex' ? 'Automatic' : 'Default'
-  return model ? `${word} (${model})` : word
+  // Always "Automatic": every tier is derived from the provider's own catalog
+  // now, never from an env-backed default.
+  return model ? `Automatic (${model})` : 'Automatic'
 }
 
 function tierSelectorValue(provider: TierProviderKey, tier: TierKey): string {
@@ -3094,29 +3132,85 @@ function tierModelSectionsFor(provider: TierProviderKey, tier: TierKey): ModelSe
 async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: string | string[]) {
   const selected = Array.isArray(value) ? value[0] || '' : value
   const model = selected === DEFAULT_TIER_SELECTION ? '' : selected
-  if (provider.startsWith('custom:')) {
-    const id = provider.slice('custom:'.length)
-    const routing = JSON.parse(JSON.stringify(routines.value?.custom_routing || {})) as Record<string, Record<string, string>>
-    const routes = { ...(routing[id] || {}) }
-    if (model.trim()) routes[tier] = model.trim()
-    else delete routes[tier]
-    if (Object.keys(routes).length) routing[id] = routes
-    else delete routing[id]
-    await saveRoutines({ custom_routing: routing })
-  } else {
-    const key = tierSettingKeys[provider][tier]
-    await saveRoutines({ [key]: model.trim() })
-  }
-  // Codex effective tiers live in /api/models; refresh so the badges and
+  const routing = JSON.parse(
+    JSON.stringify(routines.value?.provider_routing || {}),
+  ) as Record<string, Record<string, string>>
+  const routes = { ...(routing[provider] || {}) }
+  if (model.trim()) routes[tier] = model.trim()
+  else delete routes[tier]
+  if (Object.keys(routes).length) routing[provider] = routes
+  else delete routing[provider]
+  await saveRoutines({ provider_routing: routing })
+  // Effective tiers live in /api/models; refresh so the badges and
   // "Automatic (…)" labels reflect the new pin immediately.
-  if (provider === 'codex') await fetchWorkspaceModels()
+  await fetchWorkspaceModels()
+}
+
+// Per-provider default execution mode for new chats. The stored override
+// lives in RoutineSettings.provider_default_modes; a missing entry falls
+// back to the effective default reported by the backend (opencode → normal,
+// everyone else → auto). Opencode starts approval-enforcing for new chats;
+// operators can explicitly choose Auto or Bypass when desired.
+const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
+
+const MODE_LABELS: Record<string, string> = {
+  auto: 'Auto',
+  bypass: 'Bypass',
+  normal: 'Manual',
+  plan: 'Plan',
+}
+
+function providerModeOverride(provider: AliasProviderKey): string {
+  return routines.value?.provider_default_modes?.[provider] || ''
+}
+
+function providerModeEffective(provider: AliasProviderKey): string {
+  return routines.value?.provider_default_modes_effective?.[provider]
+    || (provider === 'opencode' ? 'normal' : 'auto')
+}
+
+function providerModeSelectorValue(provider: AliasProviderKey): string {
+  return providerModeOverride(provider) || DEFAULT_MODE_SELECTION
+}
+
+function providerModeOptions(provider: AliasProviderKey): { value: string; label: string }[] {
+  const effective = providerModeEffective(provider)
+  return [
+    {
+      value: DEFAULT_MODE_SELECTION,
+      label: `Automatic (${MODE_LABELS[effective] || effective})`,
+    },
+    { value: 'auto', label: 'Auto — fewer prompts, classifier approves safe actions' },
+    { value: 'bypass', label: 'Bypass — skip all checks (use in containers only)' },
+    { value: 'normal', label: 'Manual — approve each tool call' },
+    { value: 'plan', label: 'Plan — read-only, propose without acting' },
+  ]
+}
+
+async function saveProviderMode(provider: AliasProviderKey, value: string) {
+  const selected = value === DEFAULT_MODE_SELECTION ? '' : value
+  const modes = JSON.parse(
+    JSON.stringify(routines.value?.provider_default_modes || {}),
+  ) as Record<string, string>
+  if (selected) modes[provider] = selected
+  else delete modes[provider]
+  await saveRoutines({ provider_default_modes: modes })
 }
 
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
-  if (provider === 'claude') return routines.value?.alias_tiers?.claude?.[tier] || tier
+  // Claude's tiers *are* the aliases; the others pin concrete models.
+  if (provider === 'claude') return tier
   if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || 'Not available'
-  if (provider.startsWith('custom:')) return tierEffectiveValue(provider, tier) || ''
   return tierEffectiveValue(provider, tier) || ''
+}
+
+function serializeRoutineModel(provider: RoutineProviderValue, model: string): string {
+  // Runtime-provider models need an explicit qualifier so the backend does not
+  // send a global routine override through Claude by default.
+  if (provider === 'codex' || provider === 'opencode') {
+    return `${provider}:${model}`
+  }
+  return model
 }
 
 function aliasProviderLabel(provider: AliasProviderKey): string {
@@ -3136,15 +3230,18 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
   if (!raw) return { provider: 'automatic', tier: 'sonnet' }
   // 'apfel' is the legacy id from when this shelled out to the apfel CLI.
   if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
-  if (raw.startsWith('codex:')) {
-    const codexModel = raw.slice('codex:'.length)
-    const codexTiers = workspaceModels.value?.alias_tiers?.codex || {}
-    for (const tier of modelTiers) {
-      if (codexTiers[tier.key] === codexModel) {
-        return { provider: 'codex', tier: tier.key }
+  for (const provider of ['codex', 'opencode'] as const) {
+    const prefix = `${provider}:`
+    if (raw.startsWith(prefix)) {
+      const providerModel = raw.slice(prefix.length)
+      const providerTiers = workspaceModels.value?.alias_tiers?.[provider] || {}
+      for (const tier of modelTiers) {
+        if (providerTiers[tier.key] === providerModel) {
+          return { provider, tier: tier.key }
+        }
       }
+      return { provider, tier: 'sonnet' }
     }
-    return { provider: 'codex', tier: 'sonnet' }
   }
   if (raw.startsWith('custom:')) {
     const provider = `custom:${raw.split(':', 2)[1]}` as AliasProviderKey
@@ -3159,7 +3256,7 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
     return { provider: 'claude', tier: claudeTiers[raw] }
   }
 
-  const providers: TierProviderKey[] = ['ollama', 'openrouter']
+  const providers: TierProviderKey[] = ['codex', 'opencode']
   for (const provider of providers) {
     for (const tier of modelTiers) {
       if (tierEffectiveValue(provider, tier.key) === raw) {
@@ -3175,8 +3272,8 @@ function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
   return inferRoutineModel(routines.value?.[key] || '').provider
 }
 
-// Titles can be dispatched through the Codex CLI when it has discovered
-// models (i.e. Codex is connected). Other routines stay on Claude routing.
+// Titles can be dispatched through runtime providers when they have discovered
+// models (i.e. the provider is connected).
 const codexTitlesAvailable = computed(() => {
   const tiers = workspaceModels.value?.alias_tiers?.codex
   return !!tiers && Object.values(tiers).some(Boolean)
@@ -3194,8 +3291,7 @@ function routineTierValue(key: RoutineModelKey): TierKey {
 
 function routineTierSelectable(key: RoutineModelKey): boolean {
   const provider = routineProviderValue(key)
-  return provider === 'claude' || provider === 'ollama' || provider === 'openrouter'
-    || provider === 'codex' || provider.startsWith('custom:')
+  return provider === 'claude' || provider === 'codex' || provider === 'opencode'
 }
 
 function routineCustomModel(key: RoutineModelKey): string {
@@ -3215,9 +3311,7 @@ async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) 
   if (provider === 'custom') return
   const tier = routineTierValue(key)
   const model = tierModelForProvider(provider, tier)
-  // Codex models are dispatched through the Codex CLI, not Claude Code
-  // env-injection; the prefix tells the backend which pipeline to use.
-  await saveRoutines({ [key]: provider === 'codex' ? `codex:${model}` : model })
+  await saveRoutines({ [key]: serializeRoutineModel(provider, model) })
 }
 
 async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
@@ -3227,7 +3321,7 @@ async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
     provider = 'claude'
   }
   const model = tierModelForProvider(provider, tier)
-  await saveRoutines({ [key]: provider === 'codex' ? `codex:${model}` : model })
+  await saveRoutines({ [key]: serializeRoutineModel(provider, model) })
 }
 
 // Automatic does not pick one model: resolve_title_model / resolve_insights_model
@@ -3257,7 +3351,7 @@ function routineModelSummary(key: RoutineModelKey): string {
     }
     return `Automatic: ${routineEffectiveModel(key) || 'default'}`
   }
-  if (provider === 'apple') return 'Local (free)'
+  if (provider === 'apple') return 'Local (free) · beta'
   if (provider === 'custom') return `Custom: ${routineCustomModel(key)}`
   const tier = routineTierValue(key)
   const model = tierModelForProvider(provider, tier)
@@ -3278,10 +3372,6 @@ const mcpUsageError = ref('')
 const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
-type CustomProviderDraft = Omit<CustomProviderSettings, 'models'> & { token: string; models: string }
-const customProviderDrafts = ref<CustomProviderDraft[]>([])
-const customProvidersDirty = ref(false)
-const customProviderProbePending = ref('')
 const autoUpdateGithubSkills = ref(false)
 const autoUpdateSaving = ref(false)
 const autoUpdateResult = ref('')
@@ -3305,18 +3395,23 @@ function gwsProfileBadgeClass(profile: GwsProfile): string {
   return 'badge--error'
 }
 
-const defaultGwsProfileName = computed(() => gwsIntegration.value?.default_profile || 'personal')
+const defaultGwsProfileName = computed(() => gwsIntegration.value?.default_profile || '')
 
-const gwsProfileOptions = computed(() => {
-  const profiles = gwsIntegration.value?.profiles || []
-  if (profiles.length) {
-    return profiles.map((profile) => ({ name: profile.name, label: profile.label, email: profile.email }))
-  }
-  return [
-    { name: 'personal', label: 'Personal Google account', email: '' },
-    { name: 'work', label: 'Work Google account', email: '' },
-  ]
-})
+// Only the accounts this install actually has. No built-in personal/work pair:
+// a fresh install has none until the user adds one below.
+const gwsProfileOptions = computed(() =>
+  (gwsIntegration.value?.profiles || []).map((profile) => ({
+    name: profile.name,
+    label: profile.label,
+    email: profile.email,
+  })),
+)
+
+const gwsUnlinkedOptionLabel = computed(() =>
+  defaultGwsProfileName.value
+    ? `Default (${defaultGwsProfileName.value})`
+    : 'No Google account',
+)
 
 function workspaceCustomGwsProfile(profile: string): boolean {
   const name = profile.trim()
@@ -3331,6 +3426,55 @@ async function fetchGwsIntegration() {
     gwsIntegrationError.value = `Failed to load Google Workspace integration: ${errorMessage(e)}`
   } finally {
     gwsIntegrationLoaded.value = true
+  }
+}
+
+const newGwsProfileName = ref('')
+const newGwsProfileLabel = ref('')
+const gwsProfileAdding = ref(false)
+const gwsProfileActionError = ref('')
+
+async function addGwsProfile() {
+  const name = newGwsProfileName.value.trim()
+  if (!name || gwsProfileAdding.value) return
+  gwsProfileAdding.value = true
+  gwsProfileActionError.value = ''
+  try {
+    gwsIntegration.value = await api.post<GwsIntegrationSettings>(
+      '/api/integrations/gws/profiles/add',
+      { name, label: newGwsProfileLabel.value.trim() },
+    )
+    newGwsProfileName.value = ''
+    newGwsProfileLabel.value = ''
+  } catch (e) {
+    gwsProfileActionError.value = errorMessage(e, 'Failed to add the account')
+  } finally {
+    gwsProfileAdding.value = false
+  }
+}
+
+async function removeGwsProfile(profile: GwsProfile) {
+  const linked = profile.workspaces.length
+    ? ` ${profile.workspaces.join(', ')} will lose their Google access until you link another account.`
+    : ''
+  if (!await askConfirm(
+    `Remove ${profile.label} and delete its stored Google credentials from this machine?${linked}`,
+    { title: 'Remove Google account?', confirmLabel: 'Remove account', destructive: true },
+  )) {
+    return
+  }
+  gwsSavingProfile.value = profile.name
+  gwsProfileActionError.value = ''
+  try {
+    gwsIntegration.value = await api.post<GwsIntegrationSettings>(
+      '/api/integrations/gws/profiles/remove',
+      { profile: profile.name },
+    )
+    await fetchWorkspacesList()
+  } catch (e) {
+    gwsProfileActionError.value = errorMessage(e, 'Failed to remove the account')
+  } finally {
+    gwsSavingProfile.value = null
   }
 }
 
@@ -3376,7 +3520,7 @@ async function handleClientSecretUpload(event: Event, profileName: string) {
     })
     gwsIntegration.value = updated
   } catch (e) {
-    alert(errorMessage(e, 'Failed to upload client secret'))
+    notifyFailed('Could not upload the client secret', errorMessage(e, 'The upload failed.'))
   } finally {
     gwsSavingProfile.value = null
     target.value = ''
@@ -3393,7 +3537,7 @@ async function startGwsAuth(profileName: string) {
     gwsRedirectUrls.value[profileName] = ''
     window.open(res.auth_url, '_blank')
   } catch (e) {
-    alert(errorMessage(e, 'Failed to generate authorization URL'))
+    notifyFailed('Could not generate the authorization URL', errorMessage(e, 'The request failed.'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3413,7 +3557,7 @@ async function exchangeGwsCode(profileName: string) {
     delete gwsAuthUrls.value[profileName]
     delete gwsRedirectUrls.value[profileName]
   } catch (e) {
-    alert(errorMessage(e, 'Failed to complete connection'))
+    notifyFailed('Could not complete the connection', errorMessage(e, 'The request failed.'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3444,7 +3588,7 @@ async function disconnectGwsProfile(profileName: string, deleteClientSecret: boo
     gwsIntegration.value = updated
     cancelGwsAuth(profileName)
   } catch (e) {
-    alert(errorMessage(e, 'Failed to update profile connection'))
+    notifyFailed('Could not update the profile connection', errorMessage(e, 'The request failed.'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3476,12 +3620,6 @@ async function fetchProviderKeys() {
   try {
     const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
     providerKeys.value = res
-    customProviderDrafts.value = (res.custom_providers || []).map((provider) => ({
-      ...provider,
-      token: '',
-      models: provider.models.join(', '),
-    }))
-    customProvidersDirty.value = false
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
@@ -3495,48 +3633,6 @@ async function fetchProviderKeys() {
     providerKeysError.value = `Failed to load provider keys: ${errorMessage(e)}`
   } finally {
     providerKeysLoaded.value = true
-  }
-}
-
-function addCustomProvider() {
-  const id = `custom-${Date.now().toString(36)}`
-  customProviderDrafts.value.push({
-    id,
-    name: 'Custom provider',
-    url: 'http://localhost:1234/v1',
-    runner: 'claude',
-    models: '',
-    token_configured: false,
-    token: '',
-  })
-  customProvidersDirty.value = true
-}
-
-function removeCustomProvider(id: string) {
-  customProviderDrafts.value = customProviderDrafts.value.filter((provider) => provider.id !== id)
-  customProvidersDirty.value = true
-}
-
-async function probeCustomProvider(draft: CustomProviderDraft) {
-  customProviderProbePending.value = draft.id
-  try {
-    const result = await api.post<{ ok: boolean; models: string[] }>('/api/settings/providers/custom/probe', {
-      id: draft.id,
-      name: draft.name,
-      url: draft.url,
-      runner: draft.runner,
-      token: draft.token || undefined,
-    })
-    if (result.models?.length) {
-      draft.models = result.models.join(', ')
-      customProvidersDirty.value = true
-    } else {
-      providerKeysResult.value = 'No models were discovered. You can enter model ids manually.'
-    }
-  } catch (e) {
-    providerKeysResult.value = `Could not discover models: ${errorMessage(e)}`
-  } finally {
-    customProviderProbePending.value = ''
   }
 }
 
@@ -3615,10 +3711,7 @@ async function saveProviderKeys() {
     }
   }
   
-  const hasKeyChanges = Object.keys(patchKeys).length > 0
-  const customProvidersChanged = customProvidersDirty.value
-  
-  if (!hasKeyChanges && !customProvidersDirty.value) {
+  if (!Object.keys(patchKeys).length) {
     providerKeysResult.value = 'No changes to save.'
     providerKeysSaving.value = false
     setTimeout(() => { providerKeysResult.value = '' }, 2000)
@@ -3626,26 +3719,11 @@ async function saveProviderKeys() {
   }
   
   try {
-    const payload: { keys: Record<string, string>; custom_providers?: object[] } = { keys: patchKeys }
-    if (customProvidersDirty.value) {
-      payload.custom_providers = customProviderDrafts.value.map((draft) => ({
-        id: draft.id,
-        name: draft.name,
-        url: draft.url,
-        runner: draft.runner,
-        models: draft.models,
-        ...(draft.token ? { token: draft.token } : {}),
-      }))
-    }
-    
-    const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', payload)
+    const res = await api.patch<ProviderConfigSettings>(
+      '/api/settings/providers',
+      { keys: patchKeys },
+    )
     providerKeys.value = res
-    customProviderDrafts.value = (res.custom_providers || []).map((provider) => ({
-      ...provider,
-      token: '',
-      models: provider.models.join(', '),
-    }))
-    customProvidersDirty.value = false
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
@@ -3656,16 +3734,9 @@ async function saveProviderKeys() {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
     providerKeysResult.value = ''
-    if (customProvidersChanged) {
-      // Provider selectors are mounted from separate payloads; refresh them
-      // immediately so a newly saved endpoint is usable without a page reload.
-      await Promise.all([fetchRoutines(), fetchWorkspaceModels(), fetchWorkspacesList()])
-    }
-    if (hasKeyChanges) {
-      await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
-    } else {
-      providerKeysResult.value = 'Custom providers saved.'
-    }
+    // A service key only reaches the process env on startup, so a change here
+    // always needs a restart. There is nothing else this save can change.
+    await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
   } catch (e) {
     providerKeysResult.value = `Error: ${errorMessage(e)}`
   } finally {
@@ -4214,7 +4285,7 @@ async function createSkillViaChat() {
     projectId = projectStore.projects[0]?.project_id
   }
   if (!projectId) {
-    alert('Please create a project first before starting a chat.')
+    notifySaved('Create a project first, then start the chat.', 'No project yet')
     return
   }
 
@@ -4225,7 +4296,7 @@ async function createSkillViaChat() {
       projectStore.sendMessage(chat.chat_id, prompt)
     }
   } catch (e) {
-    alert(`Failed to start chat: ${errorMessage(e)}`)
+    notifyFailed('Could not start chat', errorMessage(e))
   }
 }
 
@@ -4314,6 +4385,16 @@ function isStandalone(): boolean {
 function notifySaved(body: string, title = 'settings') {
   projectStore.pushToast({ chat_id: '', title, body })
 }
+
+// The failure sibling of notifySaved. `alert` cannot be used for this: wry's
+// WKUIDelegate implements no JS dialog panels, so inside the desktop app the
+// native dialog never appears and every failure reported through it was
+// completely invisible -- the action just seemed to do nothing. Error toasts
+// persist until dismissed and can seed a fix chat from `detail`.
+function notifyFailed(title: string, detail: string) {
+  projectStore.pushErrorToast(title, detail)
+}
+const workspaceProviderFieldLabel = 'Agent CLI/Runtime'
 const workspacesLoaded = ref(false)
 const workspacesError = ref('')
 const workspacesSaving = ref<string | null>(null)
@@ -4327,7 +4408,6 @@ type WorkspaceForm = {
   default_provider: WorkspaceProvider
   default_model: string
   gws_profile: string
-  model_bucket: string
   disallowed_tools: string
   claude_ai_mcps: 'on' | 'off'
   color: WorkspaceColorId
@@ -4344,25 +4424,30 @@ function blankWorkspaceForm(): WorkspaceForm {
     default_provider: defaultWorkspaceProvider(),
     default_model: '',
     gws_profile: '',
-    model_bucket: '',
     disallowed_tools: '',
     claude_ai_mcps: 'on',
     color: DEFAULT_WORKSPACE_COLOR,
   }
 }
 
+function normalizeWorkspaceProvider(value: unknown): WorkspaceProvider {
+  // A stored provider outside the current registry (for example the removed
+  // pre-refactor "ollama") would render a native select with no selected
+  // option. Keep the form on a registry value so it can be saved cleanly.
+  const storedProvider = typeof value === 'string' ? value.trim() : ''
+  return projectStore.workspaceProviderOptions.some((option) => option.value === storedProvider)
+    ? storedProvider
+    : defaultWorkspaceProvider()
+}
+
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
   const mcps = ws.claude_ai_mcps
-  const customProvider = ws.default_model.startsWith('custom:')
-    ? `custom:${ws.default_model.split(':', 3)[1]}` as WorkspaceProvider
-    : null
   return {
     name: ws.name,
     vault_root: ws.vault_root || '',
-    default_provider: customProvider || ws.default_provider || 'claude',
+    default_provider: normalizeWorkspaceProvider(ws.default_provider),
     default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
-    model_bucket: ws.model_bucket || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
     claude_ai_mcps: mcps === false ? 'off' : 'on',
     color: normalizeWorkspaceColor(ws.color),
@@ -4491,53 +4576,48 @@ const inspectorEmbeddedTools = computed(() => {
   ]
 })
 
-const codexConnectionMcps = computed(() => {
-  const codexConn = providerKeys.value?.connections?.codex
-  // Platform MCP list only — exclude Ciaobot project servers from .mcp.json
-  // (n8n_mcp, notion, ciaobot), which have their own MCP status section.
-  const excluded = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
-  return (codexConn?.mcps || []).filter((name: string) => !excluded.has(name))
-})
+// Platform MCP list only — exclude Ciaobot project servers from .mcp.json
+// (n8n_mcp, notion, ciaobot), which have their own MCP status section.
+const EXCLUDED_PLATFORM_MCPS = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
 
-const claudeConnectionMcps = computed(() => {
+/**
+ * Platform MCP servers a provider's CLI reports.
+ *
+ * Keyed by provider id rather than written per provider, so a provider added
+ * to the backend registry gets a correct card without another branch here.
+ * Claude is the one special case: when it reports nothing, its account-OAuth
+ * connectors are inferred from the active workspace's toggle.
+ */
+function connectionMcps(providerId: string): string[] {
+  const discovered = providerKeys.value?.connections?.[providerId]?.mcps || []
   const result: string[] = []
-  const excluded = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
-  // Platform connectors only. Project .mcp.json servers (n8n_mcp, notion, …)
-  // are managed under the MCP status section, not the Providers tab.
-  const discoveredMcps = providerKeys.value?.connections?.claude?.mcps || []
-  if (discoveredMcps.length) {
-    for (const mcpName of discoveredMcps) {
-      if (excluded.has(mcpName)) continue
-      const label = formatConnectorLabel(mcpName)
-      if (!result.includes(label)) {
-        result.push(label)
-      }
-    }
-  } else {
-    const currentWs = workspaceForms.value.find((w) => w.name === projectStore.activeWorkspace) || workspaceForms.value[0]
-    if (!currentWs || currentWs.claude_ai_mcps !== 'off') {
-      const connectors = projectStore.workspaceClaudeAiConnectors.length
-        ? projectStore.workspaceClaudeAiConnectors
-        : defaultClaudeAiConnectors
-      for (const c of connectors) {
-        const label = formatConnectorLabel(c)
-        if (!result.includes(label)) {
-          result.push(label)
-        }
-      }
-    }
+  for (const mcpName of discovered) {
+    if (EXCLUDED_PLATFORM_MCPS.has(mcpName)) continue
+    const label = formatConnectorLabel(mcpName)
+    if (!result.includes(label)) result.push(label)
+  }
+  if (result.length || providerId !== 'claude') return result
+
+  const currentWs = workspaceForms.value.find((w) => w.name === projectStore.activeWorkspace)
+    || workspaceForms.value[0]
+  if (currentWs && currentWs.claude_ai_mcps === 'off') return result
+  const connectors = projectStore.workspaceClaudeAiConnectors.length
+    ? projectStore.workspaceClaudeAiConnectors
+    : defaultClaudeAiConnectors
+  for (const c of connectors) {
+    const label = formatConnectorLabel(c)
+    if (!result.includes(label)) result.push(label)
   }
   return result
-})
+}
+
 
 async function fetchWorkspacesList() {
   workspacesError.value = ''
   try {
     await projectStore.fetchWorkspaces()
     workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
-    if (!workspaceProviderOptions.value.some((provider) => provider.value === newWorkspaceForm.value.default_provider)) {
-      newWorkspaceForm.value.default_provider = defaultWorkspaceProvider()
-    }
+    newWorkspaceForm.value.default_provider = normalizeWorkspaceProvider(newWorkspaceForm.value.default_provider)
   } catch (e) {
     workspacesError.value = `Failed to load workspaces: ${errorMessage(e)}`
   } finally {
@@ -4545,9 +4625,15 @@ async function fetchWorkspacesList() {
   }
 }
 
-async function fetchWorkspaceModels() {
+// `force` bypasses the provider catalog caches, which costs a provider process
+// spawn. Opening Settings is exactly the moment a user has just connected a
+// provider elsewhere, so the tab does refresh -- but it renders from cache first
+// and lets the forced fetch land after, rather than holding the page on it.
+async function fetchWorkspaceModels(force = false) {
   try {
-    workspaceModels.value = await api.get<ModelsResponse>('/api/models')
+    workspaceModels.value = await api.get<ModelsResponse>(
+      force ? '/api/models?refresh=1' : '/api/models',
+    )
   } catch {
     workspaceModels.value = null
   }
@@ -4567,7 +4653,6 @@ async function saveWorkspace(name: string) {
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
-      model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
       color: form.color,
@@ -4575,7 +4660,9 @@ async function saveWorkspace(name: string) {
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
     await fetchWorkspacesList()
   } catch (e) {
-    workspacesResult.value = `Error: ${errorMessage(e)}`
+    const detail = apiErrorMessage(e, 'The workspace could not be saved.')
+    workspacesResult.value = `Error: ${detail}`
+    notifyFailed(`Workspace "${name}" not saved`, detail)
   } finally {
     workspacesSaving.value = null
   }
@@ -4597,7 +4684,6 @@ async function createNewWorkspace() {
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
-      model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
       color: form.color,
@@ -4607,7 +4693,9 @@ async function createNewWorkspace() {
     newWorkspaceForm.value = blankWorkspaceForm()
     await fetchWorkspacesList()
   } catch (e) {
-    workspacesResult.value = `Error: ${errorMessage(e)}`
+    const detail = apiErrorMessage(e, 'The workspace could not be created.')
+    workspacesResult.value = `Error: ${detail}`
+    notifyFailed(`Workspace "${form.name.trim()}" not created`, detail)
   } finally {
     workspacesSaving.value = null
   }
@@ -4626,7 +4714,7 @@ async function removeWorkspace(name: string) {
     notifySaved(`Workspace "${name}" deleted.`, 'Workspaces')
     await fetchWorkspacesList()
   } catch (e) {
-    workspacesResult.value = `Error: ${errorMessage(e)}`
+    workspacesResult.value = `Error: ${apiErrorMessage(e, 'The workspace could not be deleted.')}`
   } finally {
     workspacesSaving.value = null
   }
@@ -4648,7 +4736,8 @@ onMounted(async () => {
   fetchProviderKeys()
   fetchMcpStatus()
   fetchMcpUsage()
-  fetchWorkspaceModels()
+  // Render from cache immediately, then pick up anything connected elsewhere.
+  fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()
   fetchWorkspacesList()
   pushSupportedFlag.value = pushSupported()
@@ -4709,7 +4798,7 @@ async function doSnapshot(confirmWarnings = false) {
     const blockers = errorPayloadList(e, 'blockers')
     const warnings = errorPayloadList(e, 'warnings')
     if (blockers) {
-      alert(`Snapshot blocked by secrets:\n\n${blockers.join('\n')}`)
+      notifyFailed('Snapshot blocked by secrets', blockers.join('\n'))
       actionResult.value = 'Blocked by secrets.'
     } else if (warnings) {
       if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
@@ -4764,7 +4853,7 @@ async function doDeploy(confirmWarnings = false) {
     const warnings = errorPayloadList(e, 'warnings')
     if (Array.isArray(payload?.steps)) deploySteps.value = payload.steps
     if (blockers) {
-      alert(`Restart blocked by secrets:\n\n${blockers.join('\n')}`)
+      notifyFailed('Restart blocked by secrets', blockers.join('\n'))
       actionResult.value = 'Blocked by secrets.'
     } else if (warnings) {
       if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
@@ -4810,7 +4899,7 @@ async function fixDeployErrorInChat() {
     try {
       project = await projectStore.createProject('General')
     } catch (e) {
-      alert(`Failed to create project: ${errorMessage(e)}`)
+      notifyFailed('Could not create project', errorMessage(e))
       return
     }
   }
@@ -4824,7 +4913,7 @@ async function fixDeployErrorInChat() {
       router.push(`/chat/${chat.chat_id}`)
     }
   } catch (e) {
-    alert(`Failed to start chat: ${errorMessage(e)}`)
+    notifyFailed('Could not start chat', errorMessage(e))
   }
 }
 
@@ -4869,7 +4958,7 @@ async function fixIssuesInChat() {
       router.push(`/chat/${chat.chat_id}`)
     }
   } catch (e) {
-    alert(`Failed to start issue-triage chat: ${errorMessage(e)}`)
+    notifyFailed('Could not start the issue-triage chat', errorMessage(e))
   } finally {
     debugPending.value = false
   }
@@ -4994,7 +5083,7 @@ async function localHandback(confirmWarnings = false) {
     const blockers = errorPayloadList(e, 'blockers')
     const warnings = errorPayloadList(e, 'warnings')
     if (blockers) {
-      alert(`Sync blocked by secrets:\n\n${blockers.join('\n')}`)
+      notifyFailed('Sync blocked by secrets', blockers.join('\n'))
       actionResult.value = 'Blocked by secrets.'
     } else if (warnings) {
       if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
@@ -5754,28 +5843,6 @@ a.btn-secondary {
   margin-right: 10px;
   color: var(--fg3);
 }
-.custom-providers-block {
-  margin-top: var(--space-4);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--border);
-}
-.custom-provider-row {
-  margin-top: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg) 55%, transparent);
-}
-.custom-provider-grid {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-}
-.custom-provider-url,
-.custom-provider-models {
-  grid-column: span 2;
-}
-.custom-provider-token {
-  grid-column: span 2;
-}
 .settings-control {
   width: min(100%, 430px);
   min-width: 320px;
@@ -5943,6 +6010,30 @@ a.btn-secondary {
   gap: var(--space-3);
 }
 .gws-profile-heading {
+  min-width: 0;
+}
+.gws-profile-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+.gws-account-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: var(--space-3);
+}
+.gws-account-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+.gws-account-add-row .routine-input {
+  flex: 1 1 180px;
   min-width: 0;
 }
 .gws-profile-title {

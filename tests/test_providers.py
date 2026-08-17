@@ -84,8 +84,9 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
             "headers": {"Authorization": "Bearer secret-session-token"},
         }
     }
-    # The MCP path carries the slim prefer-typed-tools nudge, not the old block.
-    assert "prefer them over curl, the ciao CLI" in options.system_prompt["append"]
+    # The MCP path carries the compact shared core, not a second memory block
+    # or a provider-specific transport recipe.
+    assert "Prefer the managed Ciaobot MCP tools" in options.system_prompt["append"]
     # Ciaobot's own non-destructive control plane is pre-approved so Auto
     # mode's classifier stops raising an Approve/Deny card for "create the
     # loop you just asked for". Destructive tools stay off the allowlist.
@@ -111,10 +112,10 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
 
 
 @pytest.mark.asyncio
-async def test_claude_injects_claude_md_memory_regions_without_opt_in_flag(
+async def test_claude_does_not_duplicate_native_guide_memory(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """Bounded memory always injects from CLAUDE.md; there is no CIAO_MEMORY_ENABLED."""
+    """Claude's native guide loader is the sole memory source for chat turns."""
     from ciao.memory_tool import ensure_regions, write_region
 
     captured = {}
@@ -150,8 +151,9 @@ async def test_claude_injects_claude_md_memory_regions_without_opt_in_flag(
     await provider._ensure_connected(request)
 
     append = captured["options"].system_prompt["append"]
-    assert "Prefer pytest for regressions" in append
-    assert "User prefers concise replies" in append
+    assert "Prefer pytest for regressions" not in append
+    assert "User prefers concise replies" not in append
+    assert "native workspace guide" in append
     assert captured["options"].system_prompt.get("exclude_dynamic_sections") is True
 
 

@@ -6,6 +6,7 @@ import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import { useFileViewerStore } from '../../stores/fileViewer'
 
 function timestamp(secondsAgo: number): string {
   return new Date(Date.now() - secondsAgo * 1000).toISOString()
@@ -14,8 +15,8 @@ function timestamp(secondsAgo: number): string {
 function seedChats(includeChats = true) {
   const store = useProjectStore()
   store.workspaces = [
-    { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '', color: 'pink' },
-    { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', model_bucket: '', color: 'cyan' },
+    { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', color: 'pink' },
+    { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', color: 'cyan' },
   ]
   store.projects = [
     { project_id: 'personal-project', name: 'Personal project', workspace: 'personal' },
@@ -112,6 +113,82 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(labels.some(l => l === l.toUpperCase() && /[A-Z]/.test(l))).toBe(false)
   })
 
+  it('lists archived chats being tidied in their lane with the live step', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'tidy', project_id: 'work-project', title: 'Archived work chat',
+        created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
+        archived: true, local: true, archive_path: 'archive/tidy.md',
+        postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+      },
+      {
+        chat_id: 'tidy-no-file', project_id: 'personal-project', title: 'Archived without file',
+        created_at: timestamp(600), last_activity_at: timestamp(600), last_read_at: timestamp(600),
+        archived: true, local: true,
+        postprocess: { state: 'running', step: 'project_doc_update', expected: [], steps: {} },
+      },
+    ] as unknown as typeof store.chats
+    const viewer = useFileViewerStore()
+    const openSpy = vi.spyOn(viewer, 'open').mockResolvedValue(true)
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    // Each lane carries its own tidying tier, and the header count has rows
+    // behind it.
+    const workLane = wrapper.find('[data-lane-key="work"]')
+    const tidyRows = workLane.findAll('.home-tier--tidying .home-chat-item')
+    expect(tidyRows).toHaveLength(1)
+    expect(workLane.find('.home-tier--tidying .home-tier-label').text()).toBe('tidying up')
+    expect(tidyRows[0].find('.home-chat-title').text()).toBe('Archived work chat')
+    expect(tidyRows[0].text()).toContain('extracting insights')
+    expect(workLane.find('.home-lane-summary').text()).toContain('1 tidying up')
+
+    const personalLane = wrapper.find('[data-lane-key="personal"]')
+    const noFileRow = personalLane.find('.home-tier--tidying .home-chat-item')
+    expect(noFileRow.exists()).toBe(true)
+    expect(noFileRow.text()).toContain('folding into project doc')
+    // A tidying chat without an archive file has nothing to open.
+    expect((noFileRow.element as HTMLButtonElement).disabled).toBe(true)
+
+    // Archived chats stay out of the priority tiers; the tidying row lives
+    // only under the lane's own tidying tier.
+    const priorityTitles = wrapper.findAll(
+      '.home-tier--needsYou .home-chat-title, .home-tier--working .home-chat-title, .home-tier--unread .home-chat-title, .home-tier--quiet .home-chat-title',
+    ).map(n => n.text())
+    expect(priorityTitles).not.toContain('Archived work chat')
+    expect(priorityTitles).not.toContain('Archived without file')
+
+    // Clicking a row opens the archived transcript in the file viewer.
+    await tidyRows[0].trigger('click')
+    expect(openSpy).toHaveBeenCalledWith('archive/tidy.md')
+    wrapper.unmount()
+  })
+
+  it('keeps the tidying section visible when no active chats remain', async () => {
+    const store = seedChats(false)
+    store.chats = [{
+      chat_id: 'only-tidy', project_id: 'work-project', title: 'Archived work chat',
+      created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
+      archived: true, local: true, archive_path: 'archive/only-tidy.md',
+      postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+    }] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    expect(wrapper.find('.home-recent').exists()).toBe(true)
+    const workLane = wrapper.find('[data-lane-key="work"]')
+    expect(workLane.find('.home-tier--tidying').exists()).toBe(true)
+    expect(workLane.find('.home-tier--tidying .home-chat-title').text()).toBe('Archived work chat')
+    expect(workLane.find('.home-chat-tidy-note').text()).toContain('extracting insights')
+    wrapper.unmount()
+  })
+
   it('keeps vertical motion within a lane and horizontal motion across lanes', async () => {
     const wrapper = await mountHome()
     const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
@@ -129,6 +206,41 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(document.activeElement).toBe(cards[0].element)
   })
 
+  it('follows the vertical workspace order when lanes are stacked', async () => {
+    const wrapper = await mountHome()
+    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
+    const lanes = wrapper.findAll('.home-lane')
+    const laneRects = [
+      { top: 0, left: 0, width: 600, height: 300 },
+      { top: 320, left: 0, width: 600, height: 300 },
+    ]
+
+    lanes.forEach((lane, index) => {
+      vi.spyOn(lane.element, 'getBoundingClientRect').mockReturnValue({
+        ...laneRects[index],
+        right: laneRects[index].left + laneRects[index].width,
+        bottom: laneRects[index].top + laneRects[index].height,
+        x: laneRects[index].left,
+        y: laneRects[index].top,
+        toJSON: () => ({}),
+      })
+    })
+
+    const personalCards = lanes[0].findAll('.home-chat-item')
+    const workCards = lanes[1].findAll('.home-chat-item')
+
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    expect(document.activeElement).toBe(personalCards[0].element)
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    expect(document.activeElement).toBe(workCards[0].element)
+    expect(vm.onArrow('ArrowRight')).toBe(true)
+    expect(document.activeElement).toBe(workCards[1].element)
+    expect(vm.onArrow('ArrowLeft')).toBe(true)
+    expect(document.activeElement).toBe(workCards[0].element)
+    expect(vm.onArrow('ArrowUp')).toBe(true)
+    expect(document.activeElement).toBe(personalCards[0].element)
+  })
+
   it('consumes arrow keys at edges and reports no navigation without chats', async () => {
     const wrapper = await mountHome()
     const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
@@ -143,6 +255,46 @@ describe('HomeRecentChats lanes and tiers', () => {
   it('makes quiet rows focusable buttons', async () => {
     const wrapper = await mountHome()
     expect(wrapper.find('.home-tier--quiet .home-chat-item').element.tagName).toBe('BUTTON')
+  })
+
+  // Regression: with focus on the body (empty-space click, or Esc back out of a
+  // chat), the first arrow used to jump to the first lane in DOM order. When
+  // the active workspace was the second lane, that landed on a card in a random
+  // workspace and every arrow after it stayed trapped there.
+  it('anchors the first arrow press to the active workspace lane, not the first lane', async () => {
+    const store = seedChats()
+    store.activeWorkspace = 'work'
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
+
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    const workCards = wrapper.find('[data-lane-key="work"]').findAll('.home-chat-item')
+    expect(document.activeElement).toBe(workCards[0].element)
+    expect(document.activeElement).not.toBe(
+      wrapper.find('[data-lane-key="personal"]').findAll('.home-chat-item')[0].element,
+    )
+    wrapper.unmount()
+  })
+
+  // Regression: focus landing on a lane's "+ new" header control (via Tab or a
+  // click) used to make the next arrow jump to the first lane. It now stays in
+  // the lane that holds the focused control.
+  it('keeps arrows in the lane whose header control has focus', async () => {
+    const wrapper = await mountHome()
+    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
+
+    const workNew = wrapper.find('[data-lane-key="work"] .home-lane-new').element as HTMLElement
+    workNew.focus()
+    expect(document.activeElement).toBe(workNew)
+
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    const workCards = wrapper.find('[data-lane-key="work"]').findAll('.home-chat-item')
+    expect(document.activeElement).toBe(workCards[0].element)
+    wrapper.unmount()
   })
 })
 

@@ -1,5 +1,5 @@
 <template>
-  <div v-if="store.activeChatsAll.length" class="home-recent">
+  <div v-if="hasHomeActivity" class="home-recent">
     <h2 class="home-recent-label">jump back in</h2>
     <div ref="lanesEl" class="home-lanes">
       <section
@@ -20,6 +20,9 @@
             <span class="home-lane-summary" aria-live="polite">
               <template v-if="laneNeedsCount(lane)"><b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you</template>
               <template v-if="laneSummaryRest(lane)"><span v-if="laneNeedsCount(lane)"> · </span>{{ laneSummaryRest(lane) }}</template>
+              <!-- Third fragment, in the muted register: background tidy-up
+                   never needs the user, so it must not read as a demand. -->
+              <span v-if="laneTidyCount(lane)" class="home-lane-tidy"> · <span class="home-lane-tidy-dot" aria-hidden="true" />{{ laneTidyLabel(lane) }}</span>
             </span>
           </div>
           <div v-if="lane.newAction" class="home-lane-new-split">
@@ -130,6 +133,36 @@
             </div>
 
           </template>
+
+          <!-- Archived chats the workspace is still tidying up. They are not
+               part of the priority tiers (jump back in means active chats), but
+               the lane header's "N tidying up" count should have rows behind
+               it: opening a row shows the archived transcript, where the same
+               pipeline keeps reporting its live step. -->
+          <div v-if="lane.tidyChats.length" class="home-tier home-tier--tidying">
+            <div class="home-tier-label"><span>tidying up</span></div>
+            <button
+              v-for="chat in lane.tidyChats"
+              :key="`tidy-${chat.chat_id}`"
+              type="button"
+              class="home-chat-item home-chat-item--tidying"
+              :data-workspace-color="colorOf(chat)"
+              :disabled="!chat.archive_path"
+              :title="chat.archive_path ? 'Open the archived transcript' : chat.title"
+              @click="chat.archive_path && fileViewer.open(chat.archive_path)"
+            >
+              <span class="home-chat-heading">
+                <span class="home-chat-title">{{ chat.title }}</span>
+              </span>
+              <span class="home-chat-meta">
+                <span class="home-chat-tidy-note">
+                  <span class="home-chat-tidy-dot" aria-hidden="true" />
+                  {{ postprocessLabel(store.chatPostprocess(chat.chat_id)) }}…
+                </span>
+                <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
+              </span>
+            </button>
+          </div>
         </div>
       </section>
     </div>
@@ -139,10 +172,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
-import type { ChatInfo, ProjectInfo } from '../lib/types'
+import type { ChatInfo, ProjectInfo, WorkspaceName } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
+import { postprocessLabel, tidyingSummary } from '../lib/postprocessView'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
+import { useFileViewerStore } from '../stores/fileViewer'
 import ChatSignals from './ChatSignals.vue'
 
 type NewWorkspaceChatAction = { workspace: string; projectId: string; isCreating: boolean }
@@ -152,6 +187,10 @@ const emit = defineEmits<{
 }>()
 
 const store = useProjectStore()
+const fileViewer = useFileViewerStore()
+const hasHomeActivity = computed(() => (
+  store.activeChatsAll.length > 0 || store.postprocessingChats().length > 0
+))
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
 const openProjectLane = ref<string | null>(null)
@@ -177,6 +216,7 @@ interface HomeLane {
   newAction: NewWorkspaceChatAction | null
   projects: ProjectInfo[]
   tiers: HomeTiers
+  tidyChats: ChatInfo[]
 }
 
 const lanes = computed<HomeLane[]>(() => {
@@ -248,6 +288,11 @@ function makeLane(
       chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
+    tidyChats: workspace && workspace !== 'unknown'
+      ? store.postprocessingChats().filter(
+          chat => store.projectFor(chat.chat_id)?.workspace === workspace,
+        )
+      : [],
   }
 }
 
@@ -297,6 +342,20 @@ function laneSummaryRest(lane: HomeLane): string {
   if (laneQuietCount(lane)) parts.push(`${laneQuietCount(lane)} quiet`)
   if (!parts.length && !laneNeedsCount(lane)) return 'all quiet'
   return parts.join(' · ')
+}
+
+// Chats this workspace is still tidying up after archiving them. The chats
+// themselves stay out of the priority tiers — archiving must keep meaning —
+// but they are listed in the lane's own "tidying up" tier below quiet, so the
+// count always has rows behind it. Counted from the store rather than the
+// lane's tiers for exactly that reason: the lane holds active chats only.
+function laneTidyCount(lane: HomeLane): number {
+  if (!lane.workspace || lane.workspace === 'unknown') return 0
+  return store.workspacePostprocessingCount(lane.workspace as WorkspaceName)
+}
+
+function laneTidyLabel(lane: HomeLane): string {
+  return tidyingSummary(laneTidyCount(lane))
 }
 
 function newActionFor(workspace: string | null): NewWorkspaceChatAction | null {
@@ -441,8 +500,10 @@ function focusElement(element: HTMLElement) {
   element.scrollIntoView({ block: 'nearest' })
 }
 
-// ChatLayout owns the global keydown. The model is intentionally 2-D: vertical
-// motion stays in a lane, while horizontal motion moves between lanes.
+// ChatLayout owns the global keydown. The model is intentionally 2-D, but its
+// axes follow the rendered lane layout: vertical motion moves between lanes
+// when they are stacked, while horizontal motion moves between lanes when they
+// sit side by side. The other axis always moves within the current lane.
 function onArrow(key: string): boolean {
   const model = focusableLanes()
   const available = model.some(lane => lane.length)
@@ -451,21 +512,34 @@ function onArrow(key: string): boolean {
   let laneIndex = model.findIndex(lane => lane.includes(document.activeElement as HTMLElement))
   let itemIndex = laneIndex >= 0 ? model[laneIndex].indexOf(document.activeElement as HTMLElement) : -1
   if (laneIndex < 0) {
-    laneIndex = model.findIndex(lane => lane.length > 0)
+    // Focus is somewhere the grid does not model: a lane header control ("+ new"
+    // or the caret), the sidebar, or the body after a click on empty space or a
+    // return from a chat. Anchor to the lane the user is actually looking at —
+    // the lane holding that focus, or the active workspace's lane — instead of
+    // jumping to whichever lane comes first in DOM order, which read as the
+    // arrow landing on a card in a random workspace.
+    laneIndex = anchorLaneIndex(model)
     itemIndex = -1
   }
 
-  if (key === 'ArrowUp' || key === 'ArrowDown') {
-    const delta = key === 'ArrowDown' ? 1 : -1
+  const lanesAreStacked = laneAxis() === 'vertical'
+  const laneKey = lanesAreStacked
+    ? key === 'ArrowUp' || key === 'ArrowDown'
+    : key === 'ArrowLeft' || key === 'ArrowRight'
+  const itemKey = lanesAreStacked
+    ? key === 'ArrowLeft' || key === 'ArrowRight'
+    : key === 'ArrowUp' || key === 'ArrowDown'
+
+  if (itemKey) {
+    const delta = key === 'ArrowRight' || key === 'ArrowDown' ? 1 : -1
     const nextIndex = itemIndex < 0 ? 0 : clamp(itemIndex + delta, 0, model[laneIndex].length - 1)
     if (nextIndex === itemIndex && itemIndex >= 0) return true
     focusElement(model[laneIndex][nextIndex])
     return true
   }
 
-  if (key !== 'ArrowLeft' && key !== 'ArrowRight') return false
-
-  const delta = key === 'ArrowRight' ? 1 : -1
+  if (!laneKey) return false
+  const delta = key === 'ArrowRight' || key === 'ArrowDown' ? 1 : -1
   if (itemIndex < 0) {
     focusElement(model[laneIndex][0])
     return true
@@ -478,8 +552,44 @@ function onArrow(key: string): boolean {
   return true
 }
 
+// CSS switches `.home-lanes` from a two-column grid to a single stacked
+// column based on the component's own width. Read the first rendered lane
+// transition instead of duplicating that breakpoint here; the sidebar is
+// resizable and can make the same viewport either layout. In jsdom the boxes
+// have no geometry, so the historical side-by-side mapping remains the safe
+// fallback for unit tests and non-layout environments.
+function laneAxis(): 'horizontal' | 'vertical' {
+  const lanes = Array.from(lanesEl.value?.querySelectorAll<HTMLElement>('.home-lane') ?? [])
+  for (let index = 1; index < lanes.length; index += 1) {
+    const previous = lanes[index - 1].getBoundingClientRect()
+    const current = lanes[index].getBoundingClientRect()
+    const horizontalDistance = Math.abs(current.left - previous.left)
+    const verticalDistance = Math.abs(current.top - previous.top)
+    if (horizontalDistance <= 1 && verticalDistance <= 1) continue
+    return verticalDistance > horizontalDistance ? 'vertical' : 'horizontal'
+  }
+  return 'horizontal'
+}
+
 function clamp(value: number, lower: number, upper: number): number {
   return Math.min(upper, Math.max(lower, value))
+}
+
+// Where arrows start when nothing in the chat grid has focus. Prefer the lane
+// the focused element already lives in (a "+ new" / caret control), then the
+// active workspace's lane (the one the raised surface and hue rule highlight),
+// then any lane with cards. The model's lane order matches the DOM `.home-lane`
+// order because focusableLanes() builds from the same query.
+function anchorLaneIndex(model: HTMLElement[][]): number {
+  const lanes = () => Array.from(lanesEl.value?.querySelectorAll<HTMLElement>('.home-lane') ?? [])
+  const host = (document.activeElement as HTMLElement | null)?.closest?.('.home-lane') as HTMLElement | null
+  if (host) {
+    const index = lanes().indexOf(host)
+    if (index >= 0 && model[index]?.length) return index
+  }
+  const activeIndex = lanes().findIndex(lane => lane.dataset.laneKey === store.activeWorkspace)
+  if (activeIndex >= 0 && model[activeIndex]?.length) return activeIndex
+  return model.findIndex(lane => lane.length > 0)
 }
 
 defineExpose({ onArrow })
@@ -624,6 +734,32 @@ watch(() => store.activeWorkspace, async () => {
 .home-lane-summary b {
   color: var(--accent);
   font-weight: 700;
+}
+
+/* Muted, never accent: the count is information, not a call to act. */
+.home-lane-tidy {
+  color: var(--fg3);
+}
+
+.home-lane-tidy-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--fg3);
+  vertical-align: middle;
+  animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
+}
+
+@keyframes home-lane-tidy-breathe {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-lane-tidy-dot,
+  .home-chat-tidy-dot { animation: none; opacity: 0.75; }
 }
 
 .home-lane-new {
@@ -833,7 +969,8 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-chat-item--unread,
 .home-chat-item--quiet,
-.home-chat-item--older {
+.home-chat-item--older,
+.home-chat-item--tidying {
   flex-direction: row;
   align-items: center;
   gap: 8px;
@@ -848,7 +985,8 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-chat-item--unread:hover,
 .home-chat-item--quiet:hover,
-.home-chat-item--older:hover {
+.home-chat-item--older:hover,
+.home-chat-item--tidying:hover {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
@@ -864,7 +1002,8 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-chat-item--unread .home-chat-heading,
 .home-chat-item--quiet .home-chat-heading,
-.home-chat-item--older .home-chat-heading {
+.home-chat-item--older .home-chat-heading,
+.home-chat-item--tidying .home-chat-heading {
   flex: 1;
   align-items: center;
 }
@@ -889,7 +1028,8 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-chat-item--unread .home-chat-title,
 .home-chat-item--quiet .home-chat-title,
-.home-chat-item--older .home-chat-title {
+.home-chat-item--older .home-chat-title,
+.home-chat-item--tidying .home-chat-title {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -941,6 +1081,28 @@ watch(() => store.activeWorkspace, async () => {
   color: var(--fg3);
   font-family: var(--font-mono);
   white-space: nowrap;
+}
+
+/* Live step of a post-archive pipeline ("extracting insights…"). Muted like
+   the lane header's tidy fragment: this is background work, never a demand. */
+.home-chat-tidy-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-chat-tidy-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--fg3);
+  vertical-align: middle;
+  animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
 }
 
 .remote-chip {

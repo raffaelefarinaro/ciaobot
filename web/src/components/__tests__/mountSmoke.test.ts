@@ -22,14 +22,6 @@ vi.mock('../../lib/api', () => {
     insights_model: '',
 
     critique_models: '',
-    ollama_haiku_model: '',
-    ollama_sonnet_model: '',
-    ollama_opus_model: '',
-    ollama_fable_model: '',
-    openrouter_haiku_model: '',
-    openrouter_sonnet_model: '',
-    openrouter_opus_model: '',
-    openrouter_fable_model: '',
     codex_haiku_model: '',
     codex_sonnet_model: '',
     codex_opus_model: '',
@@ -38,34 +30,13 @@ vi.mock('../../lib/api', () => {
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
-    tier_defaults: {
-      ollama: {
-        haiku: 'deepseek-v4-flash:cloud',
-        sonnet: 'kimi-k2.7-code:cloud',
-        opus: 'minimax-m3:cloud',
-        fable: 'glm-5.2:cloud',
-      },
-      openrouter: {
-        haiku: 'anthropic/claude-haiku-4.5',
-        sonnet: 'anthropic/claude-sonnet-4.5',
-        opus: 'anthropic/claude-opus-4.8',
-        fable: 'anthropic/claude-fable-latest',
-      },
+    // Built-in defaults: opencode requires approval, everyone else uses auto.
+    provider_default_modes_effective: {
+      claude: 'auto',
+      codex: 'auto',
+      opencode: 'normal',
     },
-    alias_tiers: {
-      ollama: {
-        haiku: 'deepseek-v4-flash:cloud',
-        sonnet: 'kimi-k2.7-code:cloud',
-        opus: 'minimax-m3:cloud',
-        fable: 'glm-5.2:cloud',
-      },
-      openrouter: {
-        haiku: 'anthropic/claude-haiku-4.5',
-        sonnet: 'anthropic/claude-sonnet-4.5',
-        opus: 'anthropic/claude-opus-4.8',
-        fable: 'anthropic/claude-fable-latest',
-      },
-    },
+
     transcription: {
       engine: 'local',
       cloud_model: 'gpt-transcribe',
@@ -85,12 +56,9 @@ vi.mock('../../lib/api', () => {
       cloud_available: true,
     },
     model_options: {
-      anthropic: ['anthropic/claude-sonnet-4.5', 'anthropic/claude-haiku-4.5'],
-      ollama_cloud: ['kimi-k2.7-code:cloud'],
-      ollama_local: ['llama3.1:latest'],
-      openrouter: ['openai/gpt-5.1'],
+      anthropic: ['haiku', 'sonnet', 'opus', 'fable'],
     },
-    backends: { ollama: true, openrouter: true, anthropic: true },
+    backends: { anthropic: true },
     workspace_context: {
       workspace_root: '/tmp/workspace',
       vault_root: '/tmp/workspace/memory-vault',
@@ -99,9 +67,7 @@ vi.mock('../../lib/api', () => {
   const responses: Record<string, unknown> = {
     '/api/settings': {},
     '/api/settings/providers': {
-      keys: {
-        CIAO_OLLAMA_API_KEY: { label: 'Ollama Cloud API key', description: '', configured: true },
-      },
+      keys: {},
       service_keys: {
         OPENAI_API_KEY: {
           label: 'OpenAI voice API key',
@@ -118,6 +84,8 @@ vi.mock('../../lib/api', () => {
           version: '2.1.205 (Claude Code)',
           account: 'person@example.com',
           protocol: 'Agent SDK ready',
+          label: 'Claude Code',
+          short_label: 'Claude',
         },
         codex: {
           name: 'codex',
@@ -127,6 +95,18 @@ vi.mock('../../lib/api', () => {
           version: 'codex-cli 0.144.0-alpha.4',
           account: 'ChatGPT account',
           protocol: 'app-server protocol compatible',
+          label: 'OpenAI Codex',
+          short_label: 'Codex',
+        },
+        opencode: {
+          name: 'opencode',
+          ok: false,
+          auth: 'login_required',
+          command: 'opencode auth login',
+          version: '1.18.18',
+          detail: 'login required',
+          label: 'opencode',
+          short_label: 'opencode',
         },
       },
       requires_restart: true,
@@ -340,8 +320,7 @@ vi.mock('../../lib/api', () => {
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
         { value: 'codex', label: 'OpenAI (via Codex)' },
-        { value: 'ollama', label: 'Ollama (via Claude Code)' },
-        { value: 'openrouter', label: 'OpenRouter (via Claude Code)' },
+        { value: 'opencode', label: 'opencode' },
       ],
     },
     '/api/automation': [
@@ -364,7 +343,7 @@ vi.mock('../../lib/api', () => {
           duration_ms: 374000,
           status: 'error',
           model: 'deepseek-v4-flash:cloud',
-          provider: 'ollama',
+          provider: 'claude',
           error: 'TimeoutError',
           extra: {},
         },
@@ -444,7 +423,10 @@ vi.mock('../../lib/api', () => {
   }
   // Default to an empty array — most list endpoints return arrays and a
   // bare `{}` breaks `.reduce`/`.map` calls in stores during the smoke test.
-  const get = vi.fn((path: string) => {
+  const get = vi.fn((rawPath: string) => {
+    // Keyed by route, so a query string (e.g. `/api/models?refresh=1`) must not
+    // miss the fixture the way a real server would not serve a different route.
+    const path = rawPath.split('?')[0]
     if (path === '/api/settings/routines') return Promise.resolve(routineSettings)
     if (path in responses) return Promise.resolve(responses[path])
     if (path.startsWith('/api/chats/')) return Promise.resolve({})
@@ -458,8 +440,12 @@ vi.mock('../../lib/api', () => {
     }
     return Promise.resolve({})
   })
+  const setResponse = (path: string, value: unknown) => {
+    responses[path] = value
+  }
+  const getResponse = (path: string) => responses[path]
   return {
-    api: { get, post, patch, del: vi.fn(() => Promise.resolve({})) },
+    api: { get, post, patch, del: vi.fn(() => Promise.resolve({})), setResponse, getResponse },
   }
 })
 
@@ -730,13 +716,13 @@ describe('component mount smoke', () => {
     expect(select.exists()).toBe(true)
     // Default keeps the configured model; options are concrete model ids.
     expect(select.findAll('option')[0].text()).toContain('Configured')
-    await select.setValue('anthropic/claude-sonnet-4.5')
+    await select.setValue('gpt-5.6-terra')
     await failing.find('.btn-run').trigger('click')
     await flushPromises()
 
     expect(api.post).toHaveBeenCalledWith(
       '/api/automation/backfill-insights',
-      { model: 'anthropic/claude-sonnet-4.5' },
+      { model: 'gpt-5.6-terra' },
     )
     wrapper.unmount()
   })
@@ -759,23 +745,24 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const localOption = critiqueSelector.findAll('.model-selector__item')
-      .find((el) => el.text() === 'llama3.1:latest')
-    const anthropicOption = critiqueSelector.findAll('.model-selector__item')
-      .find((el) => el.text() === 'anthropic/claude-sonnet-4.5')
-    expect(localOption).toBeTruthy()
-    expect(anthropicOption).toBeTruthy()
+    // The panel is one voice per vendor: a bare tier is Anthropic, a prefixed
+    // entry routes to that provider's app-server.
+    const opusOption = critiqueSelector.findAll('.model-selector__item')
+      .find((el) => el.text() === 'opus')
+    const codexOption = critiqueSelector.findAll('.model-selector__item')
+      .find((el) => el.text() === 'codex:opus')
+    expect(opusOption).toBeTruthy()
+    expect(codexOption).toBeTruthy()
 
-    await localOption!.trigger('click')
+    await opusOption!.trigger('click')
     await flushPromises()
-    await anthropicOption!.trigger('click')
+    await codexOption!.trigger('click')
     await flushPromises()
 
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      critique_models: 'llama3.1:latest,anthropic/claude-sonnet-4.5',
+      critique_models: 'opus,codex:opus',
     })
-    expect(wrapper.text()).toContain('llama3.1:latest')
-    expect(wrapper.text()).toContain('anthropic/claude-sonnet-4.5')
+    expect(wrapper.text()).toContain('codex:opus')
     wrapper.unmount()
   })
 
@@ -798,17 +785,145 @@ describe('component mount smoke', () => {
     const providerOptions = wrapper.findAll('select.routine-input option').map((option) => option.text())
     expect(providerOptions).toContain('Anthropic (via Claude Code)')
     expect(providerOptions).toContain('OpenAI (via Codex)')
-    expect(providerOptions).toContain('Ollama (via Claude Code)')
-    expect(providerOptions).toContain('OpenRouter (via Claude Code)')
+    expect(providerOptions).toContain('opencode')
     expect(wrapper.findAll('select.workspace-select')).toHaveLength(3)
 
     expect(wrapper.find('[aria-label="Claude.ai MCPs"]').exists()).toBe(true)
     const providerField = wrapper.findAll('label.settings-field')
-      .find((field) => field.find('.ws-label').text() === 'Provider')
+      .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
     expect(providerField).toBeTruthy()
     await providerField!.find('select').setValue('codex')
     await nextTick()
     expect(wrapper.find('[aria-label="Claude.ai MCPs"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps a legacy workspace provider on a valid registry selection', async () => {
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const originalWorkspaces = testApi.getResponse('/api/workspaces')
+    testApi.setResponse('/api/workspaces', {
+      workspaces: [{
+        name: 'legacy',
+        vault_root: 'memory-vault/legacy',
+        default_provider: 'ollama',
+        default_model: 'qwen3:latest',
+        gws_profile: '',
+      }],
+      active: 'legacy',
+      provider_options: [
+        { value: 'claude', label: 'Anthropic (via Claude Code)' },
+        { value: 'codex', label: 'OpenAI (via Codex)' },
+        { value: 'opencode', label: 'opencode' },
+      ],
+    })
+
+    const router = makeRouter()
+    await router.push('/settings/workspaces')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    try {
+      const providerField = wrapper.findAll('label.settings-field')
+        .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
+      expect(providerField).toBeTruthy()
+      const providerSelect = providerField!.find('select')
+      expect((providerSelect.element as HTMLSelectElement).value).toBe('claude')
+      expect(providerSelect.findAll('option').map((option) => option.attributes('value')))
+        .toContain('claude')
+      expect(providerSelect.text()).toContain('Anthropic (via Claude Code)')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/workspaces', originalWorkspaces)
+    }
+  })
+
+  it('shows the API explanation for a failed workspace save', async () => {
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const originalWorkspaces = testApi.getResponse('/api/workspaces')
+    testApi.setResponse('/api/workspaces', {
+      workspaces: [{
+        name: 'personal',
+        vault_root: 'memory-vault/personal',
+        default_provider: 'claude',
+        default_model: '',
+        gws_profile: '',
+      }],
+      active: 'personal',
+      provider_options: [
+        { value: 'claude', label: 'Anthropic (via Claude Code)' },
+        { value: 'codex', label: 'OpenAI (via Codex)' },
+        { value: 'opencode', label: 'opencode' },
+      ],
+    })
+
+    const patchSpy = vi.spyOn(api, 'patch').mockRejectedValueOnce(Object.assign(
+      new Error('HTTP 400'),
+      { payload: { error: 'default_provider must be one of: claude, codex, opencode' } },
+    ))
+    const router = makeRouter()
+    await router.push('/settings/workspaces')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    try {
+      await wrapper.find('.workspace-actions .btn-small').trigger('click')
+      await flushPromises()
+
+      const result = wrapper.find('.action-result[role="alert"]')
+      expect(result.exists()).toBe(true)
+      expect(result.classes()).toContain('action-result--error')
+      expect(result.text()).toContain('default_provider must be one of: claude, codex, opencode')
+      const store = (await import('../../stores/projects')).useProjectStore()
+      expect(store.toasts).toContainEqual(expect.objectContaining({
+        title: 'Workspace "personal" not saved',
+        body: 'default_provider must be one of: claude, codex, opencode',
+        variant: 'error',
+      }))
+    } finally {
+      wrapper.unmount()
+      patchSpy.mockRestore()
+      testApi.setResponse('/api/workspaces', originalWorkspaces)
+    }
+  })
+
+  it('SettingsView labels every provider connection from the backend registry', async () => {
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const names = wrapper.findAll('.provider-connections .routine-name').map((el) => el.text())
+    // Names come from the payload, so a provider the PWA has never heard of
+    // still gets its own card rather than another provider's label.
+    expect(names).toEqual(['Claude Code', 'OpenAI Codex', 'opencode'])
+
+    // The unauthenticated provider offers Connect but not Log out.
+    const rows = wrapper.findAll('.provider-connections .credential-row')
+    const opencodeRow = rows[2]!
+    expect(opencodeRow.text()).toContain('Not connected')
+    const actions = opencodeRow.findAll('.provider-connection-actions button').map((b) => b.text())
+    expect(actions).toEqual(['Connect', 'Verify'])
     wrapper.unmount()
   })
 
@@ -849,9 +964,10 @@ describe('component mount smoke', () => {
     expect(providerSelect.exists()).toBe(true)
     expect(providerSelect.classes()).toContain('routine-select')
     expect(providerSelect.findAll('option').map((option) => option.text())).toEqual([
+      'Anthropic (via Claude Code)',
       'OpenAI (via Codex)',
-      'Ollama (via Claude Code)',
-      'OpenRouter (via Claude Code)',
+      // Registered but with no authenticated backend in this fixture.
+      'opencode (not configured)',
     ])
     expect(wrapper.text()).toContain('model routing')
     expect(wrapper.text()).not.toContain('Claude Code model routing')
@@ -871,50 +987,50 @@ describe('component mount smoke', () => {
     expect(codexOption).toBeTruthy()
     await codexOption!.trigger('click')
     await flushPromises()
+    // Runtime-provider pins go through the nested provider_routing map, not
+    // the flat per-provider scalars (which the backend still accepts).
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      codex_haiku_model: 'gpt-5.6-terra',
+      provider_routing: { codex: { haiku: 'gpt-5.6-terra' } },
     })
     expect(wrapper.find('.routing-model-catalog').exists()).toBe(false)
 
-    await providerSelect.setValue('ollama')
+    wrapper.unmount()
+  })
+
+  it('SettingsView saves a per-provider default mode from the routing card', async () => {
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
     await flushPromises()
     await nextTick()
 
-    const tierSelectors = wrapper.findAll('.tier-provider-section .model-selector')
-    expect(tierSelectors.map((selector) => selector.find('.model-selector__trigger').text())).toEqual([
-      'Default (deepseek-v4-flash:cloud)▾',
-      'Default (kimi-k2.7-code:cloud)▾',
-      'Default (minimax-m3:cloud)▾',
-      'Default (glm-5.2:cloud)▾',
-    ])
+    // The routing card carries a "Default mode" row; the automatic option
+    // names the effective default (opencode -> normal from the backend).
+    const modeSelect = wrapper.find('.tier-provider-section .routine-select:not(.alias-provider-select)')
+    expect(modeSelect.exists()).toBe(true)
+    const options = modeSelect.findAll('option').map((option) => option.text())
+    expect(options[0]).toBe('Automatic (Auto)')
 
-    // Each searchable picker includes an explicit default option.
-    const tierSelector = tierSelectors[0]
-    expect(tierSelector).toBeTruthy()
-    await tierSelector!.find('.model-selector__trigger').trigger('click')
+    await modeSelect.setValue('bypass')
+    await flushPromises()
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      provider_default_modes: { codex: 'bypass' },
+    })
+
+    // Claude joins the provider list with read-only tier inputs, so its
+    // default mode is settable even though its models cannot be re-pinned.
+    const providerSelect = wrapper.find('.alias-provider-select')
+    await providerSelect.setValue('claude')
     await flushPromises()
     await nextTick()
+    expect(wrapper.findAll('.tier-provider-section .routing-model-input').length).toBe(4)
+    const claudeMode = wrapper.find('.tier-provider-section .routine-select:not(.alias-provider-select)')
+    expect(claudeMode.findAll('option').map((option) => option.text())[0]).toBe('Automatic (Auto)')
 
-    const tierOption = tierSelector!.findAll('.model-selector__item')
-      .find((el) => el.attributes('data-model') === 'llama3.1:latest')
-    expect(tierOption).toBeTruthy()
-    await tierOption!.trigger('click')
-    await flushPromises()
-
-    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      ollama_haiku_model: 'llama3.1:latest',
-    })
-
-    await tierSelector.find('.model-selector__trigger').trigger('click')
-    await flushPromises()
-    const defaultOption = tierSelector.findAll('.model-selector__item')
-      .find((el) => el.text() === 'Default (deepseek-v4-flash:cloud)')
-    expect(defaultOption).toBeTruthy()
-    await defaultOption!.trigger('click')
-    await flushPromises()
-    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      ollama_haiku_model: '',
-    })
     wrapper.unmount()
   })
 
@@ -925,7 +1041,7 @@ describe('component mount smoke', () => {
     const original = await api.get<Record<string, unknown>>('/api/settings/routines')
     const originalBackends = original.backends as Record<string, boolean>
     await api.patch('/api/settings/routines', {
-      backends: { ollama: false, openrouter: false, anthropic: true },
+      backends: { anthropic: true },
     })
     const router = makeRouter()
     await router.push('/settings/providers')
@@ -939,13 +1055,13 @@ describe('component mount smoke', () => {
 
     try {
       const providerSelect = wrapper.find('.alias-provider-select')
-      // Ollama and OpenRouter are still listed (not hidden), marked unconfigured.
+      // A signed-out provider stays listed rather than vanishing, so the user
+      // can see it exists and what it needs.
       const labels = providerSelect.findAll('option').map((option) => option.text())
-      expect(labels.some((l) => l.includes('Ollama') && l.includes('not configured'))).toBe(true)
-      expect(labels.some((l) => l.includes('OpenRouter') && l.includes('not configured'))).toBe(true)
+      expect(labels.some((l) => l.includes('opencode') && l.includes('not configured'))).toBe(true)
 
-      // Select OpenRouter: tier ModelSelectors render disabled, hint shown.
-      await providerSelect.setValue('openrouter')
+      // Select it: tier ModelSelectors render disabled, with the hint.
+      await providerSelect.setValue('opencode')
       await flushPromises()
       await nextTick()
       const tierSelectors = wrapper.findAll('.tier-provider-section .model-selector')
@@ -955,7 +1071,7 @@ describe('component mount smoke', () => {
       }
       const hint = wrapper.find('.tier-provider-note')
       expect(hint.exists()).toBe(true)
-      expect(hint.text().toLowerCase()).toContain('openrouter api key')
+      expect(hint.text().toLowerCase()).toContain('opencode')
     } finally {
       await api.patch('/api/settings/routines', { backends: originalBackends })
       wrapper.unmount()
@@ -963,6 +1079,33 @@ describe('component mount smoke', () => {
   })
 
   it('SettingsView saves routine models by provider and tier', async () => {
+    const mockApi = api as typeof api & {
+      getResponse(path: string): unknown
+      setResponse(path: string, value: unknown): void
+    }
+    const originalModels = mockApi.getResponse('/api/models') as Record<string, unknown>
+    const opencodeModels = [
+      'anthropic/claude-haiku-4.5',
+      'anthropic/claude-sonnet-4.5',
+      'anthropic/claude-opus-4.5',
+    ]
+    mockApi.setResponse('/api/models', {
+      ...originalModels,
+      provider_models: {
+        ...(originalModels.provider_models as Record<string, string[]>),
+        opencode: opencodeModels,
+      },
+      opencode_models: opencodeModels,
+      alias_tiers: {
+        ...(originalModels.alias_tiers as Record<string, Record<string, string>>),
+        opencode: {
+          haiku: opencodeModels[0],
+          sonnet: opencodeModels[1],
+          opus: opencodeModels[2],
+          fable: opencodeModels[2],
+        },
+      },
+    })
     const router = makeRouter()
     await router.push('/settings/models')
     await router.isReady()
@@ -981,10 +1124,12 @@ describe('component mount smoke', () => {
     expect(providerSelects.length).toBeGreaterThanOrEqual(2)
     const insightsControls = controls[1]
 
-    await providerSelects[1].setValue('openrouter')
+    // Anthropic tiers are the bare aliases: picking the provider stores the
+    // routine's default tier, and the tier select stores that tier directly.
+    await providerSelects[1].setValue('claude')
     await flushPromises()
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      insights_model: 'anthropic/claude-haiku-4.5',
+      insights_model: 'haiku',
     })
 
     const insightsTier = insightsControls.find('.routine-select--tier')
@@ -992,9 +1137,22 @@ describe('component mount smoke', () => {
     await insightsTier.setValue('opus')
     await flushPromises()
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      insights_model: 'anthropic/claude-opus-4.8',
+      insights_model: 'opus',
+    })
+
+    await providerSelects[1].setValue('opencode')
+    await flushPromises()
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      insights_model: 'opencode:anthropic/claude-opus-4.5',
+    })
+
+    await insightsTier.setValue('haiku')
+    await flushPromises()
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      insights_model: 'opencode:anthropic/claude-haiku-4.5',
     })
     wrapper.unmount()
+    mockApi.setResponse('/api/models', originalModels)
   })
 
   it('ProjectView mounts without throwing', async () => {

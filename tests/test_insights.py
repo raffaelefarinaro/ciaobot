@@ -10,7 +10,6 @@ from unittest.mock import patch
 import pytest
 
 from ciao import insights, native_sidecar
-from ciao.providers.ollama import OllamaSettings
 
 
 # ── filter_session_jsonl ─────────────────────────────────────────────────
@@ -173,24 +172,16 @@ def test_filter_drops_sidechain_entries(
 # ── extract_and_append ───────────────────────────────────────────────────
 
 
-def _ollama() -> OllamaSettings:
-    return OllamaSettings(
-        models=(),
-        base_url="http://localhost:11434",
-        api_key="ollama",
-    )
-
-
 def _config():
     from ciao.config import CiaoConfig
-    return CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "CIAO_OLLAMA_API_KEY": "sk-cloud"})
+    return CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
 
 
 def test_extract_appends_section_when_archive_exists(tmp_path: Path) -> None:
     archive = tmp_path / "archive.md"
     archive.write_text("# Existing\n\nbody\n", encoding="utf-8")
 
-    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def fake_call(filtered_jsonl: str, model: str) -> str:
         return "## Errors\n- something failed [idx=3]\n"
 
     with patch.object(insights, "_call_model", side_effect=fake_call):
@@ -215,14 +206,14 @@ def test_extract_is_idempotent_when_section_already_present(
         "# Existing\n\n## Session insights\n\nold body\n", encoding="utf-8"
     )
 
-    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def fake_call(filtered_jsonl: str, model: str) -> str:
         return "fresh content"
 
     called = {"count": 0}
 
-    async def counting_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def counting_call(filtered_jsonl: str, model: str) -> str:
         called["count"] += 1
-        return await fake_call(filtered_jsonl, model, env)
+        return await fake_call(filtered_jsonl, model)
 
     with patch.object(insights, "_call_model", side_effect=counting_call):
         asyncio.run(insights.extract_and_append(
@@ -261,7 +252,7 @@ def test_extract_retries_once_then_skips(
 
     calls = {"count": 0}
 
-    async def flaky_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def flaky_call(filtered_jsonl: str, model: str) -> str:
         calls["count"] += 1
         raise RuntimeError("boom")
 
@@ -293,7 +284,7 @@ def test_extract_succeeds_on_retry(
 
     calls = {"count": 0}
 
-    async def flaky_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def flaky_call(filtered_jsonl: str, model: str) -> str:
         calls["count"] += 1
         if calls["count"] == 1:
             raise RuntimeError("transient")
@@ -323,7 +314,7 @@ def test_extract_skips_silently_on_empty_model_output(
     archive = tmp_path / "archive.md"
     archive.write_text("# Existing\n", encoding="utf-8")
 
-    async def empty_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def empty_call(filtered_jsonl: str, model: str) -> str:
         return ""
 
     with patch.object(insights, "_call_model", side_effect=empty_call):
@@ -346,7 +337,7 @@ def test_call_model_uses_oneshot_runner(
 
     captured: dict = {}
 
-    async def fake_oneshot(prompt, *, system_prompt, model, env, timeout_s=120.0):
+    async def fake_oneshot(prompt, *, system_prompt, model, env=None, timeout_s=120.0):
         captured["model"] = model
         captured["timeout_s"] = timeout_s
         return "## Decisions\n- via oneshot [idx=1]\n"
@@ -382,7 +373,7 @@ def test_call_model_uses_apple_intelligence_for_the_local_sentinel(
         return "## Decisions\n- kept the local path"
 
     monkeypatch.setattr("ciao.native_sidecar.respond", fake_respond)
-    result = asyncio.run(insights._call_model('{"idx": 1}', "apple", {}))
+    result = asyncio.run(insights._call_model('{"idx": 1}', "apple"))
 
     assert '{"idx": 1}' in captured["prompt"]
     assert result.startswith("## Decisions")
@@ -503,7 +494,7 @@ def test_resolve_insights_model_uses_override() -> None:
 def test_resolve_insights_model_uses_workspace_sonnet_when_automatic() -> None:
     config = _config()
     config.insights_model_override = ""
-    assert insights.resolve_insights_model(config, "personal") == config.ollama.sonnet_model
+    assert insights.resolve_insights_model(config, "personal") == "sonnet"
     assert insights.resolve_insights_model(config, "work") == "sonnet"
 
 
@@ -511,6 +502,17 @@ def test_resolve_insights_model_falls_back_without_workspace() -> None:
     config = _config()
     config.insights_model_override = ""
     assert insights.resolve_insights_model(config) == config.insights_model
+
+
+def test_resolve_insights_call_routes_qualified_runtime_provider() -> None:
+    config = _config()
+
+    assert insights._resolve_insights_call(
+        config, "opencode:anthropic/claude-sonnet-4.5"
+    ) == ("anthropic/claude-sonnet-4.5", "opencode", None)
+    assert insights._resolve_insights_call(
+        config, "codex:gpt-5.6-terra"
+    ) == ("gpt-5.6-terra", "codex", None)
 
 
 # ── project doc update wiring ────────────────────────────────────────────
@@ -534,7 +536,7 @@ def test_extract_updates_project_doc_when_insights_carry_decisions(
     doc = tmp_path / "doc.md"
     doc.write_text(_PROJECT_DOC, encoding="utf-8")
 
-    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def fake_call(filtered_jsonl: str, model: str) -> str:
         return "## Decisions\n- Chose sqlite over postgres because local-first. [idx=2]\n"
 
     updated_doc = _PROJECT_DOC.replace(
@@ -569,7 +571,7 @@ def test_extract_skips_project_doc_when_path_empty(
     doc = tmp_path / "doc.md"
     doc.write_text(_PROJECT_DOC, encoding="utf-8")
 
-    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
+    async def fake_call(filtered_jsonl: str, model: str) -> str:
         return "## Decisions\n- Chose sqlite over postgres because local-first. [idx=2]\n"
 
     async def fail_oneshot(prompt, **kwargs):
@@ -766,13 +768,61 @@ def test_oversized_input_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(insights.asyncio, "sleep", fake_sleep)
     out, err = asyncio.run(
         insights._run_model_with_retry(
-            filtered_jsonl='{"idx":0}', model="some-model", env={}
+            filtered_jsonl='{"idx":0}', model="some-model"
         )
     )
     assert out == ""
     assert "too long" in err.lower()
     assert calls == 1, "overflow must not be retried"
     assert slept == [], "must not burn the 30s retry wait on a deterministic failure"
+
+
+def test_usage_limit_rejection_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A weekly-quota 429 is terminal upstream; the second call buys nothing.
+
+    ``run_oneshot`` already classifies it (``transient=False``) and raises
+    without retrying internally. Insights must honour that flag instead of
+    sleeping 30s and re-sending, which on a backfill repeats once per archive.
+    """
+    from ciao.providers.oneshot import OneShotError
+
+    calls = 0
+
+    async def rejected(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        detail = (
+            "API Error: Request rejected (429) · you have reached your "
+            "weekly usage limit, upgrade for higher limits"
+        )
+        raise OneShotError(detail, transient=False)
+
+    monkeypatch.setattr(insights, "_call_model", rejected)
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(insights.asyncio, "sleep", fake_sleep)
+    out, err = asyncio.run(
+        insights._run_model_with_retry(
+            filtered_jsonl='{"idx":0}', model="some-model"
+        )
+    )
+    assert out == ""
+    assert "weekly usage limit" in err
+    assert calls == 1, "a terminal upstream rejection must not be retried"
+    assert slept == [], "must not burn the 30s retry wait on a terminal rejection"
+
+
+def test_terminal_failure_flag_only_trips_on_explicit_false() -> None:
+    from ciao.providers.oneshot import OneShotError
+
+    assert insights.is_terminal_failure(OneShotError("bad key", transient=False))
+    # Retryable, and anything without the flag stays retryable (safe default).
+    assert not insights.is_terminal_failure(OneShotError("empty body", transient=True))
+    assert not insights.is_terminal_failure(asyncio.TimeoutError())
+    assert not insights.is_terminal_failure(Exception("subprocess died"))
 
 
 def test_transient_failure_still_retries_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -793,7 +843,7 @@ def test_transient_failure_still_retries_once(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(insights.asyncio, "sleep", fake_sleep)
     out, err = asyncio.run(
         insights._run_model_with_retry(
-            filtered_jsonl='{"idx":0}', model="some-model", env={}
+            filtered_jsonl='{"idx":0}', model="some-model"
         )
     )
     assert err == ""
@@ -812,3 +862,161 @@ def test_backfill_caps_an_unlimited_run_and_reports_it(monkeypatch, tmp_path):
 
     monkeypatch.setenv("CIAO_INSIGHTS_BACKFILL_MAX", "2")
     assert insights._backfill_ceiling() == 2
+
+
+# ── locate_insights_section ──────────────────────────────────────────────
+
+
+def test_locate_returns_none_without_marker() -> None:
+    assert insights.locate_insights_section("# chat\n\n## Turn 1\n\nhi\n") is None
+
+
+def test_locate_finds_legacy_appended_section() -> None:
+    text = "# chat\n\n## Turn 1\n\nhi\n\n## Session insights\n\n## Errors\n- x\n"
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert text[location[1]:].lstrip().startswith("## Errors")
+
+
+def test_locate_rejects_marker_quoted_mid_transcript() -> None:
+    """A turn heading after the marker proves the marker is quoted content.
+
+    Curation chats quote insights sections verbatim; the old substring check
+    treated those archives as already processed and skipped extraction.
+    """
+    text = (
+        "# chat\n\n## Turn 1\n\nquoting:\n\n## Session insights\n\n"
+        "## Decisions\n- old bullet\n\n## Turn 2\n\nmore chat\n"
+    )
+    assert insights.locate_insights_section(text) is None
+
+
+def test_locate_prefers_last_marker_over_quoted_one() -> None:
+    text = (
+        "# chat\n\n## Turn 1\n\nquoting:\n\n## Session insights\n\n- old\n\n"
+        "## Turn 2\n\nbye\n\n## Session insights\n\n## Errors\n- real\n"
+    )
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert "real" in text[location[1]:]
+    assert "old" not in text[location[1]:]
+
+
+def test_locate_trusts_the_stamp() -> None:
+    """A stamped section at end of file is authoritative."""
+    text = (
+        "# chat\n\n## Turn 1\n\nhi\n\n"
+        "<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- real\n"
+    )
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert text[location[0]:].startswith("<!-- ciao:session-insights -->")
+
+
+def test_append_section_stamps_and_is_detected(tmp_path: Path) -> None:
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n\n## Turn 1\n\nhi\n", encoding="utf-8")
+
+    insights._append_section(archive, "## Errors\n- x")
+
+    text = archive.read_text(encoding="utf-8")
+    assert "<!-- ciao:session-insights -->\n## Session insights" in text
+    assert insights._has_insights_section(archive)
+
+
+def test_has_insights_section_ignores_quoted_marker(tmp_path: Path) -> None:
+    archive = tmp_path / "archive.md"
+    archive.write_text(
+        "# chat\n\n## Turn 1\n\nquoting:\n\n## Session insights\n\n- old\n\n"
+        "## Turn 2\n\nbye\n",
+        encoding="utf-8",
+    )
+    assert not insights._has_insights_section(archive)
+
+
+def test_locate_rejects_stamp_quoted_inside_code_fence() -> None:
+    """A stamped section pasted into a chat turn is fenced, hence quoted.
+
+    Rendered archives fence quoted transcript text; without the fence check
+    the stamp fast path would trust the quoted copy and skip extraction.
+    """
+    text = (
+        "# chat\n\n## Turn 1\n\nlook at this archive:\n\n"
+        "```text\n<!-- ciao:session-insights -->\n## Session insights\n\n"
+        "## Decisions\n- old reviewed bullet\n```\n\n"
+        "## Turn 2\n\nmore chat\n"
+    )
+    assert insights.locate_insights_section(text) is None
+
+
+def test_locate_ignores_stamp_mentioned_in_prose() -> None:
+    """A stamp in prose, not adjacent to a header, never binds to one."""
+    text = (
+        "# chat\n\n## Turn 1\n\nthe stamp is <!-- ciao:session-insights --> ok\n\n"
+        "## Turn 2\n\nbye\n\n"
+        "<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- real\n"
+    )
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert "## Errors" in text[location[1]:]
+    # The real appended stamp wins, not the prose mention.
+    assert text[location[0]:].startswith("<!-- ciao:session-insights -->\n## Session")
+
+
+def test_locate_rejects_marker_quoted_in_last_turn() -> None:
+    """A quote in the final turn is followed by trailers, not another turn."""
+    text = (
+        "# chat\n\n## Turn 1\n\nhi\n\n## Turn 2\n\nquoting:\n\n"
+        "## Session insights\n\n## Decisions\n- old bullet\n\n"
+        "### Usage\n- tokens\n"
+    )
+    assert insights.locate_insights_section(text) is None
+
+
+def test_locate_requires_stamped_marker_to_be_line_anchored() -> None:
+    """A prose stamp cannot bind to a following legacy-looking heading."""
+    text = (
+        "# chat\n\n## Turn 1\n\nquoted stamp: "
+        "<!-- ciao:session-insights -->\n## Session insights\n\n"
+        "## Decisions\n- quoted\n\n## Turn 2\n\nmore chat\n"
+    )
+    assert insights.locate_insights_section(text) is None
+
+
+def test_locate_accepts_stamped_crlf_archive() -> None:
+    """Archives written on Windows retain the same marker semantics."""
+    text = (
+        "# chat\r\n\r\n## Turn 1\r\n\r\nhi\r\n\r\n"
+        "<!-- ciao:session-insights -->\r\n## Session insights  \r\n\r\n"
+        "## Errors\r\n- real\r\n"
+    )
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert text[location[1]:].lstrip().startswith("## Errors")
+
+
+def test_locate_survives_unbalanced_fence_in_transcript() -> None:
+    """A stray line-start ``` inside a quoted turn must not hide the section.
+
+    Rendered archives embed turn text verbatim inside ```text fences, so a
+    message containing an odd number of line-start fences (a truncated code
+    block, a chat about Markdown) is routine. Prefix fence *parity* would
+    flip there and make the real appended stamp read as quoted content —
+    re-running extraction and appending a duplicate section on every pass.
+    """
+    text = (
+        "# chat\n\n## Turn 1\n\n```text\nlook:\n```python\nprint('unclosed')\n```\n\n"
+        "## Turn 2\n\nbye\n\n"
+        "<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- real\n"
+    )
+    location = insights.locate_insights_section(text)
+    assert location is not None
+    assert text[location[1]:].lstrip().startswith("## Errors")
+
+
+def test_locate_rejects_marker_quoted_before_subagents_block() -> None:
+    text = (
+        "# chat\n\n## Turn 1\n\nquoting:\n\n## Session insights\n\n- old\n\n"
+        "## Subagents\n\n#### Turn 1\n\nsub\n"
+    )
+    assert insights.locate_insights_section(text) is None

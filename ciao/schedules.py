@@ -237,6 +237,13 @@ class ScheduleEntry:
     run_at_date: str | None = None         # "YYYY-MM-DD" in timezone_name; used when frequency="once" (fires once then deletes)
     web_chat_id: str | None = None         # PWA chat target (e.g. "chat-a1b2c3d4"); when set, dispatches to web instead of Telegram
     web_project_id: str | None = None    # PWA project target; when set, each run creates a NEW chat in this project
+    # The target project's name, recorded alongside its id. Project ids are
+    # per-instance and regenerate on a fresh init, so the id alone silently
+    # decays into "no target" and the run lands in General with the user's
+    # choice discarded. The name survives that and lets the resolver re-home
+    # to the same project and repair the id. Empty for entries created before
+    # this field existed; those still fall back to General.
+    web_project_name: str = ""
     # Workspace the schedule belongs to (e.g. "acme" | "home" | "default"). Project IDs
     # regenerate per device on fresh init, so web_project_id goes stale across
     # devices; this field lets the resolver re-target the right General project
@@ -303,6 +310,7 @@ class ScheduleStore:
         run_at_date: str | None = None,
         web_chat_id: str | None = None,
         web_project_id: str | None = None,
+        web_project_name: str = "",
         provider: str = "",
         archive_policy: str = "manual",
         workspace: str = "",
@@ -326,6 +334,7 @@ class ScheduleStore:
             run_at_date=run_at_date or None,
             web_chat_id=web_chat_id or None,
             web_project_id=web_project_id or None,
+            web_project_name=web_project_name or "",
             archive_policy=normalize_archive_policy(archive_policy),
             workspace=workspace or "",
             title=title or "",
@@ -535,6 +544,7 @@ class ScheduleManager:
         run_at_date: str | None = None,
         web_chat_id: str | None = None,
         web_project_id: str | None = None,
+        web_project_name: str = "",
         provider: str = "",
         archive_policy: str = "manual",
         workspace: str = "",
@@ -552,6 +562,7 @@ class ScheduleManager:
             days_of_week=days_of_week,
             web_chat_id=web_chat_id,
             web_project_id=web_project_id,
+            web_project_name=web_project_name,
             thread_id=thread_id,
             frequency=frequency,
             day_of_month=day_of_month,
@@ -561,6 +572,33 @@ class ScheduleManager:
             title=title,
             description=description,
         )
+
+    def backfill_project_names(self, resolve_name) -> int:
+        """Record the target project's name on entries that only have its id.
+
+        Project ids are per-instance, so an entry carrying only an id is one
+        fresh init away from silently running in General. Entries written
+        before the name was stored — or synced in from another device — are
+        still repairable while their id resolves *here*, which is the only
+        window in which the intended project is knowable rather than guessed.
+
+        ``resolve_name`` maps a project id to its name, or None when the id
+        does not resolve; those are left alone, since inventing a name would
+        defeat the point. Returns how many entries were stamped.
+        """
+        stamped = 0
+        for entry in self.list_entries():
+            if entry.web_project_name or not entry.web_project_id:
+                continue
+            name = resolve_name(entry.web_project_id)
+            if not name:
+                continue
+            entry.web_project_name = name
+            self.replace(entry)
+            stamped += 1
+        if stamped:
+            logger.info("Recorded the target project name on %d schedule(s)", stamped)
+        return stamped
 
     def delete(self, schedule_id: str) -> bool:
         return self._store.delete(schedule_id)

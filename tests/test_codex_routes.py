@@ -41,6 +41,9 @@ def _request(path: str, app, **path_params: str) -> Request:
         "headers": [],
         "app": app,
         "path_params": path_params,
+        # A real ASGI http scope always carries this; handlers may read
+        # `request.query_params`.
+        "query_string": b"",
     })
 
 

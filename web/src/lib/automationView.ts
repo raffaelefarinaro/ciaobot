@@ -19,14 +19,20 @@ export function automationHealth(item: AutomationProcess): AutomationHealth {
   return 'ok'
 }
 
+/** Everything nested under a row: bulk variants and pipeline steps alike. */
+function nested(item: AutomationProcess): AutomationProcess[] {
+  return [...(item.sub_jobs || []), ...(item.steps || [])]
+}
+
 /**
- * Health of a job including its bulk variants: a failed insights backfill is
- * a failure of Session insights as far as the user is concerned, and would
- * otherwise hide inside a row badged as healthy.
+ * Health of a job including its bulk variants and pipeline steps: a failed
+ * insights backfill is a failure of Session insights as far as the user is
+ * concerned, and a failed memory-proposals step is a failure of the archive
+ * pipeline. Either would otherwise hide inside a row badged as healthy.
  */
 export function overallHealth(item: AutomationProcess): AutomationHealth {
   if (automationHealth(item) === 'error') return 'error'
-  if ((item.sub_jobs || []).some((sub) => automationHealth(sub) === 'error')) return 'error'
+  if (nested(item).some((sub) => automationHealth(sub) === 'error')) return 'error'
   return automationHealth(item)
 }
 
@@ -36,7 +42,46 @@ export function overallHealth(item: AutomationProcess): AutomationHealth {
  */
 export function attentionSource(item: AutomationProcess): AutomationProcess {
   if (automationHealth(item) === 'error') return item
-  return (item.sub_jobs || []).find((sub) => automationHealth(sub) === 'error') || item
+  return nested(item).find((sub) => automationHealth(sub) === 'error') || item
+}
+
+/** One line of a pipeline's step list. */
+export interface PipelineStep {
+  job: string
+  label: string
+  health: AutomationHealth
+  /** When this step is skipped, in the user's terms. '' for the owning job. */
+  condition: string
+  running: boolean
+}
+
+/**
+ * The steps of a pipeline, owning job first.
+ *
+ * The job that owns the pipeline is a step of it too — Session insights is the
+ * first thing that runs when you archive a chat — so it belongs in this list
+ * rather than being represented only by the group heading. Returns [] for a job
+ * that is not a pipeline, which is how callers decide whether to render a list.
+ */
+export function pipelineSteps(item: AutomationProcess): PipelineStep[] {
+  const steps = item.steps || []
+  if (!steps.length) return []
+  const asStep = (entry: AutomationProcess, condition: string): PipelineStep => ({
+    job: entry.job,
+    label: entry.label,
+    health: automationHealth(entry),
+    condition,
+    running: !!entry.running,
+  })
+  return [
+    asStep(item, ''),
+    ...steps.map((step) => asStep(step, step.step_condition || '')),
+  ]
+}
+
+/** True when any step of this row is running right now. */
+export function isRunningNow(item: AutomationProcess): boolean {
+  return !!item.running || nested(item).some((sub) => !!sub.running)
 }
 
 /**

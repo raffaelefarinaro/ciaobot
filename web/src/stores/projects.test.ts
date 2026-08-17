@@ -804,6 +804,9 @@ describe('re-entry summary invalidation', () => {
     const chatId = 'chat-summary-result'
     store.reentrySummaries[chatId] = 'Old orientation'
     store.connectWs(chatId)
+    // Mark the chat as streaming so the result is treated as a real turn
+    // completion rather than a broker replay on WS resume.
+    store.streaming[chatId] = true
 
     fakeSockets[0].onmessage?.({
       data: JSON.stringify({
@@ -817,6 +820,58 @@ describe('re-entry summary invalidation', () => {
     })
 
     expect(store.reentrySummaries[chatId]).toBeUndefined()
+  })
+
+  test('keeps the summary when a result is replayed after the turn has already settled', () => {
+    // A WS reconnect replays the broker's buffered events. A result for a
+    // turn that already settled on this client must NOT clear the re-entry
+    // summary — otherwise scrolling after a resume would dismiss the
+    // orientation note.
+    const store = useProjectStore()
+    const chatId = 'chat-summary-result-replay'
+    store.reentrySummaries[chatId] = 'Old orientation'
+    store.connectWs(chatId)
+    // streaming stays false (default) — the turn already settled.
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'The new answer',
+        is_error: false,
+        effective_model: 'claude-test',
+        usage: {},
+        session_id: 'session-1',
+      }),
+    })
+
+    expect(store.reentrySummaries[chatId]).toBe('Old orientation')
+  })
+
+  test('keeps the summary when a user_echo is replayed for an already-rendered turn', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-echo-replay'
+    store.reentrySummaries[chatId] = 'Old orientation'
+    store.connectWs(chatId)
+    // The transcript already has a user message with the same turn_index
+    // that the echo is replaying. The summary must survive this echo so
+    // that scrolling (which can trigger a WS resume and a buffered echo
+    // replay) doesn't dismiss the orientation note.
+    store.messages[chatId] = [{
+      role: 'user',
+      content: 'Earlier prompt',
+      timestamp: '2026-08-13T10:00:00Z',
+      turn_index: 4,
+    }]
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'Earlier prompt',
+        turn_index: 4,
+      }),
+    })
+
+    expect(store.reentrySummaries[chatId]).toBe('Old orientation')
   })
 
   test('does not restore a stale summary after a new message arrives', async () => {
@@ -850,6 +905,47 @@ describe('re-entry summary invalidation', () => {
     await request
 
     expect(store.reentrySummaries[chatId]).toBeUndefined()
+  })
+
+  test('does not request a summary when the user has disabled the preference', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-disabled'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Disabled',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+    localStorageData['ciao-reentry-summary-enabled'] = 'false'
+
+    store.requestReentrySummaryIfUseful(chatId)
+
+    const calls = apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary'))
+    expect(calls).toHaveLength(0)
+  })
+
+  test('disabling the preference evicts any cached summaries', () => {
+    const store = useProjectStore()
+    store.reentrySummaries['a'] = 'First'
+    store.reentrySummaries['b'] = 'Second'
+
+    store.setReentrySummaryEnabled(false)
+
+    expect(store.reentrySummaries).toEqual({})
+  })
+
+  test('enabling the preference leaves cached summaries alone', () => {
+    const store = useProjectStore()
+    store.reentrySummaries['a'] = 'First'
+
+    store.setReentrySummaryEnabled(true)
+
+    expect(store.reentrySummaries['a']).toBe('First')
   })
 })
 
@@ -1824,6 +1920,19 @@ describe('background agents indicator', () => {
   })
 })
 
+describe('postprocessingChats (home tidying list)', () => {
+  test('lists only chats whose pipeline is still running, newest archive first', () => {
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'c-done', project_id: 'p1', title: 'Settled', archived: true, postprocess: { state: 'done', step: 'insights', steps: {} } },
+      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'insights', expected: [], steps: {} } },
+      { chat_id: 'c-fresher', project_id: 'p1', title: 'Fresher', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'running', step: 'memory_proposals', expected: [], steps: {} } },
+      { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
+    ] as unknown as typeof store.chats
+    expect(store.postprocessingChats().map(c => c.chat_id)).toEqual(['c-fresher', 'c-running'])
+  })
+})
+
 describe('chat_streaming_done clears stale streaming for inactive chats', () => {
   test('an inactive chat finishing clears its orphaned local streaming flag', () => {
     apiGet.mockResolvedValue([])
@@ -2016,6 +2125,27 @@ describe('deep-link chat navigation', () => {
     expect(store.chats.every(chat => chat.archived)).toBe(true)
   })
 
+  test('archive response keeps the background insights status visible', async () => {
+    const store = useProjectStore()
+    store.chats = supervisorWithTwoSubchats()
+    apiPost.mockResolvedValue({
+      ok: true,
+      archived_chat_ids: ['parent'],
+      postprocess: {
+        state: 'running',
+        step: 'insights',
+        expected: ['insights', 'trajectory'],
+        steps: {},
+      },
+    })
+
+    await store.archiveChat('parent')
+
+    expect(store.chatPostprocess('parent')?.state).toBe('running')
+    const toast = store.toasts.find(t => t.title === 'Chat archived')
+    expect(toast?.body).toContain('Processing insights in the background')
+  })
+
   test('a subchat the server did not archive stays active and keeps its socket', async () => {
     const store = useProjectStore()
     store.chats = supervisorWithTwoSubchats()
@@ -2131,13 +2261,13 @@ describe('workspace and chat transitions', () => {
       if (path === '/api/workspaces') {
         return Promise.resolve({
           workspaces: [
-            { name: 'home', vault_root: 'memory-vault/home', default_provider: 'ollama', default_model: '', gws_profile: 'personal', model_bucket: 'personal' },
-            { name: 'client', vault_root: 'vaults/client', default_provider: 'claude', default_model: '', gws_profile: 'work', model_bucket: 'work' },
+            { name: 'home', vault_root: 'memory-vault/home', default_provider: 'opencode', default_model: '', gws_profile: 'personal' },
+            { name: 'client', vault_root: 'vaults/client', default_provider: 'claude', default_model: '', gws_profile: 'work' },
           ],
           active: 'home',
           provider_options: [
             { value: 'claude', label: 'Claude' },
-            { value: 'ollama', label: 'Ollama' },
+            { value: 'opencode', label: 'opencode' },
           ],
         })
       }
@@ -2228,10 +2358,12 @@ describe('workspace and chat transitions', () => {
     // Shell is ready even though the history is still in flight.
     expect(store.bootstrapped).toBe(true)
     expect(store.activeChatId).toBe('c1')
+    expect(store.messageHistoryLoading).toBe(true)
     await messagesRequested
     expect(store.messages['c1'] ?? []).toEqual([])
 
     releaseMessages([])
+    await vi.waitFor(() => expect(store.messageHistoryLoading).toBe(false))
     window.history.replaceState({}, '', '/')
   })
 
@@ -2466,6 +2598,30 @@ describe('workspace and chat transitions', () => {
     expect(chat).toBeUndefined()
     expect(apiPost).not.toHaveBeenCalled()
     expect(store.toasts.some(t => t.variant === 'error')).toBe(true)
+  })
+})
+
+describe('gws health toast', () => {
+  test('surfaces an error toast whose Fix action routes to Settings → Workspaces', () => {
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'gws_health',
+        profile: 'personal',
+        token_valid: false,
+        token_error: 'expired',
+        title: 'Google Workspace login needs attention',
+        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Workspaces.',
+      }),
+    })
+
+    const toast = store.toasts.find(t => t.variant === 'error' && t.title.includes('Google Workspace'))
+    expect(toast).toBeTruthy()
+    expect(toast?.fixRoute).toBe('/settings/workspaces')
+    expect(toast?.fixLabel).toBe('Fix in Settings')
+    expect(toast?.chat_id).toBe('')
   })
 })
 

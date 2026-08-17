@@ -16,7 +16,7 @@ Install `gws` from Settings → Workspaces (or see the Ciaobot README). The bina
 Run every Google API call through the profile wrapper — never bare `gws`:
 
 ```bash
-scripts/gws-profile.sh <personal|work> <service> <subcommand> [flags]
+scripts/gws-profile.sh "$GWS_PROFILE" <service> <subcommand> [flags]
 ```
 
 Use the chat's `GWS_PROFILE` unless the user asks otherwise. The wrapper routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
@@ -34,7 +34,7 @@ OAuth setup: Settings → Workspaces (Google Workspace card). Config dirs: `secr
 ## CLI Syntax
 
 ```bash
-scripts/gws-profile.sh <personal|work> <service> <resource> [sub-resource] <method> [flags]
+scripts/gws-profile.sh "$GWS_PROFILE" <service> <resource> [sub-resource] <method> [flags]
 ```
 
 ### Method Flags
@@ -61,12 +61,12 @@ scripts/gws-profile.sh <personal|work> <service> <resource> [sub-resource] <meth
 - **zsh `!` expansion:** Sheet ranges like `Sheet1!A1` contain `!` which zsh interprets as history expansion. Use double quotes with escaped inner quotes instead of single quotes:
   ```bash
   # WRONG (zsh will mangle the !)
-  scripts/gws-profile.sh <personal|work> sheets +read --spreadsheet ID --range 'Sheet1!A1:D10'
+  scripts/gws-profile.sh "$GWS_PROFILE" sheets +read --spreadsheet ID --range 'Sheet1!A1:D10'
 
   # CORRECT
-  scripts/gws-profile.sh <personal|work> sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
+  scripts/gws-profile.sh "$GWS_PROFILE" sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
   ```
 - **JSON with double quotes:** Wrap `--params` and `--json` values in single quotes so the shell does not interpret the inner double quotes:
   ```bash
-  scripts/gws-profile.sh <personal|work> drive files list --params '{"pageSize": 5}'
+  scripts/gws-profile.sh "$GWS_PROFILE" drive files list --params '{"pageSize": 5}'
   ```

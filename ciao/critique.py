@@ -1,9 +1,13 @@
-"""Multi-model adversarial review via the Claude Agent SDK.
+"""Multi-model adversarial review.
 
 Each model in the panel is called through
-:func:`ciao.providers.oneshot.run_oneshot` with per-model routing
-env (OpenRouter / Ollama / Anthropic), so ``owner/model`` ids reach
-OpenRouter, ``:tag`` ids reach Ollama, and bare aliases stay on Anthropic.
+:func:`ciao.providers.oneshot.run_oneshot`. A panel entry may name the provider
+that runs it -- ``codex:fable`` and ``opencode:fable`` route to those
+providers' app-servers -- and an unprefixed entry runs through Claude Code, so
+a bare tier alias means Anthropic. That is what makes the panel genuinely
+adversarial: the default lists one voice per signed-in vendor rather than three
+models from the same one.
+
 The artifact is inlined in the prompt (the one-shot call runs with no
 tools, ``max_turns=1``), so no file-read tool is needed.
 
@@ -27,15 +31,16 @@ from typing import Any
 
 from ciao.config import CiaoConfig
 from ciao.providers.oneshot import run_oneshot
-from ciao.providers.routing import routing_routine_env_for_model
 
 DEFAULT_TIMEOUT = 120  # seconds per model
 
-# Panel entries prefixed with this route through the Codex (OpenAI / ChatGPT)
-# app-server instead of the Anthropic-compatible one-shot path.
+# A panel entry may name the provider that should run it. Unprefixed entries
+# run through Claude Code; these two route to their own provider's app-server.
 CODEX_PREFIX = "codex:"
+OPENCODE_PREFIX = "opencode:"
 
 _CODEX_AVAILABLE_CACHE: tuple[float, bool] | None = None
+_OPENCODE_AVAILABLE_CACHE: tuple[float, bool] | None = None
 _CODEX_AVAILABLE_TTL = 30.0  # seconds — panel resolution is read-hot
 
 def is_anthropic_available() -> bool:
@@ -86,33 +91,54 @@ def is_codex_available() -> bool:
     return ok
 
 
+def is_opencode_available() -> bool:
+    """True when opencode is installed and has at least one connected provider.
+
+    Backs the "add a third vendor to the panel" default. Installed-but-empty is
+    not available: opencode with nothing authenticated has no model to run, and
+    listing it would put a guaranteed failure in the panel. Cached on the same
+    TTL as the Codex probe for the same reason -- panel resolution is read-hot
+    and the probe spawns a subprocess.
+    """
+    global _OPENCODE_AVAILABLE_CACHE
+    now = time.monotonic()
+    cached = _OPENCODE_AVAILABLE_CACHE
+    if cached is not None and now - cached[0] < _CODEX_AVAILABLE_TTL:
+        return cached[1]
+    try:
+        from ciao.providers.opencode import opencode_login_status
+
+        ok = bool(opencode_login_status().get("ok"))
+    except Exception:  # noqa: BLE001 — availability probe must never crash the panel
+        ok = False
+    _OPENCODE_AVAILABLE_CACHE = (now, ok)
+    return ok
+
+
 def default_critique_panel(config: CiaoConfig) -> list[str]:
-    """Backend-aware default when Settings → Models has no critique override."""
+    """Provider-aware default when Settings → Models has no critique override.
+
+    Aims for one voice per signed-in vendor: an adversarial panel of three
+    Anthropic models would mostly agree with itself, so breadth across vendors
+    beats depth within one. Every entry is gated on that vendor being usable --
+    listing a signed-out provider would only put a guaranteed failure in the
+    panel.
+    """
     models = []
 
-    # Prioritize native Anthropic over OpenRouter for the Claude models
     if is_anthropic_available():
         models.extend(["opus", "fable"])
-    elif config.openrouter.available:
-        models.extend([config.openrouter.opus_model, config.openrouter.fable_model])
-    else:
-        # Fallback when neither is explicitly configured
-        models.extend(["opus", "fable"])
-
-    # Add Ollama models if Ollama is configured / available
-    oll = config.ollama
-    if bool(oll.local_models) or (bool(oll.api_key) and oll.api_key != "ollama"):
-        if oll.opus_model:
-            models.append(oll.opus_model)
-        if oll.fable_model:
-            models.append(oll.fable_model)
-
-    # Add the OpenAI (Codex) fable model when the Codex CLI is signed in, so a
-    # ChatGPT / OpenAI account lends a non-Anthropic voice to the panel. The
-    # ``codex:`` prefix routes the entry through the Codex app-server; the bare
-    # ``fable`` tier resolves to the signed-in account's model at dispatch.
+    # The prefixed entries route through their own provider's app-server; the
+    # bare ``fable`` tier resolves to the signed-in account's model at dispatch.
     if is_codex_available():
         models.append(f"{CODEX_PREFIX}fable")
+    if is_opencode_available():
+        models.append(f"{OPENCODE_PREFIX}fable")
+
+    if not models:
+        # Nothing is signed in. Name the Anthropic tiers anyway so the panel
+        # reports a real auth error instead of silently reviewing nothing.
+        models = ["opus", "fable"]
 
     # Filter out empty strings or duplicates while preserving order
     seen = set()
@@ -218,46 +244,35 @@ def extract_json(text: str) -> dict | None:
     return None
 
 
-def _split_provider(model: str, config: CiaoConfig) -> tuple[str, str]:
+def _split_provider(model: str) -> tuple[str, str]:
     """Map a panel entry to its ``(provider, model_id)`` dispatch pair.
 
-    A ``codex:`` prefix selects the Codex (OpenAI / ChatGPT) app-server, as
-    does a ``custom:`` id whose provider is configured with the Codex runner.
-    Every other id runs through the Anthropic-compatible one-shot path with
-    per-model routing env (Anthropic passthrough / OpenRouter / Ollama /
-    custom Anthropic-compatible endpoints).
+    A ``codex:`` prefix selects the Codex (OpenAI / ChatGPT) app-server and an
+    ``opencode:`` prefix selects opencode's. Every other id runs through Claude
+    Code, so a bare tier alias means Anthropic.
     """
     if model.startswith(CODEX_PREFIX):
         return "codex", model[len(CODEX_PREFIX):].strip()
-    from ciao.custom_providers import provider_for_model, runtime_model
-    custom = provider_for_model(config, model)
-    if custom is not None:
-        return custom.runner, runtime_model(model)
+    if model.startswith(OPENCODE_PREFIX):
+        return "opencode", model[len(OPENCODE_PREFIX):].strip()
     return "claude", model
 
 
 async def _review_one(
     model: str, artifact: str, user_prompt: str, config: CiaoConfig, timeout: float
 ) -> ModelResult:
-    provider, model_id = _split_provider(model, config)
-    # Codex routes by provider, not by env injection; the Anthropic-compatible
-    # path picks its upstream from the model id shape.
-    from ciao.custom_providers import provider_for_model, env_for_model as custom_env_for_model
-    custom = provider_for_model(config, model)
-    if custom is not None:
-        env = custom_env_for_model(config, model)
-    else:
-        env = {} if provider == "codex" else routing_routine_env_for_model(model_id, config)
+    provider, model_id = _split_provider(model)
     t0 = time.monotonic()
     try:
         raw = await run_oneshot(
             user_prompt,
             system_prompt=SYSTEM_PROMPT,
             model=model_id,
-            env=env,
             timeout_s=timeout,
             provider=provider,
-            cwd=config.workspace_root if provider == "codex" else None,
+            # Both app-server providers resolve their config from a working
+            # directory; the Claude path needs none.
+            cwd=config.workspace_root if provider != "claude" else None,
         )
     except (TimeoutError, OSError, RuntimeError) as exc:
         return ModelResult(model, time.monotonic() - t0, False, error=f"{type(exc).__name__}: {exc}")

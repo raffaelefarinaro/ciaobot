@@ -53,12 +53,12 @@ Install `gws` from Settings → Workspaces (or see the Ciaobot README). The bina
 Run every Google API call through the profile wrapper — never bare `gws`:
 
 ```bash
-scripts/gws-profile.sh <personal|work> <service> <subcommand> [flags]
+scripts/gws-profile.sh "$GWS_PROFILE" <service> <subcommand> [flags]
 ```
 
-Use the chat's `GWS_PROFILE` unless the user asks otherwise. The wrapper routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
+`GWS_PROFILE` names the Google account linked to this chat's workspace; pass a different account name only if the user asks for one. The wrapper routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
 
-OAuth setup: Settings → Workspaces (Google Workspace card). Config dirs: `secrets/gws-personal/` (personal), `secrets/gws/` (work).
+OAuth setup: Settings → Workspaces (Google Workspace card). Credentials live in `secrets/gws-<account>/` (the pre-existing `personal` and `work` accounts use `secrets/gws-personal/` and `secrets/gws/`).
 
 """
 
@@ -150,12 +150,12 @@ def rewrite_gws_commands(text: str) -> str:
         if "scripts/gws-profile.sh" in code:
             code = re.sub(
                 r"scripts/gws-profile\.sh <profile> ",
-                "scripts/gws-profile.sh <personal|work> ",
+                'scripts/gws-profile.sh "$GWS_PROFILE" ',
                 code,
             )
         code = re.sub(
             r"(?m)^(\s*)gws ",
-            r"\1scripts/gws-profile.sh <personal|work> ",
+            r'\1scripts/gws-profile.sh "$GWS_PROFILE" ',
             code,
         )
         return f"```{lang}\n{code}```"

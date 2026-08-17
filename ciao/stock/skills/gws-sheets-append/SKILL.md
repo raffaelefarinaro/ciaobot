@@ -14,7 +14,7 @@ Append a row to a spreadsheet
 ## Usage
 
 ```bash
-scripts/gws-profile.sh <personal|work> sheets +append --spreadsheet <ID>
+scripts/gws-profile.sh "$GWS_PROFILE" sheets +append --spreadsheet <ID>
 ```
 
 ## Flags
@@ -28,8 +28,8 @@ scripts/gws-profile.sh <personal|work> sheets +append --spreadsheet <ID>
 ## Examples
 
 ```bash
-scripts/gws-profile.sh <personal|work> sheets +append --spreadsheet ID --values 'Alice,100,true'
-scripts/gws-profile.sh <personal|work> sheets +append --spreadsheet ID --json-values '[["a","b"],["c","d"]]'
+scripts/gws-profile.sh "$GWS_PROFILE" sheets +append --spreadsheet ID --values 'Alice,100,true'
+scripts/gws-profile.sh "$GWS_PROFILE" sheets +append --spreadsheet ID --json-values '[["a","b"],["c","d"]]'
 ```
 
 ## Tips

@@ -138,6 +138,35 @@ APPLE_MAX_INPUT_CHARS = 8_000
 # it — it was previously declared once per consumer.
 APPLE_MODEL_IDS = frozenset({"apple", "apfel"})
 
+# Apple Intelligence is a beta feature and is off by default. The app enables
+# it from Settings → Models (persisted in `.runtime/app_settings.json`), or an
+# operator can flip the default from the env; every availability check below
+# short-circuits on this flag so the "apple" sentinel degrades to a cloud-model
+# fallback with an explainable reason until it is switched on.
+APPLE_INTELLIGENCE_BETA = True
+
+# Module-level latch mirroring the effective (config/env × app-settings) value.
+# It lives here rather than on CiaoConfig because availability is consulted on
+# hot paths (every chat title, each archived insight) and callers reach for
+# `apple_model_available()` without threading a config object through.
+_apple_intelligence_enabled = False
+
+
+def set_apple_intelligence_enabled(enabled: bool) -> None:
+    """Set whether the on-device model may be used (beta, off by default).
+
+    Called from :meth:`ciao.app_settings.AppSettingsStore.apply_to_config` so
+    the flag always tracks the effective config value, at startup and on every
+    Settings PATCH.
+    """
+    global _apple_intelligence_enabled
+    _apple_intelligence_enabled = bool(enabled)
+
+
+def apple_intelligence_enabled() -> bool:
+    """Whether the operator has switched the beta on (not hardware support)."""
+    return _apple_intelligence_enabled
+
 
 def is_apple_model(model: str | None) -> bool:
     """Whether a configured model id means "the on-device model"."""
@@ -195,10 +224,12 @@ def probe() -> dict[str, Any]:
 
 def reset_probe_cache() -> None:
     """Forget the cached probe, for tests and after installing the app."""
-    global _model_failure, _model_available_latch
+    global _model_failure, _model_available_latch, _apple_intelligence_enabled
     _probe_cache.clear()
     _model_failure = None
     _model_available_latch = False
+    # Restore the beta-off-by-default state so tests start from a clean slate.
+    _apple_intelligence_enabled = False
 
 
 def section(name: str) -> dict[str, Any]:
@@ -341,14 +372,17 @@ async def run(
 def apple_model_available() -> bool:
     """True when Apple's on-device model can be used here.
 
-    False on non-macOS, without the app bundle, before macOS 26, when Apple
-    Intelligence is switched off, and while the model is still downloading.
+    False when the beta is off (the default), on non-macOS, without the app
+    bundle, before macOS 26, when Apple Intelligence is switched off, and
+    while the model is still downloading.
 
     Latches on success: see `_model_available_latch`. A machine that has the
     model keeps it, so re-probing on a timer only bought a periodic blocking
     subprocess on the title and insights paths.
     """
     global _model_available_latch
+    if not _apple_intelligence_enabled:
+        return False
     if _model_failure_reason():
         return False
     if _model_available_latch:
@@ -361,10 +395,46 @@ def apple_model_available() -> bool:
 
 def apple_model_unavailable_reason() -> str:
     """Why the on-device model is off, phrased for Settings."""
+    if not _apple_intelligence_enabled:
+        return (
+            "Apple Intelligence is a beta feature and is off by default — "
+            "enable it under Settings → Models"
+        )
     runtime_reason = _model_failure_reason()
     if runtime_reason:
         return runtime_reason
     return unavailable_reason("model", subject="the on-device model")
+
+
+def resolve_model_or_fallback(
+    model: str, *, default_model: str = ""
+) -> tuple[str, str | None]:
+    """Substitute an unusable model, explaining the substitution.
+
+    Returns ``(effective_model, note)``. ``note`` is ``None`` when the requested
+    model is used as-is, and otherwise a human-readable sentence suitable for
+    logging into ``job_runs`` so the operator can see why they got a different
+    model than they asked for.
+
+    Apple's on-device model is the only one that can be unavailable: it depends
+    on the machine (macOS version, Apple Intelligence switched on, model
+    downloaded) rather than on configuration. Every other model belongs to a
+    runtime provider that owns its own auth, and a provider that is not signed
+    in fails at the turn with its own error rather than being substituted here.
+
+    Centralized so the four routine callers -- session insights, chat titles,
+    the schedule attention classifier, and skill evolution -- do not each
+    re-test the sentinel and hand-roll a substitution.
+    """
+    if not is_apple_model(model) or apple_model_available():
+        return model, None
+    # An Apple sentinel cannot serve as its own fallback.
+    fallback = (default_model or "").strip()
+    if not fallback or is_apple_model(fallback):
+        fallback = "sonnet"
+    return fallback, (
+        f"fell back to {fallback} because {apple_model_unavailable_reason()}"
+    )
 
 
 def _model_failure_reason() -> str:
@@ -435,6 +505,11 @@ async def respond(
     cloud model on one exception type.
     """
     global _model_failure
+    if not _apple_intelligence_enabled:
+        raise SidecarError(
+            "Apple Intelligence is a beta feature and is off by default — "
+            "enable it under Settings → Models"
+        )
     cached_reason = _model_failure_reason()
     if cached_reason:
         raise SidecarError(cached_reason)
