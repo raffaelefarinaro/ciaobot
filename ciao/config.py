@@ -797,11 +797,11 @@ class CiaoConfig:
         from ciao import provider_registry
 
         workspace_config = self.workspace(workspace)
-        if workspace_config and workspace_config.default_model:
-            return workspace_config.default_model
         if workspace_config:
             descriptor = provider_registry.get(workspace_config.default_provider)
             if descriptor is not None:
+                if workspace_config.default_model:
+                    return workspace_config.default_model
                 if descriptor.default_model_config_key:
                     return str(getattr(self, descriptor.default_model_config_key, "") or "")
                 # No operator setting and no descriptor default means "use that

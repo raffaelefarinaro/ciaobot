@@ -35,6 +35,7 @@ from ciao.providers.opencode import (
     model_accepts_images,
     missing_required_paths,
     mode_settings,
+    opencode_collab_tree_counts,
     opencode_tier_models,
     opencode_tier_overrides,
     _session_handover_text,
@@ -266,6 +267,7 @@ async def test_resume_rotates_when_session_permission_is_stale(tmp_path):
         mode="normal",
         provider="opencode",
         resume_session="session-old",
+        stable_context_prefix="[stable context]\n",
     )
     expected = mode_settings("normal")[1]
 
@@ -273,6 +275,7 @@ async def test_resume_rotates_when_session_permission_is_stale(tmp_path):
     assert client.get_calls == ["/session/session-old", "/session/session-old/message"]
     assert "User: Earlier request" in provider._session_handover_context
     assert "Assistant: Earlier answer" in provider._session_handover_context
+    assert request.prompt.startswith("[stable context]\n")
     assert client.post_calls == [
         ("/session", {"agent": "build", "permission": expected})
     ]
@@ -549,6 +552,42 @@ def test_tier_overrides_skips_unpinned_tiers():
 
 def test_tier_overrides_on_a_config_without_opencode():
     assert opencode_tier_overrides(object()) == {}
+
+
+# ── collaboration tree counts ────────────────────────────────────────────
+# opencode session objects carry no status field; the running count comes from
+# each child's own messages (see `_opencode_child_status` in routes_api).
+
+
+def test_collab_tree_counts_derive_running_from_child_messages():
+    tree = [
+        # A turn still in flight: time.created without time.completed.
+        {"info": {"id": "a"}, "messages": [
+            {"info": {"role": "user"}, "parts": []},
+            {"info": {"role": "assistant", "time": {"created": 1}}, "parts": []},
+        ]},
+        # A finished child.
+        {"info": {"id": "b"}, "messages": [
+            {"info": {"role": "assistant", "time": {"created": 1, "completed": 2}}, "parts": []},
+        ]},
+        # A failed child: its last assistant message carries an error.
+        {"info": {"id": "c"}, "messages": [
+            {"info": {"role": "assistant", "error": {"name": "E"}}, "parts": []},
+        ]},
+        # A child with no assistant messages counts as completed, not running.
+        {"info": {"id": "d"}, "messages": [{"info": {"role": "user"}, "parts": []}]},
+    ]
+    running, had_subagents = opencode_collab_tree_counts(tree)
+    assert running == 1
+    assert had_subagents is True
+
+
+def test_collab_tree_counts_are_empty_for_an_empty_tree():
+    assert opencode_collab_tree_counts([]) == (0, False)
+
+
+def test_collab_tree_counts_tolerate_junk():
+    assert opencode_collab_tree_counts([None, {"info": {}}, {"messages": "nope"}]) == (0, True)
 
 
 # ── event normalization ─────────────────────────────────────────────────

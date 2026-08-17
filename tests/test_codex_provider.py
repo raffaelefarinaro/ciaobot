@@ -629,6 +629,42 @@ async def test_codex_provider_forks_resumed_thread(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_resume_fallback_replays_stable_context(tmp_path: Path) -> None:
+    from ciao.providers.stdio_rpc import RpcError
+
+    provider = CodexProvider(tmp_path)
+    calls: list[str] = []
+
+    class _Peer:
+        async def request(self, method: str, _params: object, **_kwargs: object):
+            calls.append(method)
+            if method == "thread/resume":
+                raise RpcError("thread disappeared")
+            if method == "thread/start":
+                return {"thread": {"id": "thread-new"}, "model": "gpt-test"}
+            if method == "account/rateLimits/read":
+                return {"rateLimits": {}}
+            raise AssertionError(method)
+
+    async def _peer(_request: AgentRequest):
+        return _Peer()
+
+    provider._ensure_peer = _peer  # type: ignore[method-assign]
+    request = AgentRequest(
+        prompt="continue",
+        model="gpt-test",
+        mode="normal",
+        provider="codex",
+        resume_session="thread-old",
+        stable_context_prefix="[stable context]\n",
+    )
+
+    assert await provider._ensure_thread(request) == "thread-new"
+    assert calls[:2] == ["thread/resume", "thread/start"]
+    assert request.prompt.startswith("[stable context]\n")
+
+
+@pytest.mark.asyncio
 async def test_codex_tier_resolution_honors_config_pins(
     tmp_path: Path, monkeypatch,
 ) -> None:

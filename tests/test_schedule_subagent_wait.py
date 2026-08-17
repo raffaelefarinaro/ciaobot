@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 from ciao.config import CiaoConfig
 from ciao.models import ToolUseEvent
 from ciao.providers.codex import CodexProvider
+from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -171,6 +172,38 @@ async def test_await_codex_subagents_uses_child_lifecycle(
     assert settled is True
     assert had_async is True
     assert read.await_count == 4
+
+
+async def test_await_opencode_subagents_uses_child_lifecycle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    chat = _seed_chat(pcm, "opencode-parent")
+    chat.provider = "opencode"
+
+    def child_tree(status: str) -> list[dict]:
+        # opencode sessions carry no status field; the last assistant message's
+        # `time` record marks a turn still in flight (created, no completed).
+        messages = [
+            {"info": {"role": "user"}, "parts": []},
+            {"info": {"role": "assistant", "time": {"created": 1}}, "parts": []},
+        ]
+        if status == "completed":
+            messages[1]["info"]["time"] = {"created": 1, "completed": 2}
+        return [{"info": {"id": "opencode-child"}, "messages": messages}]
+
+    read = AsyncMock(side_effect=[child_tree("running"), child_tree("completed")])
+    monkeypatch.setattr(OpencodeProvider, "read_collab_tree", read)
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    settled, had_async = await pcm._await_schedule_subagents(chat.chat_id)
+    assert settled is True
+    assert had_async is True
+    assert read.await_count == 2
 
 
 async def test_unattended_codex_question_interrupts_and_remains_pending(

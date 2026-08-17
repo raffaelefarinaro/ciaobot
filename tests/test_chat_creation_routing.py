@@ -152,3 +152,26 @@ def test_empty_default_model_without_pins_stays_empty(tmp_path: Path) -> None:
     chat = manager.create_chat(project.project_id)
     assert chat.provider == "opencode"
     assert chat.model == ""
+
+
+def test_removed_workspace_provider_does_not_carry_its_model_to_claude(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        workspaces={
+            "work": WorkspaceConfig(
+                name="work",
+                vault_root="work",
+                default_provider="ollama",
+                default_model="qwen3:latest",
+            )
+        },
+    )
+    manager = _make_manager(tmp_path, config)
+    project = manager.create_project("Recovered", workspace="work")
+
+    chat = manager.create_chat(project.project_id)
+
+    assert chat.provider == "claude"
+    assert chat.model == config.claude_default_model

@@ -35,6 +35,7 @@ from ciao.providers.base import (
     BaseSDKProvider,
     ProviderCapabilities,
     build_prompt,
+    prepend_stable_context,
 )
 from ciao.providers.connect_errors import annotate_connection_host
 from ciao.providers.stdio_rpc import RpcError, RpcProcessError, StdioJsonRpcPeer
@@ -902,6 +903,7 @@ class CodexProvider(BaseSDKProvider):
             if not requested_session:
                 raise
             logger.warning("Codex thread %s could not resume; starting fresh", requested_session)
+            prepend_stable_context(request)
             response = await peer.request(
                 "thread/start",
                 {key: value for key, value in params.items() if key != "threadId"},

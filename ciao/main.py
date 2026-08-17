@@ -539,6 +539,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app.state.schedule_manager = schedule_manager
     app.state.loop_manager = loop_manager
     app.state.background_runner = background_runner
+    # Lets the wake flusher defer runs to the runner when the restart drain
+    # blocks delivery, so the next start replays those wakes.
+    pcm._background_runner = background_runner
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
@@ -736,12 +739,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
         # Resolve any background run left non-terminal by a crash (the
         # graceful path terminates them on shutdown, so this normally finds
-        # nothing), prune expired ones, and arm the janitor. Orphans are woken
-        # here rather than left sitting in `running` forever.
+        # nothing), replay wakes deferred by a draining restart, prune expired
+        # ones, and arm the janitor. Orphans are woken here rather than left
+        # sitting in `running` forever.
         orphaned = background_runner.start()
         if orphaned:
             logger.warning(
-                "Resolved %d orphaned background run(s) after restart: %s",
+                "Resolved %d orphaned/replayed background run(s) after restart: %s",
                 len(orphaned), ", ".join(run.run_id for run in orphaned),
             )
 

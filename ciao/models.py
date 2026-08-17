@@ -144,6 +144,9 @@ class AgentRequest:
     # lets a pre-session failure retry with the full capsule.
     context_digest: str = ""
     context_session_id: str = ""
+    # Full stable context held aside for providers that have to replace a
+    # missing/invalid resumed session after the request was built.
+    stable_context_prefix: str = ""
 
 
 @dataclass(slots=True)

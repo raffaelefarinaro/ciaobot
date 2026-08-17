@@ -1915,8 +1915,8 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
         # ("Resource deadlock avoided") because this process may not ask the
         # provider to materialise it. Unlike EPERM the errno is unambiguous
         # here, so it needs no corroborating path check. The desktop shell
-        # stages images past this (`needs_drop_staging` in
-        # desktop/src-tauri/src/lib.rs); an image over the staging limit, an
+        # stages unreadable drops past this (`needs_drop_staging` in
+        # desktop/src-tauri/src/lib.rs); a file over the staging limit, an
         # older shell, or a client node transferring a non-image still lands
         # here. A non-image dropped on a host does not: the path is handed to
         # the agent unread, so the agent hits the same errno on its own.
@@ -1935,9 +1935,12 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
 def _clear_desktop_drop_staging(request: Request, grant_id: str) -> None:
     """Delete the desktop shell's staged copies for a consumed grant.
 
-    Only images are staged, and by this point their bytes are in media_root or
-    on the host, so the copies are dead weight. Best-effort: the shell's own
-    stale sweep covers a grant that errored out before reaching here.
+    Only the image copies are dead weight by this point: their bytes are in
+    media_root or on the host. A staged non-image copy is the agent's only
+    readable handle on a cloud placeholder, so it is deliberately left in
+    place for the agent to keep reading; the shell's stale sweep reclaims it
+    later. Best-effort: the shell's own stale sweep covers a grant that errored
+    out before reaching here.
     """
     try:
         # The id reaches us from the request body, and this builds an rmtree
@@ -1948,7 +1951,25 @@ def _clear_desktop_drop_staging(request: Request, grant_id: str) -> None:
     except (ValueError, AttributeError):
         return
     grant_dir = request.app.state.config.state_path.parent / "desktop-drop-grants"
-    shutil.rmtree(grant_dir / "staged" / grant_id, ignore_errors=True)
+    staged_dir = grant_dir / "staged" / grant_id
+    try:
+        for index_dir in staged_dir.iterdir():
+            if not index_dir.is_dir():
+                continue
+            for staged in index_dir.iterdir():
+                if (
+                    staged.is_file()
+                    and staged.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
+                ):
+                    staged.unlink(missing_ok=True)
+            # Drop the index dir once every copy in it went away.
+            try:
+                index_dir.rmdir()
+            except OSError:
+                pass
+        staged_dir.rmdir()
+    except OSError:
+        pass
 
 
 def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
