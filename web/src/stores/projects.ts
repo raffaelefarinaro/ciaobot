@@ -13,7 +13,7 @@ import {
   reloadWhenServerReady,
   restartMessageForDisplay,
 } from '../lib/serverRestart'
-import { archiveFailedToast, archiveStoppedToast } from '../lib/archiveCopy'
+import { archiveFailedToast, archiveProcessingToast, archiveStoppedToast } from '../lib/archiveCopy'
 import { errorMessage } from '../lib/errorMessage'
 import { readChatDraft } from '../lib/chatDrafts'
 import { isPostprocessing } from '../lib/postprocessView'
@@ -1924,7 +1924,20 @@ export const useProjectStore = defineStore('projects', () => {
       Array.isArray(res?.archived_chat_ids) ? res.archived_chat_ids : [chatId],
     )
     for (const chat of chats.value) {
-      if (confirmed.has(chat.chat_id)) chat.archived = true
+      if (confirmed.has(chat.chat_id)) {
+        chat.archived = true
+        if (chat.chat_id === chatId && res?.postprocess) {
+          // The response closes the race where the chat_postprocess event is
+          // emitted after the archive request has already cleared this pane.
+          chat.postprocess = res.postprocess
+        }
+      }
+    }
+    if (res?.postprocess?.state === 'running') {
+      const { title, body } = archiveProcessingToast(
+        (res.postprocess.expected || []).includes('insights'),
+      )
+      pushToast({ chat_id: chatId, title, body })
     }
     // A child the server did not archive is still running: put its socket back.
     for (const id of closedIds) {

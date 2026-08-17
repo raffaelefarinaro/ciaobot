@@ -66,6 +66,16 @@ export function archiveFailedToast(count: number): { title: string; body: string
   }
 }
 
+/** Confirmation that the archive's slow, non-blocking pipeline has started. */
+export function archiveProcessingToast(insights: boolean): { title: string; body: string } {
+  return {
+    title: 'Chat archived',
+    body: insights
+      ? 'Processing insights in the background. You can keep using Ciaobot.'
+      : 'Finishing archive processing in the background. You can keep using Ciaobot.',
+  }
+}
+
 /** Label for a full-width button, where there is room to spell it out. */
 export function archiveActionLabel(count: number): string {
   return count ? `Archive chat and ${subchats(count)}` : 'Archive chat'

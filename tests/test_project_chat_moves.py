@@ -587,7 +587,16 @@ async def test_archive_route_reports_the_cascade_per_subchat(
         return tmp_path / f"{chat_id}.md"
 
     monkeypatch.setattr(pcm._transcripts, "archive_session", fake_archive_session)
-    monkeypatch.setattr(pcm, "run_archive_postprocess", lambda *_a, **_k: None)
+    def fake_postprocess(chat_id: str, *_args: object, **_kwargs: object) -> None:
+        chat = pcm.get_chat(chat_id)
+        assert chat is not None
+        chat.postprocess = {
+            "state": "running",
+            "step": "insights",
+            "expected": ["insights"],
+        }
+
+    monkeypatch.setattr(pcm, "run_archive_postprocess", fake_postprocess)
 
     from starlette.requests import Request
 
@@ -606,6 +615,8 @@ async def test_archive_route_reports_the_cascade_per_subchat(
     payload = json.loads(response.body)
 
     assert payload["ok"] is True
+    assert payload["postprocess"]["state"] == "running"
+    assert payload["postprocess"]["step"] == "insights"
     # The supervisor and the subchat that made it, and nothing else.
     assert payload["archived_chat_ids"] == [parent.chat_id, good.chat_id]
     assert bad.chat_id not in payload["archived_chat_ids"]

@@ -2540,6 +2540,15 @@ async def chat_archive(request: Request) -> JSONResponse:
         "archived_chat_ids": (
             ([chat_id] + result.archived_ids()) if result is not None else []
         ),
+        # The initiating client clears the active pane as soon as this response
+        # arrives. Return the lifecycle record as well as publishing it over
+        # /ws/events, so that client cannot miss the first "running" state in
+        # the archive/event race.
+        "postprocess": (
+            dict(chat_meta.postprocess)
+            if chat_meta and chat_meta.postprocess
+            else None
+        ),
         "stopped_chat_ids": result.stopped_ids() if result is not None else [],
         "failed_chat_ids": result.failed_ids() if result is not None else [],
         "subchats": [row.to_dict() for row in delegates],

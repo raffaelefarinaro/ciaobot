@@ -973,6 +973,7 @@ export interface ArchivedSubchat {
 export interface ArchiveChatResponse {
   ok?: boolean
   archived_to?: string | null
+  postprocess?: ChatPostprocess | null
   archived_chat_ids?: string[]
   stopped_chat_ids?: string[]
   failed_chat_ids?: string[]
