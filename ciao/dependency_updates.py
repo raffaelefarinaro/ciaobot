@@ -158,6 +158,11 @@ def install_updated_packages(
     return True, "dependencies installed"
 
 
+def regenerate_python_lock(workspace_root: Path) -> None:
+    """Refresh the checked-in lockfile after changing Python dependencies."""
+    subprocess.run(["uv", "lock"], cwd=str(workspace_root), check=True)
+
+
 def _restore_dependency_files(
     pyproject_path: Path,
     package_json_path: Path,
@@ -256,7 +261,7 @@ def apply_auto_updates(
     updated_python = False
     updated_npm = False
     for update in updates:
-        if not update.auto:
+        if not update.auto or not update.is_safe:
             continue
         if update.ecosystem == "python" and update_pyproject_toml_dependency(
             pyproject_path, update.key, update.latest
@@ -269,13 +274,18 @@ def apply_auto_updates(
             updated_npm = True
             applied.append(f"{update.key} (NPM: {update.current} -> {update.latest})")
 
-    if reinstall and (updated_python or updated_npm):
-        installed, error = install_updated_packages(
-            updated_python, updated_npm, workspace_root
-        )
-        if not installed:
-            _restore_dependency_files(
-                pyproject_path, package_json_path, package_lock_path, originals
+    try:
+        if updated_python:
+            regenerate_python_lock(workspace_root)
+        if reinstall and (updated_python or updated_npm):
+            installed, error = install_updated_packages(
+                updated_python, updated_npm, workspace_root
             )
-            raise RuntimeError(error)
+            if not installed:
+                raise RuntimeError(error)
+    except Exception:
+        _restore_dependency_files(
+            pyproject_path, package_json_path, package_lock_path, originals
+        )
+        raise
     return applied

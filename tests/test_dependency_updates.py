@@ -71,6 +71,7 @@ def test_apply_auto_updates_only_touches_release_allowlist(tmp_path: Path, monke
         lambda name: {"claude-agent-sdk": "0.2.200", "openai": "3.0.0"}.get(name),
     )
     monkeypatch.setattr(depupdates, "get_latest_npm_version", lambda _name: "4.0.0")
+    monkeypatch.setattr(depupdates, "regenerate_python_lock", lambda _root: None)
 
     updates = check_available_updates(tmp_path)
     applied = apply_auto_updates(tmp_path, updates, reinstall=False)
@@ -81,6 +82,30 @@ def test_apply_auto_updates_only_touches_release_allowlist(tmp_path: Path, monke
     assert 'claude-agent-sdk==0.2.200' in pyproject
     assert 'openai==2.44.0' in pyproject
     assert '"vue": "^3.5.0"' in (tmp_path / "web" / "package.json").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_apply_auto_updates_skips_major_auto_candidates(tmp_path: Path, monkeypatch) -> None:
+    _write_update_tree(tmp_path)
+    updates = [
+        depupdates.AvailableUpdate(
+            key="claude-agent-sdk",
+            ecosystem="python",
+            current="0.2.111",
+            latest="1.0.0",
+            is_safe=False,
+            auto=True,
+        )
+    ]
+    regenerate_calls: list[Path] = []
+    monkeypatch.setattr(
+        depupdates, "regenerate_python_lock", lambda root: regenerate_calls.append(root)
+    )
+
+    assert apply_auto_updates(tmp_path, updates, reinstall=False) == []
+    assert regenerate_calls == []
+    assert 'claude-agent-sdk==0.2.111' in (tmp_path / "pyproject.toml").read_text(
         encoding="utf-8"
     )
 

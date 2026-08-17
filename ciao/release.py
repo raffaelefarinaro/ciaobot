@@ -606,11 +606,17 @@ def _print_dependency_updates(updates: list) -> None:
         print(
             f"  - {u.key} [{u.ecosystem}] {u.current} -> {u.latest} ({', '.join(flags)})"
         )
-    auto = [u.key for u in updates if u.auto]
+    auto = [u.key for u in updates if u.auto and u.is_safe]
+    skipped_auto = [u.key for u in updates if u.auto and not u.is_safe]
     if auto:
         print(
             f"  (auto: {', '.join(auto)} will be bumped on --apply; "
             "review the rest and update manually if it makes sense)"
+        )
+    if skipped_auto:
+        print(
+            f"  (auto candidates with major updates are skipped: {', '.join(skipped_auto)}; "
+            "review and update manually if needed)"
         )
 
 

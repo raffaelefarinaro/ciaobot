@@ -581,6 +581,7 @@ def test_schedule_create_defaults_to_callers_project_and_workspace(tmp_path: Pat
     assert result["data"]["project_name"] == "AI-NATIVE-SDK"
     stored = schedules.list_entries()[0]
     assert stored.web_project_id == "project-work"
+    assert stored.web_project_name == "AI-NATIVE-SDK"
     assert stored.workspace == "work"
 
 
