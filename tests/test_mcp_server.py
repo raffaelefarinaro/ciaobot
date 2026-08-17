@@ -922,6 +922,33 @@ def test_workspace_update_preserves_omitted_fields(tmp_path: Path) -> None:
     assert refreshes == ["refresh"]
 
 
+def test_workspace_update_explicit_null_resets_connector_toggle(tmp_path: Path) -> None:
+    plane, config, _refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    plane.workspace_update(principal, name="personal", claude_ai_mcps=False)
+    assert config.workspace("personal").claude_ai_mcps is False
+
+    result = plane.workspace_update(
+        principal, name="personal", claude_ai_mcps=None
+    )
+
+    assert result["data"]["claude_ai_mcps"] is None
+    assert config.workspace("personal").claude_ai_mcps is None
+
+
+def test_workspace_update_omitted_connector_toggle_preserves_value(
+    tmp_path: Path,
+) -> None:
+    plane, config, _refreshes = _workspace_control_plane(tmp_path)
+    principal = _chat_create_principal()
+
+    plane.workspace_update(principal, name="personal", claude_ai_mcps=False)
+    plane.workspace_update(principal, name="personal", default_model="sonnet")
+
+    assert config.workspace("personal").claude_ai_mcps is False
+
+
 def test_workspace_update_unknown_workspace_fails(tmp_path: Path) -> None:
     plane, _config, _refreshes = _workspace_control_plane(tmp_path)
     principal = _chat_create_principal()

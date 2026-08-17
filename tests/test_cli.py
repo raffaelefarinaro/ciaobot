@@ -875,6 +875,14 @@ def test_auth_print_only_outputs_terminal_command(capsys) -> None:
     assert capsys.readouterr().out.strip().endswith("auth login")
 
 
+def test_auth_print_only_opencode_does_not_require_installation(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda: None)
+
+    assert cli.main(["auth", "opencode", "--print-only"]) == 0
+
+    assert capsys.readouterr().out.strip() == "opencode auth login"
+
+
 def test_auth_rejects_a_non_runtime_provider(capsys) -> None:
     """Only the three runtime providers have a login; nothing else is offered."""
     with pytest.raises(SystemExit):

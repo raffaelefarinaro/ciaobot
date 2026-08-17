@@ -4527,14 +4527,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        digest = stable_context_digest(
-            workspace=workspace,
-            gws_profile=gws_profile,
-            project_name=project_name,
-            project_context=project_context,
-            canonical_doc=canonical_doc,
-        )
-        session_key = chat.session_id or "__pending__"
+        digest, session_key = self._stable_context_marker(chat)
         include_stable = (
             chat.context_digest != digest
             or chat.context_session_id != session_key
@@ -4563,9 +4556,25 @@ class ProjectChatManager:
             capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"
         else:
             return ""
-        chat.context_digest = digest
-        chat.context_session_id = session_key
         return f"[CIAO_CONTEXT_BEGIN]\n{capsule}\n[CIAO_CONTEXT_END]\n\n"
+
+    def _stable_context_marker(self, chat: ChatInfo) -> tuple[str, str]:
+        project = self._projects.get(chat.project_id)
+        workspace = project.workspace if project else ""
+        gws_profile = self._workspace_gws_profile(workspace) if workspace else ""
+        project_name = project.name if project else ""
+        project_context = project.context if project else ""
+        canonical_doc = project.vault_doc_path if project else ""
+        return (
+            stable_context_digest(
+                workspace=workspace,
+                gws_profile=gws_profile,
+                project_name=project_name,
+                project_context=project_context,
+                canonical_doc=canonical_doc,
+            ),
+            chat.session_id or "__pending__",
+        )
 
     def _format_handover_context(self, chat: ChatInfo) -> str:
         if not chat.handover_context_pending or not chat.handover_messages:
@@ -5007,14 +5016,25 @@ class ProjectChatManager:
         if old_session_id and old_session_id not in chat.previous_session_ids:
             chat.previous_session_ids.append(chat.session_id)
         chat.session_id = new_session_id
-        if chat.context_session_id == "__pending__" and not old_session_id:
-            # The capsule was already sent in the first request of this
-            # session; bind the pending marker to the provider's real id.
-            chat.context_session_id = new_session_id
-        elif old_session_id and old_session_id != new_session_id:
+        if old_session_id and old_session_id != new_session_id:
             # A native compaction/fork starts a new context boundary.
             chat.context_digest = ""
             chat.context_session_id = new_session_id
+
+    @staticmethod
+    def _commit_context_marker(
+        chat: ChatInfo, request: AgentRequest, session_id: str
+    ) -> bool:
+        if not request.context_digest or not session_id:
+            return False
+        if (
+            chat.context_digest == request.context_digest
+            and chat.context_session_id == session_id
+        ):
+            return False
+        chat.context_digest = request.context_digest
+        chat.context_session_id = session_id
+        return True
 
     async def _drive_stream(
         self,
@@ -5041,9 +5061,14 @@ class ProjectChatManager:
             outcome.events.append(event)
             yield event
             sdk_sid = provider.current_session_id
-            if sdk_sid and sdk_sid != chat.session_id:
-                self._rotate_session_id(chat, sdk_sid)
-                self._save()
+            if sdk_sid:
+                changed = False
+                if sdk_sid != chat.session_id:
+                    self._rotate_session_id(chat, sdk_sid)
+                    changed = True
+                changed = self._commit_context_marker(chat, request, sdk_sid) or changed
+                if changed:
+                    self._save()
             if isinstance(event, ResultEvent):
                 outcome.response_text = event.result
                 outcome.had_error = bool(event.is_error)
@@ -5054,9 +5079,16 @@ class ProjectChatManager:
                 outcome.usage = event.usage
                 outcome.quota = event.quota
                 outcome.cost_usd = event.cost_usd or 0.0
-                if event.session_id and event.session_id != chat.session_id:
-                    self._rotate_session_id(chat, event.session_id)
-                    self._save()
+                if event.session_id:
+                    changed = False
+                    if event.session_id != chat.session_id:
+                        self._rotate_session_id(chat, event.session_id)
+                        changed = True
+                    changed = self._commit_context_marker(
+                        chat, request, event.session_id
+                    ) or changed
+                    if changed:
+                        self._save()
             elif isinstance(event, ToolUseEvent):
                 outcome.tool_events.append({
                     "id": event.tool_use_id or "",
@@ -5111,9 +5143,10 @@ class ProjectChatManager:
         the permission mode (see ``_effective_mode_for_chat``).
         """
         prefix = self._build_prompt_prefix(chat, prompt=prompt, unattended=unattended)
-        # Persist the stable-context marker so a process restart does not
-        # resend the same routing capsule on the next turn unnecessarily.
-        self._save()
+        context_digest, context_session_id = self._stable_context_marker(chat)
+        if not prefix:
+            context_digest = ""
+            context_session_id = ""
         if chat.provider == "codex":
             provider_prompt = (
                 expand_slash_command(prompt, self._config.workspace_root) or prompt
@@ -5179,6 +5212,8 @@ class ProjectChatManager:
             mcp_url=mcp_url,
             mcp_token=mcp_token,
             mcp_required=resolved_surface == "mcp",
+            context_digest=context_digest,
+            context_session_id=context_session_id,
         )
 
     # ── Image-capability pre-flight ──────────────────────────────────────
@@ -5498,6 +5533,8 @@ class ProjectChatManager:
                     extra_env=self._build_extra_env(chat),
                     disallowed_tools=self.disallowed_tools_for_chat(chat),
                     thinking_level=self._thinking_level_for_chat(chat),
+                    context_digest=request.context_digest,
+                    context_session_id=request.context_session_id,
                 )
                 yield SystemStatusEvent(
                     type="system",

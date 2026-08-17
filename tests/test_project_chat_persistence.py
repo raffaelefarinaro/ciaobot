@@ -4,13 +4,17 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from ciao import native_sidecar
 from ciao.config import CiaoConfig
+from ciao.models import ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream
 from ciao.web.project_chats import (
     ProjectChatManager,
+    _StreamOutcome,
     _cap_reentry_summary,
     _reentry_transcript_text,
 )
@@ -173,6 +177,41 @@ def test_build_agent_request_falls_back_to_legacy_without_mcp_service(
     assert request.mcp_required is False
     assert request.mcp_url == ""
     assert request.mcp_token == ""
+
+
+@pytest.mark.asyncio
+async def test_context_marker_waits_for_provider_session(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Context", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+
+    first = manager.build_agent_request(chat, prompt="first")
+    retry = manager.build_agent_request(chat, prompt="retry after failure")
+
+    assert first.context_digest
+    assert chat.context_digest == ""
+    assert chat.context_session_id == ""
+    assert "[CIAO_CONTEXT_BEGIN]" in retry.prompt
+
+    class _Provider:
+        current_session_id = None
+
+        async def execute_streaming(self, _request):
+            self.current_session_id = "native-session"
+            yield ResultEvent(type="result", result="ok")
+
+    manager._providers[chat.chat_id] = _Provider()  # type: ignore[assignment]
+    outcome = _StreamOutcome(effective_model=chat.model)
+    events = [
+        event
+        async for event in manager._drive_stream(
+            chat_id=chat.chat_id, request=first, outcome=outcome
+        )
+    ]
+
+    assert len(events) == 1
+    assert chat.context_digest == first.context_digest
+    assert chat.context_session_id == "native-session"
 
 
 def test_chat_control_surface_round_trips_through_registry(tmp_path: Path) -> None:

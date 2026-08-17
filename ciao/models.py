@@ -139,6 +139,11 @@ class AgentRequest:
     mcp_url: str = ""
     mcp_token: str = ""
     mcp_required: bool = False
+    # Stable routing context is committed to the chat registry only after the
+    # provider reports a native session. Keeping these values on the request
+    # lets a pre-session failure retry with the full capsule.
+    context_digest: str = ""
+    context_session_id: str = ""
 
 
 @dataclass(slots=True)
