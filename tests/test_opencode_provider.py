@@ -212,6 +212,12 @@ def test_plan_mode_is_read_only():
     assert "edit" not in actions
 
 
+def test_tools_can_be_disabled_for_one_shot_sessions():
+    agent, rules = mode_settings("plan", tools_enabled=False)
+    assert agent == "plan"
+    assert rules == [{"permission": "*", "pattern": "*", "action": "deny"}]
+
+
 class _SessionResponse:
     def __init__(self, payload: object, status_code: int = 200) -> None:
         self._payload = payload
@@ -291,6 +297,46 @@ async def test_resume_keeps_session_when_permission_matches(tmp_path):
     assert await provider._ensure_session(request) == "session-old"
     assert client.get_calls == ["/session/session-old"]
     assert client.post_calls == []
+
+
+@pytest.mark.asyncio
+async def test_session_resolves_bare_tier_before_creation(tmp_path):
+    provider = _provider(tmp_path)
+
+    class _CatalogClient(_SessionClient):
+        async def get(self, path: str):
+            if path == "/provider":
+                self.get_calls.append(path)
+                return _SessionResponse({
+                    "connected": ["anthropic"],
+                    "all": [{
+                        "id": "anthropic",
+                        "models": {
+                            "claude-sonnet-4-6": {"id": "claude-sonnet-4-6"},
+                        },
+                    }],
+                })
+            return await super().get(path)
+
+    client = _CatalogClient(None)
+    provider._client = client  # type: ignore[assignment]
+    request = AgentRequest(
+        prompt="hello",
+        model="sonnet",
+        mode="normal",
+        provider="opencode",
+    )
+
+    assert await provider._ensure_session(request) == "session-new"
+    assert client.get_calls == ["/provider"]
+    assert client.post_calls == [(
+        "/session",
+        {
+            "agent": "build",
+            "permission": mode_settings("normal")[1],
+            "model": {"id": "claude-sonnet-4-6", "providerID": "anthropic"},
+        },
+    )]
 
 
 def test_unknown_mode_falls_back_to_normal():

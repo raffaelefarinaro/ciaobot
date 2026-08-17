@@ -43,6 +43,11 @@ from ciao.providers.safe_commands import is_read_only_command
     'echo "a > b"',
     "grep 'foo|bar' file.txt",
     "rg 'a;b' src",
+    "date +%Y-%m-%d",
+    "date -u",
+    "date --date yesterday",
+    "hostname --short",
+    "hostname -I",
 ])
 def test_read_only_commands_are_safe(command):
     assert is_read_only_command(command) is True
@@ -95,6 +100,10 @@ def test_read_only_commands_are_safe(command):
     "rg --pre=gunzip pattern .",
     "tree -o /tmp/out",
     "tree --output=/tmp/out",
+    "date -s 12:00",
+    "date --set=12:00",
+    "hostname new-name",
+    "hostname -F /tmp/name",
     "git branch new-feature",
     "git branch -D main",
     "git log --output=/tmp/x",
