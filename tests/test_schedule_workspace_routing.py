@@ -216,12 +216,14 @@ def _named_entry(*, name: str, workspace: str = "work") -> ScheduleEntry:
 def test_a_stale_id_re_homes_to_the_project_of_the_same_name(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     target = pcm.create_project(name="docs-improvement", workspace="work")
+    entry = _named_entry(name="docs-improvement")
 
-    resolved = pcm._resolve_schedule_project("proj-stale00", _named_entry(name="docs-improvement"))
+    resolved = pcm._resolve_schedule_project("proj-stale00", entry)
 
     assert resolved is not None
     assert resolved.project_id == target.project_id
     assert resolved.name == "docs-improvement"
+    assert entry.web_project_id == target.project_id
 
 
 def test_re_homing_stays_inside_the_schedule_workspace(tmp_path: Path) -> None:

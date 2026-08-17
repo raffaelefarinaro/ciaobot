@@ -37,6 +37,7 @@ from ciao.providers.opencode import (
     mode_settings,
     opencode_tier_models,
     opencode_tier_overrides,
+    _session_handover_text,
     split_model,
     unresolved_placeholders,
     usage_payload,
@@ -226,14 +227,16 @@ class _SessionResponse:
 
 
 class _SessionClient:
-    def __init__(self, payload: object) -> None:
+    def __init__(self, payload: object, messages: object | None = None) -> None:
         self.payload = payload
+        self.messages = messages if messages is not None else []
         self.get_calls: list[str] = []
         self.post_calls: list[tuple[str, object]] = []
 
     async def get(self, path: str):
         self.get_calls.append(path)
-        return _SessionResponse(self.payload)
+        payload = self.messages if path.endswith("/message") else self.payload
+        return _SessionResponse(payload)
 
     async def post(self, path: str, json=None):
         self.post_calls.append((path, json))
@@ -246,7 +249,10 @@ async def test_resume_rotates_when_session_permission_is_stale(tmp_path):
     client = _SessionClient({
         "id": "session-old",
         "permission": mode_settings("bypass")[1],
-    })
+    }, messages=[
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "Earlier request"}]},
+        {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Earlier answer"}]},
+    ])
     provider._client = client  # type: ignore[assignment]
     request = AgentRequest(
         prompt="continue",
@@ -258,7 +264,9 @@ async def test_resume_rotates_when_session_permission_is_stale(tmp_path):
     expected = mode_settings("normal")[1]
 
     assert await provider._ensure_session(request) == "session-new"
-    assert client.get_calls == ["/session/session-old"]
+    assert client.get_calls == ["/session/session-old", "/session/session-old/message"]
+    assert "User: Earlier request" in provider._session_handover_context
+    assert "Assistant: Earlier answer" in provider._session_handover_context
     assert client.post_calls == [
         ("/session", {"agent": "build", "permission": expected})
     ]
@@ -287,6 +295,20 @@ async def test_resume_keeps_session_when_permission_matches(tmp_path):
 
 def test_unknown_mode_falls_back_to_normal():
     assert mode_settings("nonsense") == mode_settings("normal")  # type: ignore[arg-type]
+
+
+def test_session_handover_omits_synthetic_parts():
+    history = [
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "Earlier request"}]},
+        {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Earlier answer"}]},
+        {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "synthetic", "synthetic": True}]},
+    ]
+
+    rendered = _session_handover_text(history)
+
+    assert "User: Earlier request" in rendered
+    assert "Assistant: Earlier answer" in rendered
+    assert "synthetic" not in rendered
 
 
 # ── error sanitization ──────────────────────────────────────────────────
