@@ -14,7 +14,9 @@
 PROFILE="${1:-${GWS_PROFILE:-}}"
 
 # A first arg that starts with `-` or names a gws service is not a profile, so
-# fall back to the environment and pass every arg through to gws.
+# fall back to the environment and pass every arg through to gws. Settings
+# rejects these service names as account slugs because this positional syntax
+# cannot otherwise distinguish the profile from the service argument.
 case "$PROFILE" in
   ""|-*|gmail|calendar|drive|docs|sheets|slides|tasks|contacts|forms|auth)
     PROFILE="${GWS_PROFILE:-}"

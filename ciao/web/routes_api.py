@@ -1573,6 +1573,16 @@ async def gws_add_profile(request: Request) -> JSONResponse:
             {"error": "Give the account a name using letters, numbers, dashes, or underscores."},
             status_code=400,
         )
+    if profile in gws_auth.GWS_SERVICE_NAMES:
+        return JSONResponse(
+            {
+                "error": (
+                    f"'{profile}' is reserved for a Google Workspace service; "
+                    "choose another account name."
+                )
+            },
+            status_code=400,
+        )
     if profile in _gws_profile_names(config):
         return JSONResponse(
             {"error": f"A Google account named '{profile}' already exists."},
