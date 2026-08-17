@@ -10,6 +10,8 @@ token per chat, and opencode's MCP configuration is server-wide (``/mcp`` and
 ``opencode.json``) rather than per-session. A shared server would force one
 long-lived token across every chat and lose failure isolation. Per-session
 *permission* and *model* are supported and are set on the session instead.
+Permission changes rotate to a newly-created session, because the installed
+API does not apply a patched ruleset to an existing session.
 
 The wire contract is verified against the server's own OpenAPI document at
 ``/doc`` on startup, so an incompatible build fails closed with a readable
@@ -439,16 +441,29 @@ def mode_settings(mode: BridgeMode) -> tuple[str, list[dict[str, str]]]:
     return _MODE_AGENTS[key], rules
 
 
+def _session_permission_matches(
+    payload: object, expected: list[dict[str, str]]
+) -> bool:
+    """Return whether a session exposes exactly the rules for this turn."""
+    if not isinstance(payload, Mapping):
+        return False
+    info = payload.get("info")
+    if isinstance(info, Mapping):
+        payload = info
+    actual = payload.get("permission")
+    return isinstance(actual, list) and actual == expected
+
+
 def auto_approves_permission(mode: BridgeMode, permission: str, command: str) -> bool:
     """Whether a surfaced permission request is answerable without the operator.
 
     A session's permission ruleset is fixed at creation and `PATCH` does not
-    apply (see ``_ensure_session``), so a chat created under another mode keeps
-    raising asks forever — and even a fresh auto session deliberately keeps
-    shell on the wildcard. Deciding here, on the *current* mode of the turn, is
-    what makes Auto automatic: bypass approves everything, auto approves
-    verifiably read-only work, and every other mode (or anything the
-    classifier cannot verify) still puts a card in front of the operator.
+    apply (see ``_ensure_session``); mode changes rotate the session before the
+    prompt runs. Even a fresh auto session deliberately keeps shell on the
+    wildcard. Deciding here, on the *current* mode of the turn, is what makes
+    Auto automatic: bypass approves everything, auto approves verifiably
+    read-only work, and every other mode (or anything the classifier cannot
+    verify) still puts a card in front of the operator.
     """
     if mode == "bypass":
         return True
@@ -885,15 +900,12 @@ class OpencodeProvider(BaseSDKProvider):
     async def _ensure_session(self, request: AgentRequest) -> str:
         """Resume, fork, or create the session this turn runs in.
 
-        Known limitation: the permission ruleset is fixed at creation. `agent`
-        is re-sent on every prompt, so a mode switch changes plan-vs-build, but
-        the rules do not follow it — a chat created in `normal` keeps asking
-        even after being switched to `bypass`, and one switched to `plan` keeps
-        its write grants. `PATCH /session/{id}` accepts `permission` and returns
-        200, but verified against opencode 1.18 it does not apply: the wildcard
-        read back unchanged after patching `ask` to `allow`. Re-creating the
-        session would apply the rules at the cost of the conversation, so the
-        mismatch is left visible rather than papered over.
+        The permission ruleset is fixed at creation. `agent` is re-sent on every
+        prompt, but a mode switch must not reuse a session whose rules differ:
+        `PATCH /session/{id}` accepts `permission` and returns 200, but verified
+        against opencode 1.18 it does not apply. When the session's permission
+        is missing or differs, create a fresh session with the current rules
+        rather than run with a stale (possibly broader) grant.
         """
         client = self._client
         assert client is not None
@@ -901,19 +913,40 @@ class OpencodeProvider(BaseSDKProvider):
         provider_id, model_id = split_model(request.model)
 
         resume = (request.resume_session or "").strip()
-        if resume and request.fork_session:
-            response = await client.post(f"/session/{resume}/fork", json={})
-            if response.status_code < 400:
-                self._session_id = str(response.json().get("id") or "")
-                if self._session_id:
-                    return self._session_id
-            logger.warning("opencode fork failed (%s); starting a new session", response.status_code)
-        elif resume:
+        if resume:
             response = await client.get(f"/session/{resume}")
             if response.status_code < 400:
-                self._session_id = resume
-                return resume
-            logger.info("opencode session %s is gone; starting a new one", resume)
+                try:
+                    session_payload = response.json()
+                except (TypeError, ValueError):
+                    session_payload = None
+                if _session_permission_matches(session_payload, permission):
+                    if request.fork_session:
+                        fork_response = await client.post(
+                            f"/session/{resume}/fork", json={}
+                        )
+                        if fork_response.status_code < 400:
+                            self._session_id = str(
+                                fork_response.json().get("id") or ""
+                            )
+                            if self._session_id:
+                                return self._session_id
+                        logger.warning(
+                            "opencode fork failed (%s); starting a new session",
+                            fork_response.status_code,
+                        )
+                    else:
+                        self._session_id = resume
+                        return resume
+                else:
+                    logger.warning(
+                        "opencode session %s permission rules do not match %s; "
+                        "starting a fresh session",
+                        resume,
+                        request.mode,
+                    )
+            else:
+                logger.info("opencode session %s is gone; starting a new one", resume)
 
         payload: dict[str, Any] = {"agent": agent, "permission": permission}
         if model_id:

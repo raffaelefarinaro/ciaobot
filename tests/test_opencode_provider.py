@@ -211,6 +211,80 @@ def test_plan_mode_is_read_only():
     assert "edit" not in actions
 
 
+class _SessionResponse:
+    def __init__(self, payload: object, status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.text = ""
+
+    def json(self) -> object:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"status {self.status_code}")
+
+
+class _SessionClient:
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+        self.get_calls: list[str] = []
+        self.post_calls: list[tuple[str, object]] = []
+
+    async def get(self, path: str):
+        self.get_calls.append(path)
+        return _SessionResponse(self.payload)
+
+    async def post(self, path: str, json=None):
+        self.post_calls.append((path, json))
+        return _SessionResponse({"id": "session-new"})
+
+
+@pytest.mark.asyncio
+async def test_resume_rotates_when_session_permission_is_stale(tmp_path):
+    provider = _provider(tmp_path)
+    client = _SessionClient({
+        "id": "session-old",
+        "permission": mode_settings("bypass")[1],
+    })
+    provider._client = client  # type: ignore[assignment]
+    request = AgentRequest(
+        prompt="continue",
+        model="",
+        mode="normal",
+        provider="opencode",
+        resume_session="session-old",
+    )
+    expected = mode_settings("normal")[1]
+
+    assert await provider._ensure_session(request) == "session-new"
+    assert client.get_calls == ["/session/session-old"]
+    assert client.post_calls == [
+        ("/session", {"agent": "build", "permission": expected})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_session_when_permission_matches(tmp_path):
+    provider = _provider(tmp_path)
+    client = _SessionClient({
+        "id": "session-old",
+        "permission": mode_settings("normal")[1],
+    })
+    provider._client = client  # type: ignore[assignment]
+    request = AgentRequest(
+        prompt="continue",
+        model="",
+        mode="normal",
+        provider="opencode",
+        resume_session="session-old",
+    )
+
+    assert await provider._ensure_session(request) == "session-old"
+    assert client.get_calls == ["/session/session-old"]
+    assert client.post_calls == []
+
+
 def test_unknown_mode_falls_back_to_normal():
     assert mode_settings("nonsense") == mode_settings("normal")  # type: ignore[arg-type]
 
@@ -650,9 +724,10 @@ def test_tool_use_id_for_unknown_request_is_empty(tmp_path):
 
 # ── mode-aware auto-approval ────────────────────────────────────────────
 # The session ruleset is fixed at creation and PATCH does not apply (see
-# `_ensure_session`), so `permission.asked` is answered against the *current*
-# mode instead: bypass approves everything, auto approves verifiably
-# read-only work, every other mode surfaces the card as before.
+# `_ensure_session`); mode changes rotate the session before the prompt runs.
+# `permission.asked` is still answered against the *current* mode: bypass
+# approves everything, auto approves verifiably read-only work, and every other
+# mode surfaces the card as before.
 
 
 class _RecordingPermissionClient:

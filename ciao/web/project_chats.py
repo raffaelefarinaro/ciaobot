@@ -4126,7 +4126,7 @@ class ProjectChatManager:
                     "Failed to pre-filter JSONL for chat %s", chat_id
                 )
                 filtered_jsonl = None
-        elif chat.provider == "codex":
+        elif chat.provider in {"codex", "opencode"}:
             filtered_jsonl = self._transcripts.current_filtered_jsonl(
                 ctx, chat.provider
             ) or None
