@@ -214,6 +214,41 @@ async def test_context_marker_waits_for_provider_session(tmp_path: Path) -> None
     assert chat.context_session_id == "native-session"
 
 
+@pytest.mark.asyncio
+async def test_opencode_effective_model_is_persisted_for_model_less_chat(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("OpenCode model", workspace="personal")
+    chat = manager.create_chat(
+        project.project_id, title="OpenCode model", provider="opencode"
+    )
+    chat.model = ""
+    request = manager.build_agent_request(chat, prompt="hello")
+
+    class _Provider:
+        current_session_id = None
+
+        async def execute_streaming(self, _request):
+            yield ResultEvent(
+                type="result",
+                result="ok",
+                effective_model="opencode/big-pickle",
+            )
+
+    manager._providers[chat.chat_id] = _Provider()  # type: ignore[assignment]
+    outcome = _StreamOutcome()
+    _ = [
+        event
+        async for event in manager._drive_stream(
+            chat_id=chat.chat_id, request=request, outcome=outcome
+        )
+    ]
+
+    assert chat.model == "opencode/big-pickle"
+    assert _persisted_chats(tmp_path)[chat.chat_id]["model"] == "opencode/big-pickle"
+
+
 def test_chat_control_surface_round_trips_through_registry(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("MCP evaluation", workspace="personal")

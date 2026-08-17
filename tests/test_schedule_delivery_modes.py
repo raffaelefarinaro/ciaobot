@@ -178,6 +178,26 @@ async def test_schedule_attention_classifier_tracks_model_and_verdict(
     assert row["extra"]["reason"] == "routine"
 
 
+async def test_schedule_attention_classifier_routes_qualified_insights_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager_for_classifier()
+    manager._config.insights_model_override = "opencode:vendor/insights-model"
+    captured: dict[str, object] = {}
+
+    async def fake_oneshot(*args, **kwargs):
+        captured.update(kwargs)
+        return '{"needs_user": false, "reason": "routine"}'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    assert await manager._schedule_run_needs_user(
+        _entry(), ScheduleRunOutcome(completed=True, final_text="done")
+    ) is False
+    assert captured["provider"] == "opencode"
+    assert captured["model"] == "vendor/insights-model"
+
+
 async def test_schedule_attention_classifier_tracks_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

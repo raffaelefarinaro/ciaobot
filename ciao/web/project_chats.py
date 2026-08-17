@@ -5096,7 +5096,11 @@ class ProjectChatManager:
                 outcome.response_text = event.result
                 outcome.had_error = bool(event.is_error)
                 outcome.effective_model = event.effective_model or chat.model
-                if chat.provider == "codex" and not chat.model and outcome.effective_model:
+                if (
+                    chat.provider in {"codex", "opencode"}
+                    and not chat.model
+                    and outcome.effective_model
+                ):
                     chat.model = outcome.effective_model
                     self._save()
                 outcome.usage = event.usage
@@ -8116,7 +8120,10 @@ class ProjectChatManager:
         )
         user_prompt = json.dumps(payload, ensure_ascii=False)
         try:
-            from ciao.insights import resolve_insights_model
+            from ciao.insights import (
+                _resolve_insights_call,
+                resolve_insights_model,
+            )
 
             # Route through the shared resolver (same as ciao/insights.py) so an
             # unavailable Apple on-device model is substituted rather than
@@ -8147,13 +8154,15 @@ class ProjectChatManager:
             else:
                 insights_model = resolve_insights_model(self._config, workspace)
                 env = {}
-                model, note = native_sidecar.resolve_model_or_fallback(
-                    insights_model, default_model=insights_model
+                model, classifier_provider, note = _resolve_insights_call(
+                    self._config,
+                    insights_model,
+                    provider=classifier_provider,
                 )
         except Exception:  # noqa: BLE001
             logger.exception("Schedule attention classifier setup failed; keeping chat visible")
             return True
-        tracked_provider = "codex" if classifier_provider == "codex" else "claude"
+        tracked_provider = classifier_provider
         async with job_runs.track(
             "schedule_attention_classifier",
             "Schedule attention classifier",
