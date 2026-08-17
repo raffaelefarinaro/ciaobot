@@ -251,6 +251,7 @@ async def test_happy_path_records_output_and_wakes_once(tmp_path: Path) -> None:
     log = runner.log_path(run.run_id).read_text(encoding="utf-8")
     assert run.run_id in log
     assert "hello-from-run" in log
+    assert run.run_id not in runner._supervisors
 
 
 async def test_failing_command_reports_its_exit_code(tmp_path: Path) -> None:

@@ -512,6 +512,40 @@ def test_delegate_spawn_refuses_past_the_concurrency_cap(tmp_path: Path) -> None
     assert excinfo.value.code == "delegate_limit_reached"
 
 
+def test_delegate_spawn_clamps_child_mode_to_parent(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor", mode="normal")
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    manager.queue_message = lambda _chat_id, _text: True  # type: ignore[method-assign]
+    plane = _control_plane(manager)
+
+    result = plane.delegate_spawn(
+        _principal(parent.chat_id, project.project_id),
+        prompt="do the thing",
+        mode="bypass",
+    )
+
+    child = manager.get_chat(result["data"]["chat_id"])
+    assert child is not None
+    assert child.mode == "normal"
+
+
+def test_chat_update_cannot_upgrade_mode_through_mcp(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor", mode="normal")
+    plane = _control_plane(manager)
+
+    plane.chat_update(
+        _principal(parent.chat_id, project.project_id),
+        "",
+        mode="bypass",
+    )
+
+    assert manager.get_chat(parent.chat_id).mode == "normal"
+
+
 def test_finished_delegates_free_their_slot(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Delegates", workspace="work")

@@ -288,6 +288,27 @@ class CiaoControlPlane:
         chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
         return str(getattr(chat, "mode", "auto") or "auto")
 
+    def _child_mode(self, principal: McpPrincipal, requested: str | None) -> str:
+        """Keep an MCP-created child at its caller's permission ceiling.
+
+        The child starts its first turn immediately, so accepting a stronger
+        mode from model-authored tool arguments would let a normal/auto chat
+        manufacture a bypass session without an operator approval. The
+        provider enforces the returned mode as its session permission rules;
+        keeping the clamp here also covers Codex and Claude child chats.
+        """
+        parent_mode = self.chat_mode(principal)
+        if parent_mode not in {"normal", "plan", "auto", "bypass"}:
+            parent_mode = "normal"
+        if requested and requested != parent_mode:
+            logger.warning(
+                "Clamping child chat mode %r to parent %r for %s",
+                requested,
+                parent_mode,
+                principal.chat_id or "unscoped MCP session",
+            )
+        return parent_mode
+
     def _vault_root(self, principal: McpPrincipal) -> Path:
         workspace = self._workspace(principal)
         resolver = getattr(self.pcm, "_workspace_vault_root", None)
@@ -685,6 +706,7 @@ class CiaoControlPlane:
         prompt: str | None = None,
     ) -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
+        mode = self._child_mode(principal, mode)
         chat = self.pcm.create_chat(
             project.project_id, title=title, provider=provider, model=model, mode=mode
         )
@@ -717,6 +739,11 @@ class CiaoControlPlane:
         chat_id = self._chat_id(principal, chat_id)
         if project_id is not None:
             self._project(principal, project_id)
+        if mode is not None:
+            # A normal/auto MCP caller must not upgrade its own or another
+            # chat to bypass through the auto-approved metadata tool. Keep the
+            # same ceiling used for newly-created child chats.
+            mode = self._child_mode(principal, mode)
         updated = self.pcm.update_chat(
             chat_id,
             title=title,
@@ -948,6 +975,7 @@ class CiaoControlPlane:
             )
         if not prompt.strip():
             raise ControlPlaneError("empty_prompt", "prompt is required.")
+        mode = self._child_mode(principal, mode)
         active = self.pcm.active_delegate_count(parent.chat_id)
         if active >= _MAX_ACTIVE_DELEGATES:
             raise ControlPlaneError(
