@@ -41,8 +41,11 @@ const ChatCommentPopoverStub = defineComponent({
 const MODELS_RESPONSE = {
   models: ['sonnet', 'opus'],
   default: 'sonnet',
-  provider_models: { claude: ['sonnet', 'opus'] },
-  provider_defaults: { claude: 'sonnet' },
+  provider_models: {
+    claude: ['sonnet', 'opus'],
+    opencode: ['anthropic/claude-sonnet-4-6'],
+  },
+  provider_defaults: { claude: 'sonnet', opencode: 'anthropic/claude-sonnet-4-6' },
   thinking_levels: {},
   model_reasoning_levels: {},
   model_options: {},
@@ -367,6 +370,29 @@ describe('ChatPanel workspace breadcrumb', () => {
     expect(close.text()).toBe('')
     await close.trigger('click')
     expect(wrapper.emitted('close')?.length).toBe(1)
+    wrapper.unmount()
+  })
+})
+
+describe('ChatPanel model summary', () => {
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+  })
+  afterEach(() => vi.restoreAllMocks())
+
+  it('shows a provider default for legacy chats and hides the auto thinking label', async () => {
+    const { wrapper } = await mountPanel(store => {
+      store.chats = [makeChat('chat-1', {
+        model: '',
+        provider: 'opencode',
+        mode: 'auto',
+        thinking_level: 'auto',
+      })]
+    })
+
+    const summary = wrapper.get('.model-picker-summary')
+    expect(summary.text()).toContain('anthropic/claude-sonnet-4-6')
+    expect(summary.text()).not.toContain('think:auto')
     wrapper.unmount()
   })
 })

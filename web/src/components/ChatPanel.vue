@@ -148,7 +148,7 @@
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn touch-hit mobile-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
@@ -158,13 +158,13 @@
             v-if="chat.provider"
             type="button"
             class="model-picker-summary desktop-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
           >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ chipModelLabel }} · {{ chipModeLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
-            :model-value="canonicalTier(chat.model)"
+            :model-value="canonicalTier(activeModelId)"
             :active-models="activeModelHighlights"
             :sections="chatModelSections"
             :filter-section="capabilityPickerSection"
@@ -2557,12 +2557,26 @@ const chatModelSections = computed(() => {
 // The model id the chat is running on, as stored. A tier alias stays an alias
 // here: the provider resolves it per turn against its own catalog, so there is
 // no single concrete id to substitute.
-const activeModelId = computed(() => chat.value?.model || '')
+const activeModelId = computed(() => {
+  const stored = chat.value?.model?.trim()
+  if (stored) return stored
+  // Older OpenCode chats were created before the provider catalog was
+  // persisted, so they can legitimately have an empty model. Keep the
+  // header actionable by showing the provider's current default while the
+  // user can still pick a concrete entry from the popover.
+  const provider = chat.value?.provider || ''
+  return providerDefaults.value[provider]
+    || modelsResponse.value?.provider_models?.[provider]?.[0]
+    || (provider === 'claude' ? modelsResponse.value?.default : '')
+    || ''
+})
 
 const activeModelHighlights = computed(() => {
   const c = chat.value
   if (!c) return []
-  const resolvedModel = canonicalTier(c.model)
+  const model = activeModelId.value
+  if (!model) return []
+  const resolvedModel = canonicalTier(model)
   const tier = tierAlias(resolvedModel)
   if (tier) {
     // On Claude the model literally IS the tier, so highlight the alias. Codex
@@ -2570,12 +2584,12 @@ const activeModelHighlights = computed(() => {
     // and leave the bare alias to the Anthropic section.
     if (activeBucket.value === 'claude') return [tier]
     const nativeModel = modelsResponse.value?.alias_tiers?.[activeBucket.value]?.[tier]
-    return nativeModel ? [nativeModel] : [c.model]
+    return nativeModel ? [nativeModel] : [model]
   }
-  if (isFableSelection(c.model, c.thinking_level)) {
+  if (isFableSelection(model, c.thinking_level)) {
     return [CODEX_FABLE_PSEUDO_MODEL]
   }
-  return [c.model]
+  return [model]
 })
 
 const bucketLocked = computed(() => {
@@ -2612,8 +2626,11 @@ const showThinkingLevels = computed(() => {
 // only an explicitly chosen level gets a segment. "think:" keeps this segment
 // apart from the mode segment, whose default value is also "auto".
 const chipThinkingLabel = computed(() => {
-  const level = chat.value?.thinking_level || ''
-  return level ? `think:${level}` : ''
+  const level = (chat.value?.thinking_level || '').trim().toLowerCase()
+  // "auto" is the provider default, not a user-selected tuning knob. It is
+  // still available inside the picker, but repeating it in the compact header
+  // chip made the default look like an explicit mode.
+  return level && level !== 'auto' ? `think:${level}` : ''
 })
 
 // The permission mode (auto/bypass/manual/plan) decides whether tool calls
@@ -2627,6 +2644,7 @@ const chipModeLabel = computed(() => chat.value?.mode || 'auto')
 const chipModelLabel = computed(() => {
   const model = activeModelId.value || ''
   const provider = chat.value?.provider || ''
+  if (!model) return 'select model'
   return provider && model.startsWith(`${provider}/`)
     ? model.slice(provider.length + 1)
     : model

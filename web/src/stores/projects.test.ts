@@ -2125,6 +2125,27 @@ describe('deep-link chat navigation', () => {
     expect(store.chats.every(chat => chat.archived)).toBe(true)
   })
 
+  test('archive response keeps the background insights status visible', async () => {
+    const store = useProjectStore()
+    store.chats = supervisorWithTwoSubchats()
+    apiPost.mockResolvedValue({
+      ok: true,
+      archived_chat_ids: ['parent'],
+      postprocess: {
+        state: 'running',
+        step: 'insights',
+        expected: ['insights', 'trajectory'],
+        steps: {},
+      },
+    })
+
+    await store.archiveChat('parent')
+
+    expect(store.chatPostprocess('parent')?.state).toBe('running')
+    const toast = store.toasts.find(t => t.title === 'Chat archived')
+    expect(toast?.body).toContain('Processing insights in the background')
+  })
+
   test('a subchat the server did not archive stays active and keeps its socket', async () => {
     const store = useProjectStore()
     store.chats = supervisorWithTwoSubchats()
