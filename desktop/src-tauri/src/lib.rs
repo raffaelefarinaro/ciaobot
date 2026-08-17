@@ -778,28 +778,32 @@ async fn try_apply_pending_navigation(app: AppHandle) {
                     Ok(endpoint) => endpoint,
                     Err(_) => return,
                 };
-                let delivered = reqwest::Client::new()
+                let delivered = match reqwest::Client::new()
                     .get(endpoint)
                     .timeout(Duration::from_secs(2))
                     .send()
                     .await
                     .ok()
-                    .filter(|response| response.status().is_success());
-                match delivered {
-                    Some(response) => {
-                        response
-                            .json::<serde_json::Value>()
-                            .await
-                            .ok()
-                            .and_then(|value| {
-                                value.get("delivered").and_then(|item| item.as_bool())
-                            })
-                            .unwrap_or(false)
-                            || url_with_segments(&runtime, &["chat", chat_id])
-                                .is_ok_and(|destination| main.navigate(destination).is_ok())
-                    }
+                    .filter(|response| response.status().is_success())
+                {
+                    Some(response) => response
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()
+                        .and_then(|value| {
+                            value.get("delivered").and_then(|item| item.as_bool())
+                        })
+                        .unwrap_or(false),
                     None => false,
-                }
+                };
+                // A chat deep-link only counts as applied once a live PWA client
+                // confirms it received the `open_chat` event. On a cold start the
+                // /ws/events socket has no subscriber yet, so `delivered` is false
+                // and navigating the just-created webview to /chat/<id> is racy. If
+                // we cleared the intent here the first notification click would only
+                // open the app. Leave the intent pending instead so the runtime
+                // watcher retries it every few seconds until the PWA is up.
+                delivered
             }
         }
         NavigationIntent::Workspaces => {
