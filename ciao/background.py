@@ -707,6 +707,10 @@ class BackgroundRunner:
             return
         finally:
             self._procs.pop(run_id, None)
+            # The process registry is for live supervision only. Keeping the
+            # completed asyncio.Task here retains one task object per run for
+            # the lifetime of a long-running server.
+            self._supervisors.pop(run_id, None)
 
         cancelled = run_id in self._cancelling
         self._cancelling.discard(run_id)

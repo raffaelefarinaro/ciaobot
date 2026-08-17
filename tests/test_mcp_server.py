@@ -405,11 +405,12 @@ def test_current_project_complete_and_delete_are_deferred() -> None:
 
 
 class _ChatCreatePcm:
-    def __init__(self) -> None:
+    def __init__(self, *, parent_mode: str = "auto") -> None:
         self.projects = {
             "project-1": SimpleNamespace(project_id="project-1", name="Ciaobot Improvements", workspace="personal"),
             "project-2": SimpleNamespace(project_id="project-2", name="Research", workspace="personal"),
         }
+        self.parent_mode = parent_mode
         self.created: list[dict] = []
         self.queued: list[tuple[str, str]] = []
         self.started: list[tuple[str, str]] = []
@@ -419,6 +420,11 @@ class _ChatCreatePcm:
 
     def list_projects(self, workspace: str | None = None):
         return [p for p in self.projects.values() if workspace is None or p.workspace == workspace]
+
+    def get_chat(self, chat_id: str):
+        if chat_id == "chat-1":
+            return SimpleNamespace(chat_id=chat_id, mode=self.parent_mode)
+        return None
 
     def create_chat(self, project_id, **kwargs):
         self.created.append({"project_id": project_id, **kwargs})
@@ -525,6 +531,15 @@ def test_chat_create_with_prompt_sends_first_turn_immediately() -> None:
 
     assert result["data"]["send_status"] == "started"
     assert pcm.started == [("chat-new", "Let's research the new API changes.")]
+
+
+def test_chat_create_clamps_child_mode_to_calling_chat() -> None:
+    pcm = _ChatCreatePcm(parent_mode="normal")
+    control_plane = _chat_create_control_plane(pcm)
+
+    control_plane.chat_create(_chat_create_principal(), mode="bypass")
+
+    assert pcm.created[-1]["mode"] == "normal"
 
 
 def test_schedule_create_resolves_project_by_name(tmp_path: Path) -> None:
