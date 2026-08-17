@@ -717,14 +717,21 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // Surface a failure as a persistent, actionable error toast. `errorText` is
-  // the raw log seeded into a fix chat when the user clicks "Fix".
-  function pushErrorToast(title: string, errorText: string): InAppToast {
+  // the raw log seeded into a fix chat when the user clicks "Fix". For errors
+  // whose remediation lives in Settings, pass opts.fixRoute so the Fix action
+  // navigates there instead of opening a fix chat.
+  function pushErrorToast(
+    title: string,
+    errorText: string,
+    opts?: { fixRoute?: string; fixLabel?: string },
+  ): InAppToast {
     return pushToast({
       chat_id: '',
       title,
       body: errorText,
       variant: 'error',
       errorText,
+      ...opts,
     })
   }
 
@@ -2899,10 +2906,14 @@ export const useProjectStore = defineStore('projects', () => {
       case 'gws_health': {
         // A Google Workspace login went dead (revoked/expired token). The
         // server debounces to one event per breakage; surface it as a
-        // persistent error toast whose "Fix" seeds a chat that can drive the
-        // server-managed re-login. The PWA push/menu-bar banner is the other
+        // persistent error toast. The fix is re-authentication in
+        // Settings → Workspaces, so the Fix action navigates there rather
+        // than seeding a chat. The PWA push/menu-bar banner is the other
         // channel (see push.py); this is the live in-app signal.
-        pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '')
+        pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '', {
+          fixRoute: '/settings/workspaces',
+          fixLabel: 'Fix in Settings',
+        })
         break
       }
     }

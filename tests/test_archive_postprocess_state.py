@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ciao import job_runs as jr
 from ciao.config import CiaoConfig
+from ciao.models import ChatContext
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager, _restored_postprocess
@@ -174,6 +175,43 @@ def test_missing_or_junk_records_load_as_empty() -> None:
     assert _restored_postprocess(None) == {}
     assert _restored_postprocess({}) == {}
     assert _restored_postprocess("nonsense") == {}
+
+
+def test_archive_inputs_include_opencode_transcripts(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    chat = manager.get_chat(chat_id)
+    assert chat is not None
+    chat.provider = "opencode"
+    chat.session_id = "opencode-session"
+    archive_path = tmp_path / "archive.md"
+    archive_path.write_text("# archived", encoding="utf-8")
+    providers: list[str] = []
+
+    monkeypatch.setattr(
+        manager._transcripts,
+        "peek_turn_count",
+        lambda _ctx, provider: providers.append(provider) or 1,
+    )
+    monkeypatch.setattr(
+        manager._transcripts,
+        "current_filtered_jsonl",
+        lambda _ctx, provider: providers.append(provider) or "opencode-jsonl",
+    )
+    monkeypatch.setattr(
+        manager._transcripts,
+        "archive_session",
+        lambda **_kwargs: archive_path,
+    )
+
+    turn_count, filtered_jsonl, result = manager._read_archive_inputs(
+        chat_id, ChatContext.for_web(chat_id), chat
+    )
+
+    assert turn_count == 1
+    assert filtered_jsonl == "opencode-jsonl"
+    assert result == archive_path
+    assert providers == ["opencode", "opencode"]
 
 
 def test_a_restart_mid_pipeline_leaves_no_chat_pulsing(tmp_path: Path) -> None:

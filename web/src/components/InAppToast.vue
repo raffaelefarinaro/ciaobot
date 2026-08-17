@@ -19,7 +19,7 @@
         v-if="t.variant === 'error'"
         class="toast-fix"
         @click.stop="onFix(t)"
-      >Fix this error</button>
+      >{{ t.fixRoute ? (t.fixLabel || 'Fix in Settings') : 'Fix this error' }}</button>
       <button
         class="toast-close"
         @click.stop="store.dismissToast(t.id)"
@@ -31,10 +31,12 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import type { InAppToast } from '../lib/types'
 
 const store = useProjectStore()
+const router = useRouter()
 
 // ── Swipe-to-dismiss ────────────────────────────────────────────────────────
 // Horizontal drag past a threshold dismisses the toast. Tracked per-toast so
@@ -99,6 +101,12 @@ async function onClick(toast: InAppToast) {
 
 async function onFix(toast: InAppToast) {
   store.dismissToast(toast.id)
+  // Errors whose fix lives in Settings (e.g. GWS re-auth) route there instead
+  // of seeding a fix chat that can only restate the error.
+  if (toast.fixRoute) {
+    await router.push(toast.fixRoute)
+    return
+  }
   try {
     await store.fixError({ errorText: toast.errorText || toast.body, title: 'Fix error' })
   } catch (e) {
