@@ -109,7 +109,7 @@ fn is_dataless(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-/// True for an image drop the Python server will not be able to read itself.
+/// True for a drop the Python server will not be able to read itself.
 ///
 /// Two cases, both of which left the drop on the floor as a raw errno:
 ///
@@ -123,10 +123,14 @@ fn is_dataless(_metadata: &std::fs::Metadata) -> bool {
 ///   `read_bytes()` failed with `EDEADLK` — "Resource deadlock avoided".
 ///
 /// This app *is* allowed both reads, so staging a copy here is what makes the
-/// drop work at all. Gated rather than applied to every image so an ordinary
-/// local drag stays zero-copy, because staging a dataless file means waiting for
-/// iCloud to hand the bytes over. The caller keeps that wait off the window
-/// event thread.
+/// drop work at all. Gated rather than applied to every file so an ordinary
+/// local drag stays zero-copy, because staging a dataless file means waiting
+/// for iCloud to hand the bytes over. The NSIRD screenshot dir is a permissions
+/// quirk that only ever holds images — staging a non-image from it would break
+/// the agent's continuing read access — while a dataless File Provider file can
+/// be anything, so it is staged regardless of type. The caller keeps the wait
+/// off the window event thread and the size cap (`DROP_STAGING_MAX_BYTES`)
+/// applies to every staged copy.
 fn needs_drop_staging(path: &std::path::Path) -> bool {
     let is_image = path
         .extension()
@@ -134,16 +138,26 @@ fn needs_drop_staging(path: &std::path::Path) -> bool {
         .is_some_and(|extension| {
             DROP_IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
         });
-    if !is_image {
-        return false;
-    }
     let is_promise_backed = path.components().any(|component| {
         component
             .as_os_str()
             .to_str()
             .is_some_and(|name| name.starts_with("NSIRD_"))
     });
-    is_promise_backed || std::fs::metadata(path).is_ok_and(|metadata| is_dataless(&metadata))
+    should_stage(
+        is_image,
+        is_promise_backed,
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && is_dataless(&metadata)),
+    )
+}
+
+/// The staging decision, split out so the dataless branch is unit-testable: a
+/// dataless file cannot be created in a temp dir (see `flags_are_dataless`).
+fn should_stage(is_image: bool, is_promise_backed: bool, is_dataless: bool) -> bool {
+    if is_promise_backed {
+        return is_image;
+    }
+    is_dataless
 }
 
 /// Copy one dropped file into this grant's staging dir, returning the new path.
@@ -1727,7 +1741,7 @@ mod tests {
     use super::{
         append_log, browser_event_script, create_desktop_drop_grant, engine_already_current,
         engine_launch_action, flags_are_dataless, is_external_link, is_trusted_main_navigation,
-        needs_drop_staging, requires_confirmation, should_show_main_window,
+        needs_drop_staging, requires_confirmation, should_show_main_window, should_stage,
     };
     use crate::service::ServiceResult;
 
@@ -1819,12 +1833,14 @@ mod tests {
         }
     }
 
-    // Only an image drop the server cannot read itself gets copied. A readable
-    // local screenshot, and a non-image inside an NSIRD dir, both stay
-    // pass-through: the server can read the first, and the agent needs to keep
-    // reading the second.
+    // A drop the server cannot read itself gets copied: images from the
+    // NSIRD screenshot dir (permissions) and dataless File Provider files of
+    // any type (the server's read would deadlock). A readable local
+    // screenshot, and a non-image inside an NSIRD dir, both stay
+    // pass-through: the server can read the first, and the agent needs to
+    // keep reading the second.
     #[test]
-    fn only_an_unreadable_image_drop_needs_staging() {
+    fn only_an_unreadable_drop_needs_staging() {
         let temporary =
             std::path::Path::new("/var/folders/zj/x/T/TemporaryItems/NSIRD_screencaptureui_1Pr326");
         assert!(needs_drop_staging(
@@ -1840,6 +1856,18 @@ mod tests {
         let local = root.path().join("Screenshot.png");
         std::fs::write(&local, b"\x89PNG\r\n\x1a\n").unwrap();
         assert!(!needs_drop_staging(&local));
+    }
+
+    // The staging decision itself, covering the branches a temp dir cannot:
+    // a dataless PDF must be staged just like a dataless image, while an
+    // NSIRD non-image stays pass-through so the agent keeps reading it.
+    #[test]
+    fn staging_decision_covers_dataless_non_images() {
+        assert!(should_stage(false, false, true));
+        assert!(should_stage(true, false, true));
+        assert!(!should_stage(true, false, false));
+        assert!(should_stage(true, true, false));
+        assert!(!should_stage(false, true, false));
     }
 
     // The bit test behind the dataless check. macOS sets SF_DATALESS (0x40000000)

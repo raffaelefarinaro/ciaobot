@@ -628,6 +628,62 @@ def test_native_desktop_drop_clears_staged_copies(tmp_path: Path) -> None:
     assert not (grant_dir / "staged" / grant_id).exists()
 
 
+def test_native_desktop_drop_keeps_a_staged_non_image_copy(
+    tmp_path: Path,
+) -> None:
+    """A staged non-image is the agent's only readable handle, so it survives.
+
+    The shell now stages dataless cloud files of any type; the server must
+    keep the non-image copy (the agent is handed its path to keep reading)
+    while the image copies, whose bytes are in media_root, are deleted.
+    """
+    pcm = _make_manager(tmp_path)
+    config = pcm._config
+    project = next(iter(pcm.list_projects()))
+    chat = pcm.create_chat(project.project_id, title="Drop test")
+    grant_dir = config.state_path.parent / "desktop-drop-grants"
+    grant_id = str(uuid.uuid4())
+    staged_dir = grant_dir / "staged" / grant_id
+    image_dir = staged_dir / "0"
+    image_dir.mkdir(parents=True)
+    staged_image = image_dir / "shot.png"
+    staged_image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    doc_dir = staged_dir / "1"
+    doc_dir.mkdir()
+    staged_doc = doc_dir / "report.pdf"
+    staged_doc.write_bytes(b"%PDF-1.4\n")
+    (grant_dir / f"{grant_id}.json").write_text(
+        json.dumps(
+            {
+                "created_at": time.time(),
+                "paths": [str(staged_image), str(staged_doc)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = _make_client(pcm, config)
+
+    response = client.post(
+        "/api/desktop-drop",
+        json={
+            "grant_id": grant_id,
+            "project_id": project.project_id,
+            "chat_id": chat.chat_id,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["image_refs"]) == 1
+    assert body["paths"] == [str(staged_doc)]
+    assert body["errors"] == []
+    # The image copy is gone; the agent's non-image handle is still readable.
+    assert not staged_image.exists()
+    assert staged_doc.exists()
+    assert not image_dir.exists()
+    assert doc_dir.exists()
+
+
 def test_native_desktop_drop_rejects_expired_grant(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     config = pcm._config

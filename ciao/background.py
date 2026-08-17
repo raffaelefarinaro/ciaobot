@@ -182,6 +182,9 @@ class BackgroundRun:
     status: str = "queued"
     exit_code: int | None = None
     error: str = ""
+    # Set when a terminal run's wake could not be delivered because the server
+    # was draining for restart (or shutting down). The next start() replays it.
+    wake_pending: bool = False
 
     def is_terminal(self) -> bool:
         return self.status in _TERMINAL_STATUSES
@@ -503,15 +506,17 @@ class BackgroundRunner:
     # ── lifecycle ─────────────────────────────────────────────────────
 
     def start(self) -> list[BackgroundRun]:
-        """Resolve restart orphans, prune, and arm the janitor.
+        """Resolve restart orphans, replay undelivered wakes, prune, and arm the janitor.
 
-        Returns the runs that were resolved as orphans (already woken).
+        Returns the runs that were resolved as orphans or replayed (already
+        woken).
         """
-        orphans = self.resolve_orphans()
+        resolved = self.resolve_orphans()
+        resolved.extend(self.replay_pending_wakes())
         self.prune()
         if self._janitor is None:
             self._janitor = asyncio.create_task(self._janitor_loop(), name="background-janitor")
-        return orphans
+        return resolved
 
     async def stop(self) -> None:
         """Terminate every live run, then drop the janitor.
@@ -526,15 +531,34 @@ class BackgroundRunner:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._janitor
             self._janitor = None
+        live_processes: list[tuple[str, asyncio.subprocess.Process]] = []
         for run_id in list(self._procs):
             self._cancelling.add(run_id)
             proc = self._procs.get(run_id)
             if proc is not None:
-                await self._terminate(proc)
+                live_processes.append((run_id, proc))
+        if live_processes:
+            results = await asyncio.gather(
+                *(self._terminate(proc) for _run_id, proc in live_processes),
+                return_exceptions=True,
+            )
+            for (run_id, _proc), result in zip(live_processes, results):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "Background run %s termination failed during shutdown: %s",
+                        run_id,
+                        result,
+                    )
         supervisors = [task for task in self._supervisors.values() if not task.done()]
         if supervisors:
             with contextlib.suppress(Exception):
                 await asyncio.wait(supervisors, timeout=CANCEL_GRACE_SECONDS * 2)
+        # Every run we just terminated got a wake queued against a server that
+        # is draining (or a loop that is about to close), so it can never be
+        # delivered. Persist the marker; the next start() replays these wakes
+        # so the owning chat learns its command was terminated.
+        for run_id, _proc in live_processes:
+            self.mark_wake_pending(run_id)
 
     # ── reads ─────────────────────────────────────────────────────────
 
@@ -790,9 +814,10 @@ class BackgroundRunner:
         self._store.replace(run)
         self._finish(run)
 
-    def _finish(self, run: BackgroundRun) -> None:
+    def _finish(self, run: BackgroundRun, *, record: bool = True) -> None:
         """Record the job run and wake the owning chat. Never raises."""
-        self._record(run)
+        if record:
+            self._record(run)
         if self._on_finish is None:
             return
         try:
@@ -833,6 +858,41 @@ class BackgroundRunner:
             logger.debug("Failed to record background job run", exc_info=True)
 
     # ── restart orphans and pruning ───────────────────────────────────
+
+    def mark_wake_pending(self, run_id: str) -> None:
+        """Flag a terminal run whose wake could not be delivered.
+
+        Called during a draining shutdown (by ``stop()`` and by the wake
+        flusher's restart branch). The next ``start()`` replays the wake for
+        the owning chat. Never raises.
+        """
+        run = self._store.get(run_id)
+        if run is None or not run.is_terminal():
+            return
+        run.wake_pending = True
+        try:
+            self._store.replace(run)
+        except Exception:  # noqa: BLE001 — deferral must not break shutdown
+            logger.debug("Failed to persist wake marker for %s", run_id, exc_info=True)
+
+    def replay_pending_wakes(self) -> list[BackgroundRun]:
+        """Deliver wakes persisted for terminal runs after a draining shutdown.
+
+        The job run was already recorded when the run finished, so the replay
+        only wakes the chat. Returns the replayed runs.
+        """
+        replayed: list[BackgroundRun] = []
+        for run in self._store.list():
+            if not run.wake_pending or not run.is_terminal():
+                continue
+            run.wake_pending = False
+            try:
+                self._store.replace(run)
+            except Exception:  # noqa: BLE001 — a replay failure must not raise
+                logger.debug("Failed to clear wake marker for %s", run.run_id, exc_info=True)
+            self._finish(run, record=False)
+            replayed.append(run)
+        return replayed
 
     def resolve_orphans(self) -> list[BackgroundRun]:
         """Resolve runs left non-terminal by a crash, and wake their chats.

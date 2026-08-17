@@ -387,6 +387,101 @@ async def test_stop_terminates_live_runs_so_a_restart_has_no_orphans(
     assert _runner(tmp_path).resolve_orphans() == []
 
 
+async def test_stop_marks_terminated_runs_for_wake_replay(tmp_path: Path) -> None:
+    """A wake queued against a draining server is persisted, not lost.
+
+    `stop()` finalizes every live run as cancelled, but the owning chat can
+    never receive the wake while the server is draining (providers are gone
+    and the loop is closing). The run row carries the marker so the next
+    `start()` replays the wake.
+    """
+    runner = _runner(tmp_path)
+    run = await runner.start_run(
+        parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "sleep 300"], timeout_s=600
+    )
+
+    await runner.stop()
+
+    stored = runner.get(run.run_id)
+    assert stored is not None
+    assert stored.status == "cancelled"
+    assert stored.wake_pending is True
+
+    # A fresh runner over the same store replays the wake on start().
+    collector = _Collector()
+    restarted = BackgroundRunner(
+        runner._store, workspace_root=tmp_path, on_finish=collector,
+        record_job_runs=False,
+    )
+    replayed = restarted.start()
+    assert [r.run_id for r in replayed] == [run.run_id]
+    assert len(collector.finished) == 1
+    finished_run, _tail = collector.finished[0]
+    assert finished_run.run_id == run.run_id
+    assert finished_run.status == "cancelled"
+    # The marker is consumed: a second start does not double-deliver.
+    assert restarted.get(run.run_id) is not None
+    assert restarted.get(run.run_id).wake_pending is False  # type: ignore[union-attr]
+    assert restarted.replay_pending_wakes() == []
+
+
+def test_replay_pending_wakes_delivers_and_clears_the_marker(tmp_path: Path) -> None:
+    """A marker persisted by a previous boot is replayed exactly once."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True)
+    store = BackgroundRunStore(runtime)
+    store.replace(BackgroundRun(
+        run_id="bg-deferred",
+        parent_chat_id="chat-1",
+        cmd=["/bin/sh", "-c", "true"],
+        started_at="2026-08-12T10:00:00+00:00",
+        ended_at="2026-08-12T10:00:05+00:00",
+        status="cancelled",
+        exit_code=-15,
+        wake_pending=True,
+    ))
+    collector = _Collector()
+    runner = BackgroundRunner(
+        store, workspace_root=tmp_path, on_finish=collector, record_job_runs=False
+    )
+
+    replayed = runner.replay_pending_wakes()
+
+    assert [run.run_id for run in replayed] == ["bg-deferred"]
+    assert len(collector.finished) == 1
+    stored = store.get("bg-deferred")
+    assert stored is not None
+    assert stored.wake_pending is False
+    assert runner.replay_pending_wakes() == []
+    assert len(collector.finished) == 1
+
+
+async def test_stop_terminates_multiple_live_runs_concurrently(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    first_started = asyncio.Event()
+    both_started = asyncio.Event()
+    started: list[object] = []
+    release = asyncio.Event()
+
+    async def fake_terminate(proc: object) -> None:
+        started.append(proc)
+        if len(started) == 1:
+            first_started.set()
+        if len(started) == 2:
+            both_started.set()
+        await release.wait()
+
+    runner._procs = {"run-a": object(), "run-b": object()}  # type: ignore[assignment]
+    runner._terminate = fake_terminate  # type: ignore[method-assign]
+
+    stop_task = asyncio.create_task(runner.stop())
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+    release.set()
+    await asyncio.wait_for(stop_task, timeout=1)
+    assert len(started) == 2
+
+
 # ── restart orphans ───────────────────────────────────────────────────────
 
 
@@ -726,6 +821,37 @@ async def test_background_wake_publishes_its_kind(
     assert len(reported) == 1
     assert reported[0]["kind"] == "background"
     assert reported[0]["count"] == 1
+
+
+async def test_flush_background_wake_defers_runs_during_restart_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wake that hits the restart drain is marked for replay, not dropped."""
+    monkeypatch.setattr(
+        "ciao.web.project_chats._BACKGROUND_WAKE_WINDOW_SECONDS", 0.05
+    )
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Runs", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Owner")
+    marked: list[str] = []
+    manager._background_runner = SimpleNamespace(
+        mark_wake_pending=marked.append  # type: ignore[attr-defined]
+    )
+    manager._restart_draining = True
+
+    manager.queue_background_wake(
+        chat.chat_id,
+        run_id="bg-drained",
+        label="nightly",
+        status="cancelled",
+        exit_code=-15,
+        last_lines=[],
+        log_path="/logs/bg-drained.log",
+    )
+    await asyncio.sleep(0.3)
+
+    assert marked == ["bg-drained"]
+    assert manager._background_wake_tasks == {}
 
 
 def test_no_wake_when_the_owning_chat_is_archived_or_gone(tmp_path: Path) -> None:

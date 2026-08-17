@@ -89,6 +89,7 @@ from ciao.providers.codex import (
 )
 from ciao.providers.opencode import (
     OpencodeProvider,
+    opencode_collab_tree_counts,
     opencode_tier_models,
     opencode_tier_overrides,
 )
@@ -1498,6 +1499,9 @@ class ProjectChatManager:
         # report (and vice versa) by riding the other's coalescing window.
         self._background_wake_pending: dict[str, list[dict[str, Any]]] = {}
         self._background_wake_tasks: dict[str, asyncio.Task] = {}
+        # Bound by main.py so a wake dropped by the restart drain can mark its
+        # runs for replay on the next start instead of vanishing.
+        self._background_runner: Any = None
         # A requested server restart drains existing chat work before uvicorn
         # shuts down. Once draining begins, ongoing streams (including their
         # already-queued follow-ups) may finish, but idle chats must not start
@@ -4599,6 +4603,37 @@ class ProjectChatManager:
             chat.session_id or "__pending__",
         )
 
+    def _stable_context_prefix(self, chat: ChatInfo) -> str:
+        """Build a held-aside capsule for a provider resume fallback."""
+        project = self._projects.get(chat.project_id)
+        workspace = project.workspace if project else ""
+        gws_profile = self._workspace_gws_profile(workspace) if workspace else ""
+        project_name = project.name if project else ""
+        project_context = project.context if project else ""
+        canonical_doc = project.vault_doc_path if project else ""
+        vault_root = (
+            self._workspace_vault_root(workspace)
+            if workspace
+            else Path(self._config.vault_root)
+        )
+        capsule = build_context_capsule(
+            prompt="",
+            workspace=workspace,
+            gws_profile=gws_profile,
+            project_name=project_name,
+            project_context=project_context,
+            canonical_doc=canonical_doc,
+            vault_root=vault_root,
+            legacy_entity_workspace=self._config.legacy_entity_workspace(),
+            include_stable=True,
+        )
+        if not capsule:
+            return ""
+        return (
+            f"[CIAO_CONTEXT_BEGIN]\n[Chat ID: \"{chat.chat_id}\"]\n"
+            f"{capsule}\n[CIAO_CONTEXT_END]\n\n"
+        )
+
     def _format_handover_context(self, chat: ChatInfo) -> str:
         if not chat.handover_context_pending or not chat.handover_messages:
             return ""
@@ -5241,6 +5276,7 @@ class ProjectChatManager:
             mcp_required=resolved_surface == "mcp",
             context_digest=context_digest,
             context_session_id=context_session_id,
+            stable_context_prefix=self._stable_context_prefix(chat),
         )
 
     # ── Image-capability pre-flight ──────────────────────────────────────
@@ -7057,6 +7093,9 @@ class ProjectChatManager:
         if chat.provider == "codex":
             await self._watch_codex_subagent_completion(chat_id, project_id)
             return
+        if chat.provider == "opencode":
+            await self._watch_opencode_subagent_completion(chat_id, project_id)
+            return
         path = subagent_tracking.find_parent_session_file(
             chat.session_id, self._config.workspace_root
         )
@@ -7146,6 +7185,43 @@ class ProjectChatManager:
                     self._config.workspace_root, thread
                 )
                 count, had_subagents = codex_collab_tree_counts(tree)
+                if count != last_count:
+                    if count == 0 and last_count > 0:
+                        chat.last_activity_at = _now_iso()
+                        self._save()
+                        # No separate "Background agents finished" push — the
+                        # chat's own result notification covers it; the extra
+                        # generic ping was redundant (user feedback).
+                    self._publish_subagent_count(chat_id, project_id, count, nudged=False)
+                    last_count = count
+                if not had_subagents or count == 0:
+                    break
+                await asyncio.sleep(3)
+        finally:
+            current = self._pending_subagent_watchers.get(chat_id)
+            if current is asyncio.current_task():
+                self._pending_subagent_watchers.pop(chat_id, None)
+                if last_count > 0:
+                    # See the Claude watcher: never leave clients holding a
+                    # count we have stopped maintaining.
+                    self._publish_subagent_count(chat_id, project_id, 0)
+            self._background_agents_last.pop(chat_id, None)
+
+    async def _watch_opencode_subagent_completion(
+        self, chat_id: str, project_id: str
+    ) -> None:
+        """Poll the opencode session tree while background children run."""
+        last_count = -1
+        deadline = time.perf_counter() + 3600
+        try:
+            while time.perf_counter() < deadline:
+                chat = self._chats.get(chat_id)
+                if chat is None or chat.provider != "opencode" or not chat.session_id:
+                    break
+                tree = await OpencodeProvider.read_collab_tree(
+                    self._config.workspace_root, chat.session_id
+                )
+                count, had_subagents = opencode_collab_tree_counts(tree)
                 if count != last_count:
                     if count == 0 and last_count > 0:
                         chat.last_activity_at = _now_iso()
@@ -7430,8 +7506,24 @@ class ProjectChatManager:
                 parent, prompt, kind="background", count=len(finished)
             )
         except RestartDrainingError:
+            # The server is draining for restart and providers are already
+            # gone, so this wake can never be delivered. Mark its runs so the
+            # next BackgroundRunner.start() replays them — the owning chat
+            # must learn its command was terminated rather than losing the
+            # wake forever.
+            runner = self._background_runner
+            for entry in finished:
+                run_id = str(entry.get("run_id") or "")
+                if not run_id or runner is None:
+                    continue
+                try:
+                    runner.mark_wake_pending(run_id)
+                except Exception:  # noqa: BLE001 — deferral must not raise
+                    logger.debug(
+                        "Failed to defer background wake for %s", run_id, exc_info=True
+                    )
             logger.info(
-                "Background wake for %s dropped: server is draining for restart",
+                "Background wake for %s deferred: server is draining for restart",
                 parent_chat_id,
             )
         except asyncio.CancelledError:
@@ -8021,6 +8113,20 @@ class ProjectChatManager:
                     self._config.workspace_root, thread
                 )
                 running, had_now = codex_collab_tree_counts(tree)
+                had_async = had_async or had_now
+                if running == 0:
+                    return True, had_async
+                await asyncio.sleep(3)
+            return running == 0, had_async
+        if chat.provider == "opencode":
+            deadline = time.perf_counter() + timeout_s
+            had_async = False
+            running = 0
+            while time.perf_counter() < deadline:
+                tree = await OpencodeProvider.read_collab_tree(
+                    self._config.workspace_root, chat.session_id
+                )
+                running, had_now = opencode_collab_tree_counts(tree)
                 had_async = had_async or had_now
                 if running == 0:
                     return True, had_async

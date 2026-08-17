@@ -60,6 +60,7 @@ from ciao.providers.base import (
     ProviderCapabilities,
     build_prompt,
     build_runtime_context,
+    prepend_stable_context,
 )
 from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
 from ciao.providers.safe_commands import is_read_only_command
@@ -1064,6 +1065,10 @@ class OpencodeProvider(BaseSDKProvider):
             else:
                 logger.info("opencode session %s is gone; starting a new one", resume)
 
+            # A replacement session does not inherit the stable workspace and
+            # project facts that were already committed to the old session.
+            prepend_stable_context(request)
+
         payload: dict[str, Any] = {"agent": agent, "permission": permission}
         if model_id:
             model: dict[str, Any] = {"id": model_id, "providerID": provider_id}
@@ -1845,6 +1850,39 @@ class OpencodeProvider(BaseSDKProvider):
                 return response.status_code < 400
             except httpx.HTTPError:
                 return False
+
+
+def opencode_collab_tree_counts(tree: Sequence[Mapping[str, Any]]) -> tuple[int, bool]:
+    """Return running and observed counts for ``read_collab_tree`` output.
+
+    opencode session objects carry no status field, so a child's lifecycle
+    state is derived from its own messages: the last assistant message with a
+    ``time`` record missing ``completed`` is a turn still in flight.
+    """
+    running = 0
+    for item in tree:
+        if not isinstance(item, Mapping):
+            continue
+        messages = item.get("messages")
+        if not isinstance(messages, list):
+            continue
+        last: Mapping[str, Any] | None = None
+        for message in messages:
+            if not isinstance(message, Mapping):
+                continue
+            info = message.get("info")
+            if isinstance(info, Mapping) and info.get("role") == "assistant":
+                last = info
+        if last is None or last.get("error"):
+            continue
+        time_info = last.get("time")
+        if (
+            isinstance(time_info, Mapping)
+            and time_info.get("created")
+            and not time_info.get("completed")
+        ):
+            running += 1
+    return running, bool(tree)
 
 
 def opencode_tier_models(

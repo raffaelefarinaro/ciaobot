@@ -79,6 +79,14 @@ def build_prompt(request: AgentRequest) -> str:
     return "\n".join(lines).strip()
 
 
+def prepend_stable_context(request: AgentRequest) -> None:
+    """Re-send stable routing context after a provider replaces a session."""
+    prefix = request.stable_context_prefix
+    if not prefix or request.prompt.startswith(prefix):
+        return
+    request.prompt = prefix + request.prompt
+
+
 def build_claude_message_content(request: AgentRequest) -> str | list[dict[str, Any]]:
     """Build Claude SDK message content with native image blocks when present."""
     prompt = build_prompt(request)
