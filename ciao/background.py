@@ -659,12 +659,22 @@ class BackgroundRunner:
                 await self._terminate(proc)
                 exit_code = await proc.wait()
             if pump is not None:
-                # wait_for cancels the pump on timeout, which is what we want:
-                # a surviving grandchild can hold the pipe open long after the
-                # command itself is done. CancelledError is a BaseException, so
-                # an outside cancel of this supervisor still propagates.
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(pump, timeout=CANCEL_GRACE_SECONDS)
+                if run_id in self._cancelling:
+                    # A killed process group may leave the pipe open briefly
+                    # on some runners. Cancellation has already terminated the
+                    # command, so do not delay the terminal registry update on
+                    # a grandchild that inherited stdout.
+                    pump.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pump
+                else:
+                    # wait_for cancels the pump on timeout, which is what we
+                    # want: a surviving grandchild can hold the pipe open long
+                    # after the command itself is done. CancelledError is a
+                    # BaseException, so an outside cancel of this supervisor
+                    # still propagates.
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(pump, timeout=CANCEL_GRACE_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — a supervisor crash must still finalize

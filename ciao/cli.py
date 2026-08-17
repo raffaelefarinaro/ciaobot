@@ -1090,7 +1090,17 @@ def _auth_command(args: argparse.Namespace) -> int:
             args.provider,
             device_auth=bool(getattr(args, "device_auth", False)),
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        # ``--print-only`` is useful for setup instructions even on a machine
+        # where the provider CLI is not installed yet. Keep the real command
+        # path strict, but provide opencode's documented executable name for
+        # the copy/paste form.
+        if args.print_only and args.provider == "opencode":
+            print("opencode auth login")
+            return 0
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     if args.print_only:

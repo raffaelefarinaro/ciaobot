@@ -927,18 +927,32 @@ class OpencodeProvider(BaseSDKProvider):
         (e.g. `git *` from one `git status`). Each request is re-judged.
         """
         replied = await self._reply_permission(pending, "once")
-        self._permission_requests.pop(pending.request_id, None)
-        if not replied:
+        if replied:
+            self._permission_requests.pop(pending.request_id, None)
+        else:
             logger.warning(
                 "opencode auto-approval reply failed for %s", pending.request_id
             )
 
+    async def _deliver_permission_reply(
+        self, pending: _PendingRequest, reply: str
+    ) -> None:
+        replied = await self._reply_permission(pending, reply)
+        if replied:
+            self._permission_requests.pop(pending.request_id, None)
+        else:
+            logger.warning(
+                "opencode permission reply failed for %s", pending.request_id
+            )
+
     def send_permission_response(self, request_id: str, approved: bool) -> bool:
-        pending = self._permission_requests.pop(request_id, None)
+        pending = self._permission_requests.get(request_id)
         if pending is None or self._client is None:
             return False
         asyncio.create_task(
-            self._reply_permission(pending, "once" if approved else "reject")
+            self._deliver_permission_reply(
+                pending, "once" if approved else "reject"
+            )
         )
         return True
 
@@ -953,10 +967,40 @@ class OpencodeProvider(BaseSDKProvider):
             logger.debug("opencode question reject failed", exc_info=True)
             return False
 
+    async def _reply_question(
+        self, pending: _PendingRequest, payload: dict[str, Any]
+    ) -> bool:
+        client = self._client
+        if client is None:
+            return False
+        try:
+            response = await client.post(
+                f"/question/{pending.request_id}/reply", json=payload
+            )
+            return response.status_code < 400
+        except httpx.HTTPError:
+            logger.debug("opencode question reply failed", exc_info=True)
+            return False
+
+    async def _deliver_question_reply(
+        self, pending: _PendingRequest, payload: dict[str, Any]
+    ) -> None:
+        replied = (
+            await self._reject_question(pending)
+            if not payload["answers"]
+            else await self._reply_question(pending, payload)
+        )
+        if replied:
+            self._question_requests.pop(pending.request_id, None)
+        else:
+            logger.warning(
+                "opencode question reply failed for %s", pending.request_id
+            )
+
     def send_question_response(
         self, request_id: str, answers: Mapping[str, Sequence[str]]
     ) -> bool:
-        pending = self._question_requests.pop(request_id, None)
+        pending = self._question_requests.get(request_id)
         if pending is None or self._client is None:
             return False
         payload = {
@@ -965,20 +1009,7 @@ class OpencodeProvider(BaseSDKProvider):
                 for question_id, values in answers.items()
             ]
         }
-        if not payload["answers"]:
-            asyncio.create_task(self._reject_question(pending))
-            return True
-
-        async def _send() -> None:
-            client = self._client
-            if client is None:
-                return
-            try:
-                await client.post(f"/question/{pending.request_id}/reply", json=payload)
-            except httpx.HTTPError:
-                logger.debug("opencode question reply failed", exc_info=True)
-
-        asyncio.create_task(_send())
+        asyncio.create_task(self._deliver_question_reply(pending, payload))
         return True
 
     # -------------------------------------------------------------- streaming

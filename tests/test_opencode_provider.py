@@ -636,14 +636,15 @@ def test_tool_use_id_for_unknown_request_is_empty(tmp_path):
 
 
 class _RecordingPermissionClient:
-    def __init__(self):
+    def __init__(self, *, status_code=200):
         self.calls: list[tuple[str, dict]] = []
+        self.status_code = status_code
 
     async def post(self, path, json=None):
         self.calls.append((path, json))
 
         class _Response:
-            status_code = 200
+            status_code = self.status_code
 
         return _Response()
 
@@ -756,6 +757,42 @@ def test_auto_approval_needs_a_client_to_post_the_reply(tmp_path):
     provider._current_mode = "bypass"
     events = _convert(provider, "permission.asked", LIVE_PERMISSION)
     assert isinstance(events[0], PermissionRequestEvent)
+
+
+@pytest.mark.asyncio
+async def test_failed_permission_reply_keeps_request_for_retry(tmp_path):
+    provider, client = _armed_provider(tmp_path, "normal")
+    _convert(provider, "permission.asked", LIVE_PERMISSION)
+    client.status_code = 500
+
+    assert provider.send_permission_response("per_live1", True) is True
+    await _drain_tasks()
+
+    assert "per_live1" in provider._permission_requests
+
+
+@pytest.mark.asyncio
+async def test_failed_question_reply_keeps_request_for_retry(tmp_path):
+    provider, client = _armed_provider(tmp_path, "normal")
+    _convert(
+        provider,
+        "question.v2.asked",
+        {
+            "id": "q_retry",
+            "sessionID": "ses_1",
+            "questions": [{
+                "question": "Which?",
+                "header": "Pick",
+                "options": [],
+            }],
+        },
+    )
+    client.status_code = 500
+
+    assert provider.send_question_response("q_retry", {"q": ["answer"]}) is True
+    await _drain_tasks()
+
+    assert "q_retry" in provider._question_requests
 
 
 # ── real captured stream ────────────────────────────────────────────────

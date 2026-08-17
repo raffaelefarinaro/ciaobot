@@ -23,7 +23,12 @@ from pydantic import AnyHttpUrl
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+from ciao.control_plane import (
+    CiaoControlPlane,
+    ControlPlaneError,
+    McpPrincipal,
+    _UNSET,
+)
 from ciao.web.routes_mcp import (
     _observed_project_mcp_tools,
     _probe_http_mcp_tools,
@@ -1018,7 +1023,7 @@ class CiaoMcpService:
             default_model: str = "",
             gws_profile: str = "",
             disallowed_tools: list[str] | None = None,
-            claude_ai_mcps: bool | None = None,
+            claude_ai_mcps: Any = _UNSET,
             color: str = "",
         ) -> dict[str, Any]:
             """Create a new logical workspace.
@@ -1055,7 +1060,7 @@ class CiaoMcpService:
             default_model: str | None = None,
             gws_profile: str | None = None,
             disallowed_tools: list[str] | None = None,
-            claude_ai_mcps: bool | None = None,
+            claude_ai_mcps: Any = _UNSET,
             color: str = "",
         ) -> dict[str, Any]:
             """Update a configured workspace. Omitted fields keep their values.
