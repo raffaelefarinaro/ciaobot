@@ -178,6 +178,53 @@ async def test_generate_chat_title_uses_codex_oneshot(monkeypatch, tmp_path) -> 
     assert captured["cwd"] == tmp_path
 
 
+@pytest.mark.asyncio
+async def test_opencode_chat_titles_use_the_opencode_catalog(
+    monkeypatch, tmp_path
+) -> None:
+    """Automatic titles must stay on opencode instead of falling through to Claude."""
+    from ciao.web import project_chats as pc
+
+    config = SimpleNamespace(
+        title_model_override="",
+        title_model="haiku",
+        workspace_root=tmp_path,
+        haiku_model_for_workspace=lambda _workspace: "haiku",
+    )
+    manager = pc.ProjectChatManager.__new__(pc.ProjectChatManager)
+    manager._config = config
+    manager._projects = {
+        "project-1": pc.ProjectInfo("project-1", "Project", "personal")
+    }
+    manager._chats = {
+        "chat-1": pc.ChatInfo(
+            chat_id="chat-1",
+            project_id="project-1",
+            provider="opencode",
+            model="haiku",
+        )
+    }
+    manager._save = lambda: None
+
+    async def fake_catalog(_workspace_root):
+        return [{"model": "anthropic/claude-haiku-4-5"}]
+
+    monkeypatch.setattr(pc.OpencodeProvider, "model_catalog", fake_catalog)
+    captured: dict[str, object] = {}
+
+    async def fake_title(_user_text, _assistant_text, **kwargs):
+        captured.update(kwargs)
+        return "Opencode Title", "opencode:anthropic/claude-haiku-4-5", None
+
+    monkeypatch.setattr(pc, "_generate_chat_title_with_engine", fake_title)
+
+    assert await manager.auto_title_if_default("chat-1", "Investigate opencode") == (
+        "Opencode Title"
+    )
+    assert captured["provider"] == "opencode"
+    assert captured["model"] == "anthropic/claude-haiku-4-5"
+
+
 def test_resolve_title_model_uses_override() -> None:
     from ciao.config import CiaoConfig
 

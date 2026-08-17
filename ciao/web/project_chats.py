@@ -87,7 +87,11 @@ from ciao.providers.codex import (
     CodexProvider,
     codex_collab_tree_counts,
 )
-from ciao.providers.opencode import OpencodeProvider
+from ciao.providers.opencode import (
+    OpencodeProvider,
+    opencode_tier_models,
+    opencode_tier_overrides,
+)
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
@@ -729,6 +733,20 @@ def resolve_title_model(config, workspace: str | None = None) -> str:
     if workspace is not None:
         return cast(str, config.haiku_model_for_workspace(workspace))
     return cast(str, config.title_model)
+
+
+async def _resolve_opencode_title_model(config: BridgeConfig, model: str) -> str:
+    """Resolve a title tier against opencode's live model catalog."""
+    if not is_tier(model):
+        return model
+    try:
+        catalog = await OpencodeProvider.model_catalog(config.workspace_root)
+    except Exception as exc:  # noqa: BLE001 - title generation must degrade softly
+        logger.info("opencode title catalog unavailable: %s", exc)
+        return model
+    return opencode_tier_models(
+        catalog, opencode_tier_overrides(config)
+    ).get(canonical_tier(model), model)
 
 
 async def _generate_chat_title(
@@ -7820,9 +7838,18 @@ class ProjectChatManager:
             title_provider = "codex"
             title_model = requested
             title_env = self._build_extra_env(chat)
+        elif chat.provider == "opencode":
+            title_provider = "opencode"
+            title_model = await _resolve_opencode_title_model(
+                self._config, requested
+            )
         elif override_provider:
             title_provider = override_provider
             title_model = requested[len(override_provider) + 1:] or "haiku"
+            if title_provider == "opencode":
+                title_model = await _resolve_opencode_title_model(
+                    self._config, title_model
+                )
         else:
             title_provider = "claude"
             title_model, note = native_sidecar.resolve_model_or_fallback(
