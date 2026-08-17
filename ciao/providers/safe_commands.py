@@ -21,7 +21,7 @@ _SAFE_COMMANDS = frozenset({
     "rg", "grep", "egrep", "fgrep",
     "file", "stat", "du", "df", "tree",
     "basename", "dirname", "realpath", "readlink",
-    "whoami", "hostname", "uname", "id", "date", "uptime",
+    "whoami", "uname", "id", "uptime",
     "type", "true", "false", "jq", "cut", "tr", "nl",
 })
 
@@ -54,6 +54,19 @@ _UNSAFE_TREE_PREFIXES = ("-o", "--output")
 # shlex emits as punctuation (`>`, `>>`, `<`, `&`, `(`, `)`) is rejected.
 _CONNECTORS = frozenset({";", "&&", "||", "|"})
 _PUNCTUATION = frozenset("();<>|&")
+
+_DATE_FLAGS = frozenset({
+    "-u", "--utc", "--universal", "-R", "--rfc-email", "--debug",
+    "--help", "--version",
+})
+_DATE_VALUE_FLAGS = frozenset({
+    "-d", "--date", "-f", "--file", "-r", "--reference",
+})
+_HOSTNAME_FLAGS = frozenset({
+    "-s", "--short", "-f", "--fqdn", "-d", "--domain", "-i",
+    "--ip-address", "-I", "--all-ip-addresses", "-A", "--all-fqdns",
+    "--help", "--version",
+})
 
 
 def _tokens(command: str) -> list[str] | None:
@@ -91,11 +104,40 @@ def _git_is_safe(args: list[str]) -> bool:
     return not any(arg.startswith(unsafe_prefixes) for arg in rest)
 
 
+def _date_is_safe(args: list[str]) -> bool:
+    """Allow display-only date forms, never clock-setting options."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg.startswith("+"):
+            index += 1
+            continue
+        if arg in _DATE_VALUE_FLAGS:
+            if index + 1 >= len(args):
+                return False
+            index += 2
+            continue
+        if arg in _DATE_FLAGS or arg.startswith(("-I", "--iso-8601=", "--rfc-3339=")):
+            index += 1
+            continue
+        return False
+    return True
+
+
+def _hostname_is_safe(args: list[str]) -> bool:
+    """Allow hostname queries only; positional/file forms can mutate it."""
+    return all(arg in _HOSTNAME_FLAGS for arg in args)
+
+
 def _segment_is_safe(tokens: list[str]) -> bool:
     """One pipeline/connector segment: a command name and its arguments."""
     name, *args = tokens
     if name == "git":
         return _git_is_safe(args)
+    if name == "date":
+        return _date_is_safe(args)
+    if name == "hostname":
+        return _hostname_is_safe(args)
     if name == "find":
         return not any(arg.startswith(_UNSAFE_FIND_PREFIXES) for arg in args)
     if name == "rg":

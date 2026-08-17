@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from ciao.dependency_updates import (
     AUTO_UPDATE_KEYS,
     _pinned_version,
@@ -108,6 +110,37 @@ def test_apply_auto_updates_skips_major_auto_candidates(tmp_path: Path, monkeypa
     assert 'claude-agent-sdk==0.2.111' in (tmp_path / "pyproject.toml").read_text(
         encoding="utf-8"
     )
+
+
+def test_apply_auto_updates_restores_uv_lock_after_install_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_update_tree(tmp_path)
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text("original lock\n", encoding="utf-8")
+    update = depupdates.AvailableUpdate(
+        key="claude-agent-sdk",
+        ecosystem="python",
+        current="0.2.111",
+        latest="0.2.200",
+        is_safe=True,
+        auto=True,
+    )
+
+    def regenerate(root: Path) -> None:
+        (root / "uv.lock").write_text("regenerated lock\n", encoding="utf-8")
+
+    monkeypatch.setattr(depupdates, "regenerate_python_lock", regenerate)
+    monkeypatch.setattr(
+        depupdates,
+        "install_updated_packages",
+        lambda *_args: (False, "pip failed"),
+    )
+
+    with pytest.raises(RuntimeError, match="pip failed"):
+        apply_auto_updates(tmp_path, [update])
+
+    assert uv_lock.read_text(encoding="utf-8") == "original lock\n"
 
 
 def test_install_updated_packages_uses_workspace_python(tmp_path: Path, monkeypatch) -> None:

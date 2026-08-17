@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, cast
@@ -232,37 +233,39 @@ async def _run_opencode_oneshot(
     from ciao.models import AgentRequest, ResultEvent
     from ciao.providers.opencode import OpencodeProvider
 
-    # `mode="plan"` for the same reason as Codex: a one-shot must not be able to
-    # write. opencode has no ephemeral flag -- a fresh provider instance already
-    # starts its own server and creates its own session, and `disconnect()`
-    # tears both down.
-    opencode = OpencodeProvider(
-        (cwd or Path.cwd()).resolve(),
-        developer_instructions=system_prompt,
-    )
-    try:
-        async for event in opencode.run_streaming(
-            AgentRequest(
-                prompt=prompt,
-                model=model,
-                mode="plan",
-                provider="opencode",
-                extra_env=env or {},
-            ),
-            lambda _handle: None,
-        ):
-            if isinstance(event, ResultEvent):
-                if event.is_error:
-                    detail = (event.result or "").strip() or "opencode one-shot failed"
-                    # opencode reports a rejected prompt or a dead server as a
-                    # terminal ResultEvent; it does not distinguish retriable
-                    # upstream flakes, so do not double-retry here.
-                    raise OneShotError(detail, transient=False)
-                return event.result
-        return ""
-    finally:
-        await opencode.delete_current_session()
-        await opencode.disconnect()
+    # One-shot routines have a no-tools contract. Keep the server in a fresh
+    # empty directory so opencode cannot discover project instructions,
+    # configs, or MCP registrations from the workspace. Its deny-all session
+    # permission rules also prevent read/glob/grep/list from reaching files.
+    with tempfile.TemporaryDirectory(prefix="ciaobot-opencode-oneshot-") as isolated:
+        opencode = OpencodeProvider(
+            Path(isolated),
+            developer_instructions=system_prompt,
+            tools_enabled=False,
+        )
+        try:
+            async for event in opencode.run_streaming(
+                AgentRequest(
+                    prompt=prompt,
+                    model=model,
+                    mode="plan",
+                    provider="opencode",
+                    extra_env=env or {},
+                ),
+                lambda _handle: None,
+            ):
+                if isinstance(event, ResultEvent):
+                    if event.is_error:
+                        detail = (event.result or "").strip() or "opencode one-shot failed"
+                        # opencode reports a rejected prompt or a dead server as a
+                        # terminal ResultEvent; it does not distinguish retriable
+                        # upstream flakes, so do not double-retry here.
+                        raise OneShotError(detail, transient=False)
+                    return event.result
+            return ""
+        finally:
+            await opencode.delete_current_session()
+            await opencode.disconnect()
 
 
 async def run_oneshot(

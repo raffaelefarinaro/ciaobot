@@ -167,15 +167,25 @@ def _restore_dependency_files(
     pyproject_path: Path,
     package_json_path: Path,
     package_lock_path: Path,
-    originals: tuple[str, str, str | None],
+    uv_lock_path: Path,
+    originals: tuple[str, str, str | None, str | None],
 ) -> None:
-    original_pyproject, original_package_json, original_package_lock = originals
+    (
+        original_pyproject,
+        original_package_json,
+        original_package_lock,
+        original_uv_lock,
+    ) = originals
     pyproject_path.write_text(original_pyproject, encoding="utf-8")
     package_json_path.write_text(original_package_json, encoding="utf-8")
     if original_package_lock is None:
         package_lock_path.unlink(missing_ok=True)
     else:
         package_lock_path.write_text(original_package_lock, encoding="utf-8")
+    if original_uv_lock is None:
+        uv_lock_path.unlink(missing_ok=True)
+    else:
+        uv_lock_path.write_text(original_uv_lock, encoding="utf-8")
 
 
 def get_latest_pypi_version(package_name: str) -> str | None:
@@ -250,12 +260,14 @@ def apply_auto_updates(
     pyproject_path = workspace_root / "pyproject.toml"
     package_json_path = workspace_root / "web" / "package.json"
     package_lock_path = workspace_root / "web" / "package-lock.json"
+    uv_lock_path = workspace_root / "uv.lock"
     originals = (
         pyproject_path.read_text(encoding="utf-8"),
         package_json_path.read_text(encoding="utf-8"),
         package_lock_path.read_text(encoding="utf-8")
         if package_lock_path.exists()
         else None,
+        uv_lock_path.read_text(encoding="utf-8") if uv_lock_path.exists() else None,
     )
     applied: list[str] = []
     updated_python = False
@@ -285,7 +297,11 @@ def apply_auto_updates(
                 raise RuntimeError(error)
     except Exception:
         _restore_dependency_files(
-            pyproject_path, package_json_path, package_lock_path, originals
+            pyproject_path,
+            package_json_path,
+            package_lock_path,
+            uv_lock_path,
+            originals,
         )
         raise
     return applied

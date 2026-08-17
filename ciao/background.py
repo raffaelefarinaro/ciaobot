@@ -105,6 +105,30 @@ _STRIPPED_ENV_KEYS = frozenset({
     "PWA_AUTH_TOKEN",
 })
 
+# Background commands are model-authored workspace code. Do not let them
+# inherit provider credentials, API keys, or tokens belonging to the engine.
+# The suffix rules also cover user-configured MCP and service credentials
+# whose names are not known to Ciaobot ahead of time.
+_SENSITIVE_ENV_SUFFIXES = (
+    "_API_KEY",
+    "_API_TOKEN",
+    "_AUTH_TOKEN",
+    "_ACCESS_TOKEN",
+    "_SECRET",
+    "_SECRET_KEY",
+    "_PASSWORD",
+    "_TOKEN",
+)
+
+
+def _is_sensitive_env_key(key: str) -> bool:
+    upper = key.upper()
+    return (
+        upper in {"GH_TOKEN", "GITHUB_TOKEN", "PRIVATE_KEY"}
+        or upper.endswith(_SENSITIVE_ENV_SUFFIXES)
+        or "_PRIVATE_KEY" in upper
+    )
+
 STATE_DIR_NAME = "background"
 STATE_FILE_NAME = "state.json"
 
@@ -275,7 +299,7 @@ def build_env(overrides: Any, *, run_id: str, workspace: str) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
-        if key not in _STRIPPED_ENV_KEYS
+        if key not in _STRIPPED_ENV_KEYS and not _is_sensitive_env_key(key)
     }
     if overrides:
         if not isinstance(overrides, dict):
@@ -289,7 +313,7 @@ def build_env(overrides: Any, *, run_id: str, workspace: str) -> dict[str, str]:
                     "invalid_env",
                     f"'{key}' is not a valid environment variable name.",
                 )
-            if key in _FORBIDDEN_ENV_KEYS:
+            if key in _FORBIDDEN_ENV_KEYS or _is_sensitive_env_key(key):
                 raise BackgroundRunError(
                     "env_forbidden",
                     f"'{key}' cannot be set for a background run.",

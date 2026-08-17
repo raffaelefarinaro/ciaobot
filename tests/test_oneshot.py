@@ -223,9 +223,17 @@ def _fake_opencode(captured: dict, events: list[object]):
     """Stub OpencodeProvider recording construction and request arguments."""
 
     class FakeOpencodeProvider:
-        def __init__(self, workspace_root, *, developer_instructions="", **_kw):
+        def __init__(
+            self,
+            workspace_root,
+            *,
+            developer_instructions="",
+            tools_enabled=True,
+            **_kw,
+        ):
             captured["workspace_root"] = workspace_root
             captured["developer_instructions"] = developer_instructions
+            captured["tools_enabled"] = tools_enabled
             captured["disconnected"] = False
             captured["deleted"] = False
 
@@ -277,7 +285,9 @@ async def test_run_oneshot_dispatches_to_opencode(monkeypatch, tmp_path) -> None
     assert captured["request"].model == "anthropic/claude-haiku-4.5"
     # A one-shot must not be able to write.
     assert captured["request"].mode == "plan"
-    assert captured["workspace_root"] == tmp_path.resolve()
+    assert captured["workspace_root"] != tmp_path.resolve()
+    assert not captured["workspace_root"].exists()
+    assert captured["tools_enabled"] is False
 
 
 @pytest.mark.asyncio

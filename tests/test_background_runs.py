@@ -188,16 +188,29 @@ def test_env_strips_server_secrets_from_the_inherited_environment(
 ) -> None:
     monkeypatch.setenv("CIAO_MCP_SESSION_TOKEN", "super-secret")
     monkeypatch.setenv("PWA_AUTH_TOKEN", "also-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "provider-secret")
+    monkeypatch.setenv("NOTION_TOKEN", "mcp-secret")
+    monkeypatch.setenv("HARMLESS_TOKENISH_VALUE", "kept")
     monkeypatch.setenv("HARMLESS_VAR", "kept")
 
     env = build_env({"EXTRA": "1"}, run_id="bg-7", workspace="work")
 
     assert "CIAO_MCP_SESSION_TOKEN" not in env
     assert "PWA_AUTH_TOKEN" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "NOTION_TOKEN" not in env
+    assert env["HARMLESS_TOKENISH_VALUE"] == "kept"
     assert env["HARMLESS_VAR"] == "kept"
     assert env["EXTRA"] == "1"
     assert env["CIAO_BACKGROUND_RUN_ID"] == "bg-7"
     assert env["CIAO_ACTIVE_WORKSPACE"] == "work"
+
+
+def test_env_rejects_provider_and_secret_overrides() -> None:
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "NOTION_TOKEN", "GITHUB_TOKEN"):
+        with pytest.raises(BackgroundRunError) as excinfo:
+            build_env({key: "secret"}, run_id="bg-secret", workspace="work")
+        assert excinfo.value.code == "env_forbidden"
 
 
 def test_timeout_is_clamped_not_unbounded() -> None:

@@ -436,9 +436,18 @@ def control_plane_permission_rules() -> list[dict[str, str]]:
     ]
 
 
-def mode_settings(mode: BridgeMode) -> tuple[str, list[dict[str, str]]]:
-    """Map a Ciaobot mode onto an opencode (agent, permission ruleset)."""
+def mode_settings(
+    mode: BridgeMode, *, tools_enabled: bool = True
+) -> tuple[str, list[dict[str, str]]]:
+    """Map a Ciaobot mode onto an opencode (agent, permission ruleset).
+
+    One-shot routines set ``tools_enabled=False``. A deny-all session rule is
+    the opencode API's tool-disable mechanism: unlike plan mode it does not
+    allow read/glob/grep/list to reach the provider at all.
+    """
     key = mode if mode in _MODE_AGENTS else "normal"
+    if not tools_enabled:
+        return _MODE_AGENTS[key], _rules(("*", "deny"))
     rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
     # Plan mode is excluded: its contract is "propose, don't act", and an allow
     # rule would punch a hole in it — same carve-out as the Claude provider.
@@ -618,6 +627,7 @@ class OpencodeProvider(BaseSDKProvider):
         *,
         config: object | None = None,
         developer_instructions: str | None = None,
+        tools_enabled: bool = True,
     ) -> None:
         super().__init__(workspace_root, config=config)
         # ``None`` means a normal Ciaobot chat and receives the compact shared
@@ -626,6 +636,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._developer_instructions = (
             None if developer_instructions is None else developer_instructions.strip()
         )
+        self._tools_enabled = tools_enabled
         self._process: asyncio.subprocess.Process | None = None
         # Reads the server's stderr for its whole life; see
         # `_start_stderr_reader` for why leaving the pipe unread is not an option.
@@ -665,6 +676,10 @@ class OpencodeProvider(BaseSDKProvider):
         # pin opencode without naming a model, in which case the request carries
         # none and only the assistant message says what was used.
         self._effective_model: str = ""
+        # Populated before session creation so a bare tier alias is resolved
+        # before the session payload is built, while the prompt reuses the
+        # exact same provider/model pair.
+        self._turn_model: tuple[str, str] = ("", "")
 
     def _reset_turn_state(self) -> None:
         self._emitted.clear()
@@ -991,8 +1006,15 @@ class OpencodeProvider(BaseSDKProvider):
         """
         client = self._client
         assert client is not None
-        agent, permission = mode_settings(request.mode)
+        agent, permission = mode_settings(
+            request.mode, tools_enabled=self._tools_enabled
+        )
         provider_id, model_id = split_model(request.model)
+        if model_id and not provider_id:
+            self._turn_model = await self._resolve_model(client, request.model)
+            provider_id, model_id = self._turn_model
+        else:
+            self._turn_model = (provider_id, model_id)
 
         resume = (request.resume_session or "").strip()
         if resume:
@@ -1587,12 +1609,15 @@ class OpencodeProvider(BaseSDKProvider):
         # Keep the live mode aligned with this turn before any setup work so a
         # resumed session cannot consult the previous turn's mode (#291).
         self._remember_settings(request)
+        self._turn_model = split_model(request.model)
         session_id = await self._ensure_session(request)
         self._reset_turn_state()
         register_handle(OpencodeActiveHandle(self, session_id))
 
-        agent, _permission = mode_settings(request.mode)
-        provider_id, model_id = await self._resolve_model(client, request.model)
+        agent, _permission = mode_settings(
+            request.mode, tools_enabled=self._tools_enabled
+        )
+        provider_id, model_id = self._turn_model
         body: dict[str, Any] = {"agent": agent, "parts": self._prompt_parts(request)}
         if model_id:
             body["model"] = {"providerID": provider_id, "modelID": model_id}
