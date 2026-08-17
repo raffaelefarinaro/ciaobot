@@ -621,6 +621,31 @@ def test_gws_profile_add_rejects_an_unusable_name(tmp_path, monkeypatch):
     assert resp.status_code == 400
 
 
+def test_gws_profile_add_rejects_gws_service_names(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    client, _config, _pcm = _client(tmp_path)
+
+    service_names = (
+        "Gmail",
+        "calendar",
+        "Drive",
+        "docs",
+        "sheets",
+        "slides",
+        "tasks",
+        "contacts",
+        "forms",
+        "auth",
+    )
+    for name in service_names:
+        resp = client.post("/api/integrations/gws/profiles/add", json={"name": name})
+
+        assert resp.status_code == 400
+        assert "reserved" in resp.json()["error"]
+
+
 def test_gws_install_when_already_present_is_noop(tmp_path, monkeypatch):
     from ciao.web import routes_api
 

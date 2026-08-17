@@ -70,6 +70,24 @@ _PERSONAL_SCOPES = (
 )
 _WORK_SCOPES = _PERSONAL_SCOPES
 
+# These names are positional commands to ``gws``.  Profile slugs using one of
+# them would be indistinguishable from the service argument in
+# ``scripts/gws-profile.sh <profile> <service> ...``.
+GWS_SERVICE_NAMES = frozenset(
+    {
+        "gmail",
+        "calendar",
+        "drive",
+        "docs",
+        "sheets",
+        "slides",
+        "tasks",
+        "contacts",
+        "forms",
+        "auth",
+    }
+)
+
 _TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 _AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/auth"
 
