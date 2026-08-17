@@ -2578,6 +2578,30 @@ describe('workspace and chat transitions', () => {
   })
 })
 
+describe('gws health toast', () => {
+  test('surfaces an error toast whose Fix action routes to Settings → Workspaces', () => {
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'gws_health',
+        profile: 'personal',
+        token_valid: false,
+        token_error: 'expired',
+        title: 'Google Workspace login needs attention',
+        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Workspaces.',
+      }),
+    })
+
+    const toast = store.toasts.find(t => t.variant === 'error' && t.title.includes('Google Workspace'))
+    expect(toast).toBeTruthy()
+    expect(toast?.fixRoute).toBe('/settings/workspaces')
+    expect(toast?.fixLabel).toBe('Fix in Settings')
+    expect(toast?.chat_id).toBe('')
+  })
+})
+
 describe('conversation forks', () => {
   test('creates a fork with the selected history and switches to it', async () => {
     const store = useProjectStore()

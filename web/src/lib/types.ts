@@ -410,6 +410,11 @@ export interface InAppToast {
   variant?: 'info' | 'error'
   // Raw error log used to seed a fix chat when variant === 'error'.
   errorText?: string
+  // When set on an error toast, the Fix action navigates to this route instead
+  // of opening a fix chat — for errors whose remediation lives in Settings.
+  fixRoute?: string
+  // Button label for the Fix action when fixRoute is set.
+  fixLabel?: string
 }
 
 // A pending approval surfaced to the user by Auto mode's classifier. One
