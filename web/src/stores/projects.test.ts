@@ -2337,10 +2337,12 @@ describe('workspace and chat transitions', () => {
     // Shell is ready even though the history is still in flight.
     expect(store.bootstrapped).toBe(true)
     expect(store.activeChatId).toBe('c1')
+    expect(store.messageHistoryLoading).toBe(true)
     await messagesRequested
     expect(store.messages['c1'] ?? []).toEqual([])
 
     releaseMessages([])
+    await vi.waitFor(() => expect(store.messageHistoryLoading).toBe(false))
     window.history.replaceState({}, '', '/')
   })
 
