@@ -76,10 +76,16 @@
               v-for="nb in mm.neighborsOf(mm.selectedNode.id)"
               :key="nb.id"
               class="mm-link-item"
-              @click="focusNode(nb.id)"
             >
               <span class="dot" :style="{ background: colorForNode(nb) }" />
-              <span class="label">{{ nb.title }}</span>
+              <span class="label mm-link-label" @click="openNoteFile(nb.id)">{{ nb.title }}</span>
+              <button
+                type="button"
+                class="mm-link-focus"
+                title="Locate in graph"
+                aria-label="Locate in graph"
+                @click.stop="focusNode(nb.id)"
+              >⌖</button>
             </div>
           </div>
         </template>
@@ -92,12 +98,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
 import { useProjectStore } from '../stores/projects'
+import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, type MemoryGraphNode } from '../stores/memoryMap'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const store = useProjectStore()
 const mm = useMemoryMapStore()
+const fileViewer = useFileViewerStore()
 
 function colorForNode(n: MemoryGraphNode): string {
   return categoryColorFor(catKeyFor(n))
@@ -117,6 +125,9 @@ watch(() => store.activeWorkspace, () => resetCamera())
 function focusNode(id: string) {
   mm.requestFocus(id)
 }
+function openNoteFile(id: string) {
+  void fileViewer.open(id)
+}
 watch(() => mm.focusSignal.seq, () => {
   const id = mm.focusSignal.id
   if (!id) return
@@ -133,6 +144,15 @@ const canvasWrap = ref<HTMLDivElement | null>(null)
 let ctx: CanvasRenderingContext2D | null = null
 let rafId = 0
 let ro: ResizeObserver | null = null
+// The physics step never reaches exactly zero velocity, so without a
+// convergence check the layout would redraw forever — a constant, faint
+// jitter that reads as "the app keeps refreshing" once the graph has
+// visibly settled. Stop scheduling frames once every node's speed has been
+// below the threshold for SETTLE_FRAMES_REQUIRED in a row, and only wake it
+// again on something that can actually move nodes.
+const SETTLE_VELOCITY_EPS = 0.05
+const SETTLE_FRAMES_REQUIRED = 30
+let calmFrames = 0
 let W = 0
 let H = 0
 const camera = reactive({ x: 0, y: 0, scale: 1 })
@@ -186,12 +206,22 @@ function attachCanvas() {
   ro = new ResizeObserver(() => resizeCanvas())
   ro.observe(canvasWrap.value)
   resizeCanvas()
+  // Every (re)attachment is a fresh graph (initial load, or a workspace
+  // switch since the canvas is torn down and rebuilt for each) — warm up
+  // before the first paint, then run the brief settle animation.
+  warmupSimulation(80)
+  wakeSimulation()
 }
+// A category/search filter change can bring previously-hidden nodes back
+// into the simulation; wake it so they settle instead of sitting inert at
+// whatever position they last had.
+watch(() => mm.visibleIds, () => wakeSimulation())
 watch(canvasEl, (el) => {
   if (el) nextTick(() => attachCanvas())
 })
 
-function stepSimulation() {
+/** Advances the layout by one step; returns the fastest node's speed this step. */
+function stepSimulation(): number {
   const vis = mm.visibleNodes
   const REPEL = 2600
   const SPRING = 0.02
@@ -236,6 +266,7 @@ function stepSimulation() {
     if (fa) { fa.fx += fx; fa.fy += fy }
     if (fb) { fb.fx -= fx; fb.fy -= fy }
   })
+  let maxSpeed = 0
   vis.forEach(n => {
     const f = forces.get(n.id)
     if (!f) return
@@ -243,7 +274,22 @@ function stepSimulation() {
     n.vy = (n.vy + f.fy) * DAMP
     n.x += n.vx
     n.y += n.vy
+    const speed = Math.hypot(n.vx, n.vy)
+    if (speed > maxSpeed) maxSpeed = speed
   })
+  return maxSpeed
+}
+
+/** Run the layout forward without painting, so the graph starts near its
+ * settled shape instead of visibly exploding outward from random starting
+ * positions — noisy and hard to read with a large vault. */
+function warmupSimulation(steps: number) {
+  for (let i = 0; i < steps; i++) stepSimulation()
+}
+
+function wakeSimulation() {
+  calmFrames = 0
+  if (!rafId) rafId = requestAnimationFrame(tick)
 }
 
 function draw() {
@@ -303,8 +349,19 @@ function draw() {
 }
 
 function tick() {
-  stepSimulation()
+  const maxSpeed = stepSimulation()
   draw()
+  if (maxSpeed < SETTLE_VELOCITY_EPS) {
+    calmFrames += 1
+    if (calmFrames >= SETTLE_FRAMES_REQUIRED) {
+      // Layout is at rest: stop animating rather than redrawing an
+      // unchanging frame forever. wakeSimulation() resumes it.
+      rafId = 0
+      return
+    }
+  } else {
+    calmFrames = 0
+  }
   rafId = requestAnimationFrame(tick)
 }
 
@@ -334,6 +391,7 @@ function onMouseDown(e: MouseEvent) {
   if (hit) {
     dragging = hit
     ;(dragging as any)._shiftIntent = shiftKey
+    wakeSimulation()
   } else {
     panStart = { x: e.clientX, y: e.clientY, cx: camera.x, cy: camera.y }
   }
@@ -395,7 +453,6 @@ onMounted(async () => {
   resetCamera()
   await nextTick()
   attachCanvas()
-  rafId = requestAnimationFrame(tick)
 })
 onBeforeUnmount(() => {
   if (rafId) cancelAnimationFrame(rafId)
@@ -442,11 +499,18 @@ onBeforeUnmount(() => {
 .mm-link-list { display: flex; flex-direction: column; gap: 2px; }
 .mm-link-item {
   display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
-  cursor: pointer; font-size: var(--text-sm); color: var(--fg);
+  font-size: var(--text-sm); color: var(--fg);
 }
 .mm-link-item:hover { background: var(--bg3); }
 .mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
+.mm-link-label { cursor: pointer; flex: 1; }
+.mm-link-label:hover { text-decoration: underline; }
+.mm-link-focus {
+  background: none; border: none; color: var(--fg3); cursor: pointer; padding: 2px 4px;
+  border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: 1; flex: none;
+}
+.mm-link-focus:hover { background: var(--bg2); color: var(--fg); }
 
 .mm-canvas-wrap { position: relative; overflow: hidden; background: var(--bg); }
 .mm-canvas-wrap canvas { display: block; width: 100%; height: 100%; cursor: grab; }

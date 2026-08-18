@@ -2551,7 +2551,17 @@ async function confirmDeleteChat(chatId: string) {
   margin: var(--space-4) 0 var(--space-2);
 }
 .mm-sidebar-scroll h3:first-child { margin-top: 0; }
-.mm-row-between { display: flex; align-items: baseline; justify-content: space-between; }
+/* A heading inside this row (e.g. "Categories" + reset) is a flex item, so
+   its own margin-top shifts it within the row instead of gapping the row
+   from whatever precedes it. Move that spacing onto the row itself and
+   zero the heading's own margin so the two elements share one baseline. */
+.mm-row-between {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: var(--space-4);
+}
+.mm-row-between h3 { margin: 0; }
 .mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
 .mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
 
