@@ -57,6 +57,24 @@ async def test_native_title_opencode_missing(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_title_opencode_placeholder_is_not_final(monkeypatch) -> None:
+    """opencode's default 'New session - <timestamp>' must not be accepted.
+
+    The provider seeds the session with that placeholder and only later writes
+    the generated title; accepting it would leave the sidebar stuck on it.
+    """
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
+
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": "New session - 2026-08-18T12:20:10.198Z"}, "messages": []}
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    assert await manager._native_chat_title(manager._chats["chat-1"]) is None
+
+
+@pytest.mark.asyncio
 async def test_native_title_codex(monkeypatch) -> None:
     from ciao.web import project_chats as pc
 

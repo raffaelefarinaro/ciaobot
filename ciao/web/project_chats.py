@@ -632,6 +632,23 @@ def _cap_reentry_summary(text: str) -> str:
         return result
     return result[: _REENTRY_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
 
+_PLACEHOLDER_TITLE_RE = re.compile(r"^New session\b", re.IGNORECASE)
+
+
+def _real_title(title: str) -> str | None:
+    """Return *title* if it is a real provider title, else None.
+
+    Providers seed a session with a placeholder default (opencode uses
+    ``New session - <timestamp>``) and only later write the generated title.
+    Treating the placeholder as a real title would let the auto-title poll
+    stop early and leave the sidebar stuck on it, so it is filtered out here.
+    """
+    title = (title or "").strip()
+    if not title or _PLACEHOLDER_TITLE_RE.match(title):
+        return None
+    return title
+
+
 def _fallback_title(user_text: str) -> str | None:
     """Deterministic fallback title derived from the user's first message.
 
@@ -7657,7 +7674,13 @@ class ProjectChatManager:
         return None
 
     async def _native_chat_title(self, chat: ChatInfo) -> str | None:
-        """Read the provider's own session title for a chat."""
+        """Read the provider's own session title for a chat.
+
+        Returns None when the provider has not yet produced a real title —
+        including its placeholder default (e.g. opencode's ``New session -
+        <timestamp>``) — so the caller keeps polling until the generated
+        title lands instead of accepting the placeholder as final.
+        """
         provider = getattr(chat, "provider", "claude")
         workspace = self._config.workspace_root
         try:
@@ -7665,20 +7688,18 @@ class ProjectChatManager:
                 thread = await OpencodeProvider.read_thread(workspace, chat.session_id)
                 info = thread.get("info") if isinstance(thread, dict) else None
                 title = str(info.get("title") or "") if isinstance(info, dict) else ""
-                return title.strip() or None
+                return _real_title(title)
             if provider == "codex":
                 thread = await CodexProvider.read_thread(workspace, chat.session_id)
                 if isinstance(thread, dict):
-                    title = str(thread.get("name") or "").strip()
-                    if title:
-                        return title
+                    return _real_title(str(thread.get("name") or ""))
                 return None
             # Claude Code: custom title wins, else the AI-generated title.
             info = get_session_info(chat.session_id, directory=str(workspace))
             if info is None:
                 return None
             title = (info.custom_title or "").strip() or (info.summary or "").strip()
-            return title or None
+            return _real_title(title)
         except Exception:
             logger.info("Native title read failed for %s", chat.chat_id, exc_info=True)
             return None
