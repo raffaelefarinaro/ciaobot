@@ -395,14 +395,22 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Middleware(StandbyProxyMiddleware),
     ]
 
-    lifespan = None
-    if mcp_service is not None:
-        @asynccontextmanager
-        async def _mcp_lifespan(_app):
-            async with mcp_service.lifespan():
-                yield
+    @asynccontextmanager
+    async def _lifespan(_app):
+        from ciao.node_proxy import close_shared_client
 
-        lifespan = _mcp_lifespan
+        try:
+            if mcp_service is not None:
+                async with mcp_service.lifespan():
+                    yield
+            else:
+                yield
+        finally:
+            # Release the client-mode keep-alive pool. A no-op on a host node,
+            # which never opens it.
+            await close_shared_client()
+
+    lifespan = _lifespan
 
     app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
     app.state.serializer = serializer
