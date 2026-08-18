@@ -189,6 +189,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
+import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
 import MemoryMapView from './MemoryMapView.vue'
@@ -410,6 +411,7 @@ function onFaceLeave() {
 
 const faceSrc = computed(() => (speechGreeting.value ? '/face_scared.png' : '/face.png'))
 const taskStore = useTaskStore()
+const memoryMapStore = useMemoryMapStore()
 const route = useRoute()
 const router = useRouter()
 const projectIdParam = computed(() => (route.params.projectId as string) || '')
@@ -749,6 +751,14 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     // Project routes stay chat-first on purpose: Esc closing the chat you opened
     // through a project is long-standing, tested behaviour, and a project page is
     // one press further from home either way.
+    // Memory Map's own detail panel is a mode within the page, not a
+    // separate view — the first Esc closes it (matching the panel's own
+    // close button) and only navigates home once nothing is selected.
+    if (viewMode.value === 'memory' && memoryMapStore.selectedId) {
+      e.preventDefault()
+      memoryMapStore.selectNode(null)
+      return
+    }
     if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory') {
       e.preventDefault()
       void router.push('/')

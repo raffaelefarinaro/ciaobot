@@ -9,7 +9,7 @@
       </template>
     </PaneHeader>
 
-    <div class="mm-body">
+    <div class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode }">
       <div v-if="mm.loading" class="mm-empty">Loading vault graph…</div>
       <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
       <div v-else-if="view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
@@ -50,45 +50,47 @@
         </table>
       </div>
 
-      <aside class="mm-detail">
-        <div v-if="!mm.selectedNode" class="mm-empty-detail">
-          Select a note to see its tags, description, and what it links to.
+      <aside v-if="mm.selectedNode" class="mm-detail">
+        <button
+          type="button"
+          class="mm-detail-close"
+          title="Close (Esc)"
+          aria-label="Close note detail"
+          @click="mm.selectNode(null)"
+        >×</button>
+        <div class="mm-detail-type">{{ categoryLabelFor(mm.selectedNode) }}</div>
+        <div class="mm-detail-title">{{ mm.selectedNode.title }}</div>
+        <div v-if="mm.selectedNode.description" class="mm-detail-desc">{{ mm.selectedNode.description }}</div>
+        <div class="mm-detail-path">{{ mm.selectedNode.id }}</div>
+
+        <div v-if="mm.selectedNode.tags.length" class="mm-detail-section">
+          <h4>Tags</h4>
+          <span v-for="t in mm.selectedNode.tags" :key="t" class="pill">{{ t }}</span>
         </div>
-        <template v-else>
-          <div class="mm-detail-type">{{ categoryLabelFor(mm.selectedNode) }}</div>
-          <div class="mm-detail-title">{{ mm.selectedNode.title }}</div>
-          <div v-if="mm.selectedNode.description" class="mm-detail-desc">{{ mm.selectedNode.description }}</div>
-          <div class="mm-detail-path">{{ mm.selectedNode.id }}</div>
+        <div v-if="mm.selectedNode.aliases.length" class="mm-detail-section">
+          <h4>Aliases</h4>
+          <span v-for="a in mm.selectedNode.aliases" :key="a" class="pill">{{ a }}</span>
+        </div>
 
-          <div v-if="mm.selectedNode.tags.length" class="mm-detail-section">
-            <h4>Tags</h4>
-            <span v-for="t in mm.selectedNode.tags" :key="t" class="pill">{{ t }}</span>
+        <div class="mm-detail-section">
+          <h4>Linked notes ({{ mm.neighborsOf(mm.selectedNode.id).length }})</h4>
+          <div v-if="!mm.neighborsOf(mm.selectedNode.id).length" class="mm-hint">No links found — orphaned note.</div>
+          <div
+            v-for="nb in mm.neighborsOf(mm.selectedNode.id)"
+            :key="nb.id"
+            class="mm-link-item"
+          >
+            <span class="dot" :style="{ background: colorForNode(nb) }" />
+            <span class="label mm-link-label" @click="openNoteFile(nb.id)">{{ nb.title }}</span>
+            <button
+              type="button"
+              class="mm-link-focus"
+              title="Locate in graph"
+              aria-label="Locate in graph"
+              @click.stop="focusNode(nb.id)"
+            >⌖</button>
           </div>
-          <div v-if="mm.selectedNode.aliases.length" class="mm-detail-section">
-            <h4>Aliases</h4>
-            <span v-for="a in mm.selectedNode.aliases" :key="a" class="pill">{{ a }}</span>
-          </div>
-
-          <div class="mm-detail-section">
-            <h4>Linked notes ({{ mm.neighborsOf(mm.selectedNode.id).length }})</h4>
-            <div v-if="!mm.neighborsOf(mm.selectedNode.id).length" class="mm-hint">No links found — orphaned note.</div>
-            <div
-              v-for="nb in mm.neighborsOf(mm.selectedNode.id)"
-              :key="nb.id"
-              class="mm-link-item"
-            >
-              <span class="dot" :style="{ background: colorForNode(nb) }" />
-              <span class="label mm-link-label" @click="openNoteFile(nb.id)">{{ nb.title }}</span>
-              <button
-                type="button"
-                class="mm-link-focus"
-                title="Locate in graph"
-                aria-label="Locate in graph"
-                @click.stop="focusNode(nb.id)"
-              >⌖</button>
-            </div>
-          </div>
-        </template>
+        </div>
       </aside>
     </div>
   </div>
@@ -126,6 +128,10 @@ function focusNode(id: string) {
   mm.requestFocus(id)
 }
 function openNoteFile(id: string) {
+  // "Navigating" to a linked note from the detail panel should feel like
+  // clicking it in the graph: the map's highlight and the panel's own
+  // content follow, on top of opening the file.
+  mm.requestFocus(id)
   void fileViewer.open(id)
 }
 watch(() => mm.focusSignal.seq, () => {
@@ -144,15 +150,47 @@ const canvasWrap = ref<HTMLDivElement | null>(null)
 let ctx: CanvasRenderingContext2D | null = null
 let rafId = 0
 let ro: ResizeObserver | null = null
-// The physics step never reaches exactly zero velocity, so without a
-// convergence check the layout would redraw forever — a constant, faint
-// jitter that reads as "the app keeps refreshing" once the graph has
+// The physics step never reaches exactly zero velocity on its own, so
+// without a convergence check the layout would redraw forever — a constant,
+// faint jitter that reads as "the app keeps refreshing" once the graph has
 // visibly settled. Stop scheduling frames once every node's speed has been
 // below the threshold for SETTLE_FRAMES_REQUIRED in a row, and only wake it
 // again on something that can actually move nodes.
+//
+// That alone isn't enough at real vault scale, though: a hub note with 60+
+// links asks 60+ neighbors to all sit ~SPRING_LEN from it while also mutually
+// repelling each other, which has no configuration where every pairwise force
+// is simultaneously satisfied — a few nodes keep oscillating indefinitely
+// instead of settling under naive damping (confirmed: a 5-note test vault
+// converges fine, a 318-note one with such a hub does not). A cooling
+// schedule — the same technique classic force-directed layouts
+// (Fruchterman-Reingold) use — bounds convergence time regardless: force
+// output is scaled by a "temperature" that ramps from 1 to 0 over a fixed
+// step budget, so velocity is driven to exactly zero by the time the budget
+// elapses no matter how the layout was oscillating. Velocity clamping
+// (MAX_SPEED) additionally stops any single step from overshooting wildly,
+// which is what let close-packed nodes near a hub swing further apart each
+// step instead of settling closer.
 const SETTLE_VELOCITY_EPS = 0.05
 const SETTLE_FRAMES_REQUIRED = 30
+const MAX_SPEED = 40
 let calmFrames = 0
+// The *visible* cooling window is a wall-clock budget, not a frame count: a
+// frame-count budget converged in ~15s on a real 300-note vault instead of
+// the intended "a few seconds", because each step's O(n^2) repulsion cost
+// (and this environment's software canvas) meant far fewer frames actually
+// ran per second than assumed. Tying it to real elapsed time instead makes
+// "how long the settle animation visibly runs" independent of frame rate,
+// node count, or how fast any given machine/browser executes each step.
+const COOLING_DURATION_MS = 2500
+let coolingStartedAt = 0
+// The one-time synchronous warmup (before first paint, so it costs load
+// time rather than animation time) still scales with node count: a denser,
+// hub-heavy graph needs more iterations to work out a stable configuration
+// before the user ever sees it.
+function warmupStepsFor(nodeCount: number): number {
+  return Math.max(80, Math.min(400, nodeCount * 3))
+}
 let W = 0
 let H = 0
 const camera = reactive({ x: 0, y: 0, scale: 1 })
@@ -171,9 +209,14 @@ function resetCamera() {
   camera.x = 0
   camera.y = 0
   camera.scale = 0.55
+  // draw() only runs inside the RAF loop; without this, resetting the
+  // camera while the graph is at rest changed the reactive state but the
+  // canvas kept showing the old view until something else woke it up.
+  wakeSimulation()
 }
 function zoom(factor: number) {
   camera.scale = Math.max(0.15, Math.min(3, camera.scale * factor))
+  wakeSimulation()
 }
 function worldToScreen(x: number, y: number): [number, number] {
   return [x * camera.scale + W / 2 + camera.x, y * camera.scale + H / 2 + camera.y]
@@ -209,19 +252,27 @@ function attachCanvas() {
   // Every (re)attachment is a fresh graph (initial load, or a workspace
   // switch since the canvas is torn down and rebuilt for each) — warm up
   // before the first paint, then run the brief settle animation.
-  warmupSimulation(80)
+  warmupSimulation(warmupStepsFor(mm.visibleNodes.length))
   wakeSimulation()
 }
 // A category/search filter change can bring previously-hidden nodes back
 // into the simulation; wake it so they settle instead of sitting inert at
 // whatever position they last had.
 watch(() => mm.visibleIds, () => wakeSimulation())
+// draw() only ever runs inside the RAF loop, which stops once the layout is
+// calm (see tick()) — so changing which node is selected/on-path while the
+// graph is at rest updated the reactive state but never repainted, and the
+// canvas kept showing whichever node was highlighted last. A selection
+// change doesn't need physics, just one more frame; waking the existing loop
+// is simpler than adding a second, physics-free redraw path.
+watch(() => [mm.selectedId, mm.pathStart, mm.pathEnd], () => wakeSimulation())
 watch(canvasEl, (el) => {
   if (el) nextTick(() => attachCanvas())
 })
 
 /** Advances the layout by one step; returns the fastest node's speed this step. */
-function stepSimulation(): number {
+/** @param cooling 1 = full force, ramping to 0 forces velocity to zero regardless of residual imbalance. */
+function stepSimulation(cooling = 1): number {
   const vis = mm.visibleNodes
   const REPEL = 2600
   const SPRING = 0.02
@@ -270,8 +321,14 @@ function stepSimulation(): number {
   vis.forEach(n => {
     const f = forces.get(n.id)
     if (!f) return
-    n.vx = (n.vx + f.fx) * DAMP
-    n.vy = (n.vy + f.fy) * DAMP
+    n.vx = (n.vx + f.fx) * DAMP * cooling
+    n.vy = (n.vy + f.fy) * DAMP * cooling
+    const rawSpeed = Math.hypot(n.vx, n.vy)
+    if (rawSpeed > MAX_SPEED) {
+      const scale = MAX_SPEED / rawSpeed
+      n.vx *= scale
+      n.vy *= scale
+    }
     n.x += n.vx
     n.y += n.vy
     const speed = Math.hypot(n.vx, n.vy)
@@ -282,13 +339,17 @@ function stepSimulation(): number {
 
 /** Run the layout forward without painting, so the graph starts near its
  * settled shape instead of visibly exploding outward from random starting
- * positions — noisy and hard to read with a large vault. */
+ * positions — noisy and hard to read with a large vault. Step count scales
+ * with node count (see warmupStepsFor) so a dense, hub-heavy vault gets
+ * proportionally more (still synchronous, pre-paint) time to work out a
+ * stable configuration instead of ending warmup still mid-oscillation. */
 function warmupSimulation(steps: number) {
-  for (let i = 0; i < steps; i++) stepSimulation()
+  for (let i = 0; i < steps; i++) stepSimulation(Math.max(0, 1 - i / steps))
 }
 
 function wakeSimulation() {
   calmFrames = 0
+  coolingStartedAt = performance.now()
   if (!rafId) rafId = requestAnimationFrame(tick)
 }
 
@@ -349,7 +410,15 @@ function draw() {
 }
 
 function tick() {
-  const maxSpeed = stepSimulation()
+  // cooling ramps 1 -> 0 over COOLING_DURATION_MS of real elapsed time; once
+  // past that budget it stays at 0, which forces velocity to exactly zero
+  // every subsequent step (see stepSimulation) — a hard, wall-clock bound on
+  // how long this can possibly keep animating, regardless of node count,
+  // frame rate, or whether the layout ever reaches a true low-energy
+  // equilibrium on its own.
+  const elapsed = performance.now() - coolingStartedAt
+  const cooling = Math.max(0, 1 - elapsed / COOLING_DURATION_MS)
+  const maxSpeed = stepSimulation(cooling)
   draw()
   if (maxSpeed < SETTLE_VELOCITY_EPS) {
     calmFrames += 1
@@ -377,30 +446,40 @@ function hitTest(wx: number, wy: number): MemoryGraphNode | null {
   return null
 }
 
+// A plain click has to survive a few pixels of incidental pointer jitter
+// between mousedown and mouseup, or it reads as a drag every time — this was
+// the "it keeps thinking I want to move it" complaint. Nothing (node move,
+// pan) actually happens until the pointer clears this threshold; a release
+// before that is unambiguously a click.
+const CLICK_DRAG_THRESHOLD_PX = 4
+let hitNode: MemoryGraphNode | null = null
 let dragging: MemoryGraphNode | null = null
 let panStart: { x: number; y: number; cx: number; cy: number } | null = null
+let downPos: { x: number; y: number } | null = null
 let dragged = false
 
 function onMouseDown(e: MouseEvent) {
   if (!canvasEl.value) return
   const rect = canvasEl.value.getBoundingClientRect()
   const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
-  const hit = hitTest(wx, wy)
+  hitNode = hitTest(wx, wy)
   dragged = false
-  const shiftKey = e.shiftKey
-  if (hit) {
-    dragging = hit
-    ;(dragging as any)._shiftIntent = shiftKey
-    wakeSimulation()
-  } else {
-    panStart = { x: e.clientX, y: e.clientY, cx: camera.x, cy: camera.y }
-  }
+  downPos = { x: e.clientX, y: e.clientY }
+  if (hitNode) (hitNode as any)._shiftIntent = e.shiftKey
+  else panStart = { x: e.clientX, y: e.clientY, cx: camera.x, cy: camera.y }
   window.addEventListener('mousemove', onMouseMove)
   window.addEventListener('mouseup', onMouseUp)
 }
 function onMouseMove(e: MouseEvent) {
-  if (dragging) {
+  if (!downPos) return
+  if (!dragged) {
+    const dx = e.clientX - downPos.x
+    const dy = e.clientY - downPos.y
+    if (Math.hypot(dx, dy) < CLICK_DRAG_THRESHOLD_PX) return
     dragged = true
+    if (hitNode) { dragging = hitNode; wakeSimulation() }
+  }
+  if (dragging) {
     if (!canvasEl.value) return
     const rect = canvasEl.value.getBoundingClientRect()
     const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
@@ -409,16 +488,17 @@ function onMouseMove(e: MouseEvent) {
     dragging.vx = 0
     dragging.vy = 0
   } else if (panStart) {
-    dragged = true
     camera.x = panStart.cx + (e.clientX - panStart.x) * dpr
     camera.y = panStart.cy + (e.clientY - panStart.y) * dpr
   }
 }
 function onMouseUp() {
-  if (dragging && !dragged) mm.handleNodeClick(dragging.id, !!(dragging as any)._shiftIntent)
-  else if (!dragging && !dragged) mm.selectNode(null)
+  if (hitNode && !dragged) mm.handleNodeClick(hitNode.id, !!(hitNode as any)._shiftIntent)
+  else if (!hitNode && !dragged) mm.selectNode(null)
+  hitNode = null
   dragging = null
   panStart = null
+  downPos = null
   window.removeEventListener('mousemove', onMouseMove)
   window.removeEventListener('mouseup', onMouseUp)
 }
@@ -473,19 +553,40 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   display: grid;
+  /* Same split as the chat's pinned-file panel: hidden takes no space at
+     all, so the graph gets the full width until a note is selected. */
+  grid-template-columns: 1fr;
+}
+.mm-body.mm-body--detail-open {
   grid-template-columns: 1fr 280px;
 }
 @media (max-width: 900px) {
-  .mm-body { grid-template-columns: 1fr; }
+  .mm-body.mm-body--detail-open { grid-template-columns: 1fr; }
   .mm-detail { display: none; }
 }
 
 .mm-detail {
+  position: relative;
   overflow-y: auto;
   padding: var(--space-3);
   background: var(--bg2);
   border-left: 1px solid var(--border);
 }
+.mm-detail-close {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  background: transparent;
+  border: none;
+  color: var(--fg3);
+  font-size: 18px;
+  line-height: 1;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.mm-detail-close:hover { color: var(--fg); background: var(--bg3); }
 
 .mm-detail h4 {
   font-size: var(--text-xs);
@@ -520,7 +621,7 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--bg) 70%, transparent); padding: 4px 8px; border-radius: var(--radius-sm);
 }
 
-.mm-empty, .mm-empty-detail { color: var(--fg3); font-size: var(--text-sm); padding: var(--space-5); text-align: center; }
+.mm-empty { color: var(--fg3); font-size: var(--text-sm); padding: var(--space-5); text-align: center; }
 
 .mm-list-wrap { overflow: auto; padding: var(--space-4); }
 .mm-list-wrap table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
