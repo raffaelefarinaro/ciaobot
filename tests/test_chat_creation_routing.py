@@ -60,16 +60,28 @@ def test_new_chat_uses_the_requested_model(tmp_path: Path) -> None:
     assert chat.model == "gpt-5.6-sol"
 
 
-def test_new_chat_keeps_alias_without_a_default(tmp_path: Path) -> None:
+def test_new_chat_resolves_foreign_alias_without_a_default(tmp_path: Path) -> None:
+    # "sonnet" is Claude Code's own vocabulary; Codex's real backend rejects
+    # it outright. With no operator default configured either, the request
+    # resolves to "" (the provider picks its own), not the foreign alias.
     manager = _make_manager(tmp_path, _config(tmp_path))
     project = manager.create_project("No default", workspace="work")
 
     chat = manager.create_chat(project.project_id, model="sonnet", provider="codex")
-    assert chat.model == "sonnet"
+    assert chat.model == ""
 
     # Claude has no operator-settable default; the alias passes through.
     chat = manager.create_chat(project.project_id, model="opus", provider="claude")
     assert chat.model == "opus"
+
+
+def test_new_chat_resolves_foreign_alias_to_the_operator_default(tmp_path: Path) -> None:
+    config = _config(tmp_path, opencode=OpencodeSettings(default_model="anthropic/claude-sonnet-4.5"))
+    manager = _make_manager(tmp_path, config)
+    project = manager.create_project("Has default", workspace="work")
+
+    chat = manager.create_chat(project.project_id, model="haiku", provider="opencode")
+    assert chat.model == "anthropic/claude-sonnet-4.5"
 
 
 def test_new_chat_uses_app_default_mode_on_every_provider(tmp_path: Path) -> None:

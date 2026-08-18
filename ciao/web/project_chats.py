@@ -4705,17 +4705,35 @@ class ProjectChatManager:
         except Exception:
             return default
 
+    def _model_for_provider(self, model: str, provider: str) -> str:
+        """A chat's model, resolved for the provider that will actually run it.
+
+        Tier aliases (haiku/sonnet/opus/fable) are Claude Code's own
+        vocabulary. On any other provider — because the chat predates the
+        tier-routing removal, or a caller (chat_create, a schedule) never
+        resolved one — sending the alias straight through gets rejected by
+        that provider's own backend. Fall back to the provider's operator
+        default instead (empty is fine: dispatch already treats an empty
+        model as "let the provider pick its own"). Codex's own "fable" is a
+        real, meaningful preset (see CODEX_FABLE_THINKING_LEVEL) rather than
+        a foreign alias, so it is preserved rather than resolved away.
+        """
+        resolved = (model or "").strip()
+        if provider != "claude" and is_tier(resolved) and not is_codex_fable(provider, resolved):
+            return self._config.default_model_for_provider(provider)
+        return _normalize_tier(resolved)
+
     def _resolve_and_validate_chat_model(
         self, model: str, provider: str, project_id: str
     ) -> str:
         """Normalize a chat model to its canonical form, then validate it."""
-        resolved_model = _normalize_tier((model or "").strip())
+        resolved_model = self._model_for_provider(model, provider)
         self._validate_configured_model(resolved_model, provider)
         return resolved_model
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""
-        return _normalize_tier((chat.model or "").strip())
+        return self._model_for_provider(chat.model, chat.provider)
 
     def _validate_configured_model(
         self, model: str | None, provider: str | None
