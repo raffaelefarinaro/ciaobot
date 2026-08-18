@@ -923,7 +923,7 @@ class CiaoConfig:
                 str(runtime_default),
             )
         ).expanduser()
-        if bootstrap_mode and not runtime_root.is_absolute():
+        if not runtime_root.is_absolute():
             runtime_root = workspace_root / runtime_root
         runtime_root = runtime_root.resolve()
         state_path = runtime_root / "state.json"
