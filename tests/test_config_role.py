@@ -63,8 +63,14 @@ def test_insights_min_turns_defaults_to_multiturn(tmp_path: Path) -> None:
 
 
 def test_legacy_workspaces_are_exposed_as_workspace_configs(tmp_path: Path) -> None:
+    # CIAO_RUNTIME_ROOT must be explicit: with bootstrap_mode False (a token
+    # and CIAO_WORKSPACE are both set here), from_env resolves the default
+    # ".runtime" relative to the CWD, not tmp_path — so without this, the
+    # test silently reads whatever real workspaces.json happens to exist in
+    # the repo checkout the tests run from, instead of the tmp fixture.
     config = _config(
         CIAO_WORKSPACE=str(tmp_path),
+        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
         CLAUDE_DEFAULT_MODEL_PERSONAL="deepseek-v4-flash:0731-cloud",
         CLAUDE_DEFAULT_MODEL_WORK="opus",
         CIAO_DISALLOWED_TOOLS_WORK="Bash",
