@@ -4141,7 +4141,8 @@ async def vault_graph(request: Request) -> JSONResponse:
         for tgt in targets:
             if tgt not in by_path:
                 continue
-            key = tuple(sorted((src, tgt)))
+            first, second = sorted((src, tgt))
+            key = (first, second)
             if key in seen:
                 continue
             seen.add(key)

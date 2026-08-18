@@ -7690,15 +7690,15 @@ class ProjectChatManager:
                 title = str(info.get("title") or "") if isinstance(info, dict) else ""
                 return _real_title(title)
             if provider == "codex":
-                thread = await CodexProvider.read_thread(workspace, chat.session_id)
-                if isinstance(thread, dict):
-                    return _real_title(str(thread.get("name") or ""))
+                codex_thread = await CodexProvider.read_thread(workspace, chat.session_id)
+                if isinstance(codex_thread, dict):
+                    return _real_title(str(codex_thread.get("name") or ""))
                 return None
             # Claude Code: custom title wins, else the AI-generated title.
-            info = get_session_info(chat.session_id, directory=str(workspace))
-            if info is None:
+            session_info = get_session_info(chat.session_id, directory=str(workspace))
+            if session_info is None:
                 return None
-            title = (info.custom_title or "").strip() or (info.summary or "").strip()
+            title = (session_info.custom_title or "").strip() or (session_info.summary or "").strip()
             return _real_title(title)
         except Exception:
             logger.info("Native title read failed for %s", chat.chat_id, exc_info=True)
