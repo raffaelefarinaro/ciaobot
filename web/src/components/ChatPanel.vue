@@ -311,7 +311,7 @@
       <div class="messages-content">
       <Transition name="history-loading">
         <div
-          v-if="store.messageHistoryLoading && !renderItems.length && !store.isStreaming"
+          v-if="blockingHistoryLoad"
           class="history-loading-card"
           role="status"
           aria-live="polite"
@@ -331,10 +331,7 @@
           </div>
         </div>
       </Transition>
-      <div v-if="store.messageHistoryLoading && renderItems.length" class="history-loading-inline" role="status" aria-live="polite">
-        <span class="history-loading-spinner" aria-hidden="true"></span>
-        <span>Updating conversation…</span>
-      </div>
+      <template v-if="!blockingHistoryLoad">
       <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
@@ -581,6 +578,7 @@
             >Fix this error</button>
           </div>
         </div>
+      </template>
       </template>
 
       <!-- Ephemeral orientation aid shown after reopening a chat. Keep it
@@ -3735,6 +3733,17 @@ const renderData = computed<{
 
 const renderItems = computed<RenderItem[]>(() => renderData.value.items)
 const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
+
+// One consistent full-screen state for "this chat isn't ready to show yet" —
+// previously this forked three ways depending on whether stale cached
+// messages happened to already be in the store (full skeleton vs. a small
+// "Updating conversation…" banner stacked above them) or whether the fetch
+// ran with the loading flag suppressed at all (silent background refresh —
+// see loadMessages' `background` option), which could leave an incomplete
+// transcript on screen with no visible signal. Once a turn is actively
+// streaming, the live Activity/typing UI is the better indicator, so that
+// takes over instead of hiding the transcript.
+const blockingHistoryLoad = computed(() => store.messageHistoryLoading && !store.isStreaming)
 
 // Watcher: keep highlights in sync with the pending list and message DOM.
 watch(

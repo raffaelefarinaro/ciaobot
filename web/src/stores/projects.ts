@@ -1399,7 +1399,7 @@ export const useProjectStore = defineStore('projects', () => {
         // fetch result overwriting messages[chatId].
         const bootChatId = activeChatId.value
         void (async () => {
-          await loadMessages(bootChatId)
+          await loadMessages(bootChatId, { waitForSettledReply: true })
           connectWs(bootChatId)
           requestReentrySummaryIfUseful(bootChatId)
         })()
@@ -2160,13 +2160,42 @@ export const useProjectStore = defineStore('projects', () => {
    * a chat with nothing to render yet (a brand-new one) the flag paints the
    * full-size "Loading conversation" skeleton — so an idle empty chat blinked
    * through that card on every tick. A user-initiated open still shows it.
+   *
+   * `waitForSettledReply: true` (switchChat's own open, not background polls)
+   * keeps that same loading flag held past the first fetch when the chat's
+   * last turn is an unanswered user message: the history endpoint can resolve
+   * before the SDK session file catches up with the just-finished reply (e.g.
+   * opening a chat right as its turn settles, or from a push notification),
+   * which used to clear the loading flag and show an incomplete transcript
+   * with no visible sign anything was still pending. Retries on the same
+   * cadence as reconcileAfterResult until the reply lands, streaming visibly
+   * takes over, or the budget runs out. A chat with no messages, or one
+   * already ending in a settled reply, skips this — every open must not pay
+   * for a wait nothing is actually pending.
    */
-  async function loadMessages(chatId: string, opts?: { background?: boolean }) {
+  async function loadMessages(
+    chatId: string,
+    opts?: { background?: boolean; waitForSettledReply?: boolean },
+  ) {
     const generation = (messageLoadGenerations.get(chatId) || 0) + 1
     messageLoadGenerations.set(chatId, generation)
     if (!opts?.background) loadingMessages.value[chatId] = true
     try {
       await loadMessagesFromServer(chatId)
+      if (opts?.waitForSettledReply && !opts?.background) {
+        const last = (messages.value[chatId] || []).at(-1)
+        const awaitingReply = last?.role === 'user'
+          && !streaming.value[chatId]
+          && !projectStreaming.value[chatId]
+        if (awaitingReply) {
+          for (const delay of [300, 700, 1500, 3000]) {
+            if (messageLoadGenerations.get(chatId) !== generation) return
+            await new Promise(r => setTimeout(r, delay))
+            await loadMessagesFromServer(chatId)
+            if (hasSettledHistory(chatId) || streaming.value[chatId] || projectStreaming.value[chatId]) break
+          }
+        }
+      }
     } finally {
       // A refresh can overlap a chat switch or a reconnect. Only the newest
       // request owns the loading flag, otherwise an older response can hide
@@ -2423,7 +2452,7 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
     // Fire-and-forget: clears overlay + SW cache + hits /read for cross-device sync.
     void markRead(chatId)
-    if (!opts?.skipHistory) await loadMessages(chatId)
+    if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
     void loadSubagents(chatId)
     connectWs(chatId)
     requestReentrySummaryIfUseful(chatId)

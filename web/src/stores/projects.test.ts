@@ -814,7 +814,18 @@ describe('chat closing and re-entry orientation', () => {
     expect(apiDel).not.toHaveBeenCalled()
     await vi.waitFor(() => expect(store.reentrySummaries[chatId]).toBe('• Continue the open task'))
     const summaryCalls = apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary')).length
-    await store.switchChat(chatId)
+    // The mock chat's last message is an unanswered user turn and apiGet
+    // always resolves empty, so it never looks settled -- switchChat's
+    // waitForSettledReply retries run their full real-time budget. Fake
+    // timers stand in for that wait so the test doesn't.
+    vi.useFakeTimers()
+    try {
+      const switching = store.switchChat(chatId)
+      await vi.advanceTimersByTimeAsync(6000)
+      await switching
+    } finally {
+      vi.useRealTimers()
+    }
     await vi.waitFor(() => expect(store.reentrySummaries[chatId]).toBe('• Continue the open task'))
     expect(apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary')).length).toBe(summaryCalls)
   })
