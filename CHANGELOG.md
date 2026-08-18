@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.9.1 - 2026-08-18
+
+### Added
+- feat: drop claude.ai connector MCP gating (`ed581b33`)
+- feat: live installer progress, no preserved old app, boot-style update screens (`8fa941d1`)
+- feat(chat): list provider commands and show commands inline in slash picker (`96ee6090`)
+- feat(chat): use provider-native session titles instead of a separate title model (`1b2974b0`)
+- feat(home): surface failed insights extraction with per-chat retry (`81527b1d`)
+- feat(settings): lay out per-provider defaults as three side-by-side columns (`a913227d`)
+- feat(apple): gate on-device model on hardware support, drop beta opt-in (`63f2059b`)
+- feat(web): render the device panel inline in Settings instead of navigating to /device (`cdd73e77`)
+- feat(web): simplify workspace UI when there is a single workspace (`5f50cf0e`)
+- feat(providers): add fable to the Claude model picker (`cb8dec6f`)
+- feat(settings): surface stock skills in the skill inventory (`ade5acd5`)
+- feat(web): add Memory Map page (`3b8c0d21`)
+- feat(skills): add stock visual-plan skill with evals and packaging tests (`a49cbfd4`)
+- feat(web): integrate Memory Map into the shared sidebar layout (`79e132d6`)
+
+### Changed
+- Merge pull request #300 from raffaelefarinaro/chore/sync-develop-v0.9.0 (`3af48ae7`)
+- refactor: replace model tier routing with per-provider defaults (`e3af3561`)
+- perf(client-mode): pool proxied HTTP connections (`f1990160`)
+- Remove the Compare Apple Intelligence insights comparison (`b2ad5d67`)
+- refactor: consolidate duplication found by the release /simplify pass (`a788ce9a`)
+
+### Fixed
+- fix(desktop): keep notification deep-link pending until PWA confirms delivery (`cf66c481`)
+- fix(providers): stop opencode defaulting to normal execution mode (`d37862ad`)
+- fix(chat): retry native title reads until the provider publishes one (`ed4d0856`)
+- fix(chat): stop flashing the loading skeleton on background refreshes (`7e135883`)
+- fix(chat): reconnect the awareness socket on resume even if not nulled (`fc9aa90b`)
+- fix(chat): ignore provider placeholder titles in auto-title (`75ebd497`)
+- fix(web): keep a settled assistant reply when opening from a notification (`9bb25d0b`)
+- fix(evals): stop penalizing injection-aware sentinel flagging (`67c7e777`)
+- fix(chat): recover unsent drafts orphaned by empty-chat sweeps (`d1be8b3c`)
+- fix(desktop): satisfy cargo fmt and clippy on the notification delivery check (`5c7ab9b2`)
+- fix(types): resolve mypy errors from variable reuse across branches (`cbf96bc4`)
+- fix(providers): thread the actual target provider through model defaults (`ab2639e1`)
+- fix(chat): fix draft-recovery TTL and restore-target workspace (`7c254691`)
+- fix(settings): fix commands tab, origin labeling, and non-configurable model row (`4a034243`)
+- fix(providers): resolve away Claude tier aliases on non-Claude providers (`7954502c`)
+- fix(web): stop the Memory Map graph animating forever, link notes to the file viewer (`382ba912`)
+
+### Maintenance
+- chore(web): rebuild PWA bundle (`696630be`)
+- chore(web): rebuild PWA bundle (`f9f5360e`)
+- docs(web): explain /critique skill and show voice icons in settings (`2e447679`)
+- chore(web): rebuild PWA bundle (`156fe396`)
+- test: fix stale assertions from earlier commits on this branch (`b2fdba3a`)
+- docs: sync stale claims to what actually shipped since v0.9.0 (`2b3dd6fa`)
+- docs(skills): add Memory Map to the capabilities catalog (`89b43141`)
+- test(evals): add opencode to the release eval provider matrix (`cf9b293f`)
+
 ## v0.9.0 - 2026-08-17
 
 ### Added
