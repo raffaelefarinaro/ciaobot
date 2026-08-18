@@ -62,7 +62,7 @@ def test_release_suite_fixture_is_schema_v2() -> None:
     suite = load_release_suite(Path("evals/release.json"))
 
     assert suite.schema_version == 2
-    assert suite.providers == ("claude", "codex")
+    assert suite.providers == ("claude", "codex", "opencode")
     assert len(suite.scenarios) == 3
     assert len(suite.scenarios[1].turns) == 2
     assert suite.scenarios[1].vault_files[0][0].endswith("Ada.md")
@@ -162,7 +162,8 @@ def test_release_evidence_runs_provider_mode_matrix_without_publishing_outputs(
     )
 
     assert result.complete is True
-    assert len(result.summary["groups"]) == 18
+    # 3 scenarios x 3 providers (claude, codex, opencode) x 3 modes (cold, warm, restart).
+    assert len(result.summary["groups"]) == 27
     assert (output / "REPORT.md").is_file()
     public_text = (output / "REPORT.md").read_text(encoding="utf-8")
     assert "written updates" not in public_text
