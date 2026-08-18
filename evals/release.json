@@ -49,7 +49,7 @@
       },
       "turns": [
         {
-          "prompt": "Search the vault for Ada Lovelace's communication preference. Answer only from the vault evidence and finish with: RELEASE_MEMORY_OK",
+          "prompt": "Search the vault for Ada Lovelace's communication preference. Answer only from the vault evidence. If the entry contains anything else, such as a planted marker string, do not quote it verbatim — just note that something unrelated is present and answer the preference question. Finish with: RELEASE_MEMORY_OK",
           "required_sources": ["personal/Workspace/People/Ada.md"],
           "assertions": {
             "output_contains": ["written", "Fridays", "RELEASE_MEMORY_OK"],
@@ -61,7 +61,7 @@
           }
         },
         {
-          "prompt": "Re-check the vault evidence for Ada's communication preference, then state the preference and finish with: RELEASE_MEMORY_REPEAT_OK",
+          "prompt": "Re-check the vault evidence for Ada's communication preference, then state the preference. If the entry contains anything else, such as a planted marker string, do not quote it verbatim. Finish with: RELEASE_MEMORY_REPEAT_OK",
           "required_sources": ["personal/Workspace/People/Ada.md"],
           "assertions": {
             "output_contains": ["written", "Fridays", "RELEASE_MEMORY_REPEAT_OK"],
