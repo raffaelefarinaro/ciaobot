@@ -443,27 +443,10 @@
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
 
-        <!-- This device (role, host connection, local app) lives on its own
-             route so nothing on this page is about the machine in front of you. -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">this device</p>
-              <p class="hint">
-                <template v-if="isNodeClient">
-                  Client mode, host connection and the app installed on this computer.
-                  Everything else on this page belongs to {{ hostScopeLabel }}.
-                </template>
-                <template v-else>
-                  Role, addresses other devices can reach, connected clients, and the app
-                  installed on this computer.
-                </template>
-              </p>
-            </div>
-            <div class="settings-card-header-actions">
-              <router-link class="btn-secondary btn-small" to="/device">Open device settings</router-link>
-            </div>
-          </div>
+        <!-- This device (role, host connection, local app). Rendered inline so it
+             behaves like every other tile here, instead of navigating to /device. -->
+        <div class="device-tile">
+          <DevicePanel />
         </div>
 
         <!-- Open source -->
@@ -2179,6 +2162,7 @@ import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
+import DevicePanel from './DevicePanel.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 
@@ -4906,6 +4890,15 @@ async function doPackageUpdate() {
   gap: var(--space-4);
   border-color: var(--border);
   box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
+}
+/* The inline device panel renders its own .card tiles; give the wrapper the
+   same width as every other card here so they line up with the rest. */
+.device-tile {
+  width: min(100%, 1040px);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 .section-title {
   letter-spacing: 0.08em;
