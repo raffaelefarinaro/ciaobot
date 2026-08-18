@@ -3144,7 +3144,14 @@ async def chat_messages(request: Request) -> JSONResponse:
         if not sid:
             continue
         try:
-            segment = get_session_messages_full(sid, directory=str(config.workspace_root))
+            # Reading and stitching a session's JSONL is unbounded synchronous
+            # work (it grows with the conversation), and this route is re-hit
+            # by every client's 15s poll. Left on the event loop it stalled
+            # every other request on the node, including the 5s chat-socket
+            # keepalives whose absence trips the PWA's half-open watchdog.
+            segment = await asyncio.to_thread(
+                get_session_messages_full, sid, directory=str(config.workspace_root)
+            )
         except (FileNotFoundError, ValueError):
             # This segment's file doesn't exist on this machine (remote chat,
             # or pruned after rotating away). Skip it rather than blanking
@@ -5191,16 +5198,12 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model_by_workspace": insights_by_workspace,
 
         "critique_models_effective": critique_effective,
-        # The "apple" title/insights options need macOS 26+, the desktop app,
-        # and Apple Intelligence switched on; the routine rows explain which
-        # prerequisite is missing instead of silently hiding the option.
+        # The "apple" title/insights options are hardware-gated: they need
+        # macOS 26+, the desktop app, and Apple Intelligence switched on in
+        # System Settings. No app-side opt-in: the routine rows show the
+        # missing prerequisite instead of hiding the option.
         "apple_model_available": native_sidecar.apple_model_available(),
         "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
-        # Apple Intelligence is a beta feature, off by default. The toggle in
-        # Settings → Models PATCHes apple_intelligence_enabled; when off, the
-        # "apple" sentinel above reports unavailable and routines fall back.
-        "apple_intelligence_enabled": bool(config.apple_intelligence_enabled),
-        "apple_intelligence_beta": native_sidecar.APPLE_INTELLIGENCE_BETA,
         "transcription": {
             "locale": config.transcription_locale,
             # On-device dictation needs macOS 26+, the installed app, and a

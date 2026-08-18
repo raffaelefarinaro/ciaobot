@@ -315,12 +315,6 @@ class CiaoConfig:
     max_image_size_bytes: int = 10 * 1024 * 1024
     max_voice_size_bytes: int = 25 * 1024 * 1024
     media_ttl_hours: int = 72
-    # Apple Intelligence (the "Local (free)" on-device model) is a beta feature,
-    # off by default. Opt-in from Settings → Models, or an operator can flip the
-    # default from the env with ``CIAO_APPLE_INTELLIGENCE=1``. When off, the
-    # "apple" sentinel is treated as an unavailable backend and every routine
-    # falls back to its cloud model.
-    apple_intelligence_enabled: bool = False
     # BCP-47 language for the on-device voice engines. Dictation needs a
     # matching language installed in System Settings → Keyboard → Dictation;
     # the synthesizer uses it to choose a voice.
@@ -971,10 +965,6 @@ class CiaoConfig:
             media_ttl_hours=int(
                 _env(source, "CIAO_MEDIA_TTL_HOURS", "TELEGRAM_BRIDGE_MEDIA_TTL_HOURS", "72")
             ),
-            apple_intelligence_enabled=source.get(
-                "CIAO_APPLE_INTELLIGENCE", "false"
-            ).strip().lower()
-            in {"1", "true", "yes", "on"},
             transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
             or "en-US",
             tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),

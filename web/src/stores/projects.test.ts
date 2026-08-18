@@ -735,6 +735,7 @@ describe('chat closing and re-entry orientation', () => {
     }]
     store.messages[chatId] = [{ role: 'user', content: 'Continue this later', timestamp: '' }]
     store.activeChatId = chatId
+    localStorageData['ciao-reentry-summary-enabled'] = 'true'
     apiGet.mockResolvedValue([])
     apiPost.mockImplementation((path: string) => {
       if (path.endsWith('/reentry-summary')) return Promise.resolve({ summary: '• Continue the open task' })
@@ -765,6 +766,7 @@ describe('chat closing and re-entry orientation', () => {
       created_at: '',
       archived: false,
     }))
+    localStorageData['ciao-reentry-summary-enabled'] = 'true'
     apiGet.mockResolvedValue([])
     apiPost.mockImplementation((path: string) => {
       if (path.endsWith('/reentry-summary')) {
@@ -922,6 +924,28 @@ describe('re-entry summary invalidation', () => {
       archived: false,
     }]
     localStorageData['ciao-reentry-summary-enabled'] = 'false'
+
+    store.requestReentrySummaryIfUseful(chatId)
+
+    const calls = apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary'))
+    expect(calls).toHaveLength(0)
+  })
+
+  test('does not request a summary by default, before any preference is written', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-default'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Default',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+    delete localStorageData['ciao-reentry-summary-enabled']
 
     store.requestReentrySummaryIfUseful(chatId)
 

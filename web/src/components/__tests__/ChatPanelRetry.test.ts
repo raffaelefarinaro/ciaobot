@@ -269,6 +269,7 @@ describe('ChatPanel retry from error bubble', () => {
   })
 
   it('renders a re-entry summary as a tagged assistant bubble', async () => {
+    localStorage.setItem('ciao-reentry-summary-enabled', 'true')
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'user', content: 'Earlier prompt', timestamp: '2026-08-08T15:50:00Z' },

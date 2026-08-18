@@ -402,7 +402,7 @@
               </div>
             </div>
           </div>
-          <div class="setting-row setting-row--inline setting-row--toggle">
+          <div v-if="appleModelAvailable" class="setting-row setting-row--inline setting-row--toggle">
             <div class="routine-info">
               <span class="routine-name">Re-entry summary</span>
               <span class="routine-detail">Show a one-line Apple Intelligence orientation note when you reopen a quiet chat. The summary stays visible while you scroll and clears the moment you send a new message.</span>
@@ -415,6 +415,13 @@
                 @change="onReentrySummaryToggle"
               />
             </label>
+          </div>
+          <div v-else class="setting-row setting-row--inline">
+            <div class="routine-info">
+              <span class="routine-name">Re-entry summary</span>
+              <span class="routine-detail">Show a one-line Apple Intelligence orientation note when you reopen a quiet chat.</span>
+              <span class="hint hint--warn">Unavailable: {{ routines?.apple_model_unavailable_reason || 'Apple Intelligence is not supported on this machine' }}</span>
+            </div>
           </div>
         </div>
 
@@ -481,41 +488,6 @@
           <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
         </template>
         <template v-else-if="routines">
-          <!-- Apple Intelligence (beta, off by default) -->
-          <div class="card">
-            <div class="settings-card-header settings-card-header--split">
-              <div>
-                <p class="section-title">
-                  Apple Intelligence
-                  <span v-if="routines?.apple_intelligence_beta" class="badge badge--warn">beta</span>
-                </p>
-                <p class="hint">
-                  Experimental on-device models for chat titles, Session insights, and re-entry
-                  summaries. Off by default. Requires macOS 26+, the Ciaobot desktop app, and
-                  Apple Intelligence switched on in System Settings. While it is off, the
-                  "Local (free)" options below are unavailable and routines use a cloud model.
-                </p>
-              </div>
-              <div class="settings-control">
-                <label class="settings-checkbox-hit">
-                  <input
-                    type="checkbox"
-                    class="settings-checkbox"
-                    :checked="appleIntelligenceEnabled"
-                    :disabled="routinesSaving"
-                    @change="toggleAppleIntelligence"
-                  />
-                </label>
-              </div>
-            </div>
-            <p
-              v-if="appleIntelligenceEnabled && routines?.apple_model_available === false"
-              class="hint hint--warn"
-            >
-              Enabled, but unusable on this machine: {{ routines?.apple_model_unavailable_reason }}
-            </p>
-          </div>
-
           <!-- Internal routines -->
           <div class="card">
             <div class="settings-card-header">
@@ -544,6 +516,7 @@
                 </div>
                 <div class="routine-actions">
                   <button
+                    v-if="appleModelAvailable"
                     type="button"
                     class="btn-small"
                     :disabled="insightsComparisonPending || routinesSaving"
@@ -582,7 +555,7 @@
                   @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option value="automatic">Automatic</option>
-                  <option value="apple">Local (free) · beta</option>
+                  <option v-if="appleModelAvailable" value="apple">Local (free)</option>
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
@@ -597,10 +570,6 @@
                 <span class="routine-model-hint">
                   <template v-if="routineProviderValue('insights_model') === 'apple'">
                     Runs on-device for free using Apple Intelligence. Nothing to install.
-                    <span v-if="routines && routines.apple_model_available === false" class="hint--warn">
-                      Unavailable: {{ routines.apple_model_unavailable_reason || 'not supported on this machine' }} —
-                      insights currently fall back to a cloud model.
-                    </span>
                   </template>
                   <template v-else>{{ routineModelSummary('insights_model') }}</template>
                 </span>
@@ -2740,14 +2709,9 @@ async function saveRoutines(patch: Record<string, unknown>) {
   }
 }
 
-// Apple Intelligence is a beta feature, off by default; this toggle is the
-// opt-in. While it is off, the "Local (free)" option below reports unavailable
-// and titles/insights fall back to their cloud model.
-const appleIntelligenceEnabled = computed(() => routines.value?.apple_intelligence_enabled === true)
-
-async function toggleAppleIntelligence(event: Event) {
-  await saveRoutines({ apple_intelligence_enabled: (event.target as HTMLInputElement).checked })
-}
+// Apple's on-device model is hardware-gated: it shows only when this machine
+// can run it. No app-side opt-in flag any more.
+const appleModelAvailable = computed(() => routines.value?.apple_model_available === true)
 
 async function compareAppleInsights() {
   insightsComparisonPending.value = true
@@ -3123,7 +3087,7 @@ function routineModelSummary(key: RoutineModelKey): string {
     }
     return `Automatic: ${routineEffectiveModel(key) || 'default'}`
   }
-  if (provider === 'apple') return 'Local (free) · beta'
+  if (provider === 'apple') return 'Local (free)'
   const model = routineModelValue(key)
   if (provider === 'codex') return `OpenAI (via Codex): ${model || 'default'}`
   if (provider === 'opencode') return `opencode: ${model || 'default'}`

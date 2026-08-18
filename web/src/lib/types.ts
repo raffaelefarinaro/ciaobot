@@ -553,15 +553,11 @@ export interface RoutineSettings {
   insights_model_by_workspace?: Record<string, string>
 
   critique_models_effective: string
-  // The "apple" insights option: needs macOS 26+, the desktop app, and Apple
-  // Intelligence on. Nothing installable, so Settings shows the reason.
+  // The "apple" insights option is hardware-gated: needs macOS 26+, the
+  // desktop app, and Apple Intelligence on. Nothing installable, so Settings
+  // shows the reason when the machine lacks it.
   apple_model_available?: boolean
   apple_model_unavailable_reason?: string
-  // Apple Intelligence is a beta feature, off by default; the Settings → Models
-  // toggle PATCHes apple_intelligence_enabled to switch it on. When off, the
-  // "apple" option reports unavailable and routines fall back to cloud models.
-  apple_intelligence_enabled?: boolean
-  apple_intelligence_beta?: boolean
   // Voice is on-device only: Apple dictation (macOS 26+) and
   // AVSpeechSynthesizer, both via the bundled sidecar. There is no engine to
   // choose any more, so the payload reports availability and a reason rather
