@@ -98,7 +98,7 @@
          the create action sits in the footer like the chat sidebar's, so both
          modes put "make a new one" in the same place. -->
     <template v-if="!collapsed && (mode === 'schedules')">
-      <div class="workspace-toggle">
+      <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
         <button
           v-for="workspace in store.workspaceOptions"
           :key="workspace.name"
@@ -328,7 +328,7 @@
 
     <template v-if="!collapsed && (!mode || mode === 'chat' || mode === 'project')">
       <!-- Workspace toggle -->
-      <div class="workspace-toggle">
+      <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
         <button
           v-for="workspace in store.workspaceOptions"
           :key="workspace.name"
@@ -712,6 +712,10 @@ function promptTitle(prompt: string): string {
   const first = prompt.split('\n')[0].trim()
   return first.length > 36 ? first.slice(0, 33) + '...' : first
 }
+
+// With a single workspace the toggle is pure noise — hide it and let the
+// content fill the space.
+const hasMultipleWorkspaces = computed(() => store.workspaceOptions.length > 1)
 
 // Schedule list split: one-offs first (sorted by datetime), then recurring.
 const workspaceSchedules = computed(() =>

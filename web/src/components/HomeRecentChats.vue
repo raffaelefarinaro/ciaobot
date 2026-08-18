@@ -15,8 +15,13 @@
       >
         <header class="home-lane-header" :data-workspace-color="lane.color">
           <div class="home-lane-heading">
-            <span class="home-lane-shortcut">{{ lane.shortcut }}</span>
-            <span class="home-lane-name">{{ lane.label || 'unassigned' }}</span>
+            <!-- With a single workspace the key badge and the name are pure
+                 noise: there is nothing to switch to and the workspace is the
+                 only one. Keep the status summary and "+ new". -->
+            <template v-if="hasMultipleWorkspaces">
+              <span class="home-lane-shortcut">{{ lane.shortcut }}</span>
+              <span class="home-lane-name">{{ lane.label || 'unassigned' }}</span>
+            </template>
             <span class="home-lane-summary" aria-live="polite">
               <template v-if="laneNeedsCount(lane)"><b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you</template>
               <template v-if="laneSummaryRest(lane)"><span v-if="laneNeedsCount(lane)"> · </span>{{ laneSummaryRest(lane) }}</template>
@@ -221,6 +226,7 @@ const emit = defineEmits<{
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
+const hasMultipleWorkspaces = computed(() => store.workspaceOptions.length > 1)
 const hasHomeActivity = computed(() => (
   store.activeChatsAll.length > 0
   || store.postprocessingChats().length > 0
