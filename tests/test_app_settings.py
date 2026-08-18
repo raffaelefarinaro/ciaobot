@@ -246,13 +246,19 @@ def test_default_mode_for_provider_builtin_defaults(tmp_path):
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
     )
-    # New opencode chats require approval by default; bypass is explicit.
-    assert config.default_mode_for_provider("opencode") == "normal"
+    # Every provider starts on the app-wide default; no per-provider exception.
+    assert config.default_mode_for_provider("opencode") == "auto"
     assert config.default_mode_for_provider("codex") == "auto"
     assert config.default_mode_for_provider("claude") == "auto"
 
     # An operator pin wins over the built-in default.
-    config.provider_default_modes = {"opencode": "auto", "claude": "plan"}
-    assert config.default_mode_for_provider("opencode") == "auto"
+    config.provider_default_modes = {"opencode": "normal", "claude": "plan"}
+    assert config.default_mode_for_provider("opencode") == "normal"
     assert config.default_mode_for_provider("codex") == "auto"
     assert config.default_mode_for_provider("claude") == "plan"
+
+    # The app-wide default still moves every unpinned provider together.
+    config.provider_default_modes = {}
+    config.claude_mode = "plan"
+    assert config.default_mode_for_provider("opencode") == "plan"
+    assert config.default_mode_for_provider("codex") == "plan"

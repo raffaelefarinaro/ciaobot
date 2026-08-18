@@ -72,28 +72,26 @@ def test_new_chat_keeps_alias_without_a_default(tmp_path: Path) -> None:
     assert chat.model == "opus"
 
 
-def test_new_opencode_chat_defaults_to_approval_enforcing_mode(tmp_path: Path) -> None:
+def test_new_chat_uses_app_default_mode_on_every_provider(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path, _config(tmp_path))
     project = manager.create_project("Modes", workspace="work")
 
-    # New opencode chats require approval by default; bypass is explicit.
-    chat = manager.create_chat(project.project_id, provider="opencode")
-    assert chat.mode == "normal"
-
-    # Other providers keep the env-backed default (auto).
-    chat = manager.create_chat(project.project_id, provider="claude")
-    assert chat.mode == "auto"
+    # opencode has no built-in exception: it starts on the env-backed default
+    # (auto) like every other provider.
+    for provider in ("opencode", "codex", "claude"):
+        chat = manager.create_chat(project.project_id, provider=provider)
+        assert chat.mode == "auto", provider
 
 
 def test_per_provider_default_mode_overrides_builtin(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
-        provider_default_modes={"opencode": "auto", "claude": "plan"},
+        provider_default_modes={"opencode": "normal", "claude": "plan"},
     )
     manager = _make_manager(tmp_path, config)
     project = manager.create_project("Overrides", workspace="work")
 
-    assert manager.create_chat(project.project_id, provider="opencode").mode == "auto"
+    assert manager.create_chat(project.project_id, provider="opencode").mode == "normal"
     assert manager.create_chat(project.project_id, provider="codex").mode == "auto"
     assert manager.create_chat(project.project_id, provider="claude").mode == "plan"
 

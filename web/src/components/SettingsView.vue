@@ -875,6 +875,7 @@
                   <span class="ws-label">Default mode</span>
                   <select
                     class="routine-select"
+                    :data-provider="section.key"
                     :value="providerModeSelectorValue(section.key)"
                     :disabled="routinesSaving"
                     @change="saveProviderMode(section.key, ($event.target as HTMLSelectElement).value)"
@@ -2908,10 +2909,10 @@ async function saveProviderDefaultThinking(provider: AliasProviderKey, value: st
 }
 
 // Per-provider default execution mode for new chats. The stored override
-// lives in RoutineSettings.provider_default_modes; a missing entry falls
-// back to the effective default reported by the backend (opencode → normal,
-// everyone else → auto). Opencode starts approval-enforcing for new chats;
-// operators can explicitly choose Auto or Bypass when desired.
+// lives in RoutineSettings.provider_default_modes; a missing entry falls back
+// to the effective default reported by the backend, which is the app-wide
+// mode for every provider. The local fallback below only covers a routines
+// payload that predates provider_default_modes_effective.
 const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
 
 const MODE_LABELS: Record<string, string> = {
@@ -2926,8 +2927,7 @@ function providerModeOverride(provider: AliasProviderKey): string {
 }
 
 function providerModeEffective(provider: AliasProviderKey): string {
-  return routines.value?.provider_default_modes_effective?.[provider]
-    || (provider === 'opencode' ? 'normal' : 'auto')
+  return routines.value?.provider_default_modes_effective?.[provider] || 'auto'
 }
 
 function providerModeSelectorValue(provider: AliasProviderKey): string {

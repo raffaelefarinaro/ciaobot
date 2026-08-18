@@ -542,7 +542,7 @@ export interface RoutineSettings {
   // Per-provider session-insights models; missing = provider default.
   provider_insights_models?: Record<string, string>
   // Per-provider default execution mode for new chats (Settings → Providers).
-  // Missing entry = built-in default (opencode → normal, others → auto).
+  // Missing entry = the app-wide default mode.
   provider_default_modes?: Record<string, string>
   // Resolved effective default mode per provider, after built-in defaults.
   provider_default_modes_effective?: Record<string, string>

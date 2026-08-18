@@ -344,8 +344,7 @@ class CiaoConfig:
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution mode for new chats, set from the PWA
     # Settings → Providers tab (runtime settings store). A missing entry uses
-    # the built-in default: normal for opencode (approval-enforcing),
-    # otherwise ``claude_mode``.
+    # ``claude_mode`` for every provider.
     provider_default_modes: dict[str, str] = field(default_factory=dict)
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab (runtime settings store). A missing entry uses the provider's
@@ -789,16 +788,17 @@ class CiaoConfig:
     def default_mode_for_provider(self, provider: str) -> BridgeMode:
         """The default execution mode for new chats on ``provider``.
 
-        An operator pin (Settings → Providers → default mode) wins. Otherwise
-        the built-in default: opencode runs in normal mode so tool calls
-        require operator approval. Every other provider falls back to
-        ``claude_mode``.
+        An operator pin (Settings → Providers → default mode) wins; otherwise
+        every provider falls back to ``claude_mode``. opencode used to be
+        pinned to normal here, but its auto ruleset is as tight as the other
+        adapters' (read-only tools plus ``edit`` allowed outright, shell left
+        on the wildcard so ``auto_approves_permission`` still classifies each
+        command), so there is no reason for it to be the one backend that
+        starts stricter than the app-wide default.
         """
         mode = (self.provider_default_modes or {}).get(provider, "")
         if mode in {"normal", "plan", "auto", "bypass"}:
             return cast(BridgeMode, mode)
-        if provider == "opencode":
-            return "normal"
         return self.claude_mode
 
     def disallowed_tools_for_workspace(self, workspace: str | None) -> list[str]:

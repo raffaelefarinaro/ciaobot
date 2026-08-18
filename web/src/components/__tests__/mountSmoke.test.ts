@@ -28,11 +28,11 @@ vi.mock('../../lib/api', () => {
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
-    // Built-in defaults: opencode requires approval, everyone else uses auto.
+    // Built-in default: every provider starts on the app-wide mode.
     provider_default_modes_effective: {
       claude: 'auto',
       codex: 'auto',
-      opencode: 'normal',
+      opencode: 'auto',
     },
 
     transcription: {
@@ -984,16 +984,15 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // The defaults card carries a "Default mode" row per provider; the
-    // automatic option names the effective default (opencode -> normal).
-    const modeSelect = wrapper.findAll('.routine-select')
-      .find((el) => {
-        const options = el.findAll('option')
-        return options.some((o) => o.text() === 'Automatic (Auto)')
-      })
-    expect(modeSelect).toBeTruthy()
+    // The defaults card carries a "Default mode" row per provider. Target the
+    // provider by data-provider rather than by the "Automatic (...)" label:
+    // every provider now resolves to the same app-wide default, so the label
+    // no longer identifies one.
+    const modeSelect = wrapper.find('.routine-select[data-provider="codex"]')
+    expect(modeSelect.exists()).toBe(true)
+    expect(modeSelect.findAll('option').map((o) => o.text())).toContain('Automatic (Auto)')
 
-    await modeSelect!.setValue('bypass')
+    await modeSelect.setValue('bypass')
     await flushPromises()
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       provider_default_modes: { codex: 'bypass' },
