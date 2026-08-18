@@ -2674,6 +2674,25 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c2/read', {})
   })
 
+  test('deleteChat clears any lingering draft for the deleted chat', async () => {
+    // A deliberate delete is never a sweep casualty: clear its draft key
+    // immediately so a later reconciliation pass never mistakes it for one (#277).
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeChatId = null
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ c1: 'leftover text' }))
+    apiGet.mockResolvedValue([])
+
+    await store.deleteChat('c1', { selectNext: false })
+
+    expect(localStorageData['ciao-chat-drafts']).toBeUndefined()
+  })
+
   test('deleteProject on project with active chat transitions to first chat of workspace', async () => {
     const store = useProjectStore()
     store.projects = [
@@ -2696,6 +2715,23 @@ describe('workspace and chat transitions', () => {
     expect(store.activeChatId).toBe('c2')
     expect(routerPush).toHaveBeenCalledWith('/chat/c2')
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c2/read', {})
+  })
+
+  test('deleteProject clears drafts for every chat it cascades away', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c2', project_id: 'p1', title: 'Chat 2', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeChatId = null
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ c1: 'draft one', c2: 'draft two' }))
+
+    await store.deleteProject('p1')
+
+    expect(localStorageData['ciao-chat-drafts']).toBeUndefined()
   })
 
   test('fixError opens a chat in the active workspace General project seeded with the error log', async () => {
@@ -2745,6 +2781,128 @@ describe('workspace and chat transitions', () => {
     expect(chat).toBeUndefined()
     expect(apiPost).not.toHaveBeenCalled()
     expect(store.toasts.some(t => t.variant === 'error')).toBe(true)
+  })
+
+  test('restoreDraft reopens the text in its original project and clears the old key', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.activeWorkspace = 'personal'
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'dead-chat': { text: 'recover me', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({
+      chat_id: 'c-new', project_id: 'p1', title: 'New Chat', model: '',
+      provider: 'claude', mode: '', session_id: '', created_at: '', archived: false,
+    })
+
+    vi.useFakeTimers()
+    try {
+      await store.restoreDraft({ originalChatId: 'dead-chat', projectId: 'p1', text: 'recover me' })
+      await vi.advanceTimersByTimeAsync(600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/p1/chats', { title: 'New Chat' })
+    const drafts = JSON.parse(localStorageData['ciao-chat-drafts'] || '{}')
+    expect(drafts['dead-chat']).toBeUndefined()
+    expect(drafts['c-new']?.text).toBe('recover me')
+  })
+
+  test('restoreDraft falls back to General when the original project is gone', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'pg', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: 'general', is_auto: true },
+    ]
+    store.activeWorkspace = 'personal'
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({
+      chat_id: 'c-new', project_id: 'pg', title: 'New Chat', model: '',
+      provider: 'claude', mode: '', session_id: '', created_at: '', archived: false,
+    })
+
+    vi.useFakeTimers()
+    try {
+      await store.restoreDraft({ originalChatId: 'dead-chat', projectId: 'deleted-project', text: 'recover me' })
+      await vi.advanceTimersByTimeAsync(600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/pg/chats', { title: 'New Chat' })
+  })
+
+  test('restoreDraft throws when there is nothing to restore into', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.activeWorkspace = 'personal'
+
+    await expect(
+      store.restoreDraft({ originalChatId: 'dead-chat', projectId: 'deleted-project', text: 'recover me' }),
+    ).rejects.toThrow()
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+})
+
+describe('orphaned draft recovery on load', () => {
+  test('fetchAll on first boot offers a toast for a draft whose chat is gone', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'dead-chat': { text: 'stranded text', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve(store.projects)
+      if (path === '/api/chats') return Promise.resolve([]) // dead-chat no longer exists server-side
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+
+    const toast = store.toasts.find(t => t.restoreDraft?.originalChatId === 'dead-chat')
+    expect(toast).toBeTruthy()
+    expect(toast?.body).toContain('stranded text')
+    // Not cleared yet — only on successful restore or explicit dismissal, so
+    // a reload before either happens re-offers it instead of losing it (#277).
+    expect(JSON.parse(localStorageData['ciao-chat-drafts'] || '{}')['dead-chat']).toBeTruthy()
+  })
+
+  test('does not re-offer the same orphaned draft on a later in-session refresh', async () => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'dead-chat': { text: 'stranded text', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve([])
+      if (path === '/api/chats') return Promise.resolve([])
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+    store.toasts = []
+    await store.fetchAll()
+
+    expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
+  })
+
+  test('ignores a draft whose chat still exists', async () => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'live-chat': { text: 'still typing', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve([])
+      if (path === '/api/chats') return Promise.resolve([
+        { chat_id: 'live-chat', project_id: 'p1', title: 'New Chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      ])
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+
+    expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
   })
 })
 

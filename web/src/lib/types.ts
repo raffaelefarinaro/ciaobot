@@ -409,6 +409,11 @@ export interface InAppToast {
   fixRoute?: string
   // Button label for the Fix action when fixRoute is set.
   fixLabel?: string
+  // When set, "Fix" becomes "Restore draft": reopens `text` as a fresh chat
+  // draft in `projectId` (falling back to General if that project is gone)
+  // instead of the error/fixRoute flow. `originalChatId` is the dead chat's
+  // id, cleared from storage once the text has a new home or is dismissed.
+  restoreDraft?: { originalChatId: string; projectId: string; text: string }
 }
 
 // A pending approval surfaced to the user by Auto mode's classifier. One

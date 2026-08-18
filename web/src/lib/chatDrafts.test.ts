@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  clearChatDraft,
   readChatDraft,
+  readOrphanCandidates,
   readSentPromptHistory,
   recordSentPrompt,
   writeChatDraft,
@@ -46,13 +48,59 @@ describe('chat drafts', () => {
 
   it('ignores malformed and non-string stored values', () => {
     const storage = new MemoryStorage()
-    storage.setItem('ciao-chat-drafts', '{"chat-a":42,"chat-b":"valid"}')
+    storage.setItem('ciao-chat-drafts', '{"chat-a":42,"chat-b":"valid","chat-c":{"projectId":"p"}}')
 
     expect(readChatDraft('chat-a', storage)).toBe('')
     expect(readChatDraft('chat-b', storage)).toBe('valid')
+    expect(readChatDraft('chat-c', storage)).toBe('')
 
     storage.setItem('ciao-chat-drafts', '{not-json')
     expect(readChatDraft('chat-b', storage)).toBe('')
+  })
+
+  it('round-trips a projectId alongside the draft text', () => {
+    const storage = new MemoryStorage()
+    writeChatDraft('chat-a', 'hello', storage, { projectId: 'proj-1' })
+
+    expect(readChatDraft('chat-a', storage)).toBe('hello')
+    expect(readOrphanCandidates(new Set(), storage)).toEqual([
+      expect.objectContaining({ chatId: 'chat-a', text: 'hello', projectId: 'proj-1' }),
+    ])
+  })
+
+  it('normalizes a legacy plain-string entry into the object shape', () => {
+    const storage = new MemoryStorage()
+    storage.setItem('ciao-chat-drafts', '{"chat-a":"legacy text"}')
+
+    expect(readChatDraft('chat-a', storage)).toBe('legacy text')
+    const [orphan] = readOrphanCandidates(new Set(), storage)
+    expect(orphan).toMatchObject({ chatId: 'chat-a', text: 'legacy text', projectId: '' })
+    expect(orphan.updatedAt).toBeGreaterThan(0)
+  })
+
+  describe('readOrphanCandidates', () => {
+    it('excludes drafts whose chat id is still valid', () => {
+      const storage = new MemoryStorage()
+      writeChatDraft('chat-a', 'still open', storage, { projectId: 'proj-1' })
+
+      expect(readOrphanCandidates(new Set(['chat-a']), storage)).toEqual([])
+    })
+
+    it('excludes drafts older than the recovery window', () => {
+      const storage = new MemoryStorage()
+      const stale = { text: 'old draft', projectId: 'proj-1', updatedAt: Date.now() - 15 * 24 * 60 * 60 * 1000 }
+      storage.setItem('ciao-chat-drafts', JSON.stringify({ 'chat-a': stale }))
+
+      expect(readOrphanCandidates(new Set(), storage)).toEqual([])
+    })
+
+    it('excludes empty drafts', () => {
+      const storage = new MemoryStorage()
+      writeChatDraft('chat-a', 'text', storage)
+      clearChatDraft('chat-a', storage)
+
+      expect(readOrphanCandidates(new Set(), storage)).toEqual([])
+    })
   })
 
   it('keeps a deduplicated, bounded sent-prompt history per chat', () => {

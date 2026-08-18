@@ -15,7 +15,7 @@ import {
 } from '../lib/serverRestart'
 import { archiveFailedToast, archiveProcessingToast, archiveStoppedToast } from '../lib/archiveCopy'
 import { errorMessage } from '../lib/errorMessage'
-import { readChatDraft } from '../lib/chatDrafts'
+import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
 import { isPostprocessing, postprocessNeedsInsights } from '../lib/postprocessView'
 import type {
   ArchiveChatResponse,
@@ -807,6 +807,21 @@ export const useProjectStore = defineStore('projects', () => {
     return createChat(general.project_id)
   }
 
+  // Recover a draft orphaned by a server-side empty-chat sweep (#277): open a
+  // fresh chat pre-filled with the recovered text, in its original project
+  // when that still exists, otherwise General. Only ever called from an
+  // explicit user "Restore" click — never speculatively — so a chat is only
+  // created when the user actually asked for one.
+  async function restoreDraft(payload: { originalChatId: string; projectId: string; text: string }) {
+    const project = projects.value.find(p => p.project_id === payload.projectId) ?? generalProject()
+    if (!project) throw new Error('No project available to restore into')
+    if (project.workspace !== activeWorkspace.value) {
+      await switchWorkspace(project.workspace)
+    }
+    await createChat(project.project_id, DEFAULT_CHAT_TITLE, payload.text)
+    clearChatDraft(payload.originalChatId)
+  }
+
   // ── Persistence ─────────────────────────────────────────────────────
 
   function stripLegacyContextPrefix(content: string): string {
@@ -1363,6 +1378,28 @@ export const useProjectStore = defineStore('projects', () => {
 
     // Prune messages for deleted chats.
     const validIds = new Set(nextChats.map(ch => ch.chat_id))
+
+    // Offer back any draft whose chat no longer exists — most likely swept
+    // as an abandoned empty chat before its unsent text could be sent (#277).
+    // Load-time only (not on every in-session refresh; `bootstrapped` is
+    // still false on the very first call of a page load, same flag used
+    // above in fetchAll to distinguish boot from refresh), and the original
+    // key is left in place until the user restores or dismisses it, so a
+    // reload before either happens just re-offers it rather than losing it.
+    if (!bootstrapped.value) {
+      for (const orphan of readOrphanCandidates(validIds)) {
+        const project = projects.value.find(p => p.project_id === orphan.projectId)
+        const origin = project ? `${project.workspace}/${project.name}` : 'a deleted project'
+        const preview = orphan.text.length > 80 ? `${orphan.text.slice(0, 80)}…` : orphan.text
+        pushToast({
+          chat_id: '',
+          title: 'Recovered an unsent draft',
+          body: `From ${origin}: ${preview}`,
+          variant: 'error',
+          restoreDraft: { originalChatId: orphan.chatId, projectId: orphan.projectId, text: orphan.text },
+        })
+      }
+    }
     for (const key of Object.keys(messages.value)) {
       if (!validIds.has(key)) delete messages.value[key]
     }
@@ -1636,6 +1673,9 @@ export const useProjectStore = defineStore('projects', () => {
     const activeChatProject = activeChat.value?.project_id
     await api.del(`/api/projects/${projectId}`)
     projects.value = projects.value.filter(p => p.project_id !== projectId)
+    // Deliberate delete: drop any draft riding along with these chats now,
+    // so a later reload never mistakes it for a sweep-orphaned one.
+    chats.value.filter(c => c.project_id === projectId).forEach(c => clearChatDraft(c.chat_id))
     chats.value = chats.value.filter(c => c.project_id !== projectId)
     if (activeChatProject === projectId) {
       if (activeChatId.value) disconnectWs(activeChatId.value)
@@ -1647,6 +1687,7 @@ export const useProjectStore = defineStore('projects', () => {
     const activeChatProject = activeChat.value?.project_id
     await api.post(`/api/projects/${projectId}/complete`, {})
     projects.value = projects.value.filter(p => p.project_id !== projectId)
+    chats.value.filter(c => c.project_id === projectId).forEach(c => clearChatDraft(c.chat_id))
     chats.value = chats.value.filter(c => c.project_id !== projectId)
     if (activeChatProject === projectId) {
       if (activeChatId.value) disconnectWs(activeChatId.value)
@@ -1680,7 +1721,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Chat actions ────────────────────────────────────────────────────
 
-  async function createChat(projectId: string, title = DEFAULT_CHAT_TITLE) {
+  async function createChat(projectId: string, title = DEFAULT_CHAT_TITLE, seedDraft?: string) {
     creatingChatProjectIds.value[projectId] = true
     try {
       const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
@@ -1689,6 +1730,9 @@ export const useProjectStore = defineStore('projects', () => {
       // the ID-aware helper instead of pushing a possible duplicate.
       replaceChat(c)
       messages.value[c.chat_id] = []
+      // Write before switching: ChatPanel reads the draft once at mount, so
+      // this must already be in storage before the new panel mounts below.
+      if (seedDraft) writeChatDraft(c.chat_id, seedDraft, undefined, { projectId })
       // We just created it, so there is no history to fetch.
       switchChat(c.chat_id, { skipHistory: true })
       return c
@@ -1771,6 +1815,9 @@ export const useProjectStore = defineStore('projects', () => {
     const query = options?.onlyIfEmpty ? '?only_if_empty=1' : ''
     const result = await api.del<{ deleted?: boolean }>(`/api/chats/${chatId}${query}`)
     if (options?.onlyIfEmpty && result?.deleted === false) return false
+    // Deliberate delete: the chat is really gone, so any draft riding along
+    // with it is by construction never a sweep casualty — clear it now.
+    clearChatDraft(chatId)
     chats.value = chats.value.filter(c => c.chat_id !== chatId)
     delete messages.value[chatId]
     delete reentrySummaries.value[chatId]
@@ -4459,6 +4506,6 @@ export const useProjectStore = defineStore('projects', () => {
     loadMessages, loadSubagents, setReentrySummaryEnabled,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart,
-    pushToast, pushErrorToast, dismissToast, fixError,
+    pushToast, pushErrorToast, dismissToast, fixError, restoreDraft,
   }
 })
