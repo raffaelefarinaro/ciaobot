@@ -16,29 +16,45 @@ def build_skill_inventory(
 
     Source labels intentionally stay coarse for the Settings UI:
     ``custom`` means the skill is maintained under ``skills/``;
-    ``github`` means it comes from ``skills-lock.json``.
+    ``github`` means it comes from ``skills-lock.json``;
+    ``stock`` means it ships with the app and is installed into ``.claude/skills``.
     """
 
     root = Path(workspace_root)
     custom_names = _skill_names(root / "skills")
     lock_entries = _read_lock_entries(root / "skills-lock.json")
-    names = sorted(custom_names | set(lock_entries))
+    stock_names = _stock_skill_names(root)
+    names = sorted(custom_names | set(lock_entries) | stock_names)
 
     skills: list[dict[str, Any]] = []
-    counts = {"custom": 0, "github": 0}
+    counts = {"custom": 0, "github": 0, "stock": 0}
     for name in names:
         is_custom = name in custom_names
+        is_stock = name in stock_names
         lock = lock_entries.get(name, {})
-        label = "custom" if is_custom else "github"
+        if is_custom:
+            label = "custom"
+        elif is_stock:
+            label = "stock"
+        else:
+            label = "github"
         counts[label] += 1
-        source = "skills/" if is_custom else str(lock.get("source") or "skills-lock.json")
-        source_type = "custom" if is_custom else str(lock.get("sourceType") or "github")
+        if is_custom:
+            source = "skills/"
+            source_type = "custom"
+        elif is_stock:
+            source = "ciao.stock/skills"
+            source_type = "stock"
+        else:
+            source = str(lock.get("source") or "skills-lock.json")
+            source_type = str(lock.get("sourceType") or "github")
         skill = {
             "name": name,
             "label": label,
             "source": source,
             "source_type": source_type,
             "description": _description_for(root, name, prefer_custom=is_custom),
+            "path": _path_for(root, name, prefer_custom=is_custom),
             "installed_targets": _installed_targets(root, name),
         }
         if include_content:
@@ -46,6 +62,24 @@ def build_skill_inventory(
         skills.append(skill)
 
     return {"counts": counts, "skills": skills}
+
+
+def _stock_skill_names(root: Path) -> set[str]:
+    """Names of packaged stock skills installed into ``.claude/skills``.
+
+    Stock copies carry a ``.ciao-stock-skill`` marker (see
+    ``ciao.sync_skills._install_stock_skills``). A workspace ``skills/<name>``
+    shadows the packaged skill, so a name is only reported as stock when the
+    installed copy is still marked.
+    """
+    claude_skills = root / ".claude" / "skills"
+    if not claude_skills.is_dir():
+        return set()
+    return {
+        path.parent.name
+        for path in claude_skills.glob("*/.ciao-stock-skill")
+        if path.parent.name and not path.parent.name.startswith(".")
+    }
 
 
 def _skill_names(skills_root: Path) -> set[str]:
@@ -115,6 +149,34 @@ def _read_frontmatter_description(path: Path) -> str:
             if stripped:
                 values.append(stripped.strip('"\''))
     return " ".join(values).strip()
+
+
+def _path_for(root: Path, name: str, *, prefer_custom: bool) -> str:
+    """Canonical SKILL.md path for a skill, relative to the workspace root.
+
+    Custom skills live under ``skills/``; stock and GitHub skills are read
+    from their installed copy under ``.claude/skills``.
+    """
+    candidates = []
+    if prefer_custom:
+        candidates.append(root / "skills" / name / "SKILL.md")
+    candidates.extend(
+        [
+            root / ".claude" / "skills" / name / "SKILL.md",
+            root / ".agents" / "skills" / name / "SKILL.md",
+        ]
+    )
+    for path in candidates:
+        if path.exists():
+            return _relative_or_absolute(path, root)
+    return ""
+
+
+def _relative_or_absolute(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
 
 
 def _installed_targets(root: Path, name: str) -> list[str]:

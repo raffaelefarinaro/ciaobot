@@ -112,7 +112,7 @@ vi.mock('../../lib/api', () => {
     },
     '/api/local/status': { git_repo: true, branch: 'main', dirty: false },
     '/api/admin/skills': {
-      counts: { custom: 1, github: 1 },
+      counts: { custom: 1, github: 1, stock: 0 },
       skills: [
         {
           name: 'airtable-projects',
@@ -120,6 +120,7 @@ vi.mock('../../lib/api', () => {
           source: 'skills/',
           source_type: 'custom',
           description: 'Create Airtable projects',
+          path: 'skills/airtable-projects/SKILL.md',
           content: '# airtable-projects\ncustom skill content',
           installed_targets: ['claude'],
         },
@@ -129,6 +130,7 @@ vi.mock('../../lib/api', () => {
           source: 'example-org/skill-pack',
           source_type: 'github',
           description: 'Explore design before implementation',
+          path: '.claude/skills/brainstorming/SKILL.md',
           content: '# brainstorming\ngithub skill content',
           installed_targets: ['claude'],
         },

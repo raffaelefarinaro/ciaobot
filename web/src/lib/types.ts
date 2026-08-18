@@ -720,10 +720,11 @@ export interface CliStats {
 
 export interface SkillInventoryItem {
   name: string
-  label: 'custom' | 'github'
+  label: 'custom' | 'github' | 'stock'
   source: string
   source_type: string
   description: string
+  path: string
   content?: string
   installed_targets: string[]
 }
@@ -732,6 +733,7 @@ export interface SkillInventory {
   counts: {
     custom: number
     github: number
+    stock: number
   }
   skills: SkillInventoryItem[]
 }

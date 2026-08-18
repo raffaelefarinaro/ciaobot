@@ -1480,7 +1480,7 @@
             <div>
               <p class="section-title">skills</p>
               <p class="hint">
-                Manage Ciaobot-specific custom skills and locked GitHub/package skills.
+                Manage Ciaobot's stock skills, custom skills, and locked GitHub/package skills.
               </p>
             </div>
             <div class="settings-card-header-actions">
@@ -1492,7 +1492,7 @@
           </div>
 
           <p class="hint hint--info skill-scope-note">
-            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed custom and GitHub/package skills — see
+            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock, custom, and GitHub/package skills — see
             <RouterLink to="/settings/providers">Providers</RouterLink> for what each CLI brings on its own.
           </p>
 
@@ -1520,8 +1520,38 @@
             <p class="hint hint--warn">{{ skillsError }}</p>
           </template>
           <template v-else-if="skillsInventory">
-            <!-- Custom Skills Section -->
+            <!-- Stock Skills Section -->
             <div class="skill-section">
+              <p class="subsection-title subsection-title--spaced">stock skills</p>
+              <p v-if="!stockSkills.length" class="hint hint--section-empty">No stock skills installed.</p>
+              <div v-else class="skill-list skill-list--section">
+                <div
+                  v-for="skill in stockSkills"
+                  :key="skill.name"
+                  class="skill-row"
+                  :class="{ expanded: isSkillExpanded(skill.name) }"
+                  @click="toggleSkill(skill.name)"
+                >
+                  <div class="skill-main">
+                    <div class="skill-title-row">
+                      <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
+                      <span class="skill-name">{{ skill.name }}</span>
+                    </div>
+                    <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
+                    <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
+                      <p v-if="skill.path" class="skill-meta">
+                        <span class="skill-meta-label">Path</span>
+                        <button class="inline-path-button" @click.stop="openAssetPath(skill.path)">{{ skill.path }}</button>
+                      </p>
+                      <pre v-if="skill.content" class="asset-code-preview"><code>{{ skill.content }}</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Custom Skills Section -->
+            <div class="skill-section skill-section--spaced">
               <p class="subsection-title subsection-title--spaced">custom skills</p>
               <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills created yet.</p>
               <div v-else class="skill-list skill-list--section">
@@ -1539,6 +1569,10 @@
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
+                      <p v-if="skill.path" class="skill-meta">
+                        <span class="skill-meta-label">Path</span>
+                        <button class="inline-path-button" @click.stop="openAssetPath(skill.path)">{{ skill.path }}</button>
+                      </p>
                       <pre v-if="skill.content" class="asset-code-preview"><code>{{ skill.content }}</code></pre>
                     </div>
                   </div>
@@ -1595,6 +1629,10 @@
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
+                      <p v-if="skill.path" class="skill-meta">
+                        <span class="skill-meta-label">Path</span>
+                        <button class="inline-path-button" @click.stop="openAssetPath(skill.path)">{{ skill.path }}</button>
+                      </p>
                       <pre v-if="skill.content" class="asset-code-preview"><code>{{ skill.content }}</code></pre>
                     </div>
                   </div>
@@ -3464,6 +3502,10 @@ async function fixWorkspaceHealth() {
   }
 }
 
+const stockSkills = computed(() => {
+  return skillsInventory.value?.skills.filter(s => s.label === 'stock') || []
+})
+
 const customSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'custom') || []
 })
@@ -4177,17 +4219,6 @@ function disallowedToolsPayload(raw: string): string[] | null {
   return cleaned.split(',').map((s) => s.trim()).filter(Boolean)
 }
 
-const defaultClaudeAiConnectors = [
-  'mcp__claude_ai_Airtable',
-  'mcp__claude_ai_Asana',
-  'mcp__claude_ai_Atlassian',
-  'mcp__claude_ai_Google_Cloud_BigQuery',
-  'mcp__claude_ai_Salesforce',
-  'mcp__claude_ai_Sentry',
-  'mcp__claude_ai_Slack',
-  'mcp__claude_ai_incident_io',
-]
-
 function formatConnectorLabel(name: string): string {
   let clean = name.replace(/^mcp__claude_ai_/, '').replace(/^mcp__/, '')
   if (clean === 'Google_Cloud_BigQuery') return 'BigQuery'
@@ -4220,8 +4251,9 @@ const EXCLUDED_PLATFORM_MCPS = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot
  *
  * Keyed by provider id rather than written per provider, so a provider added
  * to the backend registry gets a correct card without another branch here.
- * Claude is the one special case: when it reports nothing, its account-OAuth
- * connectors are inferred from the active workspace's toggle.
+ * Reports only what the CLI actually discovered — an empty result means
+ * "none reported", not a guess, since a placeholder here would be
+ * indistinguishable from a real connection.
  */
 function connectionMcps(providerId: string): string[] {
   const discovered = providerKeys.value?.connections?.[providerId]?.mcps || []
@@ -4229,12 +4261,6 @@ function connectionMcps(providerId: string): string[] {
   for (const mcpName of discovered) {
     if (EXCLUDED_PLATFORM_MCPS.has(mcpName)) continue
     const label = formatConnectorLabel(mcpName)
-    if (!result.includes(label)) result.push(label)
-  }
-  if (result.length || providerId !== 'claude') return result
-
-  for (const c of defaultClaudeAiConnectors) {
-    const label = formatConnectorLabel(c)
     if (!result.includes(label)) result.push(label)
   }
   return result
