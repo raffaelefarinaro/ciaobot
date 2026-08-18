@@ -212,11 +212,11 @@ function resetCamera() {
   // draw() only runs inside the RAF loop; without this, resetting the
   // camera while the graph is at rest changed the reactive state but the
   // canvas kept showing the old view until something else woke it up.
-  wakeSimulation()
+  requestRedraw()
 }
 function zoom(factor: number) {
   camera.scale = Math.max(0.15, Math.min(3, camera.scale * factor))
-  wakeSimulation()
+  requestRedraw()
 }
 function worldToScreen(x: number, y: number): [number, number] {
   return [x * camera.scale + W / 2 + camera.x, y * camera.scale + H / 2 + camera.y]
@@ -351,6 +351,24 @@ function wakeSimulation() {
   calmFrames = 0
   coolingStartedAt = performance.now()
   if (!rafId) rafId = requestAnimationFrame(tick)
+}
+
+// A pure camera change (pan, wheel-zoom, the zoom buttons, resetCamera) needs
+// exactly one more paint, not a restarted physics run: `wakeSimulation()`
+// re-arms the ~2.5s cooling schedule and repulsion stepping, which is wasted
+// work for a camera move and was itself making zoom feel heavy. Once the
+// layout is calm the RAF loop is stopped entirely (see tick()), so without
+// this, moving the camera while idle updated `camera` but nothing redrew
+// until some other interaction happened to wake the physics loop — this was
+// the "stuck" pan/zoom bug. Schedules at most one extra frame; a no-op while
+// the physics loop is already running, since tick() draws every frame anyway.
+let redrawRafId = 0
+function requestRedraw() {
+  if (rafId || redrawRafId) return
+  redrawRafId = requestAnimationFrame(() => {
+    redrawRafId = 0
+    draw()
+  })
 }
 
 function draw() {
@@ -490,6 +508,7 @@ function onMouseMove(e: MouseEvent) {
   } else if (panStart) {
     camera.x = panStart.cx + (e.clientX - panStart.x) * dpr
     camera.y = panStart.cy + (e.clientY - panStart.y) * dpr
+    requestRedraw()
   }
 }
 function onMouseUp() {
@@ -505,6 +524,7 @@ function onMouseUp() {
 function onWheel(e: WheelEvent) {
   const delta = -e.deltaY * 0.0012
   camera.scale = Math.max(0.15, Math.min(3, camera.scale * (1 + delta)))
+  requestRedraw()
 }
 
 // ---------- list view ----------
@@ -536,6 +556,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   if (rafId) cancelAnimationFrame(rafId)
+  if (redrawRafId) cancelAnimationFrame(redrawRafId)
   ro?.disconnect()
   window.removeEventListener('mousemove', onMouseMove)
   window.removeEventListener('mouseup', onMouseUp)
