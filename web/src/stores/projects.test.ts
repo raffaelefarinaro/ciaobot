@@ -134,6 +134,74 @@ describe('native window focus reporting', () => {
   })
 })
 
+describe('resume from background reconnects a dead awareness socket', () => {
+  // Other describe blocks in this file also call useProjectStore(), which
+  // registers its own module-scoped `visibilitychange` listener that is
+  // never torn down between tests. Dispatching the event here can therefore
+  // fire more than one store instance's handler, so assertions below check
+  // relative growth and specific socket identity/state rather than an
+  // absolute fakeSockets count.
+  test('reconnects when the events socket is closed but not nulled out', async () => {
+    // A long sleep/background period can flip a WebSocket to CLOSED without
+    // ever invoking its onclose handler (JS execution was frozen), leaving
+    // eventsSocket pointing at a dead object. Without the fix, resuming from
+    // that state left the app with no live awareness channel — a chat whose
+    // turn actually finished while backgrounded kept showing "in progress"
+    // until the user took some unrelated action that forced a plain HTTP
+    // refresh (e.g. clicking Stop).
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const deadSocket = fakeSockets[fakeSockets.length - 1]
+    // Simulate the frozen-tab case: readyState flips without onclose firing.
+    deadSocket.readyState = FakeWebSocket.CLOSED
+    const countBefore = fakeSockets.length
+
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      configurable: true,
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+
+    // A dead, non-open socket left in place must never be mistaken for live:
+    // something has to have opened a fresh replacement.
+    expect(fakeSockets.length).toBeGreaterThan(countBefore)
+    expect(deadSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(fakeSockets.slice(countBefore).some(s => s !== deadSocket)).toBe(true)
+  })
+
+  test('force-closes an already-live socket to guarantee a fresh snapshot', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const liveSocket = fakeSockets[fakeSockets.length - 1]
+    const countBefore = fakeSockets.length
+
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      configurable: true,
+    })
+
+    vi.useFakeTimers()
+    try {
+      document.dispatchEvent(new Event('visibilitychange'))
+      await Promise.resolve()
+      // An already-open socket gets force-closed rather than left alone —
+      // that's what guarantees a fresh snapshot lands instead of trusting a
+      // readyState that can lie after a long suspend.
+      expect(liveSocket.readyState).toBe(FakeWebSocket.CLOSED)
+      // Closing an already-open socket reconnects on its own fast timer
+      // (see onclose), not synchronously from resumeActiveChat itself.
+      await vi.advanceTimersByTimeAsync(60)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBeGreaterThan(countBefore)
+  })
+})
+
 describe('streaming started reconnect guard', () => {
   test('does not reconnect when the active chat socket is already open', () => {
     expect(shouldReconnectActiveChatOnStreamingStarted({ readyState: 1 })).toBe(false)

@@ -2516,7 +2516,15 @@ export const useProjectStore = defineStore('projects', () => {
       const ews = eventsSocket.value
       if (ews && ews.readyState === WebSocket.OPEN) {
         try { ews.close() } catch { /* ignore */ }
-      } else if (!ews) {
+      } else {
+        // Covers both null and a leftover CONNECTING/CLOSING/CLOSED socket. A
+        // long sleep/background period can close the socket without ever
+        // invoking onclose (JS execution was frozen), leaving eventsSocket
+        // pointing at a dead object that this check used to ignore — no
+        // snapshot ever arrived to correct a chat left showing "in progress"
+        // after its turn actually finished. connectEventsWs() itself no-ops
+        // if a live CONNECTING/OPEN socket already exists, so this is safe
+        // to call unconditionally.
         connectEventsWs()
       }
     }
