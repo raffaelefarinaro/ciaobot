@@ -886,13 +886,13 @@
                 for each provider. "Automatic" uses that provider's own default.
               </p>
             </div>
-            <div class="settings-field-grid">
+            <div class="provider-defaults">
               <div
                 v-for="section in aliasProviderSections"
                 :key="section.key"
-                class="settings-field routine-row"
+                class="provider-defaults-row"
               >
-                <span class="ws-label">{{ section.label }}</span>
+                <span class="provider-defaults-title ws-label">{{ section.label }}</span>
                 <label class="settings-field">
                   <span class="ws-label">Default model</span>
                   <ModelSelector
@@ -6234,6 +6234,30 @@ a.btn-secondary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
+}
+.provider-defaults {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.provider-defaults-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+}
+.provider-defaults-title {
+  font-weight: 600;
+  color: var(--fg);
+}
+@media (max-width: 720px) {
+  .provider-defaults {
+    grid-template-columns: 1fr;
+  }
 }
 .settings-field--wide {
   grid-column: 1 / -1;
