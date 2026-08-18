@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -138,7 +139,13 @@ def test_resolve_critique_panel_cli_override_wins() -> None:
 
 
 def _panel(
-    monkeypatch, *, codex: bool, opencode: bool, anthropic: bool = True
+    monkeypatch,
+    *,
+    codex: bool,
+    opencode: bool,
+    anthropic: bool = True,
+    codex_model: str = "",
+    opencode_model: str = "",
 ) -> list[str]:
     """Resolve the default panel with each vendor probe pinned."""
     from ciao.config import CiaoConfig
@@ -146,7 +153,10 @@ def _panel(
     monkeypatch.setattr(crt, "is_anthropic_available", lambda: anthropic)
     monkeypatch.setattr(crt, "is_codex_available", lambda: codex)
     monkeypatch.setattr(crt, "is_opencode_available", lambda: opencode)
-    return crt.default_critique_panel(CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"}))
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
+    config.codex = SimpleNamespace(default_model=codex_model)
+    config.opencode = SimpleNamespace(default_model=opencode_model)
+    return crt.default_critique_panel(config)
 
 
 def test_default_critique_panel_is_anthropic_only_when_nothing_else_signed_in(
@@ -160,7 +170,7 @@ def test_default_critique_panel_drops_anthropic_when_it_is_not_signed_in(
 ) -> None:
     """Every entry is gated, Anthropic included."""
     panel = _panel(monkeypatch, codex=True, opencode=True, anthropic=False)
-    assert panel == ["codex:fable", "opencode:fable"]
+    assert panel == ["codex:", "opencode:"]
 
 
 def test_default_critique_panel_never_resolves_empty(monkeypatch) -> None:
@@ -180,15 +190,37 @@ def test_default_critique_panel_adds_one_voice_per_signed_in_vendor(
     assert _panel(monkeypatch, codex=True, opencode=True) == [
         "opus",
         "fable",
-        "codex:fable",
-        "opencode:fable",
+        "codex:",
+        "opencode:",
+    ]
+
+
+def test_default_critique_panel_uses_per_provider_default_models(
+    monkeypatch,
+) -> None:
+    """Codex/opencode entries carry the operator's per-provider default model.
+
+    A tier alias like ``fable`` is only meaningful to Claude Code; the other
+    providers must get a concrete model id (or none, to use their own default).
+    """
+    assert _panel(
+        monkeypatch,
+        codex=True,
+        opencode=True,
+        codex_model="gpt-5.6-sol",
+        opencode_model="ollama-cloud/deepseek-v4-flash",
+    ) == [
+        "opus",
+        "fable",
+        "codex:gpt-5.6-sol",
+        "opencode:ollama-cloud/deepseek-v4-flash",
     ]
 
 
 def test_default_critique_panel_omits_vendors_that_are_signed_out(monkeypatch) -> None:
     """An unavailable provider would put a guaranteed failure in the panel."""
     codex_only = _panel(monkeypatch, codex=True, opencode=False)
-    assert codex_only == ["opus", "fable", "codex:fable"]
+    assert codex_only == ["opus", "fable", "codex:"]
 
     opencode_only = _panel(monkeypatch, codex=False, opencode=True)
-    assert opencode_only == ["opus", "fable", "opencode:fable"]
+    assert opencode_only == ["opus", "fable", "opencode:"]

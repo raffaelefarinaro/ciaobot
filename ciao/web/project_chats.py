@@ -3034,7 +3034,9 @@ class ProjectChatManager:
         # than another. An explicit ``model`` arg wins. When the provider is
         # explicitly given (not the workspace default), fall back to that
         # provider's own operator default.
-        default_model = self._config.default_model_for_workspace(workspace)
+        default_model = self._config.default_model_for_workspace(
+            workspace, chat_provider
+        )
         if not default_model and provider:
             default_model = self._config.default_model_for_provider(provider)
         chat_model = model or default_model
@@ -4102,7 +4104,7 @@ class ProjectChatManager:
                 workspace_ctx = workspace or None
                 insights_models = getattr(self._config, "provider_insights_models", {}) or {}
                 model = insights_models.get(chat.provider or "", "") or resolve_insights_model(
-                    self._config, workspace_ctx
+                    self._config, workspace_ctx, chat.provider or None
                 )
                 await retry_insights_for_chat(
                     config=self._config,
@@ -4153,7 +4155,9 @@ class ProjectChatManager:
             insights_models = getattr(config, "provider_insights_models", {}) or {}
             insights_model = insights_models.get(
                 chat_meta.provider if chat_meta else "", ""
-            ) or resolve_insights_model(config, workspace)
+            ) or resolve_insights_model(
+                config, workspace, chat_meta.provider if chat_meta else None
+            )
             # Auto projects (General, Claude Code CLI) are catch-alls whose
             # docs would become junk drawers; only real projects get the
             # archive-time canonical-doc update.
@@ -4595,18 +4599,22 @@ class ProjectChatManager:
         workspace = project.workspace if project else None
         return self._config.disallowed_tools_for_workspace(workspace)
 
-    def schedule_default_model(self, project_id: str | None) -> str:
+    def schedule_default_model(
+        self, project_id: str | None, provider: str | None = None
+    ) -> str:
         """Pick the default model for a new schedule.
 
         Mirrors ``create_chat``'s per-workspace default lookup so a
         schedule attached to a personal project can default to an
         tier, while another defaults to a more capable one.
         Falls back to the global ``claude_default_model`` when the
-        project is unknown.
+        project is unknown. ``provider``, when given, resolves against
+        that provider's own default instead of the workspace's default
+        provider (see ``CiaoConfig.default_model_for_workspace``).
         """
         project = self._projects.get(project_id) if project_id else None
         workspace = project.workspace if project else None
-        return self._config.default_model_for_workspace(workspace)
+        return self._config.default_model_for_workspace(workspace, provider)
 
     def schedule_default_provider(self, project_id: str | None) -> str:
         project = self._projects.get(project_id) if project_id else None
@@ -4669,7 +4677,7 @@ class ProjectChatManager:
         )
         model = (
             getattr(entry, "model", "")
-            or self._config.default_model_for_workspace(workspace)
+            or self._config.default_model_for_workspace(workspace, provider)
         )
         return provider, model, workspace
 
@@ -7876,7 +7884,7 @@ class ProjectChatManager:
                 model = (
                     fixed_chat.model if fixed_chat is not None
                     else getattr(entry, "model", "")
-                    or self.schedule_default_model(project_id)
+                    or self.schedule_default_model(project_id, classifier_provider)
                 )
                 env = (
                     self._build_extra_env(fixed_chat)

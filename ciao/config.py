@@ -727,19 +727,36 @@ class CiaoConfig:
         tmp.replace(path)
         self._workspace_registry_changed = False
 
-    def default_model_for_workspace(self, workspace: str | None) -> str:
+    def default_model_for_workspace(
+        self, workspace: str | None, provider: str | None = None
+    ) -> str:
         """Pick the new-chat / new-schedule default for a workspace.
 
         Falls back to ``claude_default_model`` when the per-workspace
         knob is empty or the workspace is unknown.
+
+        ``provider``, when given, is the provider the chat/schedule will
+        actually run on. It can differ from the workspace's own
+        ``default_provider`` (an explicit provider override); in that case
+        resolve against that provider's own operator default instead of the
+        workspace's default-provider model, since a workspace-level model
+        override is only meaningful for the workspace's own default
+        provider (#see create_chat/schedule_effective_routing callers).
         """
         from ciao import provider_registry
 
         workspace_config = self.workspace(workspace)
-        if workspace_config:
-            descriptor = provider_registry.get(workspace_config.default_provider)
+        workspace_provider = (
+            workspace_config.default_provider if workspace_config else None
+        )
+        effective_provider = provider or workspace_provider
+        if effective_provider:
+            descriptor = provider_registry.get(effective_provider)
             if descriptor is not None:
-                if workspace_config.default_model:
+                use_workspace_override = workspace_config is not None and (
+                    provider is None or provider == workspace_provider
+                )
+                if use_workspace_override and workspace_config is not None and workspace_config.default_model:
                     return workspace_config.default_model
                 if descriptor.default_model_config_key:
                     return str(getattr(self, descriptor.default_model_config_key, "") or "")

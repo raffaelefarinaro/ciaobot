@@ -43,17 +43,24 @@ from ciao.transcripts import _claude_projects_dir
 logger = logging.getLogger(__name__)
 
 
-def resolve_insights_model(config: CiaoConfig, workspace: str | None = None) -> str:
+def resolve_insights_model(
+    config: CiaoConfig, workspace: str | None = None, provider: str | None = None
+) -> str:
     """Pick the model for session-insights extraction.
 
     When the operator has not set an explicit override (Settings → Models →
     Session insights = Automatic), use the workspace's default model. Scripts
     without workspace context fall back to ``config.insights_model``.
+
+    ``provider``, when given, is the chat's actual provider; it is passed
+    through to ``default_model_for_workspace`` so a Codex/opencode chat in a
+    Claude-default workspace resolves that provider's own default model
+    instead of a Claude tier alias (which those providers cannot run).
     """
     if config.insights_model_override:
         return config.insights_model_override
     if workspace is not None:
-        return config.default_model_for_workspace(workspace)
+        return config.default_model_for_workspace(workspace, provider)
     return config.insights_model
 
 
@@ -681,7 +688,7 @@ async def retry_insights_for_chat(
     wrote one (the pipeline's trajectory step runs in a ``finally``), and the
     insights section this retry appends is what memory curation reads.
     """
-    effective_model = model or resolve_insights_model(config, workspace or None)
+    effective_model = model or resolve_insights_model(config, workspace or None, provider)
     await extract_and_append(
         archive_path=archive_path,
         filtered_jsonl="",
