@@ -1293,6 +1293,33 @@ describe('optimistic user bubble reconciliation', () => {
     expect(msgs.some(m => m.tool_name === '_activity')).toBe(false)
     expect(msgs.some(m => m.tool_name === '_thinking')).toBe(false)
   })
+
+  test('loadMessages keeps a settled assistant reply even when projectStreaming is stale', async () => {
+    // The turn finished server-side and the durable history ends in a
+    // completed assistant reply carrying a completion timestamp. Even if the
+    // events-WS still declares this chat streaming (e.g. the push notification
+    // was tapped before the snapshot caught up), the final answer must render
+    // rather than being truncated away to just the user's last turn.
+    const store = useProjectStore()
+    const chatId = 'chat-settled'
+    store.messages[chatId] = [
+      { role: 'user', content: 'make it robust', timestamp: '', turn_index: 0 },
+    ]
+    // Stale local view of the events WS — the real bug scenario.
+    store.projectStreaming[chatId] = true
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'make it robust', sent_at: '2026-07-18T08:00:00Z', turn_index: 0 },
+      // Completed reply: orchestration layer overlaid a completion sent_at.
+      { role: 'assistant', content: 'Done — hardened the parser.', sent_at: '2026-07-18T08:00:05Z' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs.length).toBe(2)
+    expect(msgs.at(-1)?.content).toBe('Done — hardened the parser.')
+    expect(msgs.at(-1)?.role).toBe('assistant')
+  })
 })
 
 describe('Codex structured questions', () => {

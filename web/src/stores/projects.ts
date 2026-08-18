@@ -2115,29 +2115,47 @@ export const useProjectStore = defineStore('projects', () => {
       })))
 
       // While the server declares this chat is actively streaming, don't let
-      // /messages pull partial assistant progress into the historical timeline:
+      // /messages pull in the assistant's progress into the historical timeline:
       // the live trace already owns the current turn. Loading mid-turn activity
       // creates a duplicate Activity row below the live one.
+      //
+      // But `projectStreaming` reflects the events-WS view, which can lag the
+      // server truth — for example when the chat is opened from a push
+      // notification before the events socket re-snapshots `chat_streaming_done`.
+      // When the server's history already ends in a *completed* assistant reply
+      // (it carries a completion `sent_at`/timestamp overlaid by the
+      // orchestration layer), the turn is settled server-side and truncating
+      // would silently drop the real answer, leaving only the user's last turn.
+      // In that case skip the truncation so the finished reply renders.
       if (projectStreaming.value[chatId]) {
-        const localMsgs = messages.value[chatId] || []
-        let lastLocalUserIdx = -1
-        for (let i = localMsgs.length - 1; i >= 0; i--) {
-          if (localMsgs[i].role === 'user') {
-            lastLocalUserIdx = i
-            break
-          }
-        }
-        if (lastLocalUserIdx >= 0) {
-          const lastLocalUser = localMsgs[lastLocalUserIdx]
-          let serverLastUserIdx = -1
-          for (let i = normalizedServer.length - 1; i >= 0; i--) {
-            if (normalizedServer[i].role === 'user' && normalizedServer[i].content === lastLocalUser.content) {
-              serverLastUserIdx = i
+        const lastServer = normalizedServer[normalizedServer.length - 1]
+        const serverTurnSettled = Boolean(
+          lastServer &&
+          lastServer.role === 'assistant' &&
+          !lastServer.is_error &&
+          lastServer.timestamp,
+        )
+        if (!serverTurnSettled) {
+          const localMsgs = messages.value[chatId] || []
+          let lastLocalUserIdx = -1
+          for (let i = localMsgs.length - 1; i >= 0; i--) {
+            if (localMsgs[i].role === 'user') {
+              lastLocalUserIdx = i
               break
             }
           }
-          if (serverLastUserIdx >= 0) {
-            normalizedServer = normalizedServer.slice(0, serverLastUserIdx + 1)
+          if (lastLocalUserIdx >= 0) {
+            const lastLocalUser = localMsgs[lastLocalUserIdx]
+            let serverLastUserIdx = -1
+            for (let i = normalizedServer.length - 1; i >= 0; i--) {
+              if (normalizedServer[i].role === 'user' && normalizedServer[i].content === lastLocalUser.content) {
+                serverLastUserIdx = i
+                break
+              }
+            }
+            if (serverLastUserIdx >= 0) {
+              normalizedServer = normalizedServer.slice(0, serverLastUserIdx + 1)
+            }
           }
         }
       }
