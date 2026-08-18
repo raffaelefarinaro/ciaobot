@@ -224,3 +224,88 @@ def test_a_restart_mid_pipeline_leaves_no_chat_pulsing(tmp_path: Path) -> None:
 
     assert reloaded.postprocessing_chat_ids() == []
     assert reloaded.get_chat(chat_id).postprocess["state"] == "done"
+
+
+# ── retry_insights ───────────────────────────────────────────────────────
+
+
+def test_retry_insights_starts_a_text_mode_pipeline(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    chat = manager.get_chat(chat_id)
+    assert chat is not None
+    chat.archived = True
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n\nbody\n", encoding="utf-8")
+    chat.archive_path = str(archive.relative_to(tmp_path))
+
+    called: dict[str, object] = {}
+
+    async def fake_retry_insights_for_chat(**kwargs: object) -> bool:
+        called.update(kwargs)
+        archive.write_text(
+            archive.read_text(encoding="utf-8")
+            + "\n\n<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- x\n",
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr(
+        "ciao.insights.retry_insights_for_chat",
+        fake_retry_insights_for_chat,
+    )
+
+    async def run() -> str:
+        return manager.retry_insights(chat_id)
+
+    status = asyncio.run(run())
+
+    assert status == "started"
+    # The retry resolves archive_path relative to the workspace root.
+    assert called["archive_path"] == archive
+
+
+def test_retry_insights_refuses_non_archived_and_missing(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+
+    assert manager.retry_insights(chat_id) == "not_archived"
+
+    chat = manager.get_chat(chat_id)
+    assert chat is not None
+    chat.archived = True
+    chat.archive_path = ""
+    assert manager.retry_insights(chat_id) == "no_archive"
+
+
+def test_retry_insights_is_noop_when_pipeline_already_running(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    chat = manager.get_chat(chat_id)
+    assert chat is not None
+    chat.archived = True
+    chat.archive_path = "archive.md"
+    manager._begin_postprocess(chat_id, ["insights"])
+
+    assert manager.retry_insights(chat_id) == "running"
+
+
+def test_retry_insights_is_noop_when_archive_already_has_insights(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    chat = manager.get_chat(chat_id)
+    assert chat is not None
+    chat.archived = True
+    archive = tmp_path / "archive.md"
+    archive.write_text(
+        "# chat\n\n## Session insights\n\n- existing\n", encoding="utf-8"
+    )
+    chat.archive_path = str(archive.relative_to(tmp_path))
+
+    status = manager.retry_insights(chat_id)
+    assert status == "already_has"
+    assert manager.postprocessing_chat_ids() == []

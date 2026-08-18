@@ -183,7 +183,7 @@ def test_record_startup_phase_maps_and_skips(tmp_path: Path) -> None:
 
 
 def test_summary_includes_never_run_jobs(tmp_path: Path) -> None:
-    jr.record_run(jr.JobRun(job="title", label="Title", status="ok", duration_ms=5))
+    jr.record_run(jr.JobRun(job="insights", label="Session insights", status="ok", duration_ms=5))
     summary = {item["job"]: item for item in jr.automation_summary()}
     # every registry job is present, except bulk variants (nested under their
     # parent) and pipeline steps (nested under the job that owns the pipeline)
@@ -193,18 +193,18 @@ def test_summary_includes_never_run_jobs(tmp_path: Path) -> None:
             assert spec.job not in summary
         else:
             assert spec.job in summary
-    assert summary["title"]["last_run"]["status"] == "ok"
+    assert summary["insights"]["last_run"]["status"] == "ok"
     # a job that never ran has empty stats
     assert summary["skill_evolution"]["last_run"] is None
     assert summary["skill_evolution"]["stats"]["total_runs"] == 0
     # categories carried through
     assert summary["startup_sync"]["category"] == "system"
-    assert summary["title"]["uses_model"] is True
-    assert summary["title"]["produces_outcome"] is True
+    assert summary["insights"]["uses_model"] is True
+    assert summary["insights"]["produces_outcome"] is True
     assert summary["startup_sync"]["uses_model"] is False
     assert summary["startup_sync"]["produces_outcome"] is False
     # every row can answer "when does this run?"
-    assert summary["title"]["trigger"]
+    assert summary["insights"]["trigger"]
     # the archive pipeline reports as one group of steps in execution order,
     # not four peers each claiming its own trigger
     assert summary["insights"]["pipeline_label"] == "When you archive a chat"
@@ -223,7 +223,7 @@ def test_summary_hides_retired_jobs(tmp_path: Path) -> None:
     """A job removed from the code must not linger on the Automation page."""
     jr.record_run(jr.JobRun(job="pwa_rebuild", label="PWA rebuild", status="ok",
                             category="system", duration_ms=5))
-    jr.record_run(jr.JobRun(job="title", label="Title", status="ok", duration_ms=5))
+    jr.record_run(jr.JobRun(job="insights", label="Session insights", status="ok", duration_ms=5))
 
     assert "pwa_rebuild" not in {item["job"] for item in jr.automation_summary()}
     # the record itself is untouched on disk, and readable on request
@@ -337,4 +337,4 @@ def test_summary_marks_a_running_job(tmp_path: Path) -> None:
     with jr.track_sync("insights", "Session insights"):
         summary = {item["job"]: item for item in jr.automation_summary()}
         assert summary["insights"]["running"] is True
-        assert summary["title"]["running"] is False
+        assert summary["skill_evolution"]["running"] is False

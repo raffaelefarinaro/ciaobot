@@ -1023,7 +1023,6 @@ class CiaoMcpService:
             default_model: str = "",
             gws_profile: str = "",
             disallowed_tools: Any = _UNSET,
-            claude_ai_mcps: Any = _UNSET,
             color: str = "",
         ) -> dict[str, Any]:
             """Create a new logical workspace.
@@ -1036,7 +1035,6 @@ class CiaoMcpService:
                 gws_profile: Linked Google Workspace profile, or empty.
                 disallowed_tools: Extra tools to deny in this workspace;
                     null resets the workspace-specific list to inherited defaults.
-                claude_ai_mcps: claude.ai connector toggle (null = default).
                 color: Workspace accent (pink, cyan, amber, emerald, violet).
             """
             return await self._invoke(
@@ -1048,7 +1046,6 @@ class CiaoMcpService:
                     default_model=default_model,
                     gws_profile=gws_profile,
                     disallowed_tools=disallowed_tools,
-                    claude_ai_mcps=claude_ai_mcps,
                     color=color,
                 ),
                 mutating=True,
@@ -1061,7 +1058,6 @@ class CiaoMcpService:
             default_model: str | None = None,
             gws_profile: str | None = None,
             disallowed_tools: Any = _UNSET,
-            claude_ai_mcps: Any = _UNSET,
             color: str = "",
         ) -> dict[str, Any]:
             """Update a configured workspace. Omitted fields keep their values.
@@ -1073,7 +1069,6 @@ class CiaoMcpService:
                 gws_profile: Linked Google Workspace profile, or empty.
                 disallowed_tools: Extra tools to deny in this workspace;
                     null resets the workspace-specific list to inherited defaults.
-                claude_ai_mcps: claude.ai connector toggle (null = default).
                 color: Workspace accent (pink, cyan, amber, emerald, violet).
             """
             return await self._invoke(
@@ -1085,7 +1080,6 @@ class CiaoMcpService:
                     default_model=default_model,
                     gws_profile=gws_profile,
                     disallowed_tools=disallowed_tools,
-                    claude_ai_mcps=claude_ai_mcps,
                     color=color,
                 ),
                 mutating=True,

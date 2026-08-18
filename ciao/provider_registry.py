@@ -55,10 +55,10 @@ class ProviderDescriptor:
     # ``module:attr`` for ``async () -> UpgradeResult``. Empty means the
     # provider's CLI is not upgraded by ``ciao upgrade``.
     upgrade_path: str = ""
-    # Name of the ``CiaoConfig`` attribute holding this provider's per-tier
-    # model pins (a dataclass with ``{haiku,sonnet,opus,fable}_model`` fields).
-    # Empty means the provider has no operator-settable tier pins.
-    tier_settings_attr: str = ""
+    # Name of the ``CiaoConfig`` attribute holding this provider's operator
+    # default-model setting (a dataclass with a ``default_model`` field).
+    # Empty means the provider has no operator-settable default model.
+    default_model_settings_attr: str = ""
     # Native thinking/reasoning levels, surfaced as-is in the PWA model picker.
     # Empty tuple = the provider has no level control.
     thinking_levels: tuple[str, ...] = ()
@@ -135,7 +135,7 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         system_skills_path="ciao.providers.codex:codex_system_skills",
         status_probe_path="ciao.setup_status:codex_status_probe",
         upgrade_path="ciao.upgrade:upgrade_codex",
-        tier_settings_attr="codex",
+        default_model_settings_attr="codex",
         # The model catalog is authoritative and the API narrows this per
         # model. This union is the validation fallback when discovery is
         # unavailable.
@@ -151,7 +151,7 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         system_skills_path="ciao.providers.opencode:opencode_system_skills",
         status_probe_path="ciao.setup_status:opencode_status_probe",
         upgrade_path="ciao.upgrade:upgrade_opencode",
-        tier_settings_attr="opencode",
+        default_model_settings_attr="opencode",
         # opencode calls reasoning effort a model `variant`. The catalog is
         # authoritative and narrows this per model; the union is the validation
         # fallback when discovery is unavailable.

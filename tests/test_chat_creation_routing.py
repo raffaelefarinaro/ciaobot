@@ -1,4 +1,4 @@
-"""New-chat creation applies tier pins and per-provider default modes."""
+"""New-chat creation applies per-provider default models and default modes."""
 
 from __future__ import annotations
 
@@ -47,107 +47,101 @@ def _config(tmp_path: Path, **kwargs) -> CiaoConfig:
     )
 
 
-def test_new_chat_uses_the_pinned_model_for_its_tier(tmp_path: Path) -> None:
+def test_new_chat_uses_the_requested_model(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
-        codex=CodexSettings(sonnet_model="gpt-5.6-terra", haiku_model="gpt-5.6-luna"),
+        codex=CodexSettings(default_model="gpt-5.6-terra"),
     )
     manager = _make_manager(tmp_path, config)
-    project = manager.create_project("Pins", workspace="work")
+    project = manager.create_project("Models", workspace="work")
 
-    chat = manager.create_chat(project.project_id, model="sonnet", provider="codex")
-    assert chat.model == "gpt-5.6-terra"
-
-    chat = manager.create_chat(project.project_id, model="haiku", provider="codex")
-    assert chat.model == "gpt-5.6-luna"
+    # An explicit model wins over the provider default.
+    chat = manager.create_chat(project.project_id, model="gpt-5.6-sol", provider="codex")
+    assert chat.model == "gpt-5.6-sol"
 
 
-def test_new_chat_keeps_alias_without_a_pin(tmp_path: Path) -> None:
+def test_new_chat_resolves_foreign_alias_without_a_default(tmp_path: Path) -> None:
+    # "sonnet" is Claude Code's own vocabulary; Codex's real backend rejects
+    # it outright. With no operator default configured either, the request
+    # resolves to "" (the provider picks its own), not the foreign alias.
     manager = _make_manager(tmp_path, _config(tmp_path))
-    project = manager.create_project("No pins", workspace="work")
+    project = manager.create_project("No default", workspace="work")
 
     chat = manager.create_chat(project.project_id, model="sonnet", provider="codex")
-    assert chat.model == "sonnet"
+    assert chat.model == ""
 
-    # Claude has no operator-settable tier pins; the alias passes through.
+    # Claude has no operator-settable default; the alias passes through.
     chat = manager.create_chat(project.project_id, model="opus", provider="claude")
     assert chat.model == "opus"
 
 
-def test_new_chat_pin_resolves_only_bare_aliases(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        codex=CodexSettings(sonnet_model="gpt-5.6-terra"),
-    )
+def test_new_chat_resolves_foreign_alias_to_the_operator_default(tmp_path: Path) -> None:
+    config = _config(tmp_path, opencode=OpencodeSettings(default_model="anthropic/claude-sonnet-4.5"))
     manager = _make_manager(tmp_path, config)
-    project = manager.create_project("Concrete", workspace="work")
+    project = manager.create_project("Has default", workspace="work")
 
-    # An explicitly chosen concrete model is not overridden by the pin.
-    chat = manager.create_chat(
-        project.project_id, model="gpt-5.6-sol", provider="codex"
-    )
-    assert chat.model == "gpt-5.6-sol"
+    chat = manager.create_chat(project.project_id, model="haiku", provider="opencode")
+    assert chat.model == "anthropic/claude-sonnet-4.5"
 
 
-def test_new_opencode_chat_defaults_to_approval_enforcing_mode(tmp_path: Path) -> None:
+def test_new_chat_uses_app_default_mode_on_every_provider(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path, _config(tmp_path))
     project = manager.create_project("Modes", workspace="work")
 
-    # New opencode chats require approval by default; bypass is explicit.
-    chat = manager.create_chat(project.project_id, provider="opencode")
-    assert chat.mode == "normal"
-
-    # Other providers keep the env-backed default (auto).
-    chat = manager.create_chat(project.project_id, provider="claude")
-    assert chat.mode == "auto"
+    # opencode has no built-in exception: it starts on the env-backed default
+    # (auto) like every other provider.
+    for provider in ("opencode", "codex", "claude"):
+        chat = manager.create_chat(project.project_id, provider=provider)
+        assert chat.mode == "auto", provider
 
 
 def test_per_provider_default_mode_overrides_builtin(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
-        provider_default_modes={"opencode": "auto", "claude": "plan"},
+        provider_default_modes={"opencode": "normal", "claude": "plan"},
     )
     manager = _make_manager(tmp_path, config)
     project = manager.create_project("Overrides", workspace="work")
 
-    assert manager.create_chat(project.project_id, provider="opencode").mode == "auto"
+    assert manager.create_chat(project.project_id, provider="opencode").mode == "normal"
     assert manager.create_chat(project.project_id, provider="codex").mode == "auto"
     assert manager.create_chat(project.project_id, provider="claude").mode == "plan"
 
 
-def test_opencode_tier_pin_applies_at_creation(tmp_path: Path) -> None:
+def test_opencode_default_model_applies_at_creation(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
-        opencode=OpencodeSettings(sonnet_model="anthropic/claude-sonnet-4-6"),
+        opencode=OpencodeSettings(default_model="anthropic/claude-sonnet-4-6"),
+        workspaces=_opencode_workspace(),
     )
     manager = _make_manager(tmp_path, config)
     project = manager.create_project("Open", workspace="work")
 
-    chat = manager.create_chat(project.project_id, model="sonnet", provider="opencode")
+    chat = manager.create_chat(project.project_id, provider="opencode")
     assert chat.model == "anthropic/claude-sonnet-4-6"
 
 
-def test_empty_default_model_uses_pinned_sonnet(tmp_path: Path) -> None:
+def test_empty_default_model_uses_provider_default(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
-        opencode=OpencodeSettings(sonnet_model="ollama-cloud/kimi-k2.7-code"),
+        opencode=OpencodeSettings(default_model="ollama-cloud/kimi-k2.7-code"),
         workspaces=_opencode_workspace(),
     )
     manager = _make_manager(tmp_path, config)
-    project = manager.create_project("Pinned default", workspace="work")
+    project = manager.create_project("Default", workspace="work")
 
     # The workspace leaves the default model empty ("let the provider pick"),
-    # but an operator who pinned tier routing expects the new chat to start
-    # on the pinned default-tier model, not on whatever the provider picks.
+    # but an operator who set a provider default expects the new chat to start
+    # on it.
     chat = manager.create_chat(project.project_id)
     assert chat.provider == "opencode"
     assert chat.model == "ollama-cloud/kimi-k2.7-code"
 
 
-def test_empty_default_model_without_pins_stays_empty(tmp_path: Path) -> None:
+def test_empty_default_model_without_defaults_stays_empty(tmp_path: Path) -> None:
     config = _config(tmp_path, workspaces=_opencode_workspace())
     manager = _make_manager(tmp_path, config)
-    project = manager.create_project("No pins", workspace="work")
+    project = manager.create_project("No default", workspace="work")
 
     chat = manager.create_chat(project.project_id)
     assert chat.provider == "opencode"

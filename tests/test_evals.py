@@ -61,6 +61,24 @@ def _assert_schema_error(tmp_path: Path, data: object, expected: str) -> None:
         load_eval_suite(_write_suite(tmp_path, data))
 
 
+def test_visual_plan_fixture_parses() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "evals" / "visual-plan.json"
+    suite = load_eval_suite(fixture)
+
+    assert suite.schema_version == 1
+    assert suite.name == "visual-plan skill live"
+    assert len(suite.scenarios) == 4
+    assert {s.name for s in suite.scenarios} == {
+        "visual-plan-document-only",
+        "visual-plan-resume",
+        "visual-plan-markdown-only",
+        "visual-plan-skip",
+    }
+    for scenario in suite.scenarios:
+        assert scenario.target.kind == "skill"
+        assert scenario.target.name == "visual-plan"
+
+
 def test_loads_strict_schema_version_one(tmp_path: Path):
     suite = load_eval_suite(_write_suite(tmp_path, _suite_data()))
 

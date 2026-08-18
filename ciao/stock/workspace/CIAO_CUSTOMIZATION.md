@@ -67,9 +67,10 @@ Useful `.env` settings:
 - `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_provider` and `default_model` per workspace.
 - `CIAO_CODEX_BIN`: optional absolute override when `codex` is not discoverable on the service PATH.
 
-A tier alias (`haiku`, `sonnet`, `opus`, `fable`) resolves against whichever
-provider runs the chat. Pin what each tier means per provider in
-Settings → Models → model routing.
+Each provider has its own default model and thinking level for new chats, set
+in Settings → Models → defaults per provider. A Claude model alias
+(`haiku`, `sonnet`, `opus`) is a real Claude model id; Codex and opencode
+resolve their own defaults from the signed-in account's catalog.
 
 The chat picker can still override the workspace default for a specific chat.
 

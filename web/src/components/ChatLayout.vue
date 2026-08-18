@@ -117,6 +117,7 @@
           @close="showNewSchedule = false"
           @open-sidebar="sidebarCollapsed = false"
         />
+        <MemoryMapView v-else-if="viewMode === 'memory'" @open-sidebar="sidebarCollapsed = false" />
         <ProjectView
           v-else-if="projectIdParam"
           :project-id="projectIdParam"
@@ -190,6 +191,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
+import MemoryMapView from './MemoryMapView.vue'
 import ProjectView from './ProjectView.vue'
 import SchedulePanel from './SchedulePanel.vue'
 import SettingsView from './SettingsView.vue'
@@ -411,10 +413,11 @@ const taskStore = useTaskStore()
 const route = useRoute()
 const router = useRouter()
 const projectIdParam = computed(() => (route.params.projectId as string) || '')
-const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings'>(() => {
+const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings' | 'memory'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
   if (path.startsWith('/schedules')) return 'schedules'
+  if (path.startsWith('/memory')) return 'memory'
   if (projectIdParam.value) return 'project'
   return 'chat'
 })
@@ -437,7 +440,7 @@ const viewShortcutsActive = computed(() =>
   && !fileViewer.isOpen,
 )
 const shortcutsActive = computed(() =>
-  viewShortcutsActive.value && viewMode.value !== 'schedules',
+  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'memory',
 )
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
@@ -534,6 +537,7 @@ const pageDocumentTitle = computed(() => {
     }
     return 'automations'
   }
+  if (viewMode.value === 'memory') return 'memory'
   if (projectIdParam.value) {
     const project = store.projects.find(p => p.project_id === projectIdParam.value)
     return project?.name || 'project'
@@ -567,7 +571,7 @@ const pinnedFilePath = computed(() => {
   // those views entirely because the v-if="pinnedFilePath" branch only
   // renders ProjectView/ChatPanel. Hide the pin in those modes; the store
   // entry stays intact, so coming back restores it.
-  if (viewMode.value === 'settings' || viewMode.value === 'schedules') return ''
+  if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory') return ''
   return activePinKey.value ? store.pinnedFileFor(activePinKey.value) || '' : ''
 })
 function unpinCurrent(): void {
@@ -697,9 +701,9 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     const workspace = store.workspaceOptions[Number(e.key) - 1]
     if (workspace) {
       e.preventDefault()
-      // The schedules view has no chat to transition into.
+      // The schedules and memory views have no chat to transition into.
       void store.switchWorkspace(workspace.name, {
-        transition: viewMode.value !== 'schedules',
+        transition: viewMode.value !== 'schedules' && viewMode.value !== 'memory',
       })
       return
     }
@@ -745,7 +749,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     // Project routes stay chat-first on purpose: Esc closing the chat you opened
     // through a project is long-standing, tested behaviour, and a project page is
     // one press further from home either way.
-    if (viewMode.value === 'settings' || viewMode.value === 'schedules') {
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory') {
       e.preventDefault()
       void router.push('/')
       return

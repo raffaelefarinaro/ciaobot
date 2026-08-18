@@ -330,6 +330,44 @@ def test_update_and_delete_custom_command(tmp_path: Path) -> None:
     assert not (tmp_path / ".claude" / "commands" / "summarize-decision.md").exists()
 
 
+def test_agent_assets_labels_unmodified_stock_command_as_built_in(tmp_path: Path) -> None:
+    from importlib import resources
+
+    stock_text = (
+        resources.files("ciao.stock").joinpath("commands", "remember.md").read_text(encoding="utf-8")
+    )
+    commands_dir = tmp_path / "commands"
+    commands_dir.mkdir()
+    (commands_dir / "remember.md").write_text(stock_text, encoding="utf-8")
+
+    resp = _client(tmp_path).get("/api/agent-assets")
+
+    assert resp.status_code == 200
+    remember = next(c for c in resp.json()["commands"] if c["name"] == "remember")
+    assert remember["scope"] == "built-in"
+    assert remember["source"] == "ciaobot"
+    assert remember["editable"] is True
+
+
+def test_agent_assets_labels_edited_stock_command_as_custom(tmp_path: Path) -> None:
+    from importlib import resources
+
+    stock_text = (
+        resources.files("ciao.stock").joinpath("commands", "remember.md").read_text(encoding="utf-8")
+    )
+    commands_dir = tmp_path / "commands"
+    commands_dir.mkdir()
+    (commands_dir / "remember.md").write_text(stock_text + "\nExtra local instruction.\n", encoding="utf-8")
+
+    resp = _client(tmp_path).get("/api/agent-assets")
+
+    assert resp.status_code == 200
+    remember = next(c for c in resp.json()["commands"] if c["name"] == "remember")
+    assert remember["scope"] == "custom"
+    assert remember["source"] == "workspace"
+    assert remember["editable"] is True
+
+
 def test_create_subagent_rejects_installed_name_collision(tmp_path: Path) -> None:
     installed = tmp_path / ".claude" / "agents" / "researcher.md"
     installed.parent.mkdir(parents=True)

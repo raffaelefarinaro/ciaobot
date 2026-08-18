@@ -166,7 +166,8 @@ Tauri capability. While the engine is unreachable it loads the bundled
 `startup.html` recovery page and automatically navigates to the PWA after
 recovery; the same local page is reused by a hidden update window that the tray
 shows immediately when an update starts. The update window receives native
-progress events and offers a collapsed/expanded terminal detail view. Test both
+progress events and renders them as boot-screen-style log rows (no interactive
+toggle; the log is always visible). Test both
 startup and update states when changing desktop startup or service lifecycle
 code. The shell's IPC surface is deliberately tiny: exactly two Tauri commands
 (`check_permission` / `request_permission`, backing the PWA's push-notification
@@ -286,6 +287,12 @@ ciao eval --suite tests/fixtures/evals/skill-smoke.json \
 ciao eval --suite tests/fixtures/evals/subagent-smoke.json \
   --workspace . --provider codex --model sonnet \
   --output /tmp/ciao-eval-codex-subagent
+
+ciao eval --suite tests/fixtures/evals/visual-plan.json \
+  --workspace . --provider claude --output /tmp/ciao-eval-visual-plan-claude
+
+ciao eval --suite tests/fixtures/evals/visual-plan.json \
+  --workspace . --provider codex --output /tmp/ciao-eval-visual-plan-codex
 ```
 
 After every scenario, the output directory contains atomic `results.json` and
@@ -440,6 +447,8 @@ Exit 0 clean, 1 findings, 2 a region could not be read.
 Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories and projects `.mcp.json` MCP servers into `.codex/config.toml` for Codex chats. The generated MCP block preserves user-owned Codex server tables and copies only environment references, never literal credentials. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
 
 The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions live in `gws-shared`; only the short profile-wrapper routing rule belongs in the compact core (`ciao/system_prompt.md`).
+
+The stock `visual-plan` skill produces local Markdown plans with optional HTML and Excalidraw companions. It is the one-stop planning surface for work that needs an approval gate and a cross-session resume contract. It deliberately draws a boundary against the stock `workspace-authoring` skill: `workspace-authoring` owns routine working docs (notes, analyses, drafts with no approval gate), while `visual-plan` owns plans that must be approved and survive a provider switch. Each skill's description names the other's territory. Visual plans are local Markdown artifacts; only one file is pinned at a time, and Plan mode cannot produce one (the skill refuses and explains instead of failing on the write). Interactive HTML companions are authored by loading the stock `html-artifact` skill. A same-named workspace skill overrides the packaged copy; refresh a workspace with `ciao sync-skills --skip-upstream`, and roll back a future removal at the package level by reverting the stock skill from the next build.
 
 ### Provider context and native memory
 

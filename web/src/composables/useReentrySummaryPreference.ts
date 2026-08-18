@@ -12,14 +12,14 @@ function defaultStorage(): PreferenceStorage | null {
 export function readReentrySummaryEnabled(
   storage: PreferenceStorage | null = defaultStorage(),
 ): boolean {
-  if (!storage) return true
+  if (!storage) return false
   try {
-    // Default to enabled when the key has never been written, so first-run
-    // users see the same Apple Intelligence orientation note the rest of
-    // the app is tuned around.
-    return storage.getItem(REENTRY_SUMMARY_STORAGE_KEY) !== 'false'
+    // Default to disabled when the key has never been written, since the
+    // re-entry summary relies on Apple Intelligence (a beta feature that is
+    // off by default).
+    return storage.getItem(REENTRY_SUMMARY_STORAGE_KEY) === 'true'
   } catch {
-    return true
+    return false
   }
 }
 

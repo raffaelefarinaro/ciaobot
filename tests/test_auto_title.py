@@ -1,374 +1,182 @@
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
 import pytest
-import shutil
 from types import SimpleNamespace
 
-from ciao.web.project_chats import _generate_chat_title, resolve_title_model
+from ciao.web.project_chats import ProjectChatManager
 
 
-class FakeProcess:
-    def __init__(self, returncode: int, stdout: bytes, stderr: bytes):
-        self.returncode = returncode
-        self._stdout = stdout
-        self._stderr = stderr
+def _manager(config=None, *, chats=None, projects=None) -> ProjectChatManager:
+    manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._config = config or SimpleNamespace(workspace_root="/tmp")
+    manager._projects = projects or {}
+    manager._chats = chats or {}
+    manager._save = lambda: None
+    manager._titling = set()
+    # Production waits ~30s in total for the provider to publish its title.
+    # Keep the retry *shape* (so the give-up path is still exercised) without
+    # the wall-clock cost.
+    manager._TITLE_POLL_DELAYS = (0.0, 0.001, 0.001)
+    return manager
 
-    async def communicate(self) -> tuple[bytes, bytes]:
-        return self._stdout, self._stderr
+
+def _chat(chat_id="chat-1", *, provider="claude", session_id="sess-1", title="New Chat"):
+    return SimpleNamespace(
+        chat_id=chat_id,
+        project_id="project-1",
+        provider=provider,
+        session_id=session_id,
+        title=title,
+    )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model", ["apple", "apfel"])
-async def test_generate_chat_title_on_device_success(
-    monkeypatch: pytest.MonkeyPatch, model: str
-) -> None:
-    """The on-device model titles the chat when it is the selected engine.
+async def test_native_title_opencode(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
 
-    Both ids are accepted: "apfel" is the legacy value still stored in settings
-    saved before titles moved off the apfel CLI to FoundationModels.
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
+
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": "How hash tables work"}, "messages": []}
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    assert await manager._native_chat_title(manager._chats["chat-1"]) == "How hash tables work"
+
+
+@pytest.mark.asyncio
+async def test_native_title_opencode_missing(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
+
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": ""}, "messages": []}
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    assert await manager._native_chat_title(manager._chats["chat-1"]) is None
+
+
+@pytest.mark.asyncio
+async def test_native_title_opencode_placeholder_is_not_final(monkeypatch) -> None:
+    """opencode's default 'New session - <timestamp>' must not be accepted.
+
+    The provider seeds the session with that placeholder and only later writes
+    the generated title; accepting it would leave the sidebar stuck on it.
     """
-    from ciao import native_sidecar
-
-    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
-
-    captured: dict[str, str] = {}
-
-    async def fake_respond(prompt, *, instructions="", timeout=0):
-        captured["prompt"] = prompt
-        captured["instructions"] = instructions
-        return "   Test Title Generated   \n"
-
-    monkeypatch.setattr(native_sidecar, "respond", fake_respond)
-
-    title = await _generate_chat_title("hello world", assistant_text="", model=model)
-    assert title == "Test Title Generated"
-    assert "hello world" in captured["prompt"]
-    # The titling system prompt has to reach the model, or it answers the
-    # excerpt instead of naming it.
-    assert "titling function" in captured["instructions"]
-
-
-@pytest.mark.asyncio
-async def test_generate_chat_title_skips_on_device_when_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Apple Intelligence off / older macOS: fall through, never call the sidecar."""
-    from ciao import native_sidecar
-
-    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: False)
-
-    async def explode(*args, **kwargs):
-        raise AssertionError("must not run the sidecar when it is unavailable")
-
-    monkeypatch.setattr(native_sidecar, "respond", explode)
-
-    async def fake_oneshot(*args, **kwargs):
-        return "Cloud Title"
-
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
-
-    title = await _generate_chat_title("hello world", assistant_text="", model="apple")
-    assert title == "Cloud Title"
-
-
-@pytest.mark.asyncio
-async def test_generate_chat_title_on_device_failure_falls_back(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A sidecar that errors mid-generation must not lose the title."""
-    from ciao import native_sidecar
-
-    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
-
-    async def failing_respond(*args, **kwargs):
-        raise native_sidecar.SidecarError("the on-device model failed")
-
-    monkeypatch.setattr(native_sidecar, "respond", failing_respond)
-
-    # Fail the provider one-shot too so it goes to deterministic fallback.
-    async def fake_oneshot(*args, **kwargs):
-        raise RuntimeError("provider unavailable")
-
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
-
-    title = await _generate_chat_title(
-        "This is a very long user message that should be truncated to some words",
-        assistant_text="",
-        model="apple",
-    )
-    # Deterministic fallback takes first ~6 words
-    assert title == "This is a very long user"
-
-
-@pytest.mark.asyncio
-async def test_generate_chat_title_on_device_crash_falls_back(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Even an unexpected exception (not SidecarError) must not escape."""
-    from ciao import native_sidecar
-
-    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
-
-    async def exploding_respond(*args, **kwargs):
-        raise OSError("Permission denied")
-
-    monkeypatch.setattr(native_sidecar, "respond", exploding_respond)
-
-    async def fake_oneshot(*args, **kwargs):
-        raise RuntimeError("provider unavailable")
-
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
-
-    title = await _generate_chat_title(
-        "How do I write Python unit tests?", assistant_text="", model="apple"
-    )
-    assert title == "How do I write Python unit"
-
-
-@pytest.mark.asyncio
-async def test_generate_chat_title_sentinel_never_reaches_the_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """"apple"/"apfel" are routing sentinels from the Settings picker, not real
-    Claude/Ollama model ids. When the on-device model is unavailable,
-    run_oneshot must never receive the sentinel literally — that always fails
-    with "There's an issue with the selected model" and drops straight to the
-    raw-text truncated fallback title.
-    """
-    from ciao import native_sidecar
-
-    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: False)
-
-    captured_model: list[str] = []
-
-    async def fake_oneshot(*args, **kwargs):
-        captured_model.append(kwargs.get("model", ""))
-        return "Generated Title"
-
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
-
-    title = await _generate_chat_title("hello world", assistant_text="", model="apfel")
-    assert captured_model == ["haiku"]
-    assert title == "Generated Title"
-
-
-@pytest.mark.asyncio
-async def test_generate_chat_title_uses_codex_oneshot(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
-    captured: dict = {}
-
-    async def fake_oneshot(*args, **kwargs):
-        captured.update(kwargs)
-        return "Codex Title"
-
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
-
-    title = await _generate_chat_title(
-        "Investigate provider support",
-        model="gpt-test",
-        provider="codex",
-        cwd=tmp_path,
-    )
-
-    assert title == "Codex Title"
-    assert captured["provider"] == "codex"
-    assert captured["model"] == "gpt-test"
-    assert captured["cwd"] == tmp_path
-
-
-@pytest.mark.asyncio
-async def test_opencode_chat_titles_use_the_opencode_catalog(
-    monkeypatch, tmp_path
-) -> None:
-    """Automatic titles must stay on opencode instead of falling through to Claude."""
     from ciao.web import project_chats as pc
 
-    config = SimpleNamespace(
-        title_model_override="",
-        title_model="haiku",
-        workspace_root=tmp_path,
-        haiku_model_for_workspace=lambda _workspace: "haiku",
-    )
-    manager = pc.ProjectChatManager.__new__(pc.ProjectChatManager)
-    manager._config = config
-    manager._projects = {
-        "project-1": pc.ProjectInfo("project-1", "Project", "personal")
-    }
-    manager._chats = {
-        "chat-1": pc.ChatInfo(
-            chat_id="chat-1",
-            project_id="project-1",
-            provider="opencode",
-            model="haiku",
-        )
-    }
-    manager._save = lambda: None
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    async def fake_catalog(_workspace_root):
-        return [{"model": "anthropic/claude-haiku-4-5"}]
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": "New session - 2026-08-18T12:20:10.198Z"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "model_catalog", fake_catalog)
-    captured: dict[str, object] = {}
-
-    async def fake_title(_user_text, _assistant_text, **kwargs):
-        captured.update(kwargs)
-        return "Opencode Title", "opencode:anthropic/claude-haiku-4-5", None
-
-    monkeypatch.setattr(pc, "_generate_chat_title_with_engine", fake_title)
-
-    assert await manager.auto_title_if_default("chat-1", "Investigate opencode") == (
-        "Opencode Title"
-    )
-    assert captured["provider"] == "opencode"
-    assert captured["model"] == "anthropic/claude-haiku-4-5"
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    assert await manager._native_chat_title(manager._chats["chat-1"]) is None
 
 
 @pytest.mark.asyncio
-async def test_codex_title_override_wins_for_opencode_chat(monkeypatch, tmp_path) -> None:
+async def test_native_title_codex(monkeypatch) -> None:
     from ciao.web import project_chats as pc
 
-    config = SimpleNamespace(
-        title_model_override="codex:gpt-title",
-        title_model="haiku",
-        workspace_root=tmp_path,
-        haiku_model_for_workspace=lambda _workspace: "haiku",
-    )
-    manager = pc.ProjectChatManager.__new__(pc.ProjectChatManager)
-    manager._config = config
-    manager._projects = {"project-1": pc.ProjectInfo("project-1", "Project", "personal")}
-    manager._chats = {
-        "chat-1": pc.ChatInfo(
-            chat_id="chat-1", project_id="project-1", provider="opencode", model="haiku"
-        )
-    }
-    manager._save = lambda: None
-    captured: dict[str, object] = {}
+    manager = _manager(chats={"chat-1": _chat(provider="codex")})
 
-    async def fake_title(_user_text, _assistant_text, **kwargs):
-        captured.update(kwargs)
-        return "Codex Title", "codex:gpt-title", None
+    async def fake_read_thread(_workspace, _sid):
+        return {"name": "Codex Thread Name", "turns": []}
 
-    monkeypatch.setattr(pc, "_generate_chat_title_with_engine", fake_title)
-
-    assert await manager.auto_title_if_default("chat-1", "Use Codex") == "Codex Title"
-    assert captured["provider"] == "codex"
-    assert captured["model"] == "gpt-title"
+    monkeypatch.setattr(pc.CodexProvider, "read_thread", fake_read_thread)
+    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Codex Thread Name"
 
 
 @pytest.mark.asyncio
-async def test_opencode_title_override_wins_for_codex_chat(monkeypatch, tmp_path) -> None:
+async def test_native_title_claude(monkeypatch) -> None:
     from ciao.web import project_chats as pc
 
-    config = SimpleNamespace(
-        title_model_override="opencode:vendor/title-model",
-        title_model="haiku",
-        workspace_root=tmp_path,
-        haiku_model_for_workspace=lambda _workspace: "haiku",
-    )
-    manager = pc.ProjectChatManager.__new__(pc.ProjectChatManager)
-    manager._config = config
-    manager._projects = {"project-1": pc.ProjectInfo("project-1", "Project", "personal")}
-    manager._chats = {
-        "chat-1": pc.ChatInfo(
-            chat_id="chat-1", project_id="project-1", provider="codex", model="gpt-chat"
-        )
-    }
-    manager._save = lambda: None
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
 
-    async def fake_catalog_model(_config, model):
-        return model
+    class FakeInfo:
+        custom_title = "Claude AI Title"
+        summary = "Claude Summary"
 
-    monkeypatch.setattr(pc, "_resolve_opencode_title_model", fake_catalog_model)
-    captured: dict[str, object] = {}
-
-    async def fake_title(_user_text, _assistant_text, **kwargs):
-        captured.update(kwargs)
-        return "OpenCode Title", "opencode:vendor/title-model", None
-
-    monkeypatch.setattr(pc, "_generate_chat_title_with_engine", fake_title)
-
-    assert await manager.auto_title_if_default("chat-1", "Use OpenCode") == "OpenCode Title"
-    assert captured["provider"] == "opencode"
-    assert captured["model"] == "vendor/title-model"
+    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
+    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude AI Title"
 
 
-def test_resolve_title_model_uses_override() -> None:
-    from ciao.config import CiaoConfig
+@pytest.mark.asyncio
+async def test_native_title_claude_falls_back_to_summary(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
 
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "CIAO_OLLAMA_API_KEY": "sk-cloud"})
-    config.title_model_override = "anthropic/claude-haiku-4.5"
-    assert resolve_title_model(config, "personal") == "anthropic/claude-haiku-4.5"
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
 
+    class FakeInfo:
+        custom_title = None
+        summary = "Claude Summary"
 
-def test_resolve_title_model_uses_workspace_haiku_when_automatic() -> None:
-    from ciao.config import CiaoConfig
-
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "CIAO_OLLAMA_API_KEY": "sk-cloud"})
-    config.title_model_override = ""
-    assert resolve_title_model(config, "personal") == "haiku"
-    assert resolve_title_model(config, "work") == "haiku"
+    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
+    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude Summary"
 
 
-def test_resolve_title_model_falls_back_without_workspace() -> None:
-    from ciao.config import CiaoConfig
+@pytest.mark.asyncio
+async def test_native_title_claude_missing(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
 
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
-    config.title_model_override = ""
-    assert resolve_title_model(config) == config.title_model
-
-
-def test_clean_title_rejects_reply_shaped_output() -> None:
-    from ciao.web.project_chats import _clean_title
-
-    user = "Create google tasks for my wedding checklist please"
-    # The title model answered the message instead of titling it.
-    assert (
-        _clean_title(
-            "I'd be happy to help you create Google Tasks, but I need more "
-            "details about what tasks you want.",
-            user,
-        )
-        == "Create google tasks for my wedding"
-    )
-    assert _clean_title("Sure, let me create those tasks for you", user) == (
-        "Create google tasks for my wedding"
-    )
-    # Real titles pass through untouched, including ones with I/O-style words.
-    assert _clean_title("Wedding Checklist Google Tasks", user) == (
-        "Wedding Checklist Google Tasks"
-    )
-    assert _clean_title("I/O Performance Tuning", user) == "I/O Performance Tuning"
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: None)
+    assert await manager._native_chat_title(manager._chats["chat-1"]) is None
 
 
-def test_clean_title_rejects_negated_and_apologetic_openers() -> None:
-    """A model handed a contentless excerpt answers instead of titling
-    ("I don't have any prior context…"). These openers must be caught so
-    the reply never lands as the title (regression: "I don't"/"There's no"
-    slipped past the original affirmative-only guard)."""
-    from ciao.web.project_chats import _clean_title
+@pytest.mark.asyncio
+async def test_auto_title_if_default_sets_native_title(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
 
-    user = "Add traction and pilot state to the delivery intelligence slides"
-    for reply in (
-        "I don't have any prior context to continue from. Could you clarify?",
-        "There's no prior conversation for me to continue.",
-        "It looks like there isn't enough information to continue.",
-        "I cannot continue without more details.",
-        "Let me know what you'd like me to continue with.",
-    ):
-        assert _clean_title(reply, user) == (
-            "Add traction and pilot state to"
-        ), reply
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
+
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": "Native Title"}, "messages": []}
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    assert await manager.auto_title_if_default("chat-1", "hello") == "Native Title"
+    assert manager._chats["chat-1"].title == "Native Title"
 
 
-def test_is_contentless_prompt() -> None:
-    from ciao.web.project_chats import _is_contentless_prompt
+@pytest.mark.asyncio
+async def test_auto_title_if_default_skips_when_not_default(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
 
-    for prompt in ("continue", "Continue.", " GO ON ", "ok", "yes", "keep going"):
-        assert _is_contentless_prompt(prompt) is True, prompt
-    for prompt in ("continue the slide deck", "ok now add a chart", "resume the migration"):
-        assert _is_contentless_prompt(prompt) is False, prompt
+    manager = _manager(chats={"chat-1": _chat(title="Already Named")})
+
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": "Native Title"}, "messages": []}
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    assert await manager.auto_title_if_default("chat-1", "hello") is None
+    assert manager._chats["chat-1"].title == "Already Named"
+
+
+@pytest.mark.asyncio
+async def test_auto_title_if_default_skips_without_session(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(session_id="")})
+
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": "Native Title"}, "messages": []}
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    assert await manager.auto_title_if_default("chat-1", "hello") is None
+
+
+@pytest.mark.asyncio
+async def test_auto_title_if_default_skips_when_native_missing(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
+
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": ""}, "messages": []}
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    assert await manager.auto_title_if_default("chat-1", "hello") is None
+    assert manager._chats["chat-1"].title == "New Chat"
 
 
 @pytest.mark.asyncio
@@ -380,7 +188,7 @@ async def test_start_stream_fires_title_immediately_for_question_prompt(
     the full first turn. The title must fire on the user echo regardless of
     question shape.
     """
-    from ciao.web.project_chats import ProjectChatManager
+    from ciao.web import project_chats as pc
 
     fired: list[tuple[str, str, str]] = []
 
@@ -392,9 +200,6 @@ async def test_start_stream_fires_title_immediately_for_question_prompt(
     monkeypatch.setattr(
         ProjectChatManager, "_auto_title_and_publish", fake_auto_title_and_publish
     )
-
-    # Import here so the monkeypatch is in place.
-    from ciao.web import project_chats as pc
 
     manager = ProjectChatManager.__new__(ProjectChatManager)
     manager._events = SimpleNamespace(publish=lambda *_args, **_kwargs: None)  # type: ignore[assignment,misc]
@@ -412,9 +217,6 @@ async def test_start_stream_fires_title_immediately_for_question_prompt(
     )
     manager._chats["chat-q1"] = chat_info  # type: ignore[index]
 
-    # Drive the same branch we touch in production: the auto-title block
-    # immediately after the user echo. We call _auto_title_and_publish once
-    # for the prompt, never gated on question shape.
     prompt = "why no recent sessions?"
     async def _expect_immediate() -> None:
         chat = manager._chats.get("chat-q1")
@@ -449,6 +251,7 @@ async def test_drive_finally_runs_second_title_pass_for_meta_question(
     manager._events = SimpleNamespace(publish=lambda *_args, **_kwargs: None)  # type: ignore[assignment,misc]
     manager._save = lambda: None  # type: ignore[assignment,method-assign,misc]
     manager._chats = {"chat-q2": FakeChat()}  # type: ignore[assignment,dict-item]
+    manager._titling = set()
 
     calls = []
 
@@ -490,6 +293,7 @@ async def test_drive_overwrites_title_when_assistant_framing_disagrees(
 
     manager = ProjectChatManager.__new__(ProjectChatManager)
     manager._chats = {"chat-q3": FakeChat()}  # type: ignore[assignment,dict-item]
+    manager._titling = set()
 
     async def fake_auto_title(self, chat_id, user_text, assistant_text):
         return "Automation Page Job Log"
@@ -522,219 +326,101 @@ async def test_drive_overwrites_title_when_assistant_framing_disagrees(
 
 
 @pytest.mark.asyncio
-async def test_title_prefers_assistant_framing_for_meta_question(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A meta-question whose reply pivots to a different topic should yield a
-    title for the topic, not the question (#176). The titler is fed both the
-    first user message and the first assistant reply; the prompt biases it
-    toward the reply's framing."""
-    from ciao.web.project_chats import _generate_chat_title_with_engine
+async def test_auto_title_waits_for_late_provider_title(monkeypatch) -> None:
+    """The provider writes its title *after* the turn, so the first read finds
+    nothing. Every previous test handed the title back on read #1, which is why
+    the suite stayed green while every real chat sat on "New Chat"."""
+    from ciao.web import project_chats as pc
 
-    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    captured: dict = {}
+    reads = 0
 
-    async def fake_oneshot(user_prompt: str, **kwargs):
-        captured["prompt"] = user_prompt
-        # The model titles the reply's topic, not the opening question.
-        return "Automation Page Job Log"
+    async def fake_read_thread(_workspace, _sid):
+        nonlocal reads
+        reads += 1
+        # opencode's title agent has not run yet on the first two reads.
+        title = "Late Native Title" if reads >= 3 else ""
+        return {"info": {"title": title}, "messages": []}
 
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
-
-    title, engine, detail = await _generate_chat_title_with_engine(
-        "why no recent sessions?",
-        assistant_text=(
-            "The Automation page only shows runs from the last 7 days. "
-            "Your job log rotated at 2 MB, so older title runs dropped out "
-            "of the view, not because they stopped running."
-        ),
-        model="haiku",
-    )
-    assert title == "Automation Page Job Log"
-    assert engine == "claude:haiku"
-    assert detail is None
-    # Both sides of the exchange are fed in, and the prompt steers toward the
-    # reply's topic when the question and reply differ.
-    assert "why no recent sessions?" in captured["prompt"]
-    assert "Assistant reply:" in captured["prompt"]
-    assert "reply is about" in captured["prompt"]
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    assert await manager.auto_title_if_default("chat-1", "hello") == "Late Native Title"
+    assert manager._chats["chat-1"].title == "Late Native Title"
+    assert reads == 3
 
 
 @pytest.mark.asyncio
-async def test_generate_title_skips_model_for_contentless_prompt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A bare "continue" must never reach the title model — otherwise the
-    model answers it conversationally and that reply becomes the title."""
-    from ciao.web.project_chats import _generate_chat_title_with_engine
+async def test_auto_title_polls_until_session_exists(monkeypatch) -> None:
+    """The first-message trigger fires before the provider session exists. A
+    missing session_id must retry, not abandon titling for the whole chat."""
+    from ciao.web import project_chats as pc
 
-    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+    chat = _chat(provider="opencode", session_id="")
+    manager = _manager(chats={"chat-1": chat})
 
-    called = False
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": "Arrived Late"}, "messages": []}
 
-    async def spy_oneshot(*args, **kwargs):
-        nonlocal called
-        called = True
-        return "I don't have any prior context to continue from."
+    # The turn assigns the session while the poller is waiting.
+    async def grant_session(*_args, **_kwargs):
+        chat.session_id = "sess-late"
 
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", spy_oneshot)
-    title, engine, detail = await _generate_chat_title_with_engine("continue", model="haiku")
-    assert called is False
-    assert engine == "fallback"
-    assert title == "continue"
-    # A contentless prompt is skipped, not a failure — no upstream detail.
-    assert detail is None
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(pc.asyncio, "sleep", grant_session)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") == "Arrived Late"
+    assert chat.title == "Arrived Late"
 
 
 @pytest.mark.asyncio
-async def test_generate_title_reports_engine(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ciao.web.project_chats import _generate_chat_title_with_engine
+async def test_auto_title_stops_when_user_renames_mid_poll(monkeypatch) -> None:
+    """A rename during the poll window must win over the provider's title."""
+    from ciao.web import project_chats as pc
 
-    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+    chat = _chat(provider="opencode")
+    manager = _manager(chats={"chat-1": chat})
 
-    async def good_oneshot(*args, **kwargs):
-        return "Wedding Task Planning"
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": ""}, "messages": []}
 
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", good_oneshot)
-    title, engine, detail = await _generate_chat_title_with_engine(
-        "Create google tasks for my wedding", model="haiku"
-    )
-    assert (title, engine, detail) == ("Wedding Task Planning", "claude:haiku", None)
+    async def rename_during_wait(*_args, **_kwargs):
+        chat.title = "User Picked This"
 
-    async def reply_shaped_oneshot(*args, **kwargs):
-        return "I'd be happy to help you create Google Tasks, but I need more info."
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(pc.asyncio, "sleep", rename_during_wait)
 
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", reply_shaped_oneshot)
-    title, engine, detail = await _generate_chat_title_with_engine(
-        "Create google tasks for my wedding", model="haiku"
-    )
-    assert engine == "fallback"
-    assert title == "Create google tasks for my wedding"
-    # Reply-shaped output is a soft fallback, not an upstream failure.
-    assert detail is None
-
-    async def failing_oneshot(*args, **kwargs):
-        raise RuntimeError("provider unavailable")
-
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
-    title, engine, detail = await _generate_chat_title_with_engine(
-        "Create google tasks for my wedding", model="haiku"
-    )
-    assert engine == "fallback"
-    assert title == "Create google tasks for my wedding"
-    # A hard failure surfaces the upstream error text for job_runs.
-    assert detail == "provider unavailable"
+    assert await manager.auto_title_if_default("chat-1", "hello") is None
+    assert chat.title == "User Picked This"
 
 
 @pytest.mark.asyncio
-async def test_generate_chat_title_on_device_failure_propagates_detail(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the on-device path fails AND the provider fallback also fails, the
-    captured exception from the on-device path must reach the caller (#257).
-    Previously the Apple except-block only logged and dropped the exception;
-    the caller's error_detail ended up empty.
-    """
-    from ciao import native_sidecar
-    from ciao.web.project_chats import _generate_chat_title_with_engine
+async def test_auto_title_and_publish_runs_once_per_chat(monkeypatch) -> None:
+    """Both triggers fire for the same chat; only one poll may run."""
+    from ciao.web.project_chats import ProjectChatManager
+    import asyncio as _asyncio
 
-    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+    class FakeChat:
+        title = "New Chat"
+        title_status = "pending"
 
-    async def failing_respond(*args, **kwargs):
-        raise native_sidecar.SidecarError("Apple sidecar timed out")
+    manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._chats = {"c": FakeChat()}  # type: ignore[assignment,dict-item]
+    manager._titling = set()
+    manager._save = lambda: None  # type: ignore[assignment,method-assign,misc]
+    manager._events = SimpleNamespace(publish=lambda *_a, **_k: None)  # type: ignore[assignment]
 
-    monkeypatch.setattr(native_sidecar, "respond", failing_respond)
+    started = 0
 
-    async def failing_oneshot(*args, **kwargs):
-        raise RuntimeError("provider unavailable")
+    async def slow_title(self, chat_id, user_text, assistant_text):
+        nonlocal started
+        started += 1
+        await _asyncio.sleep(0)
+        return "Only Once"
 
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+    monkeypatch.setattr(ProjectChatManager, "auto_title_if_default", slow_title)
 
-    title, engine, detail = await _generate_chat_title_with_engine(
-        "Plan a standup retro", assistant_text="", model="apple"
+    await _asyncio.gather(
+        manager._auto_title_and_publish("c", "prompt", ""),
+        manager._auto_title_and_publish("c", "prompt", "reply"),
     )
-    assert engine == "fallback"
-    assert title == "Plan a standup retro"
-    # The provider path's detail wins because it is the most recent cause;
-    # an empty `detail` would have been the original regression.
-    assert detail == "provider unavailable"
-
-
-@pytest.mark.asyncio
-async def test_generate_chat_title_apple_only_failure_carries_apple_detail(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When only the on-device path fails and the provider fallback succeeds,
-    the caller gets a clean title. But when the Apple failure is the only
-    failure recorded (provider returns empty, no exception), the on-device
-    detail should still flow through so the record isn't blank (#257).
-    """
-    from ciao import native_sidecar
-    from ciao.web.project_chats import _generate_chat_title_with_engine
-
-    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
-
-    async def failing_respond(*args, **kwargs):
-        raise native_sidecar.SidecarError("Apple sidecar timed out")
-
-    monkeypatch.setattr(native_sidecar, "respond", failing_respond)
-
-    async def empty_oneshot(*args, **kwargs):
-        return ""
-
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", empty_oneshot)
-
-    title, engine, detail = await _generate_chat_title_with_engine(
-        "Brainstorm launch ideas", assistant_text="", model="apple"
-    )
-    assert engine == "fallback"
-    assert title == "Brainstorm launch ideas"
-    # The empty-return path falls back to the on-device detail rather than
-    # leaving the record blank.
-    assert detail == "Apple sidecar timed out"
-
-
-@pytest.mark.asyncio
-async def test_generate_chat_title_oneshot_empty_return_reports_detail(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When run_oneshot returns an empty string with no exception, the titler
-    must still report a non-null detail so the job record distinguishes
-    "model returned empty" from "the model never ran" (#257)."""
-    from ciao.web.project_chats import _generate_chat_title_with_engine
-
-    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
-
-    async def empty_oneshot(*args, **kwargs):
-        return ""
-
-    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", empty_oneshot)
-
-    title, engine, detail = await _generate_chat_title_with_engine(
-        "Sketch a release checklist", model="haiku"
-    )
-    assert engine == "fallback"
-    assert title == "Sketch a release checklist"
-    assert detail == "upstream returned empty text"
-
-
-def test_fallback_error_message_preserves_detail_less_branch() -> None:
-    """A fallback with no upstream cause must keep the generic message.
-
-    The titler returns ``engine == "fallback"`` with ``detail is None`` for
-    intentional fallbacks (contentless prompt, reply-shaped model output).
-    The job error must not become a misleading "failed (None)" (#257).
-    """
-    from ciao.web.project_chats import _fallback_error_message
-
-    assert _fallback_error_message(None, "chat-1") == (
-        "title engine failed; used deterministic fallback"
-    )
-    assert _fallback_error_message("upstream returned empty text", "chat-1") == (
-        "title engine returned empty (chat_id=chat-1); "
-        "used deterministic fallback"
-    )
-    assert _fallback_error_message("provider unavailable", "chat-1") == (
-        "title engine failed (provider unavailable); used deterministic fallback"
-    )
+    assert started == 1

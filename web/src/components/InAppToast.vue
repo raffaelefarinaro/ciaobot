@@ -19,10 +19,10 @@
         v-if="t.variant === 'error'"
         class="toast-fix"
         @click.stop="onFix(t)"
-      >{{ t.fixRoute ? (t.fixLabel || 'Fix in Settings') : 'Fix this error' }}</button>
+      >{{ t.restoreDraft ? 'Restore draft' : (t.fixRoute ? (t.fixLabel || 'Fix in Settings') : 'Fix this error') }}</button>
       <button
         class="toast-close"
-        @click.stop="store.dismissToast(t.id)"
+        @click.stop="onDismiss(t)"
         aria-label="Dismiss"
       >&times;</button>
     </div>
@@ -33,6 +33,7 @@
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { clearChatDraft } from '../lib/chatDrafts'
 import type { InAppToast } from '../lib/types'
 
 const store = useProjectStore()
@@ -78,7 +79,14 @@ function onPointerUp(toast: InAppToast) {
   const dismissed = Math.abs(swipeDX.value) >= SWIPE_DISMISS_PX
   swipeId.value = null
   swipeDX.value = 0
-  if (dismissed) store.dismissToast(toast.id)
+  if (dismissed) onDismiss(toast)
+}
+
+// A deliberate "no thanks" on a recovered-draft toast gives up the draft for
+// good — otherwise it would keep reappearing on every future reload.
+function onDismiss(toast: InAppToast) {
+  if (toast.restoreDraft) clearChatDraft(toast.restoreDraft.originalChatId)
+  store.dismissToast(toast.id)
 }
 
 async function onClick(toast: InAppToast) {
@@ -100,6 +108,18 @@ async function onClick(toast: InAppToast) {
 }
 
 async function onFix(toast: InAppToast) {
+  if (toast.restoreDraft) {
+    // Don't dismiss until the restore actually succeeds: the original draft
+    // key is only cleared on success (inside store.restoreDraft), so leaving
+    // the toast up on failure means the text is still recoverable, not lost.
+    try {
+      await store.restoreDraft(toast.restoreDraft)
+      store.dismissToast(toast.id)
+    } catch {
+      store.pushErrorToast('Could not restore draft', 'Reload the page and try again.')
+    }
+    return
+  }
   store.dismissToast(toast.id)
   // Errors whose fix lives in Settings (e.g. GWS re-auth) route there instead
   // of seeding a fix chat that can only restate the error.

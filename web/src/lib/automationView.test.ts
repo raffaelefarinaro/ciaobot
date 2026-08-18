@@ -162,26 +162,26 @@ describe('runOutcome', () => {
 })
 
 describe('retryModelOptions', () => {
-  it('flattens the routing table into concrete model ids, cheapest tier first', () => {
+  it('flattens provider model lists into concrete model ids', () => {
     const options = retryModelOptions(
       {
-        ollama: { sonnet: 'qwen3-coder:30b', haiku: 'qwen3:4b' },
-        openrouter: { sonnet: 'anthropic/claude-sonnet-5' },
+        ollama: ['qwen3-coder:30b', 'qwen3:4b'],
+        openrouter: ['anthropic/claude-sonnet-5'],
       },
       { ollama: 'Ollama (local)', openrouter: 'OpenRouter' },
     )
 
     expect(options.map((o) => o.value)).toEqual([
-      'qwen3:4b',
       'qwen3-coder:30b',
+      'qwen3:4b',
       'anthropic/claude-sonnet-5',
     ])
-    expect(options[0].label).toBe('Ollama (local) · haiku — qwen3:4b')
+    expect(options[0].label).toBe('Ollama (local) — qwen3-coder:30b')
   })
 
   it('drops duplicate model ids and survives a missing table', () => {
     const options = retryModelOptions({
-      ollama: { haiku: 'qwen3:4b', sonnet: 'qwen3:4b' },
+      ollama: ['qwen3:4b', 'qwen3:4b'],
     })
 
     expect(options).toHaveLength(1)

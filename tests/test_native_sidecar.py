@@ -25,7 +25,6 @@ def test_foundation_models_runtime_failure_overrides_probe_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     native_sidecar.reset_probe_cache()
-    native_sidecar.set_apple_intelligence_enabled(True)
     monkeypatch.setattr(
         native_sidecar,
         "probe",
@@ -49,7 +48,6 @@ def test_foundation_models_runtime_failure_overrides_probe_availability(
     assert "FoundationModels" in native_sidecar.apple_model_unavailable_reason()
 
     native_sidecar.reset_probe_cache()
-    native_sidecar.set_apple_intelligence_enabled(True)
     assert native_sidecar.apple_model_available() is True
 
 
@@ -57,7 +55,6 @@ def test_successful_foundation_models_response_clears_runtime_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     native_sidecar.reset_probe_cache()
-    native_sidecar.set_apple_intelligence_enabled(True)
     monkeypatch.setattr(
         native_sidecar,
         "probe",
@@ -74,11 +71,11 @@ def test_successful_foundation_models_response_clears_runtime_failure(
     assert native_sidecar.apple_model_available() is True
 
 
-def test_beta_is_disabled_by_default_and_gates_the_on_device_model(
+def test_on_device_model_is_gated_by_hardware_support_not_a_beta_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Apple Intelligence is beta, off by default: availability reports no,
-    the reason points at Settings, and `respond` refuses so callers fall back."""
+    """The "apple" model is available purely from machine support: when the
+    probe reports the model present, no app-side opt-in is required."""
     native_sidecar.reset_probe_cache()
     monkeypatch.setattr(
         native_sidecar,
@@ -86,19 +83,34 @@ def test_beta_is_disabled_by_default_and_gates_the_on_device_model(
         lambda: {"model": {"available": True}},
     )
 
-    assert native_sidecar.apple_intelligence_enabled() is False
-    assert native_sidecar.apple_model_available() is False
-
-    reason = native_sidecar.apple_model_unavailable_reason()
-    assert "beta" in reason
-    assert "Settings" in reason
-
-    with pytest.raises(native_sidecar.SidecarError, match="beta"):
-        asyncio.run(native_sidecar.respond("Say hello"))
-
-    # Flipping the flag on (as Settings does) unlocks the same machine.
-    native_sidecar.set_apple_intelligence_enabled(True)
     assert native_sidecar.apple_model_available() is True
+    assert native_sidecar.apple_model_unavailable_reason() == ""
+
+    async def successful_run(*args, **kwargs):
+        return 0, b"Hello from Apple\n", ""
+
+    _patch_respond_transport(monkeypatch, successful_run)
+    assert asyncio.run(native_sidecar.respond("Say hello")) == "Hello from Apple"
+
+
+def test_on_device_model_unavailable_reports_machine_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine without the model gets a reason that names the hardware gap,
+    not an app-side opt-in flag."""
+    native_sidecar.reset_probe_cache()
+    monkeypatch.setattr(
+        native_sidecar,
+        "probe",
+        lambda: {"model": {"available": False}},
+    )
+
+    assert native_sidecar.apple_model_available() is False
+    reason = native_sidecar.apple_model_unavailable_reason()
+    assert reason
+    # It names the hardware gap, not an app-side opt-in flag.
+    assert "beta" not in reason
+    assert "Settings" not in reason
 
 
 def test_user_session_bridge_keeps_the_prompt_off_the_command_line(

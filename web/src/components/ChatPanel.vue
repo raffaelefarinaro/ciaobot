@@ -1354,7 +1354,10 @@ watch(inputText, (text) => {
   if (!settingPromptHistoryText) {
     promptHistoryIndex.value = -1
     promptHistoryDraft.value = ''
-    writeChatDraft(draftChatId, text)
+    writeChatDraft(draftChatId, text, undefined, {
+      projectId: chat.value?.project_id,
+      workspace: store.activeWorkspace,
+    })
   }
 }, { flush: 'sync' })
 
@@ -1519,11 +1522,7 @@ const filteredCommands = computed<SlashCommand[]>(() => {
   if (!active) return []
   const needle = active.query.toLowerCase()
   return slashCommands.value.filter(command =>
-    // Project/user commands are expanded only when they make up the prompt.
-    // Skills are native provider entries, so they remain available alongside
-    // file, chat, and other inline references anywhere in the draft.
-    (active.start === 0 || command.source === 'skill')
-    && command.name.toLowerCase().startsWith(needle),
+    command.name.toLowerCase().startsWith(needle),
   )
 })
 
@@ -2576,16 +2575,6 @@ const activeModelHighlights = computed(() => {
   if (!c) return []
   const model = activeModelId.value
   if (!model) return []
-  const resolvedModel = canonicalTier(model)
-  const tier = tierAlias(resolvedModel)
-  if (tier) {
-    // On Claude the model literally IS the tier, so highlight the alias. Codex
-    // and opencode pin tiers to concrete models, so highlight the pinned model
-    // and leave the bare alias to the Anthropic section.
-    if (activeBucket.value === 'claude') return [tier]
-    const nativeModel = modelsResponse.value?.alias_tiers?.[activeBucket.value]?.[tier]
-    return nativeModel ? [nativeModel] : [model]
-  }
   if (isFableSelection(model, c.thinking_level)) {
     return [CODEX_FABLE_PSEUDO_MODEL]
   }
@@ -3209,6 +3198,8 @@ onBeforeUnmount(() => {
   writeChatDraft(
     draftChatId,
     promptHistoryIndex.value < 0 ? inputText.value : promptHistoryDraft.value,
+    undefined,
+    { projectId: chat.value?.project_id, workspace: store.activeWorkspace },
   )
   window.removeEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
@@ -4021,21 +4012,11 @@ function tierAlias(model: string): TierAlias | null {
     : null
 }
 
-function tierForModel(model: string, bucket: BucketKey): TierAlias | null {
-  if (bucket === 'codex') return null
-  const tiers = modelsResponse.value?.alias_tiers?.[bucket] || {}
-  for (const [tier, target] of Object.entries(tiers)) {
-    if (target === model) return tier as TierAlias
-  }
-  return null
-}
-
 function canonicalTier(model: string): string {
   const alias = tierAlias(model)
   if (alias) return alias
   if (model === CODEX_FABLE_PSEUDO_MODEL) return model
-  const resolvedAlias = tierForModel(model, activeBucket.value)
-  return resolvedAlias || model
+  return model
 }
 
 // Render the vendor behind the chat as the operator in the brain chip. Falls
@@ -4068,7 +4049,6 @@ function bucketLabel(bucket: BucketKey): string {
 // the catalog has not reported yet.
 function bucketForSelectedModel(model: string): BucketKey {
   const response = modelsResponse.value
-  if (response?.alias_tiers?.codex?.[model]) return 'codex'
   if ((response?.codex_models || []).includes(model)) return 'codex'
   if (model === CODEX_FABLE_PSEUDO_MODEL) return 'codex'
   if ((response?.opencode_models || []).includes(model)) return 'opencode'

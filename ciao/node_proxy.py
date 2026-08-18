@@ -84,6 +84,40 @@ RESPONSE_STRIP_HEADERS: set[str] = {"set-cookie"}
 
 _NO_CACHE = "no-cache, no-store, must-revalidate"
 
+_PROXY_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+
+# One pooled client for every non-streaming proxied request. Building a fresh
+# AsyncClient per call meant a new TCP connect (plus TLS handshake) for each
+# one — and a client node makes several per chat open on top of a 15s poll of
+# /api/chats + /messages + /subagents, so the handshakes dominated the latency
+# users saw as "client mode is slow". Keep-alive collapses them to one
+# connection per host.
+#
+# Module-level rather than app.state: the middleware is constructed per app but
+# `proxy_http_request` is also called as a bare function, and the pool keys on
+# the target URL anyway. `httpx.AsyncClient` is safe for concurrent use.
+_SHARED_CLIENT: httpx.AsyncClient | None = None
+
+
+def _shared_client() -> httpx.AsyncClient:
+    """The pooled client, created on first use."""
+    global _SHARED_CLIENT
+    if _SHARED_CLIENT is None or _SHARED_CLIENT.is_closed:
+        _SHARED_CLIENT = httpx.AsyncClient(
+            timeout=_PROXY_TIMEOUT,
+            follow_redirects=True,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+        )
+    return _SHARED_CLIENT
+
+
+async def close_shared_client() -> None:
+    """Release the pooled connections (server shutdown, or leaving client mode)."""
+    global _SHARED_CLIENT
+    client, _SHARED_CLIENT = _SHARED_CLIENT, None
+    if client is not None and not client.is_closed:
+        await client.aclose()
+
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -305,14 +339,14 @@ async def proxy_http_request(
     except Exception:
         body = b""
 
-    timeout = httpx.Timeout(60.0, connect=5.0)
-
     try:
-        client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
         # Check if client requested event stream / SSE
         is_sse = "text/event-stream" in request.headers.get("accept", "")
 
         if is_sse:
+            # An SSE response lives as long as the stream, so it gets its own
+            # client that closes with it rather than a slot in the shared pool.
+            client = httpx.AsyncClient(timeout=_PROXY_TIMEOUT, follow_redirects=True)
             req = client.build_request(
                 method=request.method,
                 url=target_url,
@@ -337,21 +371,21 @@ async def proxy_http_request(
                 media_type=res.headers.get("content-type", "text/event-stream"),
             )
 
-        # Standard HTTP proxy call
-        async with client:
-            res = await client.request(
-                method=request.method,
-                url=target_url,
-                headers=headers,
-                content=body,
-            )
-            _capture_host_session(request, res)
-            return Response(
-                content=res.content,
-                status_code=res.status_code,
-                headers=_forwarded_response_headers(res, decoded_body=True),
-                media_type=res.headers.get("content-type"),
-            )
+        # Standard HTTP proxy call, over the shared keep-alive pool.
+        client = _shared_client()
+        res = await client.request(
+            method=request.method,
+            url=target_url,
+            headers=headers,
+            content=body,
+        )
+        _capture_host_session(request, res)
+        return Response(
+            content=res.content,
+            status_code=res.status_code,
+            headers=_forwarded_response_headers(res, decoded_body=True),
+            media_type=res.headers.get("content-type"),
+        )
     except httpx.HTTPError as exc:
         logger.warning("Client proxy to host %s failed: %s", target_url, exc)
         if on_unreachable is not None:

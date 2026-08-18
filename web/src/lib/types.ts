@@ -58,10 +58,6 @@ export interface WorkspaceInfo {
   default_provider: WorkspaceProvider
   default_model: string
   disallowed_tools?: string[] | null
-  // claude.ai connector MCP toggle. null = per-workspace default
-  // (personal off, else on). When off, the connector set is added to the
-  // effective denylist; disallowed_tools covers the extra tools.
-  claude_ai_mcps?: boolean | null
   gws_profile: string
   // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
   color?: string
@@ -73,8 +69,6 @@ export interface WorkspacesResponse {
   // App-wide fallback model used when a workspace's default_model is empty.
   app_default_model?: string
   provider_options?: WorkspaceProviderOption[]
-  // claude.ai connector MCP names the per-workspace toggle controls.
-  claude_ai_connectors?: string[]
 }
 
 export interface McpEnvKey {
@@ -415,6 +409,14 @@ export interface InAppToast {
   fixRoute?: string
   // Button label for the Fix action when fixRoute is set.
   fixLabel?: string
+  // When set, "Fix" becomes "Restore draft": reopens `text` as a fresh chat
+  // draft in `projectId` (falling back to General if that project is gone)
+  // instead of the error/fixRoute flow. `originalChatId` is the dead chat's
+  // id, cleared from storage once the text has a new home or is dismissed.
+  // `workspace`, when known, is the draft's original workspace so the
+  // General fallback opens there instead of whichever workspace happens to
+  // be active when the user clicks Restore.
+  restoreDraft?: { originalChatId: string; projectId: string; text: string; workspace?: string }
 }
 
 // A pending approval surfaced to the user by Auto mode's classifier. One
@@ -527,12 +529,6 @@ export interface ModelsResponse {
     input_modalities: string[]
   }>
   model_reasoning_levels?: Record<string, string[]>
-  // Per-backend haiku/sonnet/opus/fable tier models and which
-  // backends are configured/available.
-  alias_tiers?: Record<string, Record<string, string>>
-  // Catalog-derived codex tier mapping before operator pins, used to
-  // label the "Automatic (…)" option while an override is active.
-  codex_tier_defaults?: Record<string, string>
   backends?: Record<string, boolean>
   // Keyed by runtime provider; Claude buckets share the SDK effort levels,
   // while Codex is additionally narrowed by model_reasoning_levels.
@@ -543,47 +539,33 @@ export interface ModelsResponse {
 // voice transcription engine (Settings → Models tab).
 export interface RoutineSettings {
   // Overrides as stored; empty string = automatic default.
-  title_model: string
   insights_model: string
 
   critique_models: string
-  // Per-runtime-provider tier pins, keyed by provider id then tier; a missing
-  // entry = automatic catalog mapping. This is the canonical shape — PATCH it
-  // rather than the flat keys below. Effective values come from /api/models
-  // (alias_tiers.<provider>).
-  provider_routing?: Record<string, Record<string, string>>
+  // Per-provider default model for new chats; a missing entry = the provider's
+  // own catalog default.
+  provider_default_models?: Record<string, string>
+  // Per-provider default thinking level for new chats; missing = provider default.
+  provider_default_thinking?: Record<string, string>
+  // Per-provider session-insights models; missing = provider default.
+  provider_insights_models?: Record<string, string>
   // Per-provider default execution mode for new chats (Settings → Providers).
-  // Missing entry = built-in default (opencode → normal, others → auto).
+  // Missing entry = the app-wide default mode.
   provider_default_modes?: Record<string, string>
   // Resolved effective default mode per provider, after built-in defaults.
   provider_default_modes_effective?: Record<string, string>
-  // Flat mirror of the same Codex pins, still emitted and accepted for
-  // clients written before provider_routing existed.
-  codex_haiku_model: string
-  codex_sonnet_model: string
-  codex_opus_model: string
-  codex_fable_model: string
   // What actually runs right now, after defaults.
-  title_model_effective: string
   insights_model_effective: string
-  // On Automatic these resolve from the chat's workspace, so *_effective above
+  // On Automatic this resolves from the chat's workspace, so *_effective above
   // is only the primary workspace's answer. Empty when an override is set.
-  title_model_by_workspace?: Record<string, string>
   insights_model_by_workspace?: Record<string, string>
 
   critique_models_effective: string
-  // Env-backed models used when a tier override is cleared.
-  tier_defaults?: Record<string, Record<string, string>>
-  alias_tiers?: Record<string, Record<string, string>>
-  // The "apple" title option: needs macOS 26+, the desktop app, and Apple
-  // Intelligence on. Nothing installable, so Settings shows the reason.
+  // The "apple" insights option is hardware-gated: needs macOS 26+, the
+  // desktop app, and Apple Intelligence on. Nothing installable, so Settings
+  // shows the reason when the machine lacks it.
   apple_model_available?: boolean
   apple_model_unavailable_reason?: string
-  // Apple Intelligence is a beta feature, off by default; the Settings → Models
-  // toggle PATCHes apple_intelligence_enabled to switch it on. When off, the
-  // "apple" option reports unavailable and routines fall back to cloud models.
-  apple_intelligence_enabled?: boolean
-  apple_intelligence_beta?: boolean
   // Voice is on-device only: Apple dictation (macOS 26+) and
   // AVSpeechSynthesizer, both via the bundled sidecar. There is no engine to
   // choose any more, so the payload reports availability and a reason rather
@@ -746,10 +728,11 @@ export interface CliStats {
 
 export interface SkillInventoryItem {
   name: string
-  label: 'custom' | 'github'
+  label: 'custom' | 'github' | 'stock'
   source: string
   source_type: string
   description: string
+  path: string
   content?: string
   installed_targets: string[]
 }
@@ -758,6 +741,7 @@ export interface SkillInventory {
   counts: {
     custom: number
     github: number
+    stock: number
   }
   skills: SkillInventoryItem[]
 }

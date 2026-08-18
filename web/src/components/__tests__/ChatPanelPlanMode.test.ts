@@ -136,6 +136,7 @@ function planReturnModeStorageKey(chatId: string): string {
 async function mountPanel(options: {
   mode?: string
   commandsFail?: boolean
+  commands?: Array<{ name: string; description: string; argument_hint: string; source: 'project' | 'user' | 'builtin' | 'skill'; path: string }>
   skills?: Array<{ name: string; description: string; argument_hint: string; source: 'skill'; path: string }>
 } = {}): Promise<Harness> {
   const pinia = createPinia()
@@ -155,7 +156,7 @@ async function mountPanel(options: {
     if (path === '/api/models') return Promise.resolve(MODELS_RESPONSE) as never
     if (path.startsWith('/api/commands')) {
       if (options.commandsFail) return Promise.reject(new Error('commands unavailable')) as never
-      return Promise.resolve({ commands: [], skills: options.skills || [] }) as never
+      return Promise.resolve({ commands: options.commands || [], skills: options.skills || [] }) as never
     }
     return Promise.resolve([]) as never
   })
@@ -334,6 +335,27 @@ describe('ChatPanel plan mode', () => {
     await nextTick()
 
     expect(textareaValue(wrapper)).toBe('Please use /research')
+    wrapper.unmount()
+  })
+
+  it('lists and inserts commands from a slash token anywhere in the draft', async () => {
+    const { wrapper } = await mountPanel({
+      commands: [{
+        name: 'remember',
+        description: 'Remember a preference',
+        argument_hint: '<note>',
+        source: 'project',
+        path: 'commands/remember.md',
+      }],
+    })
+
+    await wrapper.get('textarea.chat-input').setValue('Please /rem')
+    const row = wrapper.get('.commands-picker-row')
+    expect(row.text()).toContain('/remember')
+    await row.trigger('mousedown')
+    await nextTick()
+
+    expect(textareaValue(wrapper)).toBe('Please /remember ')
     wrapper.unmount()
   })
 

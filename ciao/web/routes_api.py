@@ -29,13 +29,9 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
-from ciao.config import (
-    WorkspaceConfig,
-    CLAUDE_AI_CONNECTORS,
-)
+from ciao.config import WorkspaceConfig
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
-from ciao.model_tiers import codex_tier_models
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
     parse_disallowed_tools_value,
@@ -49,12 +45,11 @@ from ciao.workspaces import (
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
-from ciao.providers.codex import CodexProvider, codex_login_status, codex_tier_overrides
+from ciao.providers.codex import CodexProvider, codex_login_status
 from ciao.providers.opencode import (
     OpencodeProvider,
     _file_touches as _opencode_file_touches,
     _summarize_tool_input as _summarize_opencode_tool_input,
-    opencode_tier_overrides,
 )
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.schedules import (
@@ -68,6 +63,7 @@ from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
+from ciao.vault_index import _build_graph, filter_entries, scan_vault
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import (
@@ -820,9 +816,6 @@ def _workspaces_payload(config) -> dict:
         # PWA can label "Inherit default (<model>)" instead of a vague hint.
         "app_default_model": getattr(config, "claude_default_model", "") or "",
         "provider_options": _workspace_provider_options(config),
-        # The claude.ai connector set the toggle controls, so the PWA can label
-        # the switch without hardcoding tool names.
-        "claude_ai_connectors": list(CLAUDE_AI_CONNECTORS),
     }
 
 
@@ -1043,6 +1036,10 @@ async def provider_connection_action(request: Request) -> JSONResponse:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse({"ok": True, "opened": opened, "command": command}, status_code=202)
     if action == "verify":
+        if provider == "claude":
+            from ciao.setup_status import clear_claude_discovery_cache
+
+            await asyncio.to_thread(clear_claude_discovery_cache)
         payload = await asyncio.to_thread(_provider_config_payload, config)
         return JSONResponse(payload["connections"].get(provider, {}))
     if action == "logout":
@@ -2242,10 +2239,8 @@ async def create_project_chat(request: Request) -> JSONResponse:
 
 # ── Chats ────────────────────────────────────────────────────────────────
 
-def _codex_reasoning_levels(
-    catalog: list[dict], overrides: dict[str, str] | None = None
-) -> dict[str, list[str]]:
-    """Per-model reasoning levels from the codex catalog, tier aliases included."""
+def _codex_reasoning_levels(catalog: list[dict]) -> dict[str, list[str]]:
+    """Per-model reasoning levels from the codex catalog."""
     levels: dict[str, list[str]] = {}
     for item in catalog:
         if item.get("hidden"):
@@ -2259,8 +2254,6 @@ def _codex_reasoning_levels(
             for option in efforts or []
             if isinstance(option, dict) and option.get("reasoningEffort")
         ]
-    for tier, model_id in codex_tier_models(catalog, overrides=overrides).items():
-        levels[tier] = list(levels.get(model_id, []))
     return levels
 
 
@@ -2289,7 +2282,7 @@ async def _unsupported_codex_level_error(
         catalog = await CodexProvider.model_catalog(config.workspace_root)
     except Exception:
         return None
-    allowed = _codex_reasoning_levels(catalog, codex_tier_overrides(config)).get(model)
+    allowed = _codex_reasoning_levels(catalog).get(model)
     if allowed and level not in allowed:
         return JSONResponse(
             {
@@ -2574,6 +2567,33 @@ async def chat_archive(request: Request) -> JSONResponse:
         "failed_chat_ids": result.failed_ids() if result is not None else [],
         "subchats": [row.to_dict() for row in delegates],
     })
+
+
+async def chat_retry_insights(request: Request) -> JSONResponse:
+    """Re-run session-insights extraction for a single archived chat.
+
+    The retry works in text mode against the rendered archive (the raw session
+    JSONL is reclaimed at archive time). Returns a job status; a pipeline that
+    is already running for the chat is left alone.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    status = pcm.retry_insights(chat_id)
+    if status == "not_found":
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if status == "not_archived":
+        return JSONResponse(
+            {"error": "chat is not archived", "chat_id": chat_id}, status_code=409
+        )
+    if status == "no_archive":
+        return JSONResponse(
+            {"error": "no archive file for this chat", "chat_id": chat_id}, status_code=409
+        )
+    if status == "already_has":
+        return JSONResponse({"status": "already_has", "chat_id": chat_id}, status_code=200)
+    if status == "running":
+        return JSONResponse({"status": "running", "chat_id": chat_id}, status_code=202)
+    return JSONResponse({"status": "started", "chat_id": chat_id}, status_code=202)
 
 
 def _overlay_assistant_timings(
@@ -3129,7 +3149,14 @@ async def chat_messages(request: Request) -> JSONResponse:
         if not sid:
             continue
         try:
-            segment = get_session_messages_full(sid, directory=str(config.workspace_root))
+            # Reading and stitching a session's JSONL is unbounded synchronous
+            # work (it grows with the conversation), and this route is re-hit
+            # by every client's 15s poll. Left on the event loop it stalled
+            # every other request on the node, including the 5s chat-socket
+            # keepalives whose absence trips the PWA's half-open watchdog.
+            segment = await asyncio.to_thread(
+                get_session_messages_full, sid, directory=str(config.workspace_root)
+            )
         except (FileNotFoundError, ValueError):
             # This segment's file doesn't exist on this machine (remote chat,
             # or pruned after rotating away). Skip it rather than blanking
@@ -4077,6 +4104,60 @@ async def vault_backlinks(request: Request) -> JSONResponse:
     return JSONResponse({"backlinks": backlinks})
 
 
+async def vault_graph(request: Request) -> JSONResponse:
+    """Return the vault as a note graph for the Memory Map page.
+
+    Nodes are notes with frontmatter (or an inferred type); edges come from
+    both frontmatter ``related:``/``relatedTo:`` and body ``[[wikilinks]]``,
+    already merged and resolved to real paths by ``vault_index.scan_vault``.
+    Optional ``?workspace=`` scopes to one logical workspace; cross-workspace
+    edges are dropped rather than left dangling.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip() or None
+    # scan_vault reads and parses every markdown file in the vault; run it off
+    # the event loop so a large vault doesn't stall other requests, including
+    # the 5s chat-socket keepalives (see chat_messages above for the same fix).
+    entries = await asyncio.to_thread(scan_vault, config.vault_root)
+    workspaces = sorted({e.workspace for e in entries})
+    scoped = filter_entries(entries, workspace=workspace) if workspace else entries
+    graph = _build_graph(scoped)
+    by_path = {str(e.path) for e in scoped}
+    nodes = [
+        {
+            "id": str(e.path),
+            "title": e.title,
+            "type": e.type,
+            "tags": e.tags,
+            "aliases": e.aliases,
+            "description": e.description,
+            "workspace": e.workspace,
+            "degree": len(graph.get(str(e.path), ())),
+        }
+        for e in scoped
+    ]
+    seen: set[tuple[str, str]] = set()
+    edges = []
+    for src, targets in graph.items():
+        if src not in by_path:
+            continue
+        for tgt in targets:
+            if tgt not in by_path:
+                continue
+            first, second = sorted((src, tgt))
+            key = (first, second)
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append({"source": key[0], "target": key[1]})
+    return JSONResponse({
+        "workspace": workspace or "all",
+        "workspaces": workspaces,
+        "nodes": nodes,
+        "edges": edges,
+    })
+
+
 # Binary downloads (PDFs, ZIPs, office docs) live under their own endpoint so
 # the text and image viewers stay strictly typed. Same (unrestricted) path
 # contract as ``workspace_file``/``workspace_image``: any allowlisted-extension
@@ -4639,23 +4720,6 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
     return JSONResponse({"status": "started", "model": model}, status_code=202)
 
 
-async def compare_apple_insights_route(request: Request) -> JSONResponse:
-    """Compare Apple Intelligence with a small sample of existing insights."""
-    from ciao.insights import compare_apple_insights
-
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001 — empty body uses the default sample size
-        body = {}
-    raw_limit = (body or {}).get("limit", 2) if isinstance(body, dict) else 2
-    try:
-        limit = max(1, min(int(raw_limit), 5))
-    except (TypeError, ValueError):
-        limit = 2
-    result = await compare_apple_insights(request.app.state.config, limit=limit)
-    return JSONResponse(result)
-
-
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     state = request.app.state.state_store
@@ -5013,8 +5077,13 @@ async def list_models(request: Request) -> JSONResponse:
     refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
-    codex_catalog = await CodexProvider.model_catalog(
-        config.workspace_root, force=refresh
+    # Independent per-provider discovery calls (each may spin up an app-server
+    # and round-trip an RPC) — sequential awaits summed their latencies, so a
+    # cold cache (the 5-minute TTL lapses between normal chat-creation gaps)
+    # stalled every "New Chat" for as long as both providers took combined.
+    codex_catalog, opencode_catalog = await asyncio.gather(
+        CodexProvider.model_catalog(config.workspace_root, force=refresh),
+        OpencodeProvider.model_catalog(config.workspace_root, force=refresh),
     )
     visible_codex = [item for item in codex_catalog if not item.get("hidden")]
     codex_models = [
@@ -5030,17 +5099,20 @@ async def list_models(request: Request) -> JSONResponse:
         ),
         codex_models[0] if codex_models else "",
     )
-    # Automatic (catalog-derived) mapping vs the effective one after the
-    # operator's per-tier pins; the settings UI labels "Automatic (…)"
-    # from the former and shows the latter on the tier badges.
+    # The operator's per-provider default model wins over the catalog default.
+    codex_operator_default = config.default_model_for_provider("codex")
+    if codex_operator_default in codex_models:
+        codex_default = codex_operator_default
     # opencode is bring-your-own-provider: its catalog is whatever backends the
     # user has connected, so an empty list simply means "not signed in yet".
-    opencode_catalog = await OpencodeProvider.model_catalog(
-        config.workspace_root, force=refresh
-    )
     opencode_models = [
         str(item.get("model") or "") for item in opencode_catalog if item.get("model")
     ]
+    opencode_operator_default = config.default_model_for_provider("opencode")
+    if opencode_operator_default in opencode_models:
+        opencode_default = opencode_operator_default
+    else:
+        opencode_default = opencode_models[0] if opencode_models else ""
     # Per-model reasoning-effort variants, merged into the same map the PWA
     # already reads for Codex so the picker needs no provider-specific branch.
     opencode_reasoning_levels = {
@@ -5048,16 +5120,9 @@ async def list_models(request: Request) -> JSONResponse:
         for item in opencode_catalog
         if item.get("model")
     }
-    opencode_overrides = opencode_tier_overrides(config)
-    opencode_tiers = {
-        tier: model for tier, model in opencode_overrides.items() if model in opencode_models
-    }
-    codex_overrides = codex_tier_overrides(config)
-    codex_tier_defaults = codex_tier_models(codex_catalog)
-    codex_tiers = codex_tier_models(codex_catalog, overrides=codex_overrides)
     model_reasoning_levels = {
         **opencode_reasoning_levels,
-        **_codex_reasoning_levels(codex_catalog, codex_overrides),
+        **_codex_reasoning_levels(codex_catalog),
     }
     codex_model_metadata: dict[str, dict] = {}
     for item in visible_codex:
@@ -5092,19 +5157,8 @@ async def list_models(request: Request) -> JSONResponse:
         "provider_defaults": {
             "claude": claude_default,
             "codex": codex_default,
-            "opencode": opencode_models[0] if opencode_models else "",
+            "opencode": opencode_default,
         },
-        # Per-provider tier models, so the picker can show
-        # "sonnet -> gpt-5.6-terra (codex)". Tier names resolve to
-        # provider-native ids only at the dispatch boundary.
-        "alias_tiers": {
-            "codex": codex_tiers,
-            "opencode": opencode_tiers,
-        },
-        # Catalog-derived codex mapping before per-tier pins, so the
-        # settings UI can label the automatic choice while an override
-        # is active.
-        "codex_tier_defaults": codex_tier_defaults,
         "backends": {
             "anthropic": True,
             "codex": bool(codex_models),
@@ -5142,47 +5196,39 @@ def _routines_payload(config, app_settings) -> dict:
     )
 
     s = app_settings.settings
-    if config.title_model_override:
-        title_effective = config.title_model_override
-    else:
-        # Automatic resolves to the workspace haiku tier — Apple's on-device
-        # model is opt-in
-        # (choose "Apple" explicitly), not the auto default just because the
-        # binary is on PATH (it fails when Apple Intelligence is disabled).
-        title_effective = config.haiku_model_for_workspace(config.primary_workspace())
     from ciao.critique import critique_models_effective
 
     critique_effective = critique_models_effective(config)
     if config.insights_model_override:
         insights_effective = config.insights_model_override
     else:
-        insights_effective = config.sonnet_model_for_workspace(
+        insights_effective = config.default_model_for_workspace(
             config.primary_workspace()
         )
 
-    # On Automatic these routines resolve per workspace (resolve_title_model and
-    # resolve_insights_model take the chat's workspace), so the single
+    # On Automatic the insights routine resolves per workspace
+    # (resolve_insights_model takes the chat's workspace), so the single
     # *_effective value above is only the primary-workspace answer. Reporting it
     # alone reads as a global choice and is wrong for every other workspace, so
     # ship the whole map and let the UI say what actually varies. Empty when an
     # override is set, because then one model really does apply everywhere.
-    title_by_workspace: dict[str, str] = {}
     insights_by_workspace: dict[str, str] = {}
     for name in config.workspace_names():
-        if not config.title_model_override:
-            title_by_workspace[name] = config.haiku_model_for_workspace(name)
         if not config.insights_model_override:
-            insights_by_workspace[name] = config.sonnet_model_for_workspace(name)
+            insights_by_workspace[name] = config.default_model_for_workspace(name)
 
     return {
         # Overrides as stored ("" = automatic default).
-        "title_model": s.title_model,
         "insights_model": s.insights_model,
 
         "critique_models": s.critique_models,
-        # Canonical shape: {provider_id: {tier: model}} for every runtime
-        # provider with operator-settable tier pins.
-        "provider_routing": s.provider_routing or {},
+        # Per-provider default model for new chats, as stored (missing =
+        # provider's own catalog default).
+        "provider_default_models": s.provider_default_models or {},
+        # Per-provider default thinking level for new chats, as stored.
+        "provider_default_thinking": s.provider_default_thinking or {},
+        # Per-provider routine models, as stored (missing = provider default).
+        "provider_insights_models": s.provider_insights_models or {},
         # Per-provider default execution mode for new chats, as stored
         # (missing = built-in default). Effective defaults below.
         "provider_default_modes": s.provider_default_modes or {},
@@ -5190,32 +5236,18 @@ def _routines_payload(config, app_settings) -> dict:
             item.id: config.default_mode_for_provider(item.id)
             for item in provider_registry.descriptors()
         },
-        # Flat mirror of the same pins, kept so a client written against the
-        # pre-map settings API keeps rendering. PATCH accepts either shape.
-        **{
-            f"{descriptor.id}_{tier}_model": app_settings.tier_pin(descriptor.id, tier)
-            for descriptor in provider_registry.descriptors()
-            if descriptor.tier_settings_attr
-            for tier in ("haiku", "sonnet", "opus", "fable")
-        },
         # What actually runs right now, after defaults.
-        "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,
         # Per-workspace resolution for the Automatic case; empty when overridden.
-        "title_model_by_workspace": title_by_workspace,
         "insights_model_by_workspace": insights_by_workspace,
 
         "critique_models_effective": critique_effective,
-        # The "apple" title/insights options need macOS 26+, the desktop app,
-        # and Apple Intelligence switched on; the routine rows explain which
-        # prerequisite is missing instead of silently hiding the option.
+        # The "apple" title/insights options are hardware-gated: they need
+        # macOS 26+, the desktop app, and Apple Intelligence switched on in
+        # System Settings. No app-side opt-in: the routine rows show the
+        # missing prerequisite instead of hiding the option.
         "apple_model_available": native_sidecar.apple_model_available(),
         "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
-        # Apple Intelligence is a beta feature, off by default. The toggle in
-        # Settings → Models PATCHes apple_intelligence_enabled; when off, the
-        # "apple" sentinel above reports unavailable and routines fall back.
-        "apple_intelligence_enabled": bool(config.apple_intelligence_enabled),
-        "apple_intelligence_beta": native_sidecar.APPLE_INTELLIGENCE_BETA,
         "transcription": {
             "locale": config.transcription_locale,
             # On-device dictation needs macOS 26+, the installed app, and a
@@ -5233,7 +5265,7 @@ def _routines_payload(config, app_settings) -> dict:
         },
         # Grouped options for the routine model selectors.
         "model_options": {
-            "anthropic": ["haiku", "sonnet", "opus", "fable"],
+            "anthropic": list(config.claude_models),
         },
         "backends": {
             "anthropic": True,

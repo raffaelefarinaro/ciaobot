@@ -16,8 +16,9 @@ from ciao.web.routes_api import settings_routines
 
 
 @pytest.fixture(autouse=True)
-def reset_apple_beta_flag():
-    """Keep the module-level beta flag from leaking between route tests."""
+def reset_native_sidecar():
+    """Keep the cached probe (and latched model availability) from leaking
+    between route tests."""
     from ciao import native_sidecar
 
     native_sidecar.reset_probe_cache()
@@ -53,13 +54,10 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
-    assert data["title_model"] == ""  # no override stored
-    # Automatic resolves to the workspace's tier alias; the provider running
-    # the routine resolves that alias against its own catalog.
-    assert data["title_model_effective"] == "haiku"
-    assert data["insights_model_effective"] == "sonnet"
-    # Tier aliases are the whole vocabulary the selectors offer.
-    assert data["model_options"]["anthropic"] == ["haiku", "sonnet", "opus", "fable"]
+    # Automatic resolves to the workspace's default model.
+    assert data["insights_model_effective"] == config.claude_default_model
+    # The Claude model list is the vocabulary the selectors offer.
+    assert data["model_options"]["anthropic"] == list(config.claude_models)
     assert data["backends"] == {"anthropic": True}
     assert data["workspace_context"] == {
         "workspace_root": str(config.workspace_root),
@@ -76,27 +74,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert isinstance(data["speech"]["local_voices"], list)
 
 
-def test_get_title_effective_is_haiku_not_apfel_when_no_override(monkeypatch, tmp_path):
-    # apfel is opt-in, not the Automatic default: even with the binary on PATH,
-    # Automatic resolves to the workspace haiku tier (apfel fails when Apple
-    # Intelligence is disabled). See issue: "Automatic: apfel" mislabel.
-    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
-    client, config = _make_client(tmp_path)
-    data = client.get("/api/settings/routines").json()
-    assert data["title_model"] == ""  # no override stored
-    assert data["title_model_effective"] != "apfel"
-    assert data["title_model_effective"] == "haiku"
-
-
-def test_get_title_effective_is_apfel_when_explicitly_chosen(monkeypatch, tmp_path):
-    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
-    client, config = _make_client(tmp_path)
-    resp = client.patch("/api/settings/routines", json={"title_model": "apfel"})
-    assert resp.status_code == 200
-    assert resp.json()["title_model_effective"] == "apfel"
-
-
-def test_get_insights_effective_is_sonnet_not_apfel_when_no_override(
+def test_get_insights_effective_is_default_not_apfel_when_no_override(
     monkeypatch, tmp_path,
 ):
     # Apple Intelligence is an explicit option, never the Automatic default.
@@ -105,7 +83,7 @@ def test_get_insights_effective_is_sonnet_not_apfel_when_no_override(
     data = client.get("/api/settings/routines").json()
     assert data["insights_model"] == ""
     assert data["insights_model_effective"] != "apfel"
-    assert data["insights_model_effective"] == "sonnet"
+    assert data["insights_model_effective"] == config.claude_default_model
 
 
 def test_get_insights_effective_is_apfel_when_explicitly_chosen(
@@ -122,71 +100,62 @@ def test_patch_applies_to_live_config_and_persists(tmp_path):
     client, config = _make_client(tmp_path)
     resp = client.patch(
         "/api/settings/routines",
-        json={"title_model": "gemma4:12b-it-qat", "insights_model": "haiku"},
+        json={"insights_model": "haiku"},
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["title_model_effective"] == "gemma4:12b-it-qat"
     assert data["insights_model_effective"] == "haiku"
     # Live config updated, no restart needed.
-    assert config.title_model_override == "gemma4:12b-it-qat"
     assert config.insights_model_override == "haiku"
     # Persisted: a fresh store sees the values.
     fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.settings.title_model == "gemma4:12b-it-qat"
+    assert fresh.settings.insights_model == "haiku"
 
 
-def test_patch_applies_codex_tier_pins(tmp_path):
-    """The legacy flat ``<provider>_<tier>_model`` PATCH shape still works."""
+def test_patch_applies_provider_default_models(tmp_path):
+    """The per-provider default-model map sets the new-chat default."""
     client, config = _make_client(tmp_path)
     resp = client.patch(
         "/api/settings/routines",
-        json={"codex_sonnet_model": "gpt-5.6-sol", "codex_haiku_model": "gpt-5.6-terra"},
+        json={"provider_default_models": {"codex": "gpt-5.6-sol"}},
     )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["codex_sonnet_model"] == "gpt-5.6-sol"
-    assert data["codex_haiku_model"] == "gpt-5.6-terra"
-    assert data["codex_opus_model"] == ""
-    assert data["provider_routing"]["codex"] == {
-        "sonnet": "gpt-5.6-sol",
-        "haiku": "gpt-5.6-terra",
-    }
-    # Per-provider effective tiers need the account catalog, so they live in
-    # /api/models rather than here; this route only carries the pins.
-    assert "alias_tiers" not in data
-    assert config.codex.sonnet_model == "gpt-5.6-sol"
+    assert data["provider_default_models"] == {"codex": "gpt-5.6-sol"}
+    assert config.provider_default_models == {"codex": "gpt-5.6-sol"}
     fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.tier_pin("codex", "sonnet") == "gpt-5.6-sol"
+    assert fresh.settings.provider_default_models == {"codex": "gpt-5.6-sol"}
 
 
-def test_patch_applies_provider_routing_map(tmp_path):
-    """The canonical nested shape sets the same pins."""
+def test_patch_applies_provider_routine_models(tmp_path):
+    """Per-provider insights models are stored and applied."""
     client, config = _make_client(tmp_path)
     resp = client.patch(
         "/api/settings/routines",
-        json={"provider_routing": {"codex": {"sonnet": "gpt-5.6-sol"}}},
+        json={
+            "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
+        },
     )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["provider_routing"] == {"codex": {"sonnet": "gpt-5.6-sol"}}
-    assert data["codex_sonnet_model"] == "gpt-5.6-sol"
-    assert config.codex.sonnet_model == "gpt-5.6-sol"
-    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.tier_pin("codex", "sonnet") == "gpt-5.6-sol"
+    assert data["provider_insights_models"] == {"opencode": "anthropic/claude-sonnet-4-6"}
+    assert config.provider_insights_models == {"opencode": "anthropic/claude-sonnet-4-6"}
 
 
-def test_legacy_flat_tier_pins_on_disk_are_migrated(tmp_path):
-    """A settings file written before the map still resolves its pins."""
-    path = tmp_path / ".runtime" / "app_settings.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"codex_opus_model": "gpt-5.6-sol"}), encoding="utf-8")
+def test_patch_applies_provider_default_thinking(tmp_path):
+    """The per-provider default thinking map is stored and applied."""
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"provider_default_thinking": {"claude": "high"}},
+    )
 
-    store = AppSettingsStore(path)
-
-    assert store.tier_pin("codex", "opus") == "gpt-5.6-sol"
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["provider_default_thinking"] == {"claude": "high"}
+    assert config.provider_default_thinking == {"claude": "high"}
 
 
 def test_patch_clearing_restores_defaults(tmp_path):
@@ -207,9 +176,9 @@ def test_automatic_routines_report_every_workspace_not_just_the_primary(
 ):
     """Automatic resolves per workspace, so one model must not be presented as global.
 
-    resolve_title_model / resolve_insights_model both read the chat's workspace,
-    so *_effective (the primary workspace's answer) is wrong for every other
-    workspace. The UI needs the whole map to say so.
+    resolve_insights_model reads the chat's workspace, so *_effective (the
+    primary workspace's answer) is wrong for every other workspace. The UI
+    needs the whole map to say so.
     """
     monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
@@ -218,13 +187,10 @@ def test_automatic_routines_report_every_workspace_not_just_the_primary(
     names = config.workspace_names()
     assert names, "fixture should register at least one workspace"
 
-    for key, expected in (
-        ("title_model_by_workspace", "haiku"),
-        ("insights_model_by_workspace", "sonnet"),
-    ):
-        assert set(data[key]) == set(names), f"{key} must cover every workspace"
-        for name in names:
-            assert data[key][name] == expected
+    key = "insights_model_by_workspace"
+    assert set(data[key]) == set(names), f"{key} must cover every workspace"
+    for name in names:
+        assert data[key][name] == config.claude_default_model
 
 
 def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
@@ -234,14 +200,12 @@ def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
 
     client.patch(
         "/api/settings/routines",
-        json={"title_model": "gemma4:12b-it-qat", "insights_model": "gemma4:12b-it-qat"},
+        json={"insights_model": "gemma4:12b-it-qat"},
     )
     data = client.get("/api/settings/routines").json()
 
-    assert data["title_model_effective"] == "gemma4:12b-it-qat"
     assert data["insights_model_effective"] == "gemma4:12b-it-qat"
     # Empty signals "not workspace-dependent" to the UI.
-    assert data["title_model_by_workspace"] == {}
     assert data["insights_model_by_workspace"] == {}
 
 
@@ -260,33 +224,13 @@ def test_patch_persists_the_voice_locale_and_voice(tmp_path):
     assert not hasattr(config, "tts_engine")
 
 
-def test_apple_intelligence_is_beta_and_off_by_default(tmp_path):
-    """GET reports the flag plus the beta marker, with the option unavailable."""
-    client, config = _make_client(tmp_path)
-    data = client.get("/api/settings/routines").json()
-    assert data["apple_intelligence_beta"] is True
-    assert data["apple_intelligence_enabled"] is False
-    assert config.apple_intelligence_enabled is False
-
-
-def test_patch_enables_apple_intelligence_and_syncs_the_sidecar(tmp_path):
-    from ciao import native_sidecar
-
-    native_sidecar.set_apple_intelligence_enabled(False)
-    client, config = _make_client(tmp_path)
-    resp = client.patch("/api/settings/routines", json={"apple_intelligence_enabled": True})
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["apple_intelligence_enabled"] is True
-    # Live config updated and the sidecar latch follows it, no restart needed.
-    assert config.apple_intelligence_enabled is True
-    assert native_sidecar.apple_intelligence_enabled() is True
-    # Persisted: a fresh store sees the toggle.
-    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.settings.apple_intelligence_enabled is True
-
-
-def test_patch_rejects_a_non_boolean_apple_toggle(tmp_path):
+def test_routines_reports_apple_model_availability_without_a_beta_flag(tmp_path):
+    """GET reports whether the machine can run the on-device model; there is
+    no app-side beta opt-in flag any more."""
     client, _config = _make_client(tmp_path)
-    resp = client.patch("/api/settings/routines", json={"apple_intelligence_enabled": "yes"})
-    assert resp.status_code == 400
+    data = client.get("/api/settings/routines").json()
+    assert "apple_intelligence_beta" not in data
+    assert "apple_intelligence_enabled" not in data
+    # Availability is a machine report, present regardless of the answer.
+    assert "apple_model_available" in data
+    assert "apple_model_unavailable_reason" in data

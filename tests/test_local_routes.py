@@ -163,7 +163,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "default_model": "",
                 "gws_profile": "personal",
                 "disallowed_tools": None,
-                "claude_ai_mcps": None,
                 "color": "pink",
             },
             {
@@ -173,7 +172,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "default_model": "opus",
                 "gws_profile": "work",
                 "disallowed_tools": [],
-                "claude_ai_mcps": None,
                 "color": "pink",
             },
         ],
@@ -183,16 +181,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
             {"value": "claude", "label": "Anthropic (via Claude Code)"},
             {"value": "codex", "label": "OpenAI (via Codex)"},
             {"value": "opencode", "label": "opencode"},
-        ],
-        "claude_ai_connectors": [
-            "mcp__claude_ai_Airtable",
-            "mcp__claude_ai_Asana",
-            "mcp__claude_ai_Atlassian",
-            "mcp__claude_ai_Google_Cloud_BigQuery",
-            "mcp__claude_ai_Salesforce",
-            "mcp__claude_ai_Sentry",
-            "mcp__claude_ai_Slack",
-            "mcp__claude_ai_incident_io",
         ],
     }
 

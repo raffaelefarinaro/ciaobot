@@ -677,14 +677,42 @@ def list_subagents(config: Any) -> list[AgentAsset]:
     return sorted(_dedupe_by_name(items), key=lambda item: item.name)
 
 
+def _stock_command_sources() -> dict[str, str]:
+    """Packaged ``ciao.stock/commands`` text, keyed by command name.
+
+    Stock commands are seeded straight into the canonical, editable
+    ``commands/`` directory (see ``_seed_stock_commands``) so they stay
+    covered by weekly-review hygiene checks. That means the only way to
+    tell a still-stock command apart from a user-authored one is to diff
+    its content against the packaged source.
+    """
+    try:
+        stock_commands = resources.files("ciao.stock").joinpath("commands")
+        entries = [entry for entry in stock_commands.iterdir() if entry.name.endswith(".md")]
+    except (ModuleNotFoundError, FileNotFoundError, OSError):
+        return {}
+    out: dict[str, str] = {}
+    for entry in entries:
+        with resources.as_file(entry) as stock_path:
+            out[stock_path.stem] = stock_path.read_text(encoding="utf-8")
+    return out
+
+
 def list_command_assets(config: Any) -> list[CommandAsset]:
     root = Path(config.workspace_root)
     vault_root = Path(config.vault_root)
     items: list[CommandAsset] = []
+    stock_sources = _stock_command_sources()
 
     for path in _iter_markdown_files(root / "commands"):
+        is_stock = stock_sources.get(path.stem) == _read_text(path)
         items.append(_command_asset_from_file(
-            path, root=root, source="workspace", scope="custom", editable=True, vault_root=vault_root,
+            path,
+            root=root,
+            source="ciaobot" if is_stock else "workspace",
+            scope="built-in" if is_stock else "custom",
+            editable=True,
+            vault_root=vault_root,
         ))
     for path in _iter_markdown_files(root / ".claude" / "commands"):
         if (root / "commands" / path.name).exists():

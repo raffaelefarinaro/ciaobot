@@ -147,7 +147,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "default_provider": "claude",
         "default_model": "kimi-k2.7-code:cloud",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
-        "claude_ai_mcps": None,
         "gws_profile": "work",
         "color": "pink",
     }
@@ -178,7 +177,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "default_provider": "claude",
             "default_model": "",
             "disallowed_tools": None,
-            "claude_ai_mcps": None,
             "gws_profile": "personal",
             "color": "pink",
         },
@@ -188,7 +186,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "default_provider": "claude",
             "default_model": "",
             "disallowed_tools": None,
-            "claude_ai_mcps": None,
             "gws_profile": "work",
             "color": "pink",
         },
@@ -387,47 +384,32 @@ def test_persist_workspace_registry_normalizes_stale_provider(tmp_path):
     assert stored[0]["default_provider"] == "claude"
 
 
-def test_claude_ai_mcps_toggle_persists_and_resolves(tmp_path):
-    """The claude.ai MCPs toggle is persisted on the workspace and drives the
-    connector portion of the effective denylist (union with extras)."""
+def test_connectors_always_allowed_and_extras_honored(tmp_path):
+    """claude.ai connectors are always allowed; harness tools blocked by
+    default; an explicit per-workspace extras list replaces the defaults."""
     client, config, _pcm = _client(tmp_path)
 
-    # Personal default: toggle on -> connectors allowed, harness tools blocked.
+    # Default: connectors allowed, harness tools blocked.
     personal = config.disallowed_tools_for_workspace("personal")
     assert "mcp__claude_ai_Airtable" not in personal
     assert "EnterPlanMode" in personal
 
-    # Flip the personal toggle off via PATCH; keep n8n as an explicit extra.
+    # Explicit extras replace the default harness set, and never include the
+    # connectors.
     resp = client.patch(
         "/api/workspaces/personal",
-        json={"claude_ai_mcps": False, "disallowed_tools": "mcp__n8n_mcp"},
+        json={"disallowed_tools": "mcp__n8n_mcp"},
     )
     assert resp.status_code == 200
-    ws = next(w for w in resp.json()["workspaces"] if w["name"] == "personal")
-    assert ws["claude_ai_mcps"] is False
-    # Connectors now blocked; n8n extra also blocked.
-    assert "mcp__claude_ai_Airtable" in config.disallowed_tools_for_workspace("personal")
-    assert "mcp__n8n_mcp" in config.disallowed_tools_for_workspace("personal")
-    assert config.claude_ai_mcps_for_workspace("personal") is False
+    effective = config.disallowed_tools_for_workspace("personal")
+    assert effective == ["mcp__n8n_mcp"]
+    assert "mcp__claude_ai_Airtable" not in effective
 
-    # Persisted to disk.
+    # Persisted to disk without the (removed) claude_ai_mcps field.
     stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
     personal_stored = next(w for w in stored if w["name"] == "personal")
-    assert personal_stored["claude_ai_mcps"] is False
+    assert "claude_ai_mcps" not in personal_stored
     assert personal_stored["disallowed_tools"] == ["mcp__n8n_mcp"]
-
-    # "default" string clears the toggle back to the default (on).
-    resp = client.patch(
-        "/api/workspaces/personal",
-        json={"claude_ai_mcps": "default"},
-    )
-    assert resp.status_code == 200
-    assert config.claude_ai_mcps_for_workspace("personal") is True
-    assert "mcp__claude_ai_Airtable" not in config.disallowed_tools_for_workspace("personal")
-
-    # The payload advertises the connector set for the PWA label.
-    payload = client.get("/api/workspaces").json()
-    assert "mcp__claude_ai_Airtable" in payload["claude_ai_connectors"]
 
 
 def test_workspace_color_defaults_persists_and_validates(tmp_path):

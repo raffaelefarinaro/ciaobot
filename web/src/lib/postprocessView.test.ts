@@ -3,6 +3,7 @@ import {
   isPostprocessing,
   postprocessFailed,
   postprocessLabel,
+  postprocessNeedsInsights,
   postprocessOutcomes,
   postprocessSummary,
   tidyingSummary,
@@ -137,6 +138,22 @@ describe('postprocessFailed', () => {
     expect(postprocessFailed({ state: 'done', steps: { insights: { status: 'error' } } })).toBe(true)
     expect(postprocessFailed({ state: 'done', steps: { insights: { status: 'ok' } } })).toBe(false)
     expect(postprocessFailed(null)).toBe(false)
+  })
+})
+
+describe('postprocessNeedsInsights', () => {
+  it('is true only for a settled pipeline whose insights step failed', () => {
+    expect(postprocessNeedsInsights({ state: 'done', steps: { insights: { status: 'error' } } })).toBe(true)
+    // A running pipeline is still trying, not a retry case.
+    expect(postprocessNeedsInsights(running('insights'))).toBe(false)
+    // Insights skipped (e.g. the archive predates the pipeline) is not
+    // something a retry button would fix.
+    expect(postprocessNeedsInsights({ state: 'done', steps: { insights: { status: 'skipped' } } })).toBe(false)
+    // Insights succeeded — nothing to retry.
+    expect(postprocessNeedsInsights({ state: 'done', steps: { insights: { status: 'ok' } } })).toBe(false)
+    // A different step failing (say the project doc) is not an insights failure.
+    expect(postprocessNeedsInsights({ state: 'done', steps: { project_doc_update: { status: 'error' } } })).toBe(false)
+    expect(postprocessNeedsInsights(null)).toBe(false)
   })
 })
 

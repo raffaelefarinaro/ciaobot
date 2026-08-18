@@ -122,6 +122,19 @@ export function postprocessFailed(pp: ChatPostprocess | null | undefined): boole
 }
 
 /**
+ * True when this chat's insights extraction failed and is worth a manual
+ * retry. A settled pipeline whose insights step errored is the retriggerable
+ * case; a pipeline that never ran insights (skipped, or the archive predates
+ * the pipeline) is not something a retry button would fix.
+ */
+export function postprocessNeedsInsights(
+  pp: ChatPostprocess | null | undefined,
+): boolean {
+  const step = pp?.steps?.['insights']
+  return !!pp && pp.state === 'done' && step?.status === 'error'
+}
+
+/**
  * "2 tidying up" for a lane header, or '' when nothing is running. Plural
  * handled here so the callers stay markup-only.
  */

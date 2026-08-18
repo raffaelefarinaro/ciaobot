@@ -670,7 +670,8 @@ def test_delegate_spawn_rejects_an_empty_prompt(tmp_path: Path) -> None:
 def test_delegate_spawn_rejects_an_unconfigured_model(tmp_path: Path) -> None:
     """Issue #259: free-text model ids must be validated at dispatch time.
 
-    ``claude_models`` defaults to ``["opus", "sonnet", "haiku"]``; an unknown
+    ``claude_models`` defaults to ``["opus", "sonnet", "haiku", "fable"]``; an
+    unknown
     id like ``deepseek-coder`` must surface as a clear ``invalid_model``
     error so the caller can correct the dispatch, instead of opening a chat
     that silently fails on its first turn.

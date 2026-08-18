@@ -120,10 +120,8 @@ const props = defineProps<{
   // Model routing table, so a model-backed job that keeps failing can be
   // retried with a different model without leaving the page.
   routines: RoutineSettings | null
-  // Per-provider effective tier models, from /api/models. Each provider
-  // resolves these from its own account catalog, which is why they do not ride
-  // on the routines payload.
-  aliasTiers: Record<string, Record<string, string>> | undefined
+  // Per-provider model lists, from /api/models.
+  providerModels: Record<string, string[]> | undefined
   providerLabels: Record<string, string>
 }>()
 
@@ -133,7 +131,7 @@ const groups = computed(() => groupAutomations(props.automationItems))
 const headline = computed(() => automationHeadline(props.automationItems))
 
 const retryModelOptions = computed(() =>
-  buildRetryModelOptions(props.aliasTiers, props.providerLabels),
+  buildRetryModelOptions(props.providerModels, props.providerLabels),
 )
 const configuredInsightsModel = computed(
   () => props.routines?.insights_model_effective || '',

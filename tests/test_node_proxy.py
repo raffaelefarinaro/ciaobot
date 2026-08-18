@@ -331,3 +331,41 @@ async def test_websocket_proxy_reports_a_client_to_host_forwarding_failure() -> 
 
     websocket.send_json.assert_awaited_once_with({"type": "host_unreachable"})
     websocket.close.assert_awaited_once_with(code=4004)
+
+
+@pytest.mark.asyncio
+async def test_proxied_requests_share_one_keepalive_client() -> None:
+    """Every non-streaming proxied call must reuse the pooled client.
+
+    A fresh AsyncClient per request meant a TCP connect (and TLS handshake) per
+    call, which is what made client mode feel slow: one chat open is several
+    proxied calls, on top of a 15s poll of /api/chats + /messages + /subagents.
+    """
+    from ciao import node_proxy
+
+    await node_proxy.close_shared_client()
+    try:
+        first = node_proxy._shared_client()
+        second = node_proxy._shared_client()
+        assert first is second
+        assert not first.is_closed
+    finally:
+        await node_proxy.close_shared_client()
+
+
+@pytest.mark.asyncio
+async def test_closing_the_pool_lets_a_later_request_rebuild_it() -> None:
+    """Shutdown (or leaving client mode) closes the pool; reconnecting must not
+    hand back the dead client."""
+    from ciao import node_proxy
+
+    first = node_proxy._shared_client()
+    await node_proxy.close_shared_client()
+    assert first.is_closed
+
+    second = node_proxy._shared_client()
+    try:
+        assert second is not first
+        assert not second.is_closed
+    finally:
+        await node_proxy.close_shared_client()

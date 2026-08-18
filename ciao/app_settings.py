@@ -21,9 +21,19 @@ from ciao import provider_registry
 
 logger = logging.getLogger(__name__)
 
-_TIERS = ("haiku", "sonnet", "opus", "fable")
-
 _MODES = ("auto", "bypass", "normal", "plan")
+
+
+def _clean_provider_map(raw: object) -> dict[str, str]:
+    """Normalize a ``{provider: value}`` map, dropping junk."""
+    if not isinstance(raw, dict):
+        return {}
+    known = set(provider_registry.provider_ids())
+    return {
+        str(provider_id): str(value).strip()
+        for provider_id, value in raw.items()
+        if str(provider_id) in known and isinstance(value, str) and value.strip()
+    }
 
 
 def _clean_default_modes(raw: object) -> dict[str, str]:
@@ -40,65 +50,18 @@ def _clean_default_modes(raw: object) -> dict[str, str]:
     }
 
 
-def _clean_tier_routes(raw: object) -> dict[str, dict[str, str]]:
-    """Normalize a ``{provider: {tier: model}}`` map, dropping junk."""
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        str(provider_id): {
-            str(tier): str(model).strip()
-            for tier, model in routes.items()
-            if str(tier) in _TIERS and isinstance(model, str) and model.strip()
-        }
-        for provider_id, routes in raw.items()
-        if isinstance(routes, dict)
-    }
+def _default_model_settings(config: object, descriptor: object) -> Any:
+    """This provider's default-model settings dataclass on ``config``, if present.
 
-
-def _coerce_bool(raw: object) -> bool | None:
-    """Read a stored boolean toggle, tolerating hand-edited truthy strings."""
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        return raw.strip().lower() in {"1", "true", "yes", "on"}
-    if isinstance(raw, int) and raw in (0, 1):
-        return bool(raw)
-    return None
-
-
-def _tier_settings(config: object, descriptor: object) -> Any:
-    """This provider's per-tier settings dataclass on ``config``, if present.
-
-    Returns ``None`` when the provider declares no tier pins, or when the
-    config object simply does not carry them — settings overlays run against
-    duck-typed configs in tests and during bootstrap, and a missing attribute
-    means "nothing to pin", not a failure.
+    Returns ``None`` when the provider declares no default-model setting, or
+    when the config object simply does not carry it — settings overlays run
+    against duck-typed configs in tests and during bootstrap, and a missing
+    attribute means "nothing to set", not a failure.
     """
-    attr = getattr(descriptor, "tier_settings_attr", "")
+    attr = getattr(descriptor, "default_model_settings_attr", "")
     if not attr:
         return None
     return getattr(config, attr, None)
-
-
-def _merge_legacy_tier_pins(
-    raw: dict, routing: dict[str, dict[str, str]]
-) -> dict[str, dict[str, str]]:
-    """Fold pre-``provider_routing`` ``<provider>_<tier>_model`` keys in.
-
-    Settings files written before the per-provider map stored Codex pins as
-    four flat scalars. They are read once here and re-persisted in the nested
-    shape on the next save; an explicit ``provider_routing`` entry wins.
-    """
-    merged = {key: dict(value) for key, value in routing.items()}
-    for descriptor in provider_registry.descriptors():
-        if not descriptor.tier_settings_attr:
-            continue
-        for tier in _TIERS:
-            value = raw.get(f"{descriptor.id}_{tier}_model")
-            if not isinstance(value, str) or not value.strip():
-                continue
-            merged.setdefault(descriptor.id, {}).setdefault(tier, value.strip())
-    return merged
 
 
 
@@ -106,21 +69,13 @@ def _merge_legacy_tier_pins(
 class AppSettings:
     """One value per overridable knob; empty string = use config default.
 
-    ``provider_routing`` is the exception: the set of runtime providers is
-    dynamic, so it nests a per-provider tier map rather than a scalar per
-    provider and tier.
+    The per-provider maps are the exception: the set of runtime providers is
+    dynamic, so each nests a per-provider value rather than a scalar per
+    provider.
     """
 
-    # Model used by the chat title generator. Overrides the workspace's
-    # haiku-tier default when set.
-    title_model: str = ""
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
-
-    # Apple Intelligence (the on-device "Local (free)" model) is a beta feature,
-    # off by default. None = "no override, use the config/env default" (false);
-    # True enables it, False disables it even when the env default is on.
-    apple_intelligence_enabled: bool | None = None
 
     # BCP-47 language for the on-device voice engines.
     transcription_locale: str = ""
@@ -129,21 +84,27 @@ class AppSettings:
     tts_local_voice: str = ""
     # Comma-separated list of models for the adversarial_review MCP tool.
     critique_models: str = ""
-    # Per-runtime-provider tier pins, keyed by provider id then tier. There is
-    # no env-backed default: a missing entry means the tier resolves through
-    # that provider's automatic catalog mapping (for Codex: luna→haiku,
-    # terra→sonnet, sol→opus/fable).
+    # Per-runtime-provider default model for new chats, keyed by provider id.
+    # There is no env-backed default: a missing entry means the provider's own
+    # catalog default applies.
     #
-    # A nested map rather than four scalars per provider, so a new provider
-    # costs a registry entry instead of four fields threaded through the
-    # settings route and the PWA.
-    provider_routing: dict[str, dict[str, str]] | None = None
+    # A nested map rather than a scalar per provider, so a new provider costs a
+    # registry entry instead of a field threaded through the settings route and
+    # the PWA.
+    provider_default_models: dict[str, str] | None = None
 
-    # Per-provider default execution mode for new chats. Missing entry =
-    # built-in default: ``normal`` for opencode (approval-enforcing),
-    # otherwise the env-backed
-    # ``claude_mode``. Same nested-map rationale as ``provider_routing``.
+    # Per-provider default execution mode for new chats. Missing entry = the
+    # env-backed ``claude_mode``, for every provider. Same nested-map rationale
+    # as ``provider_default_models``.
     provider_default_modes: dict[str, str] | None = None
+
+    # Per-provider default thinking level for new chats. Missing entry = the
+    # provider's own default ("auto").
+    provider_default_thinking: dict[str, str] | None = None
+
+    # Per-provider session-insights model. Missing entry = the provider's
+    # balanced default.
+    provider_insights_models: dict[str, str] | None = None
 
 
 class AppSettingsStore:
@@ -164,7 +125,12 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
-        nested_fields = {"provider_routing", "provider_default_modes"}
+        nested_fields = {
+            "provider_default_models",
+            "provider_default_modes",
+            "provider_default_thinking",
+            "provider_insights_models",
+        }
         string_fields = {
             field.name
             for field in fields(AppSettings)
@@ -174,15 +140,14 @@ class AppSettingsStore:
         for key, value in raw.items():
             if key in string_fields and isinstance(value, str):
                 setattr(settings, key, value.strip())
-        if "apple_intelligence_enabled" in raw:
-            settings.apple_intelligence_enabled = _coerce_bool(
-                raw["apple_intelligence_enabled"]
-            )
-        provider_routing = _merge_legacy_tier_pins(
-            raw, _clean_tier_routes(raw.get("provider_routing"))
-        )
-        if provider_routing:
-            settings.provider_routing = provider_routing
+        for key in (
+            "provider_default_models",
+            "provider_default_thinking",
+            "provider_insights_models",
+        ):
+            cleaned = _clean_provider_map(raw.get(key))
+            if cleaned:
+                setattr(settings, key, cleaned)
         provider_default_modes = _clean_default_modes(raw.get("provider_default_modes"))
         if provider_default_modes:
             settings.provider_default_modes = provider_default_modes
@@ -191,12 +156,7 @@ class AppSettingsStore:
     def _save(self) -> None:
         payload = {}
         for key, value in asdict(self.settings).items():
-            if key == "apple_intelligence_enabled":
-                # A tri-state bool: persist only an explicit override so the
-                # env default keeps working when the field is left untouched.
-                if value is not None:
-                    payload[key] = value
-            elif value:
+            if value:
                 payload[key] = value
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
@@ -208,47 +168,19 @@ class AppSettingsStore:
 
         Unknown keys are ignored. Raises ``ValueError`` on a bad engine
         value so the API route can 400 instead of persisting garbage.
-
-        Legacy flat ``<provider>_<tier>_model`` tier pins are still accepted
-        and folded into ``provider_routing``, so a client written against the
-        pre-map settings API keeps working.
         """
         known = {f.name for f in fields(AppSettings)}
-        legacy_pins = self._legacy_pin_updates(changes)
-        if legacy_pins:
-            merged = {
-                key: dict(value)
-                for key, value in (self.settings.provider_routing or {}).items()
-            }
-            for provider_id, routes in legacy_pins.items():
-                target = merged.setdefault(provider_id, {})
-                for tier, model in routes.items():
-                    # An empty value clears the pin back to automatic.
-                    if model:
-                        target[tier] = model
-                    else:
-                        target.pop(tier, None)
-                # Drop a provider that has no pins left, so clearing the last
-                # one persists as absence rather than an empty object.
-                if not target:
-                    del merged[provider_id]
-            self.settings.provider_routing = merged
         for key, value in changes.items():
             if key not in known:
                 continue
-            if key == "apple_intelligence_enabled":
-                # The one boolean knob: the PWA sends true/false; anything
-                # else is a client bug, not a value to persist.
-                if not isinstance(value, bool):
-                    raise ValueError("apple_intelligence_enabled must be a boolean")
-                setattr(self.settings, key, value)
-                continue
-            if key == "provider_routing":
+            if key in {
+                "provider_default_models",
+                "provider_default_thinking",
+                "provider_insights_models",
+            }:
                 if not isinstance(value, dict):
                     raise ValueError(f"{key} must be an object")
-                if any(not isinstance(routes, dict) for routes in value.values()):
-                    raise ValueError(f"{key} entries must be objects")
-                setattr(self.settings, key, _clean_tier_routes(value))
+                setattr(self.settings, key, _clean_provider_map(value))
                 continue
             if key == "provider_default_modes":
                 if not isinstance(value, dict):
@@ -272,27 +204,6 @@ class AppSettingsStore:
         self._save()
         return self.settings
 
-    @staticmethod
-    def _legacy_pin_updates(changes: dict[str, object]) -> dict[str, dict[str, str]]:
-        """Extract ``<provider>_<tier>_model`` keys from a legacy PATCH body."""
-        found: dict[str, dict[str, str]] = {}
-        for descriptor in provider_registry.descriptors():
-            if not descriptor.tier_settings_attr:
-                continue
-            for tier in _TIERS:
-                key = f"{descriptor.id}_{tier}_model"
-                if key not in changes:
-                    continue
-                value = changes[key]
-                if not isinstance(value, str):
-                    raise ValueError(f"{key} must be a string")
-                found.setdefault(descriptor.id, {})[tier] = value.strip()
-        return found
-
-    def tier_pin(self, provider: str, tier: str) -> str:
-        """Operator-pinned model for a provider tier; "" means automatic."""
-        return (self.settings.provider_routing or {}).get(provider, {}).get(tier, "")
-
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
 
@@ -302,40 +213,23 @@ class AppSettingsStore:
         """
         if self._defaults is None:
             self._defaults = {
-                "title_model_override": config.title_model_override,
                 "insights_model_override": config.insights_model_override,
-                "apple_intelligence_enabled": config.apple_intelligence_enabled,
-
                 "transcription_locale": config.transcription_locale,
                 "tts_local_voice": config.tts_local_voice,
                 "critique_models": config.critique_models,
             }
             for descriptor in provider_registry.descriptors():
                 # A config object that predates this provider (or a duck-typed
-                # stand-in) simply has no pins to snapshot.
-                current = _tier_settings(config, descriptor)
+                # stand-in) simply has no default to snapshot.
+                current = _default_model_settings(config, descriptor)
                 if current is None:
                     continue
-                for tier in _TIERS:
-                    self._defaults[f"{descriptor.id}_{tier}_model"] = getattr(
-                        current, f"{tier}_model", ""
-                    )
+                self._defaults[f"{descriptor.id}_default_model"] = getattr(
+                    current, "default_model", ""
+                )
         d = self._defaults
         s = self.settings
-        config.title_model_override = s.title_model or d["title_model_override"]
         config.insights_model_override = s.insights_model or d["insights_model_override"]
-
-        # Beta feature, off by default: the env default, unless the operator
-        # has explicitly toggled it in Settings. Mirror it onto the sidecar so
-        # availability checks and `respond` agree without threading config.
-        config.apple_intelligence_enabled = (
-            s.apple_intelligence_enabled
-            if s.apple_intelligence_enabled is not None
-            else d["apple_intelligence_enabled"]
-        )
-        from ciao import native_sidecar
-
-        native_sidecar.set_apple_intelligence_enabled(config.apple_intelligence_enabled)
 
         config.transcription_locale = (
             s.transcription_locale or d["transcription_locale"]
@@ -345,21 +239,22 @@ class AppSettingsStore:
         # Per-provider default modes have no env-backed default; absence means
         # "use the built-in default" (opencode -> normal, else claude_mode).
         config.provider_default_modes = dict(s.provider_default_modes or {})
-        routing = s.provider_routing or {}
+        # Per-provider default models / thinking / routine models have no
+        # env-backed default; absence means "use the provider's own default".
+        config.provider_default_models = dict(s.provider_default_models or {})
+        config.provider_default_thinking = dict(s.provider_default_thinking or {})
+        config.provider_insights_models = dict(s.provider_insights_models or {})
         for descriptor in provider_registry.descriptors():
-            current = _tier_settings(config, descriptor)
+            current = _default_model_settings(config, descriptor)
             if current is None:
                 continue
-            routes = routing.get(descriptor.id, {})
+            default = (s.provider_default_models or {}).get(descriptor.id, "")
             setattr(
                 config,
-                descriptor.tier_settings_attr,
+                descriptor.default_model_settings_attr,
                 replace(
                     current,
-                    **{
-                        f"{tier}_model": routes.get(tier)
-                        or d.get(f"{descriptor.id}_{tier}_model", "")
-                        for tier in _TIERS
-                    },
+                    default_model=default
+                    or d.get(f"{descriptor.id}_default_model", ""),
                 ),
             )

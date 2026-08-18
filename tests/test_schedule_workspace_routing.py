@@ -6,7 +6,7 @@ maps a stale id to a local General project. It must honour an explicit
 `workspace` field on the schedule instead of guessing from the schedule_id
 prefix, otherwise work schedules whose id doesn't start with "sched-work"
 (e.g. the morning action briefing, sched-ee193709) land in personal General
-and lose the work-only connector MCPs.
+and lose the work-only MCPs.
 
 The manager seeds a "General" project per workspace on init, so the tests
 assert on the resolved project's workspace rather than a hand-made id.

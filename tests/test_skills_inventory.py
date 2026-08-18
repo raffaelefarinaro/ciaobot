@@ -51,7 +51,7 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
 
     inventory = build_skill_inventory(tmp_path)
 
-    assert inventory["counts"] == {"custom": 1, "github": 1}
+    assert inventory["counts"] == {"custom": 1, "github": 1, "stock": 0}
     assert inventory["skills"] == [
         {
             "name": "airtable-projects",
@@ -59,6 +59,7 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
             "source": "skills/",
             "source_type": "custom",
             "description": "Create Airtable projects",
+            "path": "skills/airtable-projects/SKILL.md",
             "content": "---\nname: airtable-projects\ndescription: Create Airtable projects\n---\n\n# airtable-projects\n",
             "installed_targets": ["claude", "opencode"],
         },
@@ -68,6 +69,7 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
             "source": "example-org/skill-pack",
             "source_type": "github",
             "description": "Installed GitHub",
+            "path": ".claude/skills/brainstorming/SKILL.md",
             "content": "---\nname: brainstorming\ndescription: Installed GitHub\n---\n\n# brainstorming\n",
             "installed_targets": ["claude", "opencode"],
         },
@@ -150,6 +152,6 @@ def test_build_skill_inventory_dedupes_custom_over_lock_entry(tmp_path: Path) ->
 
     inventory = build_skill_inventory(tmp_path)
 
-    assert inventory["counts"] == {"custom": 1, "github": 0}
+    assert inventory["counts"] == {"custom": 1, "github": 0, "stock": 0}
     assert inventory["skills"][0]["label"] == "custom"
     assert inventory["skills"][0]["source"] == "skills/"

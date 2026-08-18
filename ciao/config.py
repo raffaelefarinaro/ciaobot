@@ -9,28 +9,16 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, normalize_claude_mode
 from ciao.models import BridgeMode
 from ciao.providers.codex import CodexSettings
 from ciao.providers.opencode import OpencodeSettings
 
+if TYPE_CHECKING:
+    from ciao.provider_registry import ProviderDescriptor
 
-# claude.ai account-OAuth connector MCPs (Airtable, Atlassian, Slack, Asana,
-# BigQuery, incident.io, Salesforce, Sentry). These are gated per workspace
-# by the ``claude_ai_mcps`` toggle on ``WorkspaceConfig`` (default on). The
-# toggle expands to this set in ``CiaoConfig.disallowed_tools_for_workspace``.
-CLAUDE_AI_CONNECTORS: tuple[str, ...] = (
-    "mcp__claude_ai_Airtable",
-    "mcp__claude_ai_Asana",
-    "mcp__claude_ai_Atlassian",
-    "mcp__claude_ai_Google_Cloud_BigQuery",
-    "mcp__claude_ai_Salesforce",
-    "mcp__claude_ai_Sentry",
-    "mcp__claude_ai_Slack",
-    "mcp__claude_ai_incident_io",
-)
 
 # Harness tools that are irrelevant inside the Ciaobot PWA regardless of
 # workspace. The PWA is the notification, plan-approval, and scheduling
@@ -133,27 +121,6 @@ def _vault_evidence_score(path: Path) -> int:
     return score
 
 
-def coerce_claude_ai_mcps(raw: object) -> bool | None:
-    """Parse the claude.ai MCPs toggle. ``None``/``"default"`` → unset (use the
-    per-workspace default); booleans pass through; strings ``true/false/on/off``
-    coerce. Anything else → None."""
-    if raw is None:
-        return None
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, (int, float)):
-        return bool(raw)
-    if isinstance(raw, str):
-        cleaned = raw.strip().lower()
-        if cleaned in {"", "default", "none"}:
-            return None
-        if cleaned in {"true", "1", "yes", "on"}:
-            return True
-        if cleaned in {"false", "0", "no", "off"}:
-            return False
-    return None
-
-
 # Accent presets for the PWA. Missing/unknown values resolve to pink
 # (Ciao brand). Only accents shift; canvas tokens stay stable.
 WORKSPACE_COLOR_IDS = ("pink", "cyan", "amber", "emerald", "violet")
@@ -182,16 +149,9 @@ class WorkspaceConfig:
     vault_root: str
     default_provider: str = "claude"
     default_model: str = ""
-    # Extra (non-connector) tools to deny. The claude.ai connector set is
-    # controlled by ``claude_ai_mcps``; this field covers everything else
-    # (e.g. ``mcp__n8n_mcp``, ``Bash``). ``None`` = use the per-workspace
-    # default extras; ``[]`` = explicit opt-out (no extras).
+    # Extra tools to deny (e.g. ``mcp__n8n_mcp``, ``Bash``). ``None`` = use
+    # the per-workspace default extras; ``[]`` = explicit opt-out (no extras).
     disallowed_tools: list[str] | None = None
-    # Whether claude.ai account-OAuth connector MCPs are exposed in this
-    # workspace. ``None`` = default (True).
-    # When False/defaults-off, ``CLAUDE_AI_CONNECTORS`` is added to the
-    # effective denylist in ``disallowed_tools_for_workspace``.
-    claude_ai_mcps: bool | None = None
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
@@ -222,7 +182,6 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         default_provider=str(data.get("default_provider", "claude")).strip() or "claude",
         default_model=str(data.get("default_model", "")).strip(),
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
-        claude_ai_mcps=coerce_claude_ai_mcps(data.get("claude_ai_mcps")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
     )
@@ -261,8 +220,6 @@ def _legacy_workspaces(
     default_model_work: str = "",
     disallowed_tools_personal: list[str] | None = None,
     disallowed_tools_work: list[str] | None = None,
-    claude_ai_mcps_personal: bool | None = None,
-    claude_ai_mcps_work: bool | None = None,
     gws_default_profile: str = "personal",
 ) -> dict[str, WorkspaceConfig]:
     """Current private-layout defaults until callers fully support N workspaces."""
@@ -273,7 +230,6 @@ def _legacy_workspaces(
             default_provider="claude",
             default_model=default_model_personal,
             disallowed_tools=disallowed_tools_personal,
-            claude_ai_mcps=claude_ai_mcps_personal,
             gws_profile=gws_default_profile or "personal",
         ),
         "work": WorkspaceConfig(
@@ -282,7 +238,6 @@ def _legacy_workspaces(
             default_provider="claude",
             default_model=default_model_work,
             disallowed_tools=disallowed_tools_work,
-            claude_ai_mcps=claude_ai_mcps_work,
             gws_profile="work",
         ),
     }
@@ -296,9 +251,9 @@ def _parse_disallowed_tools(raw: str) -> list[str] | None:
     """Parse a CSV denylist. Empty/missing → None (use defaults);
     ``"none"`` → ``[]`` (explicit opt-out); CSV → parsed list.
 
-    The None vs []-empty distinction matters because the personal
-    workspace has built-in defaults (block claude.ai connectors).
-    Operators who want zero denylist set the literal ``"none"``.
+    The None vs []-empty distinction matters because every workspace has
+    built-in defaults (the harness tool denylist). Operators who want zero
+    denylist set the literal ``"none"``.
     """
     cleaned = raw.strip()
     if not cleaned:
@@ -363,18 +318,6 @@ class CiaoConfig:
     max_image_size_bytes: int = 10 * 1024 * 1024
     max_voice_size_bytes: int = 25 * 1024 * 1024
     media_ttl_hours: int = 72
-    # Titling uses the Claude Agent SDK's one-shot query(); default Haiku.
-    title_model: str = "haiku"
-    # Operator override for the titling model, set from the PWA Settings →
-    # Models tab (runtime settings store) or ``CIAO_TITLE_MODEL_OVERRIDE``.
-    # Empty = automatic routing: the workspace's haiku-tier model.
-    title_model_override: str = ""
-    # Apple Intelligence (the "Local (free)" on-device model) is a beta feature,
-    # off by default. Opt-in from Settings → Models, or an operator can flip the
-    # default from the env with ``CIAO_APPLE_INTELLIGENCE=1``. When off, the
-    # "apple" sentinel is treated as an unavailable backend and every routine
-    # falls back to its cloud model.
-    apple_intelligence_enabled: bool = False
     # BCP-47 language for the on-device voice engines. Dictation needs a
     # matching language installed in System Settings → Keyboard → Dictation;
     # the synthesizer uses it to choose a voice.
@@ -383,26 +326,20 @@ class CiaoConfig:
     # installed voice for transcription_locale" -- the right default when the
     # available voices differ on every machine.
     tts_local_voice: str = ""
-    claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku"])
+    claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku", "fable"])
     claude_default_model: str = "opus"
     # Per-workspace default models. Empty string falls back to
     # claude_default_model, so one workspace can prefer a cheaper tier
     # than another.
     default_model_personal: str = ""
     default_model_work: str = ""
-    # Per-workspace tool denylists (the "extra" tools beyond claude.ai
-    # connectors). Forwarded to ``ClaudeAgentOptions.disallowed_tools`` for the
+    # Per-workspace tool denylists (the "extra" tools beyond the default
+    # harness set). Forwarded to ``ClaudeAgentOptions.disallowed_tools`` for the
     # spawned CLI subprocess, so a personal chat can't accidentally touch a
     # work-only MCP (and vice versa). ``None`` = "unset, use built-in
     # defaults"; explicit ``[]`` = "operator opted out of the defaults".
     disallowed_tools_personal: list[str] | None = None
     disallowed_tools_work: list[str] | None = None
-    # Per-workspace claude.ai connector MCP toggle. ``None`` = default (on).
-    # When off, ``CLAUDE_AI_CONNECTORS`` is added to the effective denylist.
-    # Set via ``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``_WORK`` (true/false;
-    # ``default``/unset → default on).
-    claude_ai_mcps_personal: bool | None = None
-    claude_ai_mcps_work: bool | None = None
     workspaces: dict[str, WorkspaceConfig] = field(default_factory=dict)
     _workspace_registry_changed: bool = field(
         init=False, default=False, repr=False
@@ -410,9 +347,18 @@ class CiaoConfig:
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution mode for new chats, set from the PWA
     # Settings → Providers tab (runtime settings store). A missing entry uses
-    # the built-in default: normal for opencode (approval-enforcing),
-    # otherwise ``claude_mode``.
+    # ``claude_mode`` for every provider.
     provider_default_modes: dict[str, str] = field(default_factory=dict)
+    # Per-provider default model for new chats, set from the PWA Settings →
+    # Models tab (runtime settings store). A missing entry uses the provider's
+    # own catalog default.
+    provider_default_models: dict[str, str] = field(default_factory=dict)
+    # Per-provider default thinking level for new chats, set from the PWA
+    # Settings → Models tab. A missing entry uses the provider's own default.
+    provider_default_thinking: dict[str, str] = field(default_factory=dict)
+    # Per-provider session-insights model, set from the PWA Settings → Models
+    # tab. A missing entry uses the provider's balanced default.
+    provider_insights_models: dict[str, str] = field(default_factory=dict)
     restart_exit_code: int = 75
     auto_sync_on_start: bool = False
     auto_vault_index: bool = True
@@ -420,12 +366,11 @@ class CiaoConfig:
     pwa_port: int = 8443
     pwa_host: str = "127.0.0.1"
     gws_default_profile: str = "personal"
-    # Per-tier Codex model pins set from the PWA Settings → Providers tab.
-    # Empty means automatic: tiers derive from the signed-in account's
-    # model catalog (luna→haiku, terra→sonnet, sol→opus/fable).
+    # Per-provider default model for new chats, set from the PWA Settings →
+    # Models tab. A missing entry uses the provider's own catalog default.
     codex: CodexSettings = field(default_factory=CodexSettings)
-    # Per-tier opencode model pins, same shape and meaning as the Codex ones.
-    # Empty means the tier falls through to the session provider's own model.
+    # Per-provider default model for new chats, same shape and meaning as the
+    # Codex one. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
     # Post-archive insights extraction: when a chat is archived, run the raw
     # Claude Code session JSONL through a fast cheap model and append a
@@ -496,8 +441,6 @@ class CiaoConfig:
                 default_model_work=self.default_model_work,
                 disallowed_tools_personal=self.disallowed_tools_personal,
                 disallowed_tools_work=self.disallowed_tools_work,
-                claude_ai_mcps_personal=self.claude_ai_mcps_personal,
-                claude_ai_mcps_work=self.claude_ai_mcps_work,
                 gws_default_profile=self.gws_default_profile,
             )
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
@@ -777,7 +720,6 @@ class CiaoConfig:
                 ),
                 "default_model": workspace.default_model,
                 "disallowed_tools": workspace.disallowed_tools,
-                "claude_ai_mcps": workspace.claude_ai_mcps,
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
             }
@@ -788,42 +730,70 @@ class CiaoConfig:
         tmp.replace(path)
         self._workspace_registry_changed = False
 
-    def default_model_for_workspace(self, workspace: str | None) -> str:
+    def default_model_for_workspace(
+        self, workspace: str | None, provider: str | None = None
+    ) -> str:
         """Pick the new-chat / new-schedule default for a workspace.
 
         Falls back to ``claude_default_model`` when the per-workspace
         knob is empty or the workspace is unknown.
+
+        ``provider``, when given, is the provider the chat/schedule will
+        actually run on. It can differ from the workspace's own
+        ``default_provider`` (an explicit provider override); in that case
+        resolve against that provider's own operator default instead of the
+        workspace's default-provider model, since a workspace-level model
+        override is only meaningful for the workspace's own default
+        provider (#see create_chat/schedule_effective_routing callers).
         """
         from ciao import provider_registry
 
         workspace_config = self.workspace(workspace)
-        if workspace_config:
-            descriptor = provider_registry.get(workspace_config.default_provider)
+        workspace_provider = (
+            workspace_config.default_provider if workspace_config else None
+        )
+        effective_provider = provider or workspace_provider
+        if effective_provider:
+            descriptor = provider_registry.get(effective_provider)
             if descriptor is not None:
-                if workspace_config.default_model:
+                uses_workspace_default_provider = provider is None or provider == workspace_provider
+                if (
+                    workspace_config is not None
+                    and uses_workspace_default_provider
+                    and workspace_config.default_model
+                ):
                     return workspace_config.default_model
                 if descriptor.default_model_config_key:
                     return str(getattr(self, descriptor.default_model_config_key, "") or "")
-                # No operator setting and no descriptor default means "use that
-                # provider account's current catalog default": the provider
-                # resolves it and the chat records the effective model.
+                # A provider with an operator-settable default model (Codex,
+                # opencode) uses it; otherwise "use that provider account's
+                # current catalog default": the provider resolves it and the
+                # chat records the effective model.
+                operator_default = self._operator_default_model(descriptor)
+                if operator_default:
+                    return operator_default
                 return descriptor.default_model
         return self.claude_default_model
 
-    def sonnet_model_for_workspace(self, workspace: str | None) -> str:
-        """The sonnet-tier model for a workspace's routines.
+    def _operator_default_model(self, descriptor: "ProviderDescriptor") -> str:
+        """The operator-settable default model for a provider, or ``""`` when unset."""
+        if not descriptor.default_model_settings_attr:
+            return ""
+        settings = getattr(self, descriptor.default_model_settings_attr, None)
+        return getattr(settings, "default_model", "") if settings else ""
 
-        A bare tier alias: whichever provider runs the workspace resolves it
-        against its own catalog. Kept as a method rather than inlining the
-        literal so the routines that ask "what does Automatic mean here?"
-        (`resolve_title_model`, `resolve_insights_model`) keep one answer, and
-        so a future per-workspace tier pin has somewhere to live.
+    def default_model_for_provider(self, provider: str) -> str:
+        """The operator's default model for a provider, or ``""`` when unset.
+
+        Used when a chat is created on a provider that is not the workspace's
+        default provider, so the per-provider default still applies.
         """
-        return "sonnet"
+        from ciao import provider_registry
 
-    def haiku_model_for_workspace(self, workspace: str | None) -> str:
-        """The haiku-tier model for a workspace's routines. See above."""
-        return "haiku"
+        descriptor = provider_registry.get(provider)
+        if descriptor is None:
+            return ""
+        return self._operator_default_model(descriptor)
 
     def default_provider_for_workspace(self, workspace: str | None) -> str:
         from ciao import provider_registry
@@ -840,72 +810,41 @@ class CiaoConfig:
     def default_mode_for_provider(self, provider: str) -> BridgeMode:
         """The default execution mode for new chats on ``provider``.
 
-        An operator pin (Settings → Providers → default mode) wins. Otherwise
-        the built-in default: opencode runs in normal mode so tool calls
-        require operator approval. Every other provider falls back to
-        ``claude_mode``.
+        An operator pin (Settings → Providers → default mode) wins; otherwise
+        every provider falls back to ``claude_mode``. opencode used to be
+        pinned to normal here, but its auto ruleset is as tight as the other
+        adapters' (read-only tools plus ``edit`` allowed outright, shell left
+        on the wildcard so ``auto_approves_permission`` still classifies each
+        command), so there is no reason for it to be the one backend that
+        starts stricter than the app-wide default.
         """
         mode = (self.provider_default_modes or {}).get(provider, "")
         if mode in {"normal", "plan", "auto", "bypass"}:
             return cast(BridgeMode, mode)
-        if provider == "opencode":
-            return "normal"
         return self.claude_mode
-
-    def claude_ai_mcps_for_workspace(self, workspace: str | None) -> bool:
-        """Whether claude.ai connector MCPs are exposed in this workspace.
-
-        ``None`` on the workspace config resolves to the default: True.
-        """
-        workspace_config = self.workspace(workspace)
-        if workspace_config is None:
-            return True
-        value = workspace_config.claude_ai_mcps
-        if value is None:
-            return True
-        return value
 
     def disallowed_tools_for_workspace(self, workspace: str | None) -> list[str]:
         """Tools to deny for a chat in this workspace.
 
-        The effective denylist is the union of:
-
-        * the claude.ai connector set (``CLAUDE_AI_CONNECTORS``) when
-          ``claude_ai_mcps`` resolves to False, and
-        * the workspace's extra tools (``disallowed_tools``), which defaults to
-          the harness set (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every
-          workspace.
-
-        So, with the toggle at its default (on), every chat blocks the
-        PWA-irrelevant harness tools (plan mode, cron, /loop wakeup, routine
-        trigger, push, notebook edit, design-system sync) and the 8 claude.ai
-        connectors are allowed until the toggle is flipped off. Both are
-        overridable: the toggle via the per-workspace claude.ai env var or the
-        PWA switch, the extras via the per-workspace disallowed-tools env var or
-        the "Extra disallowed tools" field (the literal ``none`` denies nothing
-        at all).
+        The effective denylist is the workspace's extra tools
+        (``disallowed_tools``), which defaults to the harness set
+        (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every workspace. Every chat
+        blocks the PWA-irrelevant harness tools (plan mode, cron, /loop wakeup,
+        routine trigger, push, notebook edit, design-system sync). claude.ai
+        connector MCPs are always allowed: with multiple providers Ciaobot no
+        longer ships an opinion on them. The extras are overridable via the
+        per-workspace disallowed-tools env var or the "Extra disallowed tools"
+        field (the literal ``none`` denies nothing at all).
 
         An unregistered workspace name — a stale reference, or a renamed or
         deleted workspace — gets the defaults rather than an empty denylist. It
         was the one input that reached the model with nothing denied.
         """
         workspace_config = self.workspace(workspace)
-        connectors = (
-            list(CLAUDE_AI_CONNECTORS)
-            if not self.claude_ai_mcps_for_workspace(workspace)
-            else []
-        )
         extras = workspace_config.disallowed_tools if workspace_config else None
         if extras is None:
             extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
-        # Union, preserving order, deduped.
-        seen: set[str] = set()
-        effective: list[str] = []
-        for tool in (*connectors, *extras):
-            if tool not in seen:
-                seen.add(tool)
-                effective.append(tool)
-        return effective
+        return list(dict.fromkeys(extras))
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "CiaoConfig":
@@ -998,7 +937,7 @@ class CiaoConfig:
             except OSError:
                 workspaces_json = ""
 
-        claude_models = _split_csv(source.get("CLAUDE_MODELS", "opus,sonnet,haiku"))
+        claude_models = _split_csv(source.get("CLAUDE_MODELS", "opus,sonnet,haiku,fable"))
         claude_default_model = claude_models[0] if claude_models else "opus"
         default_model_personal = source.get("CLAUDE_DEFAULT_MODEL_PERSONAL", "").strip()
         default_model_work = source.get("CLAUDE_DEFAULT_MODEL_WORK", "").strip()
@@ -1008,20 +947,12 @@ class CiaoConfig:
         disallowed_tools_work = _parse_disallowed_tools(
             source.get("CIAO_DISALLOWED_TOOLS_WORK", "")
         )
-        claude_ai_mcps_personal = coerce_claude_ai_mcps(
-            source.get("CIAO_CLAUDE_AI_MCPS_PERSONAL", "")
-        )
-        claude_ai_mcps_work = coerce_claude_ai_mcps(
-            source.get("CIAO_CLAUDE_AI_MCPS_WORK", "")
-        )
         gws_default_profile = source.get("GWS_PROFILE", "personal").strip() or "personal"
         workspaces = _parse_workspaces_json(workspaces_json) or _legacy_workspaces(
             default_model_personal=default_model_personal,
             default_model_work=default_model_work,
             disallowed_tools_personal=disallowed_tools_personal,
             disallowed_tools_work=disallowed_tools_work,
-            claude_ai_mcps_personal=claude_ai_mcps_personal,
-            claude_ai_mcps_work=claude_ai_mcps_work,
             gws_default_profile=gws_default_profile,
         )
 
@@ -1056,16 +987,10 @@ class CiaoConfig:
             media_ttl_hours=int(
                 _env(source, "CIAO_MEDIA_TTL_HOURS", "TELEGRAM_BRIDGE_MEDIA_TTL_HOURS", "72")
             ),
-            title_model=source.get("CIAO_TITLE_MODEL", "").strip() or "haiku",
-            title_model_override=source.get("CIAO_TITLE_MODEL_OVERRIDE", "").strip(),
-            apple_intelligence_enabled=source.get(
-                "CIAO_APPLE_INTELLIGENCE", "false"
-            ).strip().lower()
-            in {"1", "true", "yes", "on"},
             transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
             or "en-US",
             tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
-            claude_models=list(claude_models or ["opus", "sonnet", "haiku"]),
+            claude_models=list(claude_models or ["opus", "sonnet", "haiku", "fable"]),
             claude_default_model=claude_default_model,
             claude_mode=normalize_claude_mode(
                 source.get("CLAUDE_EXECUTION_MODE", "")
@@ -1088,8 +1013,6 @@ class CiaoConfig:
             default_model_work=default_model_work,
             disallowed_tools_personal=disallowed_tools_personal,
             disallowed_tools_work=disallowed_tools_work,
-            claude_ai_mcps_personal=claude_ai_mcps_personal,
-            claude_ai_mcps_work=claude_ai_mcps_work,
             workspaces=workspaces,
             insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
             in {"", "0", "false", "no", "off"},

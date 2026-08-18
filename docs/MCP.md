@@ -84,12 +84,10 @@ The managed Claude process is restarted when its MCP token changes.
 guarantee the Ciaobot server is the global strict switch — but strict mode
 restricts the CLI to *only* the servers in `mcp_servers` and ignores every
 other MCP source, which includes the account's claude.ai connector MCPs
-(`mcp__claude_ai_*`). Forcing it therefore suppressed all connectors regardless
-of the per-workspace `claude_ai_mcps` toggle (that was a bug: the toggle became
-dead UI on the MCP surface). Connectors now stay loaded and are gated solely by
-the per-workspace `disallowed_tools` denylist. A Ciaobot server that is
-unavailable at spawn time already degrades to the legacy surface (above), so
-strict mode is not needed to surface that case.
+(`mcp__claude_ai_*`). Forcing it therefore suppressed all connectors, which are
+always allowed and stay loaded. A Ciaobot server that is unavailable at spawn
+time already degrades to the legacy surface (above), so strict mode is not
+needed to surface that case.
 
 ## Managed Codex configuration
 

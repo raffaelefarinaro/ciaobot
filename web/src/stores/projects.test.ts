@@ -134,6 +134,74 @@ describe('native window focus reporting', () => {
   })
 })
 
+describe('resume from background reconnects a dead awareness socket', () => {
+  // Other describe blocks in this file also call useProjectStore(), which
+  // registers its own module-scoped `visibilitychange` listener that is
+  // never torn down between tests. Dispatching the event here can therefore
+  // fire more than one store instance's handler, so assertions below check
+  // relative growth and specific socket identity/state rather than an
+  // absolute fakeSockets count.
+  test('reconnects when the events socket is closed but not nulled out', async () => {
+    // A long sleep/background period can flip a WebSocket to CLOSED without
+    // ever invoking its onclose handler (JS execution was frozen), leaving
+    // eventsSocket pointing at a dead object. Without the fix, resuming from
+    // that state left the app with no live awareness channel — a chat whose
+    // turn actually finished while backgrounded kept showing "in progress"
+    // until the user took some unrelated action that forced a plain HTTP
+    // refresh (e.g. clicking Stop).
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const deadSocket = fakeSockets[fakeSockets.length - 1]
+    // Simulate the frozen-tab case: readyState flips without onclose firing.
+    deadSocket.readyState = FakeWebSocket.CLOSED
+    const countBefore = fakeSockets.length
+
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      configurable: true,
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+
+    // A dead, non-open socket left in place must never be mistaken for live:
+    // something has to have opened a fresh replacement.
+    expect(fakeSockets.length).toBeGreaterThan(countBefore)
+    expect(deadSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(fakeSockets.slice(countBefore).some(s => s !== deadSocket)).toBe(true)
+  })
+
+  test('force-closes an already-live socket to guarantee a fresh snapshot', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const liveSocket = fakeSockets[fakeSockets.length - 1]
+    const countBefore = fakeSockets.length
+
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      configurable: true,
+    })
+
+    vi.useFakeTimers()
+    try {
+      document.dispatchEvent(new Event('visibilitychange'))
+      await Promise.resolve()
+      // An already-open socket gets force-closed rather than left alone —
+      // that's what guarantees a fresh snapshot lands instead of trusting a
+      // readyState that can lie after a long suspend.
+      expect(liveSocket.readyState).toBe(FakeWebSocket.CLOSED)
+      // Closing an already-open socket reconnects on its own fast timer
+      // (see onclose), not synchronously from resumeActiveChat itself.
+      await vi.advanceTimersByTimeAsync(60)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBeGreaterThan(countBefore)
+  })
+})
+
 describe('streaming started reconnect guard', () => {
   test('does not reconnect when the active chat socket is already open', () => {
     expect(shouldReconnectActiveChatOnStreamingStarted({ readyState: 1 })).toBe(false)
@@ -735,6 +803,7 @@ describe('chat closing and re-entry orientation', () => {
     }]
     store.messages[chatId] = [{ role: 'user', content: 'Continue this later', timestamp: '' }]
     store.activeChatId = chatId
+    localStorageData['ciao-reentry-summary-enabled'] = 'true'
     apiGet.mockResolvedValue([])
     apiPost.mockImplementation((path: string) => {
       if (path.endsWith('/reentry-summary')) return Promise.resolve({ summary: '• Continue the open task' })
@@ -765,6 +834,7 @@ describe('chat closing and re-entry orientation', () => {
       created_at: '',
       archived: false,
     }))
+    localStorageData['ciao-reentry-summary-enabled'] = 'true'
     apiGet.mockResolvedValue([])
     apiPost.mockImplementation((path: string) => {
       if (path.endsWith('/reentry-summary')) {
@@ -922,6 +992,28 @@ describe('re-entry summary invalidation', () => {
       archived: false,
     }]
     localStorageData['ciao-reentry-summary-enabled'] = 'false'
+
+    store.requestReentrySummaryIfUseful(chatId)
+
+    const calls = apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary'))
+    expect(calls).toHaveLength(0)
+  })
+
+  test('does not request a summary by default, before any preference is written', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-summary-default'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Default',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+    delete localStorageData['ciao-reentry-summary-enabled']
 
     store.requestReentrySummaryIfUseful(chatId)
 
@@ -1200,6 +1292,33 @@ describe('optimistic user bubble reconciliation', () => {
     expect(msgs.length).toBe(3)
     expect(msgs.some(m => m.tool_name === '_activity')).toBe(false)
     expect(msgs.some(m => m.tool_name === '_thinking')).toBe(false)
+  })
+
+  test('loadMessages keeps a settled assistant reply even when projectStreaming is stale', async () => {
+    // The turn finished server-side and the durable history ends in a
+    // completed assistant reply carrying a completion timestamp. Even if the
+    // events-WS still declares this chat streaming (e.g. the push notification
+    // was tapped before the snapshot caught up), the final answer must render
+    // rather than being truncated away to just the user's last turn.
+    const store = useProjectStore()
+    const chatId = 'chat-settled'
+    store.messages[chatId] = [
+      { role: 'user', content: 'make it robust', timestamp: '', turn_index: 0 },
+    ]
+    // Stale local view of the events WS — the real bug scenario.
+    store.projectStreaming[chatId] = true
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'make it robust', sent_at: '2026-07-18T08:00:00Z', turn_index: 0 },
+      // Completed reply: orchestration layer overlaid a completion sent_at.
+      { role: 'assistant', content: 'Done — hardened the parser.', sent_at: '2026-07-18T08:00:05Z' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs.length).toBe(2)
+    expect(msgs.at(-1)?.content).toBe('Done — hardened the parser.')
+    expect(msgs.at(-1)?.role).toBe('assistant')
   })
 })
 
@@ -1931,6 +2050,34 @@ describe('postprocessingChats (home tidying list)', () => {
     ] as unknown as typeof store.chats
     expect(store.postprocessingChats().map(c => c.chat_id)).toEqual(['c-fresher', 'c-running'])
   })
+
+  test('insightsFailedChats lists only settled chats whose insights step errored', () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', workspace: 'work' },
+      { project_id: 'p2', workspace: 'personal' },
+    ] as unknown as typeof store.projects
+    store.chats = [
+      { chat_id: 'c-failed', project_id: 'p1', title: 'Failed', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'error' } } } },
+      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'insights', expected: [], steps: {} } },
+      { chat_id: 'c-ok', project_id: 'p2', title: 'Ok', archived: true, last_activity_at: '2026-08-14T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'ok' } } } },
+      { chat_id: 'c-skipped', project_id: 'p2', title: 'Skipped', archived: true, last_activity_at: '2026-08-13T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'skipped' } } } },
+      { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
+    ] as unknown as typeof store.chats
+    expect(store.insightsFailedChats().map(c => c.chat_id)).toEqual(['c-failed'])
+    // Workspace counts follow the project → workspace mapping.
+    expect(store.workspaceInsightsFailedCount('work')).toBe(1)
+    expect(store.workspaceInsightsFailedCount('personal')).toBe(0)
+  })
+})
+
+describe('retryInsights', () => {
+  test('posts to the per-chat retry-insights endpoint', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValue({ status: 'started' })
+    await store.retryInsights('c1')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/retry-insights')
+  })
 })
 
 describe('chat_streaming_done clears stale streaming for inactive chats', () => {
@@ -2527,6 +2674,25 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c2/read', {})
   })
 
+  test('deleteChat clears any lingering draft for the deleted chat', async () => {
+    // A deliberate delete is never a sweep casualty: clear its draft key
+    // immediately so a later reconciliation pass never mistakes it for one (#277).
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeChatId = null
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ c1: 'leftover text' }))
+    apiGet.mockResolvedValue([])
+
+    await store.deleteChat('c1', { selectNext: false })
+
+    expect(localStorageData['ciao-chat-drafts']).toBeUndefined()
+  })
+
   test('deleteProject on project with active chat transitions to first chat of workspace', async () => {
     const store = useProjectStore()
     store.projects = [
@@ -2549,6 +2715,23 @@ describe('workspace and chat transitions', () => {
     expect(store.activeChatId).toBe('c2')
     expect(routerPush).toHaveBeenCalledWith('/chat/c2')
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c2/read', {})
+  })
+
+  test('deleteProject clears drafts for every chat it cascades away', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c2', project_id: 'p1', title: 'Chat 2', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeChatId = null
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ c1: 'draft one', c2: 'draft two' }))
+
+    await store.deleteProject('p1')
+
+    expect(localStorageData['ciao-chat-drafts']).toBeUndefined()
   })
 
   test('fixError opens a chat in the active workspace General project seeded with the error log', async () => {
@@ -2598,6 +2781,128 @@ describe('workspace and chat transitions', () => {
     expect(chat).toBeUndefined()
     expect(apiPost).not.toHaveBeenCalled()
     expect(store.toasts.some(t => t.variant === 'error')).toBe(true)
+  })
+
+  test('restoreDraft reopens the text in its original project and clears the old key', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.activeWorkspace = 'personal'
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'dead-chat': { text: 'recover me', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({
+      chat_id: 'c-new', project_id: 'p1', title: 'New Chat', model: '',
+      provider: 'claude', mode: '', session_id: '', created_at: '', archived: false,
+    })
+
+    vi.useFakeTimers()
+    try {
+      await store.restoreDraft({ originalChatId: 'dead-chat', projectId: 'p1', text: 'recover me' })
+      await vi.advanceTimersByTimeAsync(600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/p1/chats', { title: 'New Chat' })
+    const drafts = JSON.parse(localStorageData['ciao-chat-drafts'] || '{}')
+    expect(drafts['dead-chat']).toBeUndefined()
+    expect(drafts['c-new']?.text).toBe('recover me')
+  })
+
+  test('restoreDraft falls back to General when the original project is gone', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'pg', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: 'general', is_auto: true },
+    ]
+    store.activeWorkspace = 'personal'
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({
+      chat_id: 'c-new', project_id: 'pg', title: 'New Chat', model: '',
+      provider: 'claude', mode: '', session_id: '', created_at: '', archived: false,
+    })
+
+    vi.useFakeTimers()
+    try {
+      await store.restoreDraft({ originalChatId: 'dead-chat', projectId: 'deleted-project', text: 'recover me' })
+      await vi.advanceTimersByTimeAsync(600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/pg/chats', { title: 'New Chat' })
+  })
+
+  test('restoreDraft throws when there is nothing to restore into', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.activeWorkspace = 'personal'
+
+    await expect(
+      store.restoreDraft({ originalChatId: 'dead-chat', projectId: 'deleted-project', text: 'recover me' }),
+    ).rejects.toThrow()
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+})
+
+describe('orphaned draft recovery on load', () => {
+  test('fetchAll on first boot offers a toast for a draft whose chat is gone', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'dead-chat': { text: 'stranded text', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve(store.projects)
+      if (path === '/api/chats') return Promise.resolve([]) // dead-chat no longer exists server-side
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+
+    const toast = store.toasts.find(t => t.restoreDraft?.originalChatId === 'dead-chat')
+    expect(toast).toBeTruthy()
+    expect(toast?.body).toContain('stranded text')
+    // Not cleared yet — only on successful restore or explicit dismissal, so
+    // a reload before either happens re-offers it instead of losing it (#277).
+    expect(JSON.parse(localStorageData['ciao-chat-drafts'] || '{}')['dead-chat']).toBeTruthy()
+  })
+
+  test('does not re-offer the same orphaned draft on a later in-session refresh', async () => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'dead-chat': { text: 'stranded text', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve([])
+      if (path === '/api/chats') return Promise.resolve([])
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+    store.toasts = []
+    await store.fetchAll()
+
+    expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
+  })
+
+  test('ignores a draft whose chat still exists', async () => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'live-chat': { text: 'still typing', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve([])
+      if (path === '/api/chats') return Promise.resolve([
+        { chat_id: 'live-chat', project_id: 'p1', title: 'New Chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      ])
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+
+    expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
   })
 })
 

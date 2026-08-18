@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from ciao.context.entity_tagger import find_entities, format_entities
 from ciao.memory_injector import build_memory_block, system_prompt_payload
-from ciao.model_tiers import MODEL_TIERS, canonical_tier, codex_tier_models, is_tier
+from ciao.model_tiers import canonical_tier
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -81,32 +81,31 @@ _REQUIRED_PROTOCOL_TOKENS = frozenset({
 
 @dataclass(frozen=True, slots=True)
 class CodexSettings:
-    """Operator overrides for the Codex tier aliases.
+    """Operator overrides for the Codex default model.
 
-    Empty string means "no pin": the tier resolves through the automatic
-    catalog mapping (:func:`ciao.model_tiers.codex_tier_models`). A pin
-    is honored only while its model is still visible in the signed-in
-    account's catalog, so removed models degrade gracefully.
+    Empty string means "no override": the default resolves through the
+    signed-in account's catalog default.
     """
 
-    haiku_model: str = ""
-    sonnet_model: str = ""
-    opus_model: str = ""
-    fable_model: str = ""
-
-    def tier_overrides(self) -> dict[str, str]:
-        return {tier: getattr(self, f"{tier}_model") for tier in MODEL_TIERS}
+    default_model: str = ""
 
 
-def codex_tier_overrides(config: object) -> dict[str, str]:
-    """Extract the per-tier Codex pins from a (duck-typed) config object."""
+# The Codex "fable" preset is defined as the flagship Sol model at Ultra
+# reasoning effort. It is a real model choice, not a routing alias.
+CODEX_FABLE_THINKING_LEVEL = "ultra"
+
+
+def is_codex_fable(provider: str, model: str) -> bool:
+    """Whether a chat is on the Codex fable preset (forces Ultra effort)."""
+    return provider == "codex" and canonical_tier(model) == "fable"
+
+
+def codex_default_model(config: object) -> str:
+    """The operator's Codex default model, or ``""`` when there is none."""
     codex = getattr(config, "codex", None)
     if codex is None:
-        return {}
-    return {
-        tier: str(getattr(codex, f"{tier}_model", "") or "")
-        for tier in MODEL_TIERS
-    }
+        return ""
+    return str(getattr(codex, "default_model", "") or "")
 
 
 def codex_protocol_status(
@@ -872,11 +871,6 @@ class CodexProvider(BaseSDKProvider):
 
     async def _ensure_thread(self, request: AgentRequest) -> str:
         requested_model = request.model
-        if is_tier(requested_model):
-            catalog = await self.model_catalog(self.workspace_root)
-            requested_model = codex_tier_models(
-                catalog, overrides=codex_tier_overrides(self.config)
-            ).get(canonical_tier(requested_model), "")
         peer = await self._ensure_peer(request)
         sandbox, approval, reviewer = _mode_settings(request.mode)
         params: dict[str, Any] = {

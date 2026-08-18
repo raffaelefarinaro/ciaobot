@@ -185,7 +185,6 @@ def test_installer_requires_native_verification_before_extraction() -> None:
     assert "ciao-runtime/bin/ciao" in script
     assert 'ciao-runtime/bin/ciao" --help' in script
     assert 'CIAO_RELEASE_BASE_URL' in script
-    assert 'if [ -e "$backup" ]; then' in script
 
 
 def test_installer_starts_and_persists_the_menu_bar_agent() -> None:

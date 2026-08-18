@@ -48,6 +48,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/continue` | Create a new active chat continuing from this archived one |
 | POST | `/api/chats/{chat_id}/read` | Mark chat read |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
+| POST | `/api/chats/{chat_id}/retry-insights` | Re-run session-insights extraction for an archived chat (text-mode, on demand) |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
@@ -69,6 +70,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/file-content` | Read one snapshot's content |
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
 | GET | `/api/vault/backlinks` | List notes whose wikilinks resolve to a given markdown path |
+| GET | `/api/vault/graph` | Vault-wide note graph (frontmatter `related:` + `[[wikilinks]]`) for the Memory Map page; optional `?workspace=` scopes to one logical workspace |
 | POST | `/api/file-restore` | Restore a snapshot to disk |
 | GET, POST | `/api/schedules` | List or create schedules |
 | POST | `/api/schedule-run/{schedule_id}` | Run schedule now |
@@ -78,7 +80,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | PATCH, DELETE | `/api/loops/{loop_id}` | Update, start/stop (`{"running": bool}`), or delete a loop |
 | GET | `/api/automation` | Background-job status (Settings → Automations): per job its trigger, last run, duration, model, errors, and bulk `sub_jobs`. Omits retired jobs and schedule-only jobs whose schedule is not installed |
 | POST | `/api/automation/backfill-insights` | Run Session insights over every archived chat missing them. Optional `{"model": "<model-id>"}` runs this pass with a different model without changing the stored setting |
-| POST | `/api/automation/compare-apple-insights` | Compare Apple Intelligence with existing archived Session insights; does not modify archives |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/agent-assets` | List instruction sources, subagents, slash commands, and workspace health for Settings |
@@ -387,30 +388,25 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 **Workspaces**
 
 ```bash
-# List — returns {workspaces, active, provider_options, claude_ai_connectors}.
-# claude_ai_connectors is the claude.ai connector MCP set the per-workspace
-# toggle controls (for UI labels).
+# List — returns {workspaces, active, provider_options}.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider, default_model,
 # gws_profile, color (pink|cyan|amber|emerald|violet; default
-# pink — PWA accent only), disallowed_tools (extra non-connector tools,
-# CSV or list, null = defaults), claude_ai_mcps (true|false|null where null
-# = per-workspace default: personal off, else on). The effective denylist is
-# the union of the claude.ai connector set (when the toggle is off) and the
-# extras. POST creates `<CIAO_VAULT_ROOT>/<name>` and PATCH
-# /api/workspaces/{name} updates metadata in place. `vault_root` in a request
-# body is ignored: locations are read-only here so a routine settings save
-# cannot relocate a workspace. Setup and migration may still persist an
-# external/legacy root in the registry.
+# pink — PWA accent only), disallowed_tools (extra tools, CSV or list,
+# null = defaults). claude.ai connector MCPs are always allowed. POST
+# creates `<CIAO_VAULT_ROOT>/<name>` and PATCH /api/workspaces/{name} updates
+# metadata in place. `vault_root` in a request body is ignored: locations are
+# read-only here so a routine settings save cannot relocate a workspace.
+# Setup and migration may still persist an external/legacy root in the registry.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces" \
   -H 'content-type: application/json' \
-  -d '{"name":"client-a","claude_ai_mcps":true,"disallowed_tools":"mcp__n8n_mcp"}'
+  -d '{"name":"client-a","disallowed_tools":"mcp__n8n_mcp"}'
 
-# Flip just the toggle on an existing workspace.
+# Update metadata on an existing workspace.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \
   -H 'content-type: application/json' \
-  -d '{"claude_ai_mcps":true}'
+  -d '{"disallowed_tools":"mcp__n8n_mcp"}'
 
 # Delete.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/workspaces/client-a"
@@ -491,27 +487,28 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 **Routine settings (Settings → Models tab)**
 
 ```bash
-# Read internal-routine settings: title, insights, and critique model
-# overrides, the per-provider tier pins (provider_routing plus a flat
-# {provider}_{tier}_model mirror), and the effective models after defaults.
+# Read internal-routine settings: insights and critique model overrides, the
+# per-provider default model / thinking / routine-model maps, and the effective
+# models after defaults.
 #
-# title_model_effective / insights_model_effective are the PRIMARY workspace's
-# answer only. With no override both routines resolve from the chat's own
-# workspace, so title_model_by_workspace / insights_model_by_workspace carry the
-# full {workspace: model} map. Both maps are empty when an override is set,
-# because then that one model applies everywhere.
+# insights_model_effective is the PRIMARY workspace's answer only. With no
+# override the insights routine resolves from the chat's own workspace, so
+# insights_model_by_workspace carries the full {workspace: model} map. The map
+# is empty when an override is set, because then that one model applies
+# everywhere.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
 # live config immediately (no restart). Empty string clears an override back
 # to the env default. "apple" routes a routine to the on-device Foundation
-# Model (title_model / insights_model).
+# Model (insights_model). Per-provider defaults use the nested maps:
+# provider_default_models, provider_default_thinking, provider_insights_models.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5"}'
+  -d '{"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"codex":"gpt-5.6-terra"}}'
 ```
 
-**Project MCP servers (Settings → Providers tab)**
+**Project MCP servers (Settings → MCP tab)**
 
 ```bash
 # Create a project MCP server in .mcp.json. Pass url for an HTTP server, or

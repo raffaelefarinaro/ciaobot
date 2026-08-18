@@ -402,7 +402,7 @@
               </div>
             </div>
           </div>
-          <div class="setting-row setting-row--inline setting-row--toggle">
+          <div v-if="appleModelAvailable" class="setting-row setting-row--inline setting-row--toggle">
             <div class="routine-info">
               <span class="routine-name">Re-entry summary</span>
               <span class="routine-detail">Show a one-line Apple Intelligence orientation note when you reopen a quiet chat. The summary stays visible while you scroll and clears the moment you send a new message.</span>
@@ -415,6 +415,13 @@
                 @change="onReentrySummaryToggle"
               />
             </label>
+          </div>
+          <div v-else class="setting-row setting-row--inline">
+            <div class="routine-info">
+              <span class="routine-name">Re-entry summary</span>
+              <span class="routine-detail">Show a one-line Apple Intelligence orientation note when you reopen a quiet chat.</span>
+              <span class="hint hint--warn">Unavailable: {{ routines?.apple_model_unavailable_reason || 'Apple Intelligence is not supported on this machine' }}</span>
+            </div>
           </div>
         </div>
 
@@ -436,27 +443,10 @@
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
 
-        <!-- This device (role, host connection, local app) lives on its own
-             route so nothing on this page is about the machine in front of you. -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">this device</p>
-              <p class="hint">
-                <template v-if="isNodeClient">
-                  Client mode, host connection and the app installed on this computer.
-                  Everything else on this page belongs to {{ hostScopeLabel }}.
-                </template>
-                <template v-else>
-                  Role, addresses other devices can reach, connected clients, and the app
-                  installed on this computer.
-                </template>
-              </p>
-            </div>
-            <div class="settings-card-header-actions">
-              <router-link class="btn-secondary btn-small" to="/device">Open device settings</router-link>
-            </div>
-          </div>
+        <!-- This device (role, host connection, local app). Rendered inline so it
+             behaves like every other tile here, instead of navigating to /device. -->
+        <div class="device-tile">
+          <DevicePanel />
         </div>
 
         <!-- Open source -->
@@ -481,41 +471,6 @@
           <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
         </template>
         <template v-else-if="routines">
-          <!-- Apple Intelligence (beta, off by default) -->
-          <div class="card">
-            <div class="settings-card-header settings-card-header--split">
-              <div>
-                <p class="section-title">
-                  Apple Intelligence
-                  <span v-if="routines?.apple_intelligence_beta" class="badge badge--warn">beta</span>
-                </p>
-                <p class="hint">
-                  Experimental on-device models for chat titles, Session insights, and re-entry
-                  summaries. Off by default. Requires macOS 26+, the Ciaobot desktop app, and
-                  Apple Intelligence switched on in System Settings. While it is off, the
-                  "Local (free)" options below are unavailable and routines use a cloud model.
-                </p>
-              </div>
-              <div class="settings-control">
-                <label class="settings-checkbox-hit">
-                  <input
-                    type="checkbox"
-                    class="settings-checkbox"
-                    :checked="appleIntelligenceEnabled"
-                    :disabled="routinesSaving"
-                    @change="toggleAppleIntelligence"
-                  />
-                </label>
-              </div>
-            </div>
-            <p
-              v-if="appleIntelligenceEnabled && routines?.apple_model_available === false"
-              class="hint hint--warn"
-            >
-              Enabled, but unusable on this machine: {{ routines?.apple_model_unavailable_reason }}
-            </p>
-          </div>
-
           <!-- Internal routines -->
           <div class="card">
             <div class="settings-card-header">
@@ -525,70 +480,6 @@
                 "Automatic" keeps the built-in default.
                 System automations without a model picker are tracked on the Automations page.
               </p>
-            </div>
-
-            <div class="routine-row">
-              <div class="routine-info">
-                <span class="routine-name">Chat titles</span>
-                <span class="routine-detail">Names a new chat after the first message.</span>
-                <div v-if="getJobTelemetry('title')" class="routine-telemetry">
-                  <span class="badge" :class="getJobBadgeClass('title')">
-                    {{ getJobStatus('title') }}
-                  </span>
-                  <span v-if="hasJobLastRun('title')" class="telemetry-meta">
-                    Last run: {{ getJobLastRunLabel('title') }} ({{ getJobDuration('title') }})
-                  </span>
-                  <span v-if="getJobStatus('title') === 'error' && getJobLastError('title')" class="telemetry-error" :title="getJobLastError('title')">
-                    &middot; {{ getJobLastError('title') }}
-                  </span>
-                </div>
-              </div>
-              <div
-                class="routine-model-controls"
-                :class="{ 'routine-model-controls--single': routineProviderValue('title_model') === 'apple' }"
-              >
-                <select
-                  class="routine-select routine-select--provider"
-                  :value="routineProviderValue('title_model')"
-                  :disabled="routinesSaving"
-                  @change="saveRoutineProvider('title_model', ($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="automatic">Automatic</option>
-                  <option value="apple">Local (free) · beta</option>
-                  <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
-                    {{ provider.label }}
-                  </option>
-                  <option v-if="codexTitlesAvailable" value="codex">OpenAI (via Codex)</option>
-                  <option v-if="routineProviderValue('title_model') === 'custom'" value="custom">Custom model</option>
-                </select>
-                <select
-                  v-if="routineProviderValue('title_model') !== 'apple'"
-                  class="routine-select routine-select--tier"
-                  :value="routineTierValue('title_model')"
-                  :disabled="routinesSaving || !routineTierSelectable('title_model')"
-                  @change="saveRoutineTier('title_model', ($event.target as HTMLSelectElement).value)"
-                >
-                  <option v-for="tier in modelTiers" :key="`title-${tier.key}`" :value="tier.key">
-                    {{ tier.label }}
-                  </option>
-                </select>
-                <span class="routine-model-hint">
-                  <template v-if="routineProviderValue('title_model') === 'apple'">
-                    Runs on-device for free using Apple Intelligence. Nothing to install.
-                    <!-- The on-device model does not honour "reply in the same language";
-                         it returns English titles regardless of the chat's language. -->
-                    Titles are written in English.
-                    <!-- Nothing to offer when it is unavailable: it needs macOS 26+,
-                         the desktop app, and Apple Intelligence switched on, none of
-                         which a button here can fix. Say why and let the user choose. -->
-                    <span v-if="routines && routines.apple_model_available === false" class="hint--warn">
-                      Unavailable: {{ routines.apple_model_unavailable_reason || 'not supported on this machine' }} —
-                      titles currently fall back to a cloud model.
-                    </span>
-                  </template>
-                  <template v-else>{{ routineModelSummary('title_model') }}</template>
-                </span>
-              </div>
             </div>
 
             <div class="routine-row">
@@ -606,34 +497,6 @@
                     &middot; {{ getJobLastError('insights') }}
                   </span>
                 </div>
-                <div class="routine-actions">
-                  <button
-                    type="button"
-                    class="btn-small"
-                    :disabled="insightsComparisonPending || routinesSaving"
-                    @click="compareAppleInsights"
-                  >{{ insightsComparisonPending ? 'Comparing…' : 'Compare Apple Intelligence' }}</button>
-                </div>
-                <div v-if="insightsComparison" class="routine-comparison">
-                  <span v-if="!insightsComparison.available" class="hint--warn">
-                    {{ insightsComparison.reason || 'Apple Intelligence is unavailable.' }}
-                  </span>
-                  <span v-else-if="!insightsComparison.results.length" class="hint">
-                    {{ insightsComparison.reason || 'No archived chats with Session insights were found.' }}
-                  </span>
-                  <template v-else>
-                    <span class="hint">Apple re-ran the text-only extraction on {{ insightsComparison.results.length }} existing archive(s). Shared headings show where the signal matched.</span>
-                    <div v-for="result in insightsComparison.results" :key="result.archive" class="routine-comparison-result">
-                      <strong>{{ result.archive }}</strong>
-                      <span v-if="result.error" class="hint--warn"> · {{ result.error }}</span>
-                      <span v-else> · shared: {{ result.shared_sections?.join(', ') || 'none' }}</span>
-                      <details v-if="result.apple_output">
-                        <summary>Apple output</summary>
-                        <pre>{{ result.apple_output }}</pre>
-                      </details>
-                    </div>
-                  </template>
-                </div>
               </div>
               <div
                 class="routine-model-controls"
@@ -646,30 +509,21 @@
                   @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option value="automatic">Automatic</option>
-                  <option value="apple">Local (free) · beta</option>
+                  <option v-if="appleModelAvailable" value="apple">Local (free)</option>
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
-                  <option v-if="routineProviderValue('insights_model') === 'custom'" value="custom">Custom model</option>
                 </select>
-                <select
-                  v-if="routineProviderValue('insights_model') !== 'apple'"
-                  class="routine-select routine-select--tier"
-                  :value="routineTierValue('insights_model')"
-                  :disabled="routinesSaving || !routineTierSelectable('insights_model')"
-                  @change="saveRoutineTier('insights_model', ($event.target as HTMLSelectElement).value)"
-                >
-                  <option v-for="tier in modelTiers" :key="`insights-${tier.key}`" :value="tier.key">
-                    {{ tier.label }}
-                  </option>
-                </select>
+                <ModelSelector
+                  v-if="routineProviderValue('insights_model') !== 'apple' && routineProviderValue('insights_model') !== 'automatic'"
+                  :model-value="routineModelValue('insights_model')"
+                  :sections="routineModelSectionsFor('insights_model')"
+                  :disabled="routinesSaving"
+                  @update:model-value="saveRoutineModel('insights_model', $event)"
+                />
                 <span class="routine-model-hint">
                   <template v-if="routineProviderValue('insights_model') === 'apple'">
                     Runs on-device for free using Apple Intelligence. Nothing to install.
-                    <span v-if="routines && routines.apple_model_available === false" class="hint--warn">
-                      Unavailable: {{ routines.apple_model_unavailable_reason || 'not supported on this machine' }} —
-                      insights currently fall back to a cloud model.
-                    </span>
                   </template>
                   <template v-else>{{ routineModelSummary('insights_model') }}</template>
                 </span>
@@ -733,7 +587,10 @@
                  this machine can run them and, if not, why. -->
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
-                <span class="routine-name">Hear</span>
+                <span class="routine-name">
+                  <svg class="routine-voice-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+                  Hear
+                </span>
               </div>
               <div class="routine-model-controls routine-model-controls--single">
                 <span class="routine-model-hint">
@@ -751,7 +608,10 @@
             </div>
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
-                <span class="routine-name">Speak</span>
+                <span class="routine-name">
+                  <svg class="routine-voice-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+                  Speak
+                </span>
               </div>
               <div class="routine-model-controls routine-model-controls--single">
                 <span class="routine-model-hint">
@@ -944,58 +804,63 @@
           </div>
 
 
-          <!-- Provider-neutral model routing -->
-          <div v-if="tierProviderSections.length" class="card">
+          <!-- Per-provider default model and thinking for new chats. Moved
+               here from the removed model-routing card; these are the
+               per-provider knobs that used to be four tier pins each. -->
+          <div v-if="aliasProviderSections.length" class="card">
             <div class="settings-card-header">
-              <p class="section-title">model routing</p>
+              <p class="section-title">defaults per provider</p>
               <p class="hint">
-                Ciaobot maps Haiku, Sonnet, Opus, and Fable to each provider's own models.
+                Choose the default model and thinking level new chats start on
+                for each provider. "Automatic" uses that provider's own default.
               </p>
             </div>
-            <div class="alias-provider-bar">
-              <label class="settings-field alias-provider-field">
-                <span class="ws-label">Provider</span>
-                <select
-                  class="routine-select alias-provider-select"
-                  :value="selectedTierProviderSection?.key || ''"
-                  :disabled="routinesSaving"
-                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as RoutingProviderKey"
-                >
-                  <option v-for="section in tierProviderSections" :key="section.key" :value="section.key">
-                    {{ section.label }}<template v-if="!section.available"> (not configured)</template>
-                  </option>
-                </select>
-              </label>
-            </div>
-            <div v-if="selectedTierProviderSection" class="tier-provider-section">
-              <div class="settings-field-grid">
-                <label v-for="tier in modelTiers" :key="`${selectedTierProviderSection.key}-${tier.key}`" class="settings-field">
-                  <span class="ws-label">{{ tier.label }}</span>
+            <div class="provider-defaults">
+              <div
+                v-for="section in aliasProviderSections"
+                :key="section.key"
+                class="provider-defaults-row"
+              >
+                <span class="provider-defaults-title ws-label">{{ section.label }}</span>
+                <label class="settings-field">
+                  <span class="ws-label">Default model</span>
                   <ModelSelector
-                    v-if="selectedTierProviderSection.configurable"
-                    :model-value="tierSelectorValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
-                    :sections="tierModelSectionsFor(selectedTierProviderSection.key as TierProviderKey, tier.key)"
-                    :disabled="routinesSaving || !selectedTierProviderSection.available"
-                    @update:model-value="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, $event)"
+                    v-if="section.configurable"
+                    :model-value="providerDefaultModelSelectorValue(section.key)"
+                    :sections="providerDefaultModelSectionsFor(section.key)"
+                    :disabled="routinesSaving || !section.available"
+                    @update:model-value="saveProviderDefaultModel(section.key, $event)"
                   />
-                  <input
-                    v-else
-                    class="routine-input routing-model-input"
-                    :value="tierModelForProvider(selectedTierProviderSection.key, tier.key)"
-                    :aria-label="`${tier.label} ${selectedTierProviderSection.label} routing model`"
-                    disabled
-                  />
+                  <span v-else class="hint hint--compact">Automatic — Claude Code picks its own default.</span>
+                </label>
+                <label class="settings-field">
+                  <span class="ws-label">Default thinking</span>
+                  <select
+                    class="routine-select"
+                    :value="providerDefaultThinkingValue(section.key)"
+                    :disabled="routinesSaving || !section.available"
+                    @change="saveProviderDefaultThinking(section.key, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <option
+                      v-for="option in providerThinkingOptions(section.key)"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
                 </label>
                 <label class="settings-field">
                   <span class="ws-label">Default mode</span>
                   <select
                     class="routine-select"
-                    :value="providerModeSelectorValue(selectedTierProviderSection.key)"
+                    :data-provider="section.key"
+                    :value="providerModeSelectorValue(section.key)"
                     :disabled="routinesSaving"
-                    @change="saveProviderMode(selectedTierProviderSection.key, ($event.target as HTMLSelectElement).value)"
+                    @change="saveProviderMode(section.key, ($event.target as HTMLSelectElement).value)"
                   >
                     <option
-                      v-for="option in providerModeOptions(selectedTierProviderSection.key)"
+                      v-for="option in providerModeOptions(section.key)"
                       :key="option.value"
                       :value="option.value"
                     >
@@ -1004,9 +869,6 @@
                   </select>
                 </label>
               </div>
-              <p v-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
-                {{ tierProviderUnavailableHint }}
-              </p>
             </div>
           </div>
         </template>
@@ -1022,7 +884,7 @@
           :notify-saved="notifySaved"
           :notify-failed="notifyFailed"
           :routines="routines"
-          :alias-tiers="workspaceModels?.alias_tiers"
+          :provider-models="workspaceModels?.provider_models"
           :provider-labels="aliasProviderLabels"
         />
       </template>
@@ -1122,31 +984,6 @@
                     </option>
                   </select>
                 </label>
-                <div v-if="newWorkspaceForm.default_provider !== 'codex'" class="settings-field settings-field--wide">
-                  <div class="settings-label-row">
-                    <span class="ws-label">Claude.ai MCPs</span>
-                    <details class="field-info">
-                      <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
-                      <div class="field-info-panel">
-                        <p>
-                          Allows this workspace to use claude.ai account connectors, for example Airtable,
-                          Slack, Atlassian, BigQuery, Sentry, or similar tools.
-                        </p>
-                        <p>
-                          Turn this off for personal workspaces when your connected accounts point to work systems,
-                          so personal chats do not inherit work-only connectors.
-                        </p>
-                      </div>
-                    </details>
-                  </div>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
-                    <option value="on">On (connectors allowed)</option>
-                    <option value="off">Off (connectors blocked)</option>
-                  </select>
-                </div>
-
-
-
               </div>
               <div class="action-row settings-actions">
                 <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
@@ -1244,31 +1081,6 @@
                       </option>
                     </select>
                   </label>
-                  <div v-if="form.default_provider !== 'codex'" class="settings-field settings-field--wide">
-                    <div class="settings-label-row">
-                      <span class="ws-label">Claude.ai MCPs</span>
-                      <details class="field-info">
-                        <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
-                        <div class="field-info-panel">
-                          <p>
-                            Allows this workspace to use claude.ai account connectors, for example Airtable,
-                            Slack, Atlassian, BigQuery, Sentry, or similar tools.
-                          </p>
-                          <p>
-                            Turn this off for personal workspaces when your connected accounts point to work systems,
-                            so personal chats do not inherit work-only connectors.
-                          </p>
-                        </div>
-                      </details>
-                    </div>
-                    <select class="routine-input workspace-select" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
-                      <option value="on">On (connectors allowed)</option>
-                      <option value="off">Off (connectors blocked)</option>
-                    </select>
-                  </div>
-
-
-
                 </div>
               </div>
             </div>
@@ -1670,7 +1482,7 @@
             <div>
               <p class="section-title">skills</p>
               <p class="hint">
-                Manage Ciaobot-specific custom skills and locked GitHub/package skills.
+                Manage Ciaobot's stock skills, custom skills, and locked GitHub/package skills.
               </p>
             </div>
             <div class="settings-card-header-actions">
@@ -1682,7 +1494,7 @@
           </div>
 
           <p class="hint hint--info skill-scope-note">
-            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed custom and GitHub/package skills — see
+            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock, custom, and GitHub/package skills — see
             <RouterLink to="/settings/providers">Providers</RouterLink> for what each CLI brings on its own.
           </p>
 
@@ -1710,8 +1522,38 @@
             <p class="hint hint--warn">{{ skillsError }}</p>
           </template>
           <template v-else-if="skillsInventory">
-            <!-- Custom Skills Section -->
+            <!-- Stock Skills Section -->
             <div class="skill-section">
+              <p class="subsection-title subsection-title--spaced">stock skills</p>
+              <p v-if="!stockSkills.length" class="hint hint--section-empty">No stock skills installed.</p>
+              <div v-else class="skill-list skill-list--section">
+                <div
+                  v-for="skill in stockSkills"
+                  :key="skill.name"
+                  class="skill-row"
+                  :class="{ expanded: isSkillExpanded(skill.name) }"
+                  @click="toggleSkill(skill.name)"
+                >
+                  <div class="skill-main">
+                    <div class="skill-title-row">
+                      <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
+                      <span class="skill-name">{{ skill.name }}</span>
+                    </div>
+                    <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
+                    <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
+                      <p v-if="skill.path" class="skill-meta">
+                        <span class="skill-meta-label">Path</span>
+                        <button class="inline-path-button" @click.stop="openAssetPath(skill.path)">{{ skill.path }}</button>
+                      </p>
+                      <pre v-if="skill.content" class="asset-code-preview"><code>{{ skill.content }}</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Custom Skills Section -->
+            <div class="skill-section skill-section--spaced">
               <p class="subsection-title subsection-title--spaced">custom skills</p>
               <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills created yet.</p>
               <div v-else class="skill-list skill-list--section">
@@ -1729,6 +1571,10 @@
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
+                      <p v-if="skill.path" class="skill-meta">
+                        <span class="skill-meta-label">Path</span>
+                        <button class="inline-path-button" @click.stop="openAssetPath(skill.path)">{{ skill.path }}</button>
+                      </p>
                       <pre v-if="skill.content" class="asset-code-preview"><code>{{ skill.content }}</code></pre>
                     </div>
                   </div>
@@ -1785,6 +1631,10 @@
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
+                      <p v-if="skill.path" class="skill-meta">
+                        <span class="skill-meta-label">Path</span>
+                        <button class="inline-path-button" @click.stop="openAssetPath(skill.path)">{{ skill.path }}</button>
+                      </p>
                       <pre v-if="skill.content" class="asset-code-preview"><code>{{ skill.content }}</code></pre>
                     </div>
                   </div>
@@ -1793,7 +1643,10 @@
             </div>
           </template>
         </div>
+      </template>
 
+      <!-- SUBAGENTS TAB -->
+      <template v-if="currentTab === 'subagents'">
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
@@ -1890,7 +1743,10 @@
             </div>
           </template>
         </div>
+      </template>
 
+      <!-- COMMANDS TAB -->
+      <template v-if="currentTab === 'commands'">
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
@@ -1928,6 +1784,7 @@
             </div>
             <div v-if="addCommandResult" class="action-result" :class="{ '--error': addCommandError }">{{ addCommandResult }}</div>
           </div>
+
           <div v-if="assetLifecycleResult" class="action-result" :class="{ '--error': assetLifecycleError }">{{ assetLifecycleResult }}</div>
 
           <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
@@ -2006,8 +1863,10 @@
             </div>
           </template>
         </div>
+      </template>
 
-        <!-- MCP SERVERS CARD -->
+      <!-- MCP TAB -->
+      <template v-if="currentTab === 'mcp'">
         <div class="card" id="mcp-servers">
           <div class="settings-card-header settings-card-header--split">
             <div>
@@ -2324,7 +2183,8 @@ import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
-import { providerModelBadges, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import DevicePanel from './DevicePanel.vue'
+import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 
 // The tray owns package updates and native notifications in the desktop app.
@@ -2344,7 +2204,6 @@ const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
-  if (tab === 'mcp') return 'skills'
   return tab
 })
 
@@ -2797,31 +2656,12 @@ const routinesLoaded = ref(false)
 const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
-const insightsComparisonPending = ref(false)
-type InsightsComparison = {
-  available: boolean
-  reason?: string
-  results: Array<{
-    archive: string
-    shared_sections?: string[]
-    existing_only?: string[]
-    apple_only?: string[]
-    apple_output?: string
-    error?: string
-  }>
-}
-const insightsComparison = ref<InsightsComparison | null>(null)
 
-// Every provider with models or tier pins is a runtime provider now.
+// Every provider with models is a runtime provider now.
 type AliasProviderKey = RuntimeProvider
-// The Providers tab routing card shows every runtime provider; Claude is
-// included so its default-mode selector lives next to the others, even
-// though its tiers are the aliases themselves and cannot be re-pinned.
-type TierProviderKey = AliasProviderKey
-type RoutingProviderKey = AliasProviderKey
-type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
-type RoutineModelKey = 'title_model' | 'insights_model'
-type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
+type RoutineModelKey = 'insights_model'
+// The routine pickers offer Automatic, Apple, and each available provider.
+type RoutineProviderValue = 'automatic' | 'apple' | AliasProviderKey
 
 type AliasProviderSection = {
   key: AliasProviderKey
@@ -2829,25 +2669,12 @@ type AliasProviderSection = {
   options: string[]
   configurable: boolean
   // Whether the provider is signed in and reporting models. Routine selectors
-  // filter to available sections; the Providers tab tier card shows unavailable
-  // sections disabled with setup guidance.
+  // filter to available sections.
   available: boolean
 }
-const modelTiers: { key: TierKey; label: string }[] = [
-  { key: 'haiku', label: 'Haiku' },
-  { key: 'sonnet', label: 'Sonnet' },
-  { key: 'opus', label: 'Opus' },
-  { key: 'fable', label: 'Fable' },
-]
 
 const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
-  title_model: 'title_model_effective',
   insights_model: 'insights_model_effective',
-}
-
-const routineDefaultTiers: Record<RoutineModelKey, TierKey> = {
-  title_model: 'haiku',
-  insights_model: 'sonnet',
 }
 
 async function fetchRoutines() {
@@ -2873,30 +2700,9 @@ async function saveRoutines(patch: Record<string, unknown>) {
   }
 }
 
-// Apple Intelligence is a beta feature, off by default; this toggle is the
-// opt-in. While it is off, the "Local (free)" option below reports unavailable
-// and titles/insights fall back to their cloud model.
-const appleIntelligenceEnabled = computed(() => routines.value?.apple_intelligence_enabled === true)
-
-async function toggleAppleIntelligence(event: Event) {
-  await saveRoutines({ apple_intelligence_enabled: (event.target as HTMLInputElement).checked })
-}
-
-async function compareAppleInsights() {
-  insightsComparisonPending.value = true
-  insightsComparison.value = null
-  try {
-    insightsComparison.value = await api.post<InsightsComparison>('/api/automation/compare-apple-insights', { limit: 2 })
-  } catch (e) {
-    insightsComparison.value = {
-      available: false,
-      reason: errorMessage(e, 'Comparison failed'),
-      results: [],
-    }
-  } finally {
-    insightsComparisonPending.value = false
-  }
-}
+// Apple's on-device model is hardware-gated: it shows only when this machine
+// can run it. No app-side opt-in flag any more.
+const appleModelAvailable = computed(() => routines.value?.apple_model_available === true)
 
 function parseModelList(raw: string): string[] {
   const seen = new Set<string>()
@@ -2999,158 +2805,110 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   return sections
 })
 
-// Provider-neutral routing overview for the Providers tab. Models and their
-// automatic tier mapping come from each provider's own discovery in
-// `/api/models`. A provider that is not signed in stays visible with setup
-// guidance instead of vanishing.
-const tierProviderSections = computed<AliasProviderSection[]>(() => {
-  if (!routines.value) return []
-  const codexModels = parseModelList((
-    workspaceModels.value?.codex_models
-    || workspaceModels.value?.provider_models?.codex
-    || []
-  ).join(','))
-  const opencodeModels = parseModelList((
-    workspaceModels.value?.opencode_models
-    || workspaceModels.value?.provider_models?.opencode
-    || []
-  ).join(','))
-  return [
-    {
-      key: 'claude',
-      label: 'Anthropic (via Claude Code)',
-      // Claude's tiers are the aliases themselves; nothing to pin. The
-      // section exists so the default-mode selector covers every provider.
-      options: [],
-      configurable: false,
-      available: true,
-    },
-    {
-      key: 'codex',
-      label: 'OpenAI (via Codex)',
-      options: codexModels,
-      configurable: true,
-      available: codexModels.length > 0,
-    },
-    {
-      key: 'opencode',
-      label: 'opencode',
-      options: opencodeModels,
-      configurable: true,
-      available: opencodeModels.length > 0,
-    },
-  ]
-})
-
 // Provider key -> human label, for components that render model ids from the
-// routing table (Automations offers a one-off retry model).
+// default-model table (Automations offers a one-off retry model).
 const aliasProviderLabels = computed<Record<string, string>>(() => {
   const labels: Record<string, string> = { claude: 'Anthropic (via Claude Code)' }
   for (const section of aliasProviderSections.value) labels[section.key] = section.label
   return labels
 })
 
-const selectedTierProvider = ref<RoutingProviderKey>('codex')
-const selectedTierProviderSection = computed(() =>
-  tierProviderSections.value.find((section) => section.key === selectedTierProvider.value)
-  || tierProviderSections.value[0]
-  || null
-)
+// ── Per-provider default model / thinking (Models tab) ─────────────────
+const DEFAULT_MODEL_SELECTION = '__ciao_default_model__'
 
-// Hint shown when the selected tier provider isn't configured yet.
-const tierModelSections = computed<ModelSection[]>(() => {
-  const section = selectedTierProviderSection.value
-  if (!section || !section.options.length) return []
-  const aliasTiers = workspaceModels.value?.alias_tiers
-  return [
-    {
-      key: section.key,
-      label: section.label,
-      models: section.options,
-      modelBadges: providerModelBadges(section.key, section.options, aliasTiers),
-      disabled: !section.available,
-      hint: section.available ? undefined : tierProviderUnavailableHint.value,
-    },
-  ]
-})
+function providerDefaultModelOverride(provider: AliasProviderKey): string {
+  return routines.value?.provider_default_models?.[provider] || ''
+}
 
-const tierProviderUnavailableHint = computed(() => {
-  const section = selectedTierProviderSection.value
-  if (!section || section.available) return ''
-  if (section.key === 'codex') {
-    return 'Sign in to Codex to discover the available OpenAI models and their tier routing.'
+// The alias-provider section entry (models + disabled state) is identical
+// wherever a picker offers one provider's catalog; only the surrounding
+// sections (e.g. the "Default"/Automatic entry above) differ per caller.
+function aliasSectionEntry(provider: string): ModelSection {
+  const section = aliasProviderSections.value.find((s) => s.key === provider)
+  return {
+    key: provider,
+    label: section?.label || provider,
+    models: section?.options || [],
+    disabled: !section?.available,
   }
-  if (section.key === 'opencode') {
-    return 'Sign in to opencode (and connect at least one of its providers) to enable tier mapping.'
-  }
-  return 'Configure this provider to enable tier mapping.'
-})
-
-const DEFAULT_TIER_SELECTION = '__ciao_default__'
-
-function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
-  return routines.value?.provider_routing?.[provider]?.[tier] || ''
 }
 
-function tierEffectiveValue(provider: TierProviderKey, tier: TierKey): string {
-  // A runtime provider's effective tiers come from its account catalog,
-  // exposed by /api/models rather than the routines payload.
-  return workspaceModels.value?.alias_tiers?.[provider]?.[tier] || ''
-}
-
-function tierDefaultValue(provider: TierProviderKey, tier: TierKey): string {
-  if (provider === 'codex') {
-    return workspaceModels.value?.codex_tier_defaults?.[tier]
-      || tierEffectiveValue(provider, tier)
-  }
-  return tierEffectiveValue(provider, tier)
-}
-
-function tierDefaultLabel(provider: TierProviderKey, tier: TierKey): string {
-  const model = tierDefaultValue(provider, tier)
-  // Always "Automatic": every tier is derived from the provider's own catalog
-  // now, never from an env-backed default.
-  return model ? `Automatic (${model})` : 'Automatic'
-}
-
-function tierSelectorValue(provider: TierProviderKey, tier: TierKey): string {
-  return tierOverrideValue(provider, tier) || DEFAULT_TIER_SELECTION
-}
-
-function tierModelSectionsFor(provider: TierProviderKey, tier: TierKey): ModelSection[] {
+function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
+  const effective = providerDefaultModelEffective(provider)
   return [
     {
       key: 'default',
       label: 'Default',
-      models: [DEFAULT_TIER_SELECTION],
-      modelLabels: { [DEFAULT_TIER_SELECTION]: tierDefaultLabel(provider, tier) },
+      models: [DEFAULT_MODEL_SELECTION],
+      modelLabels: {
+        [DEFAULT_MODEL_SELECTION]: effective ? `Automatic (${effective})` : 'Automatic',
+      },
     },
-    ...tierModelSections.value,
+    aliasSectionEntry(provider),
   ]
 }
 
-async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: string | string[]) {
+function providerDefaultModelEffective(provider: AliasProviderKey): string {
+  const explicit = workspaceModels.value?.provider_defaults?.[provider]
+  if (explicit) return explicit
+  // Fall back to the provider's first discovered model so a routine pick can
+  // store a concrete id even before an operator default is configured.
+  const section = aliasProviderSections.value.find((s) => s.key === provider)
+  return section?.options?.[0] || ''
+}
+
+function providerDefaultModelSelectorValue(provider: AliasProviderKey): string {
+  return providerDefaultModelOverride(provider) || DEFAULT_MODEL_SELECTION
+}
+
+async function saveProviderDefaultModel(provider: AliasProviderKey, value: string | string[]) {
   const selected = Array.isArray(value) ? value[0] || '' : value
-  const model = selected === DEFAULT_TIER_SELECTION ? '' : selected
-  const routing = JSON.parse(
-    JSON.stringify(routines.value?.provider_routing || {}),
-  ) as Record<string, Record<string, string>>
-  const routes = { ...(routing[provider] || {}) }
-  if (model.trim()) routes[tier] = model.trim()
-  else delete routes[tier]
-  if (Object.keys(routes).length) routing[provider] = routes
-  else delete routing[provider]
-  await saveRoutines({ provider_routing: routing })
-  // Effective tiers live in /api/models; refresh so the badges and
-  // "Automatic (…)" labels reflect the new pin immediately.
+  const model = selected === DEFAULT_MODEL_SELECTION ? '' : selected
+  const defaults = JSON.parse(
+    JSON.stringify(routines.value?.provider_default_models || {}),
+  ) as Record<string, string>
+  if (model.trim()) defaults[provider] = model.trim()
+  else delete defaults[provider]
+  await saveRoutines({ provider_default_models: defaults })
   await fetchWorkspaceModels()
 }
 
+const DEFAULT_THINKING_SELECTION = '__ciao_thinking_default__'
+
+function providerDefaultThinkingOverride(provider: AliasProviderKey): string {
+  return routines.value?.provider_default_thinking?.[provider] || ''
+}
+
+function providerDefaultThinkingValue(provider: AliasProviderKey): string {
+  return providerDefaultThinkingOverride(provider) || DEFAULT_THINKING_SELECTION
+}
+
+function providerThinkingOptions(provider: AliasProviderKey): { value: string; label: string }[] {
+  const levels = workspaceModels.value?.thinking_levels?.[provider] || []
+  return [
+    {
+      value: DEFAULT_THINKING_SELECTION,
+      label: 'Automatic (provider default)',
+    },
+    ...levels.map((level) => ({ value: level, label: level })),
+  ]
+}
+
+async function saveProviderDefaultThinking(provider: AliasProviderKey, value: string) {
+  const selected = value === DEFAULT_THINKING_SELECTION ? '' : value
+  const defaults = JSON.parse(
+    JSON.stringify(routines.value?.provider_default_thinking || {}),
+  ) as Record<string, string>
+  if (selected) defaults[provider] = selected
+  else delete defaults[provider]
+  await saveRoutines({ provider_default_thinking: defaults })
+}
+
 // Per-provider default execution mode for new chats. The stored override
-// lives in RoutineSettings.provider_default_modes; a missing entry falls
-// back to the effective default reported by the backend (opencode → normal,
-// everyone else → auto). Opencode starts approval-enforcing for new chats;
-// operators can explicitly choose Auto or Bypass when desired.
+// lives in RoutineSettings.provider_default_modes; a missing entry falls back
+// to the effective default reported by the backend, which is the app-wide
+// mode for every provider. The local fallback below only covers a routines
+// payload that predates provider_default_modes_effective.
 const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
 
 const MODE_LABELS: Record<string, string> = {
@@ -3165,8 +2923,7 @@ function providerModeOverride(provider: AliasProviderKey): string {
 }
 
 function providerModeEffective(provider: AliasProviderKey): string {
-  return routines.value?.provider_default_modes_effective?.[provider]
-    || (provider === 'opencode' ? 'normal' : 'auto')
+  return routines.value?.provider_default_modes_effective?.[provider] || 'auto'
 }
 
 function providerModeSelectorValue(provider: AliasProviderKey): string {
@@ -3197,13 +2954,6 @@ async function saveProviderMode(provider: AliasProviderKey, value: string) {
   await saveRoutines({ provider_default_modes: modes })
 }
 
-function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
-  // Claude's tiers *are* the aliases; the others pin concrete models.
-  if (provider === 'claude') return tier
-  if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || 'Not available'
-  return tierEffectiveValue(provider, tier) || ''
-}
-
 function serializeRoutineModel(provider: RoutineProviderValue, model: string): string {
   // Runtime-provider models need an explicit qualifier so the backend does not
   // send a global routine override through Claude by default.
@@ -3225,77 +2975,40 @@ function routineEffectiveModel(key: RoutineModelKey): string {
   return typeof value === 'string' ? value : ''
 }
 
-function inferRoutineModel(model: string): { provider: RoutineProviderValue; tier: TierKey } {
+function inferRoutineModel(model: string): { provider: RoutineProviderValue; model: string } {
   const raw = model.trim()
-  if (!raw) return { provider: 'automatic', tier: 'sonnet' }
+  if (!raw) return { provider: 'automatic', model: '' }
   // 'apfel' is the legacy id from when this shelled out to the apfel CLI.
-  if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
+  if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', model: '' }
   for (const provider of ['codex', 'opencode'] as const) {
     const prefix = `${provider}:`
     if (raw.startsWith(prefix)) {
-      const providerModel = raw.slice(prefix.length)
-      const providerTiers = workspaceModels.value?.alias_tiers?.[provider] || {}
-      for (const tier of modelTiers) {
-        if (providerTiers[tier.key] === providerModel) {
-          return { provider, tier: tier.key }
-        }
-      }
-      return { provider, tier: 'sonnet' }
+      return { provider, model: raw.slice(prefix.length) }
     }
   }
-  if (raw.startsWith('custom:')) {
-    const provider = `custom:${raw.split(':', 2)[1]}` as AliasProviderKey
-    const tiers = routines.value?.alias_tiers?.[provider] || {}
-    for (const tier of modelTiers) {
-      if (tiers[tier.key] === raw) return { provider, tier: tier.key }
-    }
-    return { provider, tier: 'sonnet' }
+  // A bare Claude tier alias is a real model id on Claude.
+  if (['haiku', 'sonnet', 'opus', 'fable'].includes(raw)) {
+    return { provider: 'claude', model: raw }
   }
-  const claudeTiers: Record<string, TierKey> = { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'fable' }
-  if (claudeTiers[raw]) {
-    return { provider: 'claude', tier: claudeTiers[raw] }
-  }
-
-  const providers: TierProviderKey[] = ['codex', 'opencode']
-  for (const provider of providers) {
-    for (const tier of modelTiers) {
-      if (tierEffectiveValue(provider, tier.key) === raw) {
-        return { provider, tier: tier.key }
-      }
-    }
-  }
-
-  return { provider: 'custom', tier: 'sonnet' }
+  // A concrete model id on the default provider (Claude).
+  return { provider: 'claude', model: raw }
 }
 
 function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
   return inferRoutineModel(routines.value?.[key] || '').provider
 }
 
-// Titles can be dispatched through runtime providers when they have discovered
-// models (i.e. the provider is connected).
-const codexTitlesAvailable = computed(() => {
-  const tiers = workspaceModels.value?.alias_tiers?.codex
-  return !!tiers && Object.values(tiers).some(Boolean)
-})
-
-function routineTierValue(key: RoutineModelKey): TierKey {
+function routineModelValue(key: RoutineModelKey): string {
   const raw = routines.value?.[key] || ''
-  if (raw.trim()) return inferRoutineModel(raw).tier
-  const effective = inferRoutineModel(routineEffectiveModel(key))
-  if (effective.provider !== 'automatic' && effective.provider !== 'custom') {
-    return effective.tier
-  }
-  return routineDefaultTiers[key]
+  if (raw.trim()) return inferRoutineModel(raw).model
+  return routineEffectiveModel(key)
 }
 
-function routineTierSelectable(key: RoutineModelKey): boolean {
+// The concrete-model sections for a routine once its provider is chosen.
+function routineModelSectionsFor(key: RoutineModelKey): ModelSection[] {
   const provider = routineProviderValue(key)
-  return provider === 'claude' || provider === 'codex' || provider === 'opencode'
-}
-
-function routineCustomModel(key: RoutineModelKey): string {
-  return routineProviderValue(key) === 'custom' ? (routines.value?.[key] || '') : ''
+  if (provider === 'automatic' || provider === 'apple') return []
+  return [aliasSectionEntry(provider)]
 }
 
 async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) {
@@ -3308,33 +3021,28 @@ async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) 
     await saveRoutines({ [key]: 'apple' })
     return
   }
-  if (provider === 'custom') return
-  const tier = routineTierValue(key)
-  const model = tierModelForProvider(provider, tier)
+  // Pick the provider's effective default model as the starting point.
+  const model = providerDefaultModelEffective(provider) || routineEffectiveModel(key)
   await saveRoutines({ [key]: serializeRoutineModel(provider, model) })
 }
 
-async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
-  const tier = tierValue as TierKey
-  let provider = routineProviderValue(key)
-  if (provider === 'automatic' || provider === 'apple' || provider === 'custom') {
-    provider = 'claude'
+async function saveRoutineModel(key: RoutineModelKey, value: string | string[]) {
+  const selected = Array.isArray(value) ? value[0] || '' : value
+  if (!selected) {
+    await saveRoutines({ [key]: '' })
+    return
   }
-  const model = tierModelForProvider(provider, tier)
-  await saveRoutines({ [key]: serializeRoutineModel(provider, model) })
+  await saveRoutines({ [key]: selected })
 }
 
-// Automatic does not pick one model: resolve_title_model / resolve_insights_model
-// take the chat's workspace and read that workspace's tier. Naming a single
-// model here read as a global choice and was wrong for every workspace but the
-// primary one, so say what it follows and list the per-workspace answers.
+// Automatic does not pick one model: resolve_insights_model takes the chat's
+// workspace and reads that workspace's tier. Naming a single model here read
+// as a global choice and was wrong for every workspace but the primary one, so
+// say what it follows and list the per-workspace answers.
 function routineWorkspaceModels(key: RoutineModelKey): Array<[string, string]> {
   const settings = routines.value
   if (!settings) return []
-  const map = key === 'title_model'
-    ? settings.title_model_by_workspace
-    : settings.insights_model_by_workspace
-  return Object.entries(map || {})
+  return Object.entries(settings.insights_model_by_workspace || {})
 }
 
 function routineModelSummary(key: RoutineModelKey): string {
@@ -3351,12 +3059,11 @@ function routineModelSummary(key: RoutineModelKey): string {
     }
     return `Automatic: ${routineEffectiveModel(key) || 'default'}`
   }
-  if (provider === 'apple') return 'Local (free) · beta'
-  if (provider === 'custom') return `Custom: ${routineCustomModel(key)}`
-  const tier = routineTierValue(key)
-  const model = tierModelForProvider(provider, tier)
-  if (provider === 'codex') return `OpenAI (via Codex) ${tier}: ${model || 'default'}`
-  return `${aliasProviderLabel(provider)} ${tier}: ${model || 'default'}`
+  if (provider === 'apple') return 'Local (free)'
+  const model = routineModelValue(key)
+  if (provider === 'codex') return `OpenAI (via Codex): ${model || 'default'}`
+  if (provider === 'opencode') return `opencode: ${model || 'default'}`
+  return `${aliasProviderLabel(provider)}: ${model || 'default'}`
 }
 
 // ── Provider API Key settings (Providers tab) ─────────────────────────────────
@@ -3798,6 +3505,10 @@ async function fixWorkspaceHealth() {
   }
 }
 
+const stockSkills = computed(() => {
+  return skillsInventory.value?.skills.filter(s => s.label === 'stock') || []
+})
+
 const customSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'custom') || []
 })
@@ -3823,10 +3534,15 @@ function assetOriginClass(origin: AssetOrigin): string {
 }
 
 function commandOrigin(command: { editable?: boolean; scope?: string }): AssetOrigin {
-  if (command.editable || command.scope === 'custom') return 'custom'
+  // Scope is definitive when set: stock commands/subagents are seeded into
+  // the same editable location as custom ones (so users can override them
+  // in place), so `editable` alone can't distinguish "built-in" from
+  // "custom" — it's only a fallback for the rare case scope is unset.
+  if (command.scope === 'custom') return 'custom'
   if (command.scope === 'built-in') return 'builtin'
   if (command.scope === 'global') return 'global'
-  return 'installed'
+  if (command.scope === 'installed') return 'installed'
+  return command.editable ? 'custom' : 'installed'
 }
 
 function subagentOrigin(agent: { editable?: boolean; scope?: string }): AssetOrigin {
@@ -4409,7 +4125,6 @@ type WorkspaceForm = {
   default_model: string
   gws_profile: string
   disallowed_tools: string
-  claude_ai_mcps: 'on' | 'off'
   color: WorkspaceColorId
 }
 
@@ -4425,7 +4140,6 @@ function blankWorkspaceForm(): WorkspaceForm {
     default_model: '',
     gws_profile: '',
     disallowed_tools: '',
-    claude_ai_mcps: 'on',
     color: DEFAULT_WORKSPACE_COLOR,
   }
 }
@@ -4441,7 +4155,6 @@ function normalizeWorkspaceProvider(value: unknown): WorkspaceProvider {
 }
 
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
-  const mcps = ws.claude_ai_mcps
   return {
     name: ws.name,
     vault_root: ws.vault_root || '',
@@ -4449,18 +4162,9 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
-    claude_ai_mcps: mcps === false ? 'off' : 'on',
     color: normalizeWorkspaceColor(ws.color),
   }
 }
-
-function claudeAiMcpsPayload(value: 'default' | 'on' | 'off'): boolean | null {
-  if (value === 'on') return true
-  if (value === 'off') return false
-  return null
-}
-
-
 
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
   if (provider.startsWith('custom:')) {
@@ -4471,44 +4175,25 @@ function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentM
     if (currentModelValue && !models.includes(currentModelValue)) models.push(currentModelValue)
     return [{ ...section, models }]
   }
-  if (provider === 'codex') {
-    const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === 'codex')
+  if (provider === 'codex' || provider === 'opencode') {
+    const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === provider)
     if (!section) return []
     const models = [...section.models]
-    const badges = { ...(section.modelBadges || {}) }
     const current = currentModelValue.trim()
-    if (current && !modelTiers.some((tier) => tier.key === current) && !models.includes(current)) models.push(current)
-    return [{ ...section, models, modelBadges: badges }]
+    if (current && !models.includes(current)) models.push(current)
+    return [{ ...section, models }]
   }
-  const tiers: TierKey[] = ['haiku', 'sonnet', 'opus', 'fable']
-  const modelBadges: Record<string, string[]> = {}
-  
-  for (const tier of tiers) {
-    const actualModel = tierModelForProvider(provider as AliasProviderKey, tier)
-    if (actualModel && actualModel !== tier) {
-      modelBadges[tier] = [actualModel]
-    }
-  }
-
-  const sections: ModelSection[] = [
-    {
-      key: provider,
-      label: `${aliasProviderLabel(provider as AliasProviderKey)} Tiers`,
-      models: tiers,
-      modelBadges,
-    }
-  ]
-
-  const v = (currentModelValue || '').trim()
-  if (v && !tiers.includes(v as TierKey)) {
-    sections.push({
-      key: 'custom',
-      label: 'Custom override',
-      models: [v],
-    })
-  }
-
-  return sections
+  // Claude's models are the tier aliases plus any configured concrete ids.
+  const section = sectionsFromModelsResponse(workspaceModels.value)
+    .find((item) => item.key === 'anthropic')
+  const models = section ? [...section.models] : []
+  const current = (currentModelValue || '').trim()
+  if (current && !models.includes(current)) models.push(current)
+  return [{
+    key: provider,
+    label: aliasProviderLabel(provider as AliasProviderKey),
+    models,
+  }]
 }
 
 const newWorkspaceModelSections = computed<ModelSection[]>(() => {
@@ -4542,17 +4227,6 @@ function disallowedToolsPayload(raw: string): string[] | null {
   return cleaned.split(',').map((s) => s.trim()).filter(Boolean)
 }
 
-const defaultClaudeAiConnectors = [
-  'mcp__claude_ai_Airtable',
-  'mcp__claude_ai_Asana',
-  'mcp__claude_ai_Atlassian',
-  'mcp__claude_ai_Google_Cloud_BigQuery',
-  'mcp__claude_ai_Salesforce',
-  'mcp__claude_ai_Sentry',
-  'mcp__claude_ai_Slack',
-  'mcp__claude_ai_incident_io',
-]
-
 function formatConnectorLabel(name: string): string {
   let clean = name.replace(/^mcp__claude_ai_/, '').replace(/^mcp__/, '')
   if (clean === 'Google_Cloud_BigQuery') return 'BigQuery'
@@ -4585,8 +4259,9 @@ const EXCLUDED_PLATFORM_MCPS = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot
  *
  * Keyed by provider id rather than written per provider, so a provider added
  * to the backend registry gets a correct card without another branch here.
- * Claude is the one special case: when it reports nothing, its account-OAuth
- * connectors are inferred from the active workspace's toggle.
+ * Reports only what the CLI actually discovered — an empty result means
+ * "none reported", not a guess, since a placeholder here would be
+ * indistinguishable from a real connection.
  */
 function connectionMcps(providerId: string): string[] {
   const discovered = providerKeys.value?.connections?.[providerId]?.mcps || []
@@ -4594,18 +4269,6 @@ function connectionMcps(providerId: string): string[] {
   for (const mcpName of discovered) {
     if (EXCLUDED_PLATFORM_MCPS.has(mcpName)) continue
     const label = formatConnectorLabel(mcpName)
-    if (!result.includes(label)) result.push(label)
-  }
-  if (result.length || providerId !== 'claude') return result
-
-  const currentWs = workspaceForms.value.find((w) => w.name === projectStore.activeWorkspace)
-    || workspaceForms.value[0]
-  if (currentWs && currentWs.claude_ai_mcps === 'off') return result
-  const connectors = projectStore.workspaceClaudeAiConnectors.length
-    ? projectStore.workspaceClaudeAiConnectors
-    : defaultClaudeAiConnectors
-  for (const c of connectors) {
-    const label = formatConnectorLabel(c)
     if (!result.includes(label)) result.push(label)
   }
   return result
@@ -4654,7 +4317,6 @@ async function saveWorkspace(name: string) {
       default_model: form.default_model,
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
-      claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
       color: form.color,
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
@@ -4685,7 +4347,6 @@ async function createNewWorkspace() {
       default_model: form.default_model,
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
-      claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
       color: form.color,
     })
     notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')
@@ -5211,6 +4872,15 @@ async function doPackageUpdate() {
   border-color: var(--border);
   box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
 }
+/* The inline device panel renders its own .card tiles; give the wrapper the
+   same width as every other card here so they line up with the rest. */
+.device-tile {
+  width: min(100%, 1040px);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
 .section-title {
   letter-spacing: 0.08em;
 }
@@ -5678,6 +5348,13 @@ a.btn-secondary {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.routine-voice-icon {
+  flex: none;
+  color: var(--fg-muted);
 }
 .routine-detail {
   font-size: var(--text-xs);
@@ -6502,6 +6179,30 @@ a.btn-secondary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
+}
+.provider-defaults {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.provider-defaults-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+}
+.provider-defaults-title {
+  font-weight: 600;
+  color: var(--fg);
+}
+@media (max-width: 720px) {
+  .provider-defaults {
+    grid-template-columns: 1fr;
+  }
 }
 .settings-field--wide {
   grid-column: 1 / -1;

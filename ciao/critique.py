@@ -123,17 +123,23 @@ def default_critique_panel(config: CiaoConfig) -> list[str]:
     beats depth within one. Every entry is gated on that vendor being usable --
     listing a signed-out provider would only put a guaranteed failure in the
     panel.
+
+    Claude entries use the tier aliases (``opus``/``fable``), which Claude Code
+    resolves itself. Codex and opencode entries resolve to the operator's
+    per-provider default model (Settings → Models); when none is set the model
+    id is left empty so the provider's own account catalog picks the default.
     """
     models = []
 
     if is_anthropic_available():
         models.extend(["opus", "fable"])
-    # The prefixed entries route through their own provider's app-server; the
-    # bare ``fable`` tier resolves to the signed-in account's model at dispatch.
+    # The prefixed entries route through their own provider's app-server. The
+    # model id is the operator's per-provider default (not a tier alias, which
+    # only Claude Code understands); empty lets the provider pick its own.
     if is_codex_available():
-        models.append(f"{CODEX_PREFIX}fable")
+        models.append(f"{CODEX_PREFIX}{config.default_model_for_provider('codex')}")
     if is_opencode_available():
-        models.append(f"{OPENCODE_PREFIX}fable")
+        models.append(f"{OPENCODE_PREFIX}{config.default_model_for_provider('opencode')}")
 
     if not models:
         # Nothing is signed in. Name the Anthropic tiers anyway so the panel

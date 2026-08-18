@@ -1,298 +1,248 @@
+/*
+ * The bundled startup/update window. Mirrors the PWA boot screen
+ * (StartupView.vue): same indigo canvas, pink accent, monospace progress
+ * bar and log rows, so the native window and the remotely loaded PWA never
+ * look like different products.
+ */
+
 :root {
-  color: #24201d;
-  background: transparent;
-  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  /* PWA boot-overlay tokens (App.vue) */
+  --bg: #1a1a2e;
+  --fg: #e8e8f0;
+  --fg2: #b4b4c4;
+  --fg3: #7a7a90;
+  --accent: #ff4d6d;
+  --border: #2e3258;
+  --success: #4caf50;
+  --error: #f44336;
+  --font-mono: ui-monospace, "SF Mono", "Fira Code", "Cascadia Code", Menlo, monospace;
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; background: #f6f1ea; }
-.panel { min-height: 100vh; padding: 24px; }
-header { margin-bottom: 18px; }
-.eyebrow {
-  color: #896f59;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-h1 { margin: 3px 0 0; font-size: 22px; }
-h2 { font-size: 12px; margin: 18px 0 6px; color: #6c5c50; }
-label { display: grid; gap: 6px; margin: 14px 0; font-weight: 600; }
-input, select, textarea, button {
-  font: inherit;
-}
-input, select, textarea {
-  width: 100%;
-  border: 1px solid #cfc3b7;
-  border-radius: 8px;
-  background: #fffdfa;
-  color: inherit;
-  padding: 9px 10px;
-}
-textarea { resize: vertical; min-height: 58px; }
-input:focus, select:focus, textarea:focus {
-  outline: 2px solid #b0572f;
-  outline-offset: 1px;
-}
-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-button {
-  border: 0;
-  border-radius: 8px;
-  background: #9c4727;
-  color: white;
-  padding: 9px 15px;
-  font-weight: 650;
-}
-button:disabled { opacity: .55; }
-.secondary, .history-row { background: transparent; color: #70452f; }
-.hint { color: #766a62; font-size: 12px; }
-.error { min-height: 20px; color: #9e2e25; }
-.history { border-top: 1px solid #ddd1c6; margin-top: 18px; }
-.history-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 5px;
-  width: 100%;
-  overflow: hidden;
-  padding: 6px 0;
-  text-align: left;
-}
-.history-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.toggle { display: flex; align-items: center; gap: 9px; }
-.toggle input { width: auto; }
-.settings { max-width: 560px; margin: 0 auto; }
+
+html, body { height: 100%; }
 
 body[data-window="startup"] {
-  min-height: 100vh;
-  background: #101010;
-  color: #f2ede8;
-}
-
-body[data-window="startup"] .startup {
-  display: grid;
-  min-height: 100vh;
-  place-content: center;
-  justify-items: center;
-  padding: 44px 32px 32px;
-  text-align: center;
-}
-
-.startup-state { width: 100%; }
-
-.startup-state--waiting {
-  display: grid;
-  justify-items: center;
-}
-
-.startup-state--waiting .startup-mark {
-  color: #d85a35;
-  font: 700 48px/1 "SF Mono", ui-monospace, monospace;
-}
-
-.startup-state--waiting p {
-  max-width: 440px;
-  margin: 10px 0 0;
-}
-
-.startup-state--waiting .eyebrow { margin-top: 6px; }
-.startup-state--waiting h1 { margin-top: 8px; }
-
-.startup-progress {
-  width: 160px;
-  height: 3px;
-  margin-top: 24px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: #3a302b;
-}
-
-.startup-progress::after {
-  display: block;
-  width: 45%;
-  height: 100%;
-  border-radius: inherit;
-  background: #d85a35;
-  content: "";
-  animation: startup-wait 1.2s ease-in-out infinite alternate;
-}
-
-@keyframes startup-wait {
-  from { transform: translateX(0); }
-  to { transform: translateX(122%); }
-}
-
-.startup-state--update {
-  display: grid;
-  justify-items: center;
-  max-width: 720px;
-}
-
-.update-brand { display: grid; justify-items: center; gap: 12px; }
-
-.update-wordmark {
-  color: #f2ede8;
-  font: 700 clamp(42px, 6vw, 64px)/1 "SF Mono", ui-monospace, monospace;
-  letter-spacing: -.08em;
-}
-
-.update-wordmark span {
-  margin-right: 8px;
-  color: #d85a35;
-}
-
-.update-status {
-  width: min(600px, 100%);
-  margin-top: 52px;
-}
-
-.update-spinner {
-  width: 28px;
-  height: 28px;
-  margin: 0 auto 18px;
-  border: 3px solid #4b403a;
-  border-top-color: #d85a35;
-  border-radius: 50%;
-  animation: update-spin 1s linear infinite;
-}
-
-@keyframes update-spin { to { transform: rotate(360deg); } }
-
-.update-status h1 {
   margin: 0;
-  color: #f2ede8;
-  font-size: clamp(20px, 3vw, 26px);
-  letter-spacing: -.02em;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
-.update-subtitle {
-  margin: 10px auto 0;
-  color: #9e9690;
-  font-size: 15px;
+/* Same faint scanline texture as the PWA boot overlay. */
+body[data-window="startup"]::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(180deg, rgba(255, 77, 109, 0.04) 0%, transparent 60%),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.012) 0 1px, transparent 1px 3px);
 }
 
-.update-progress-summary {
+.startup {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 44px 32px 32px;
+}
+
+.startup-state { width: 100%; max-width: 560px; }
+
+/* ── Head: wordmark + eyebrow, dashed divider ── */
+.startup-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
-  margin-top: 30px;
-  color: #9e9690;
-  font: 11px/1.3 "SF Mono", ui-monospace, monospace;
-  text-align: left;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed var(--border);
 }
 
-.update-progress-value {
-  color: #f2ede8;
-  font-size: 16px;
+.wordmark {
+  font-family: var(--font-mono);
   font-weight: 700;
+  font-size: 32px;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  user-select: none;
 }
 
-.update-progress-message {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.wordmark::before {
+  content: "›";
+  color: var(--accent);
+  font-weight: 400;
+  font-size: 1.1em;
 }
 
-.update-progress-track {
-  height: 7px;
-  margin-top: 10px;
-  overflow: hidden;
-  border-radius: 99px;
-  background: #3a302b;
-}
-
-.update-progress-fill {
-  display: block;
-  width: 0;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #d85a35, #f0a084);
-  transition: width 320ms ease;
-}
-
-.update-language-line {
-  min-height: 22px;
-  margin: 20px 0 0;
-  color: #9e9690;
-  font-size: 13px;
-}
-
-.update-language-line > span:first-child { color: #f0a084; }
-.update-language-line strong { color: #f2ede8; font-weight: 650; }
-.update-language-extra {
-  color: #6f6964;
-  font: 11px/1.3 "SF Mono", ui-monospace, monospace;
-}
-
-.update-details {
-  width: min(720px, 100%);
-  margin-top: 32px;
-}
-
-.update-details-toggle {
-  min-height: 44px;
-  padding: 8px 12px;
-  border: 0;
-  background: transparent;
-  color: #9e9690;
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.update-details-toggle:hover { color: #f2ede8; }
-.update-details-toggle span { margin-left: 7px; color: #f0a084; }
-
-.update-terminal {
-  overflow: hidden;
-  border: 1px solid #34312e;
-  border-radius: 12px;
-  background: #0d0d0d;
-  text-align: left;
-}
-
-.update-terminal-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  border-bottom: 1px solid #292622;
-  color: #6f6964;
-  font: 600 10px/1.2 "SF Mono", ui-monospace, monospace;
-  letter-spacing: .08em;
+.startup-version {
+  font-size: 11px;
+  color: var(--fg3);
+  letter-spacing: 0.5px;
   text-transform: uppercase;
 }
 
-.update-terminal-head span:last-child { color: #77c08a; }
-
-.update-terminal pre {
-  min-height: 154px;
-  max-height: 190px;
-  margin: 0;
-  overflow: auto;
-  padding: 16px;
-  color: #bcb5ae;
-  font: 12px/1.75 "SF Mono", ui-monospace, monospace;
-  white-space: pre-wrap;
-  scrollbar-color: #5b524c transparent;
+/* ── Progress row: mono bar + padded percent ── */
+.startup-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1;
 }
 
-.startup-state--update[data-status="error"] .update-spinner {
-  border-top-color: #d85a35;
-  animation: none;
+.startup-progress-track {
+  color: var(--accent);
+  letter-spacing: -1px;
+  flex: 1;
 }
 
-.startup-state--update[data-status="error"] .update-progress-fill {
-  background: #d85a35;
+.startup-progress-pct {
+  color: var(--fg2);
+  font-variant-numeric: tabular-nums;
+  min-width: 4ch;
+  text-align: right;
+}
+
+/* Waiting: the bar shimmers instead of counting. */
+.startup-state--waiting .startup-progress-track {
+  color: transparent;
+  background-image: linear-gradient(90deg, var(--fg3) 0%, var(--accent) 45%, var(--fg3) 90%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  background-size: 200% 100%;
+  animation: startup-shimmer 1.4s ease-in-out infinite alternate;
+}
+
+@keyframes startup-shimmer {
+  from { background-position: 0% 0; }
+  to { background-position: 100% 0; }
+}
+
+.startup-hint {
+  margin: 18px 0 0;
+  color: var(--fg2);
+  font-size: 13px;
+  max-width: 440px;
+}
+
+.startup-hint strong { color: var(--fg); }
+
+/* ── Log rows (boot-style) ── */
+.startup-log {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.startup-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  color: var(--fg3);
+  opacity: 0.55;
+  transition: opacity 200ms ease, color 200ms ease;
+}
+
+.startup-log-row.is-in_progress,
+.startup-log-row.is-done {
+  color: var(--fg2);
+  opacity: 1;
+}
+
+.startup-log-row.is-failed {
+  color: var(--error);
+  opacity: 1;
+}
+
+.startup-log-ts { color: var(--fg3); flex-shrink: 0; }
+.startup-log-name { color: var(--fg); flex-shrink: 0; }
+.startup-log-dots {
+  color: var(--fg3);
+  opacity: 0.5;
+  flex: 1;
+  overflow: hidden;
+  letter-spacing: 1px;
+}
+.startup-log-status {
+  flex-shrink: 0;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+.startup-log-row.is-done .startup-log-status { color: var(--success); }
+.startup-log-row.is-failed .startup-log-status { color: var(--error); }
+.startup-log-row.is-in_progress .startup-log-status { color: var(--accent); }
+.startup-log-row.is-in_progress .startup-log-status::after {
+  content: "";
+  display: inline-block;
+  width: 0.4em;
+  height: 0.9em;
+  background: var(--accent);
+  margin-left: 0.2em;
+  vertical-align: text-bottom;
+  animation: startup-caret-blink 0.9s steps(2, end) infinite;
+}
+
+/* ── Footer: $ prompt + blinking caret ── */
+.startup-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--fg2);
+}
+
+.startup-prompt { color: var(--accent); font-weight: 700; }
+.startup-prompt-text { color: var(--fg2); }
+.startup-ready { color: var(--success); font-weight: 600; }
+.startup-foot.is-failed .startup-prompt { color: var(--error); }
+.startup-foot.is-failed .startup-prompt-text { color: var(--error); }
+
+.caret {
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  background: var(--accent);
+  vertical-align: text-bottom;
+  margin-left: 0.15em;
+  animation: startup-caret-blink 1.1s steps(2, end) infinite;
+}
+
+@keyframes startup-caret-blink {
+  0%, 49.9% { opacity: 1; }
+  50%, 100% { opacity: 0; }
 }
 
 @media (max-width: 620px) {
-  body[data-window="startup"] .startup { padding: 32px 18px 22px; }
-  .update-status { margin-top: 40px; }
+  .startup { padding: 32px 18px 22px; }
+  .startup-log { font-size: 11px; }
+  .startup-progress { font-size: 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .startup-progress::after,
-  .update-spinner { animation: none; }
-  .update-progress-fill { transition: none; }
+  .startup-state--waiting .startup-progress-track { animation: none; }
+  .startup-log-row.is-in_progress .startup-log-status::after,
+  .caret { animation: none; opacity: 0.6; }
 }

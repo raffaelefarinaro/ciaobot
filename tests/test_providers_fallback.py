@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from ciao.models import AgentRequest
-from ciao.model_tiers import (
-    is_capability_error,
-    next_tier_for_failure,
-    tier_order,
-)
 from ciao.providers.base import build_runtime_context
 from ciao.providers.claude import _fallback_model_for
 
 
 def test_fallback_model_downgrades_tier() -> None:
+    assert _fallback_model_for("fable") == "opus"
+    assert _fallback_model_for("claude-fable-5") == "opus"
     assert _fallback_model_for("opus") == "sonnet"
     assert _fallback_model_for("claude-opus-4-7") == "sonnet"
     assert _fallback_model_for("sonnet") == "haiku"
@@ -54,64 +49,3 @@ def test_runtime_context_reads_env(monkeypatch) -> None:
     assert "active_project=2026-q2-foo" in ctx
     # GWS_PROFILE matches workspace, so it should not be duplicated.
     assert ctx.count("gws_profile") == 0
-
-
-# ── Auto tier-fallback (ciao/model_tiers.py) ────────────────────────────
-
-
-def test_tier_order_is_cheapest_to_most_capable() -> None:
-    # The ladder is walked via index deltas: -1 (down/cheaper) and +1
-    # (up/more capable). Index 0 is the cheapest, index 3 is the most
-    # capable.
-    assert tier_order() == ("haiku", "sonnet", "opus", "fable")
-
-
-def test_is_capability_error_matches_image_input() -> None:
-    # The exact error text from the screenshot that triggered this work.
-    assert is_capability_error(
-        "API Error: 400 this model does not support image input (ref: 365b601b)"
-    )
-
-
-def test_is_capability_error_matches_tool_use_and_context() -> None:
-    assert is_capability_error("this model does not support tool use")
-    assert is_capability_error("unsupported capability: function_calling")
-    assert is_capability_error("context length exceeded")
-    assert is_capability_error("max context length is 200000 tokens")
-
-
-def test_is_capability_error_rejects_rate_limit_and_auth() -> None:
-    # Rate limits, auth, content filters, and 5xx are NOT capability
-    # errors. The auto-retry is narrow by design; these need operator
-    # attention, not silent retry against the next tier.
-    assert not is_capability_error("API Error: 429 Rate Limit Exceeded")
-    assert not is_capability_error("unauthorized: invalid api key")
-    assert not is_capability_error("content policy violation")
-    assert not is_capability_error("internal server error")
-    assert not is_capability_error("")
-
-
-def test_next_tier_walks_down_then_up() -> None:
-    # Tier aliases are provider-agnostic, so the ladder needs no config: the
-    # provider running the chat resolves the returned alias itself.
-    assert next_tier_for_failure("fable") == "opus"
-    assert next_tier_for_failure("opus") == "sonnet"
-    assert next_tier_for_failure("sonnet") == "haiku"
-    # haiku sits at the bottom, so escalating is the only direction left.
-    assert next_tier_for_failure("haiku") == "sonnet"
-
-
-def test_next_tier_returns_none_for_a_pinned_concrete_model() -> None:
-    """A chat pinned to a concrete id opted into that model.
-
-    Swapping it for a neighbouring tier would broaden scope the user declined,
-    so the ladder only applies to bare tier aliases.
-    """
-    assert next_tier_for_failure("claude-opus-4-8") is None
-    assert next_tier_for_failure("anthropic/claude-sonnet-4-6") is None
-    assert next_tier_for_failure("some-local-model") is None
-    assert next_tier_for_failure("") is None
-
-
-def test_next_tier_is_case_and_whitespace_insensitive() -> None:
-    assert next_tier_for_failure("  Opus  ") == "sonnet"

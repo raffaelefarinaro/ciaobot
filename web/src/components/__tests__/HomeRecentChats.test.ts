@@ -189,6 +189,62 @@ describe('HomeRecentChats lanes and tiers', () => {
     wrapper.unmount()
   })
 
+  it('lists failed insights in their lane with a retry button and header count', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'c-failed-work', project_id: 'work-project', title: 'Failed work chat',
+        created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
+        archived: true, local: true, archive_path: 'archive/failed.md',
+        postprocess: { state: 'done', steps: { insights: { status: 'error' } } },
+      },
+      {
+        chat_id: 'c-ok-personal', project_id: 'personal-project', title: 'Ok personal chat',
+        created_at: timestamp(600), last_activity_at: timestamp(600), last_read_at: timestamp(600),
+        archived: true, local: true,
+        postprocess: { state: 'done', steps: { insights: { status: 'ok' } } },
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const workLane = wrapper.find('[data-lane-key="work"]')
+    const failedRows = workLane.findAll('.home-tier--failed .home-chat-item')
+    expect(failedRows).toHaveLength(1)
+    expect(failedRows[0].find('.home-chat-title').text()).toBe('Failed work chat')
+    expect(failedRows[0].find('.home-chat-tidy-note').text()).toBe('insights failed')
+    expect(failedRows[0].find('.home-chat-retry').exists()).toBe(true)
+    // Header carries the recovery count in the warn register.
+    expect(workLane.find('.home-lane-summary').text()).toContain('1 insights failed')
+
+    // A chat whose insights succeeded is not a retry case.
+    const personalLane = wrapper.find('[data-lane-key="personal"]')
+    expect(personalLane.find('.home-tier--failed').exists()).toBe(false)
+    expect(personalLane.find('.home-lane-summary').text()).not.toContain('insights failed')
+    wrapper.unmount()
+  })
+
+  it('keeps the failed-insights section visible when no active chats remain', async () => {
+    const store = seedChats(false)
+    store.chats = [{
+      chat_id: 'only-failed', project_id: 'work-project', title: 'Failed chat',
+      created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
+      archived: true, local: true, archive_path: 'archive/only-failed.md',
+      postprocess: { state: 'done', steps: { insights: { status: 'error' } } },
+    }] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    expect(wrapper.find('.home-recent').exists()).toBe(true)
+    const workLane = wrapper.find('[data-lane-key="work"]')
+    expect(workLane.find('.home-tier--failed').exists()).toBe(true)
+    expect(workLane.find('.home-tier--failed .home-chat-title').text()).toBe('Failed chat')
+    wrapper.unmount()
+  })
+
   it('keeps vertical motion within a lane and horizontal motion across lanes', async () => {
     const wrapper = await mountHome()
     const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
