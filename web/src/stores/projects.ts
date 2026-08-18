@@ -1436,7 +1436,7 @@ export const useProjectStore = defineStore('projects', () => {
         : false
       if (!chatId || !chatStillOpen) return
 
-      await loadMessages(chatId)
+      await loadMessages(chatId, { background: true })
       // Only clear a stale local spinner when the server agrees the turn is
       // done. Mid-turn Claude sessions already expose progress assistant
       // text via /messages; treating that as settled promoted those notes
@@ -1689,7 +1689,8 @@ export const useProjectStore = defineStore('projects', () => {
       // the ID-aware helper instead of pushing a possible duplicate.
       replaceChat(c)
       messages.value[c.chat_id] = []
-      switchChat(c.chat_id)
+      // We just created it, so there is no history to fetch.
+      switchChat(c.chat_id, { skipHistory: true })
       return c
     } finally {
       delete creatingChatProjectIds.value[projectId]
@@ -2047,10 +2048,17 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Message loading from server ──────────────────────────────────────
 
-  async function loadMessages(chatId: string) {
+  /**
+   * `background: true` refreshes history without claiming the loading flag.
+   * The 15s poll and the socket watchdog both re-read every open chat, and on
+   * a chat with nothing to render yet (a brand-new one) the flag paints the
+   * full-size "Loading conversation" skeleton — so an idle empty chat blinked
+   * through that card on every tick. A user-initiated open still shows it.
+   */
+  async function loadMessages(chatId: string, opts?: { background?: boolean }) {
     const generation = (messageLoadGenerations.get(chatId) || 0) + 1
     messageLoadGenerations.set(chatId, generation)
-    loadingMessages.value[chatId] = true
+    if (!opts?.background) loadingMessages.value[chatId] = true
     try {
       await loadMessagesFromServer(chatId)
     } finally {
@@ -2262,7 +2270,13 @@ export const useProjectStore = defineStore('projects', () => {
     await switchChat(chatId)
   }
 
-  async function switchChat(chatId: string) {
+  /**
+   * `skipHistory` is for a chat this client just created: its history is
+   * provably empty, so the /messages round-trip can only return nothing while
+   * the "Loading conversation" skeleton sits on screen for its duration. Every
+   * other entry point still fetches.
+   */
+  async function switchChat(chatId: string, opts?: { skipHistory?: boolean }) {
     await ensureWorkspaceForChat(chatId)
     // Always sync URL, even if activeChatId already matches (we may have
     // landed here from /settings or /schedules where the chat route isn't
@@ -2282,7 +2296,7 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
     // Fire-and-forget: clears overlay + SW cache + hits /read for cross-device sync.
     void markRead(chatId)
-    await loadMessages(chatId)
+    if (!opts?.skipHistory) await loadMessages(chatId)
     void loadSubagents(chatId)
     connectWs(chatId)
     requestReentrySummaryIfUseful(chatId)
@@ -2444,7 +2458,7 @@ export const useProjectStore = defineStore('projects', () => {
     connectWs(chatId)
     void markRead(chatId)
     try {
-      await loadMessages(chatId)
+      await loadMessages(chatId, { background: true })
       if (
         streaming.value[chatId]
         && !projectStreaming.value[chatId]
