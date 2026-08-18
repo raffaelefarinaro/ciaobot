@@ -5077,8 +5077,13 @@ async def list_models(request: Request) -> JSONResponse:
     refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
-    codex_catalog = await CodexProvider.model_catalog(
-        config.workspace_root, force=refresh
+    # Independent per-provider discovery calls (each may spin up an app-server
+    # and round-trip an RPC) — sequential awaits summed their latencies, so a
+    # cold cache (the 5-minute TTL lapses between normal chat-creation gaps)
+    # stalled every "New Chat" for as long as both providers took combined.
+    codex_catalog, opencode_catalog = await asyncio.gather(
+        CodexProvider.model_catalog(config.workspace_root, force=refresh),
+        OpencodeProvider.model_catalog(config.workspace_root, force=refresh),
     )
     visible_codex = [item for item in codex_catalog if not item.get("hidden")]
     codex_models = [
@@ -5100,9 +5105,6 @@ async def list_models(request: Request) -> JSONResponse:
         codex_default = codex_operator_default
     # opencode is bring-your-own-provider: its catalog is whatever backends the
     # user has connected, so an empty list simply means "not signed in yet".
-    opencode_catalog = await OpencodeProvider.model_catalog(
-        config.workspace_root, force=refresh
-    )
     opencode_models = [
         str(item.get("model") or "") for item in opencode_catalog if item.get("model")
     ]
