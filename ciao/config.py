@@ -9,12 +9,15 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, normalize_claude_mode
 from ciao.models import BridgeMode
 from ciao.providers.codex import CodexSettings
 from ciao.providers.opencode import OpencodeSettings
+
+if TYPE_CHECKING:
+    from ciao.provider_registry import ProviderDescriptor
 
 
 # Harness tools that are irrelevant inside the Ciaobot PWA regardless of
@@ -753,10 +756,12 @@ class CiaoConfig:
         if effective_provider:
             descriptor = provider_registry.get(effective_provider)
             if descriptor is not None:
-                use_workspace_override = workspace_config is not None and (
-                    provider is None or provider == workspace_provider
-                )
-                if use_workspace_override and workspace_config is not None and workspace_config.default_model:
+                uses_workspace_default_provider = provider is None or provider == workspace_provider
+                if (
+                    workspace_config is not None
+                    and uses_workspace_default_provider
+                    and workspace_config.default_model
+                ):
                     return workspace_config.default_model
                 if descriptor.default_model_config_key:
                     return str(getattr(self, descriptor.default_model_config_key, "") or "")
@@ -764,13 +769,18 @@ class CiaoConfig:
                 # opencode) uses it; otherwise "use that provider account's
                 # current catalog default": the provider resolves it and the
                 # chat records the effective model.
-                if descriptor.default_model_settings_attr:
-                    settings = getattr(self, descriptor.default_model_settings_attr, None)
-                    default = getattr(settings, "default_model", "") if settings else ""
-                    if default:
-                        return default
+                operator_default = self._operator_default_model(descriptor)
+                if operator_default:
+                    return operator_default
                 return descriptor.default_model
         return self.claude_default_model
+
+    def _operator_default_model(self, descriptor: "ProviderDescriptor") -> str:
+        """The operator-settable default model for a provider, or ``""`` when unset."""
+        if not descriptor.default_model_settings_attr:
+            return ""
+        settings = getattr(self, descriptor.default_model_settings_attr, None)
+        return getattr(settings, "default_model", "") if settings else ""
 
     def default_model_for_provider(self, provider: str) -> str:
         """The operator's default model for a provider, or ``""`` when unset.
@@ -783,12 +793,7 @@ class CiaoConfig:
         descriptor = provider_registry.get(provider)
         if descriptor is None:
             return ""
-        if descriptor.default_model_settings_attr:
-            settings = getattr(self, descriptor.default_model_settings_attr, None)
-            default = getattr(settings, "default_model", "") if settings else ""
-            if default:
-                return default
-        return ""
+        return self._operator_default_model(descriptor)
 
     def default_provider_for_workspace(self, workspace: str | None) -> str:
         from ciao import provider_registry

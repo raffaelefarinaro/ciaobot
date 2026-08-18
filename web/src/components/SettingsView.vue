@@ -2820,9 +2820,20 @@ function providerDefaultModelOverride(provider: AliasProviderKey): string {
   return routines.value?.provider_default_models?.[provider] || ''
 }
 
-function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
+// The alias-provider section entry (models + disabled state) is identical
+// wherever a picker offers one provider's catalog; only the surrounding
+// sections (e.g. the "Default"/Automatic entry above) differ per caller.
+function aliasSectionEntry(provider: string): ModelSection {
   const section = aliasProviderSections.value.find((s) => s.key === provider)
-  const options = section?.options || []
+  return {
+    key: provider,
+    label: section?.label || provider,
+    models: section?.options || [],
+    disabled: !section?.available,
+  }
+}
+
+function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
   const effective = providerDefaultModelEffective(provider)
   return [
     {
@@ -2833,12 +2844,7 @@ function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSecti
         [DEFAULT_MODEL_SELECTION]: effective ? `Automatic (${effective})` : 'Automatic',
       },
     },
-    {
-      key: provider,
-      label: section?.label || provider,
-      models: options,
-      disabled: !section?.available,
-    },
+    aliasSectionEntry(provider),
   ]
 }
 
@@ -3002,15 +3008,7 @@ function routineModelValue(key: RoutineModelKey): string {
 function routineModelSectionsFor(key: RoutineModelKey): ModelSection[] {
   const provider = routineProviderValue(key)
   if (provider === 'automatic' || provider === 'apple') return []
-  const section = aliasProviderSections.value.find((s) => s.key === provider)
-  return [
-    {
-      key: provider,
-      label: section?.label || provider,
-      models: section?.options || [],
-      disabled: !section?.available,
-    },
-  ]
+  return [aliasSectionEntry(provider)]
 }
 
 async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) {

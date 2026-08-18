@@ -646,45 +646,44 @@ export const useProjectStore = defineStore('projects', () => {
     return isPostprocessing(chatPostprocess(chatId))
   }
 
-  /** Chats being tidied up in a workspace, for the home lane summary. */
-  function workspacePostprocessingCount(ws: WorkspaceName): number {
-    const wsProjectIds = new Set(
-      projects.value.filter(p => p.workspace === ws).map(p => p.project_id),
-    )
-    return chats.value.filter(
-      c => wsProjectIds.has(c.project_id) && isPostprocessing(c.postprocess),
-    ).length
-  }
-
-  // Archived chats still being tidied, newest archive first. Same predicate as
-  // workspacePostprocessingCount so the lane rows always add up to the lane's
-  // "N tidying up" count. Archived chats are excluded from activeChatsAll, so
-  // this is the one path that surfaces them while the pipeline runs.
-  function postprocessingChats(): ChatInfo[] {
+  // Archived chats matching a predicate, newest archive first. Shared by
+  // postprocessingChats/insightsFailedChats so both stay consistent with
+  // their *Count siblings below. Archived chats are excluded from
+  // activeChatsAll, so this is the one path that surfaces them while the
+  // pipeline runs.
+  function chatsMatching(predicate: (chat: ChatInfo) => boolean): ChatInfo[] {
     return chats.value
-      .filter(c => isPostprocessing(c.postprocess))
+      .filter(predicate)
       .sort((a, b) =>
         (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at),
       )
+  }
+
+  /** Count of one workspace's chats matching a predicate, for lane headers. */
+  function workspaceCountMatching(ws: WorkspaceName, predicate: (chat: ChatInfo) => boolean): number {
+    const wsProjectIds = new Set(
+      projects.value.filter(p => p.workspace === ws).map(p => p.project_id),
+    )
+    return chats.value.filter(c => wsProjectIds.has(c.project_id) && predicate(c)).length
+  }
+
+  /** Chats being tidied up in a workspace, for the home lane summary. */
+  function workspacePostprocessingCount(ws: WorkspaceName): number {
+    return workspaceCountMatching(ws, c => isPostprocessing(c.postprocess))
+  }
+
+  function postprocessingChats(): ChatInfo[] {
+    return chatsMatching(c => isPostprocessing(c.postprocess))
   }
 
   /** Archived chats whose insights extraction failed and can be retried. */
   function insightsFailedChats(): ChatInfo[] {
-    return chats.value
-      .filter(c => postprocessNeedsInsights(c.postprocess))
-      .sort((a, b) =>
-        (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at),
-      )
+    return chatsMatching(c => postprocessNeedsInsights(c.postprocess))
   }
 
   /** Insights-failed count for one workspace, for the home lane header. */
   function workspaceInsightsFailedCount(ws: WorkspaceName): number {
-    const wsProjectIds = new Set(
-      projects.value.filter(p => p.workspace === ws).map(p => p.project_id),
-    )
-    return chats.value.filter(
-      c => wsProjectIds.has(c.project_id) && postprocessNeedsInsights(c.postprocess),
-    ).length
+    return workspaceCountMatching(ws, c => postprocessNeedsInsights(c.postprocess))
   }
 
   function projectPostprocessingCount(projectId: string): number {
@@ -1681,13 +1680,17 @@ export const useProjectStore = defineStore('projects', () => {
     })
   }
 
+  // Deliberate delete: drop any draft riding along with these chats now, so
+  // a later reload never mistakes it for a sweep-orphaned one.
+  function clearDraftsForProject(projectId: string) {
+    chats.value.filter(c => c.project_id === projectId).forEach(c => clearChatDraft(c.chat_id))
+  }
+
   async function deleteProject(projectId: string) {
     const activeChatProject = activeChat.value?.project_id
     await api.del(`/api/projects/${projectId}`)
     projects.value = projects.value.filter(p => p.project_id !== projectId)
-    // Deliberate delete: drop any draft riding along with these chats now,
-    // so a later reload never mistakes it for a sweep-orphaned one.
-    chats.value.filter(c => c.project_id === projectId).forEach(c => clearChatDraft(c.chat_id))
+    clearDraftsForProject(projectId)
     chats.value = chats.value.filter(c => c.project_id !== projectId)
     if (activeChatProject === projectId) {
       if (activeChatId.value) disconnectWs(activeChatId.value)
@@ -1699,7 +1702,7 @@ export const useProjectStore = defineStore('projects', () => {
     const activeChatProject = activeChat.value?.project_id
     await api.post(`/api/projects/${projectId}/complete`, {})
     projects.value = projects.value.filter(p => p.project_id !== projectId)
-    chats.value.filter(c => c.project_id === projectId).forEach(c => clearChatDraft(c.chat_id))
+    clearDraftsForProject(projectId)
     chats.value = chats.value.filter(c => c.project_id !== projectId)
     if (activeChatProject === projectId) {
       if (activeChatId.value) disconnectWs(activeChatId.value)

@@ -18,13 +18,7 @@ interface DraftEntry {
   workspace: string
 }
 
-export interface OrphanDraft {
-  chatId: string
-  text: string
-  projectId: string
-  updatedAt: number
-  workspace: string
-}
+export type OrphanDraft = DraftEntry & { chatId: string }
 
 function defaultStorage(): DraftStorage | null {
   if (typeof localStorage === 'undefined') return null

@@ -80,6 +80,7 @@ from ciao.model_tiers import canonical_tier, is_tier
 from ciao.providers.codex import (
     CODEX_FABLE_THINKING_LEVEL,
     CodexProvider,
+    is_codex_fable,
     codex_collab_tree_counts,
 )
 from ciao.providers.claude import get_session_info
@@ -633,6 +634,11 @@ def _cap_reentry_summary(text: str) -> str:
     return result[: _REENTRY_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
 
 _PLACEHOLDER_TITLE_RE = re.compile(r"^New session\b", re.IGNORECASE)
+
+
+def _normalize_tier(model: str) -> str:
+    """Canonicalize a tier alias; a concrete model id passes through unchanged."""
+    return canonical_tier(model) if is_tier(model) else model
 
 
 def _real_title(title: str) -> str | None:
@@ -3031,14 +3037,12 @@ class ProjectChatManager:
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
         # Per-workspace default: one workspace can default to a cheaper model
-        # than another. An explicit ``model`` arg wins. When the provider is
-        # explicitly given (not the workspace default), fall back to that
-        # provider's own operator default.
+        # than another. An explicit ``model`` arg wins. Passing chat_provider
+        # makes this resolve against that provider's own operator default
+        # when it differs from the workspace's own default provider.
         default_model = self._config.default_model_for_workspace(
             workspace, chat_provider
         )
-        if not default_model and provider:
-            default_model = self._config.default_model_for_provider(provider)
         chat_model = model or default_model
         chat_model = self._resolve_and_validate_chat_model(
             chat_model, chat_provider, project_id
@@ -3068,7 +3072,7 @@ class ProjectChatManager:
             spawned_from_chat_id=spawned_from_chat_id,
             delegation_id=delegation_id,
         )
-        if chat_provider == "codex" and canonical_tier(chat_model) == "fable":
+        if is_codex_fable(chat_provider, chat_model):
             chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
         self._chats[cid] = chat
         self._save()
@@ -3172,9 +3176,7 @@ class ProjectChatManager:
             raise ValueError(
                 f"Unknown mode '{mode}' (allowed: normal, plan, auto, bypass)"
             )
-        was_codex_fable = (
-            chat.provider == "codex" and canonical_tier(chat.model) == "fable"
-        )
+        was_codex_fable = is_codex_fable(chat.provider, chat.model)
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
         target_provider = provider or chat.provider
@@ -3241,10 +3243,8 @@ class ProjectChatManager:
             chat.provider = new_provider
         if mode is not None:
             chat.mode = mode  # type: ignore[assignment]
-        is_codex_fable = (
-            chat.provider == "codex" and canonical_tier(chat.model) == "fable"
-        )
-        if is_codex_fable:
+        chat_is_codex_fable = is_codex_fable(chat.provider, chat.model)
+        if chat_is_codex_fable:
             chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
         elif was_codex_fable and thinking_level is None:
             # Leaving the Fable preset restores the target model's default
@@ -3523,7 +3523,7 @@ class ProjectChatManager:
         # that the Codex Fable preset is defined as Sol with Ultra effort.
         chat.thinking_level = (
             CODEX_FABLE_THINKING_LEVEL
-            if provider == "codex" and canonical_tier(resolved_model) == "fable"
+            if is_codex_fable(provider, resolved_model)
             else ""
         )
         chat.session_id = ""
@@ -4709,16 +4709,13 @@ class ProjectChatManager:
         self, model: str, provider: str, project_id: str
     ) -> str:
         """Normalize a chat model to its canonical form, then validate it."""
-        resolved_model = (model or "").strip()
-        if is_tier(resolved_model):
-            resolved_model = canonical_tier(resolved_model)
+        resolved_model = _normalize_tier((model or "").strip())
         self._validate_configured_model(resolved_model, provider)
         return resolved_model
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""
-        model = (chat.model or "").strip()
-        return canonical_tier(model) if is_tier(model) else model
+        return _normalize_tier((chat.model or "").strip())
 
     def _validate_configured_model(
         self, model: str | None, provider: str | None
@@ -4758,7 +4755,7 @@ class ProjectChatManager:
         before a guard fix). Dispatch falls back to the provider default
         instead of failing the turn.
         """
-        if chat.provider == "codex" and canonical_tier(chat.model) == "fable":
+        if is_codex_fable(chat.provider, chat.model):
             return CODEX_FABLE_THINKING_LEVEL
         if chat.thinking_level in THINKING_LEVELS.get(chat.provider, ()):
             return chat.thinking_level

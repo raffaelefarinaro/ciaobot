@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from ciao.context.entity_tagger import find_entities, format_entities
 from ciao.memory_injector import build_memory_block, system_prompt_payload
+from ciao.model_tiers import canonical_tier
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -92,6 +93,11 @@ class CodexSettings:
 # The Codex "fable" preset is defined as the flagship Sol model at Ultra
 # reasoning effort. It is a real model choice, not a routing alias.
 CODEX_FABLE_THINKING_LEVEL = "ultra"
+
+
+def is_codex_fable(provider: str, model: str) -> bool:
+    """Whether a chat is on the Codex fable preset (forces Ultra effort)."""
+    return provider == "codex" and canonical_tier(model) == "fable"
 
 
 def codex_default_model(config: object) -> str:

@@ -4115,7 +4115,10 @@ async def vault_graph(request: Request) -> JSONResponse:
     """
     config = request.app.state.config
     workspace = request.query_params.get("workspace", "").strip() or None
-    entries = scan_vault(config.vault_root)
+    # scan_vault reads and parses every markdown file in the vault; run it off
+    # the event loop so a large vault doesn't stall other requests, including
+    # the 5s chat-socket keepalives (see chat_messages above for the same fix).
+    entries = await asyncio.to_thread(scan_vault, config.vault_root)
     workspaces = sorted({e.workspace for e in entries})
     scoped = filter_entries(entries, workspace=workspace) if workspace else entries
     graph = _build_graph(scoped)

@@ -209,7 +209,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
-import type { ChatInfo, ProjectInfo, WorkspaceName } from '../lib/types'
+import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
 import { postprocessLabel, tidyingSummary } from '../lib/postprocessView'
 import { errorMessage } from '../lib/errorMessage'
@@ -274,6 +274,25 @@ interface HomeLane {
   tidyChats: ChatInfo[]
   failedChats: ChatInfo[]
 }
+
+// Grouped once per recompute rather than re-scanning the full archived-chat
+// list inside makeLane for every lane — this component re-renders on every
+// streaming tick, so that was an O(workspaces × chats) rescan. Partitioning a
+// pre-sorted list preserves order, so no re-sort is needed per workspace.
+function groupChatsByWorkspace(sortedChats: ChatInfo[]): Map<string, ChatInfo[]> {
+  const map = new Map<string, ChatInfo[]>()
+  for (const chat of sortedChats) {
+    const workspace = store.projectFor(chat.chat_id)?.workspace
+    if (!workspace) continue
+    const bucket = map.get(workspace)
+    if (bucket) bucket.push(chat)
+    else map.set(workspace, [chat])
+  }
+  return map
+}
+
+const tidyChatsByWorkspace = computed(() => groupChatsByWorkspace(store.postprocessingChats()))
+const failedChatsByWorkspace = computed(() => groupChatsByWorkspace(store.insightsFailedChats()))
 
 const lanes = computed<HomeLane[]>(() => {
   const grouped = new Map<string, ChatInfo[]>()
@@ -344,16 +363,8 @@ function makeLane(
       chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
-    tidyChats: workspace && workspace !== 'unknown'
-      ? store.postprocessingChats().filter(
-          chat => store.projectFor(chat.chat_id)?.workspace === workspace,
-        )
-      : [],
-    failedChats: workspace && workspace !== 'unknown'
-      ? store.insightsFailedChats().filter(
-          chat => store.projectFor(chat.chat_id)?.workspace === workspace,
-        )
-      : [],
+    tidyChats: (workspace && workspace !== 'unknown' && tidyChatsByWorkspace.value.get(workspace)) || [],
+    failedChats: (workspace && workspace !== 'unknown' && failedChatsByWorkspace.value.get(workspace)) || [],
   }
 }
 
@@ -411,8 +422,7 @@ function laneSummaryRest(lane: HomeLane): string {
 // count always has rows behind it. Counted from the store rather than the
 // lane's tiers for exactly that reason: the lane holds active chats only.
 function laneTidyCount(lane: HomeLane): number {
-  if (!lane.workspace || lane.workspace === 'unknown') return 0
-  return store.workspacePostprocessingCount(lane.workspace as WorkspaceName)
+  return lane.tidyChats.length
 }
 
 function laneTidyLabel(lane: HomeLane): string {
@@ -421,8 +431,7 @@ function laneTidyLabel(lane: HomeLane): string {
 
 /** Insights-failed count for a lane's workspace, for the header fragment. */
 function laneInsightsFailedCount(lane: HomeLane): number {
-  if (!lane.workspace || lane.workspace === 'unknown') return 0
-  return store.workspaceInsightsFailedCount(lane.workspace as WorkspaceName)
+  return lane.failedChats.length
 }
 
 function newActionFor(workspace: string | null): NewWorkspaceChatAction | null {

@@ -105,7 +105,12 @@ def _read_lock_entries(lock_path: Path) -> dict[str, dict[str, Any]]:
     return {str(name): value for name, value in skills.items() if isinstance(value, dict)}
 
 
-def _description_for(root: Path, name: str, *, prefer_custom: bool) -> str:
+def _skill_candidates(root: Path, name: str, *, prefer_custom: bool) -> list[Path]:
+    """Where a skill's SKILL.md may live, in read-priority order.
+
+    Custom skills live under ``skills/``; stock and GitHub skills are read
+    from their installed copy under ``.claude/skills`` or ``.agents/skills``.
+    """
     candidates = []
     if prefer_custom:
         candidates.append(root / "skills" / name / "SKILL.md")
@@ -115,7 +120,11 @@ def _description_for(root: Path, name: str, *, prefer_custom: bool) -> str:
             root / ".agents" / "skills" / name / "SKILL.md",
         ]
     )
-    for path in candidates:
+    return candidates
+
+
+def _description_for(root: Path, name: str, *, prefer_custom: bool) -> str:
+    for path in _skill_candidates(root, name, prefer_custom=prefer_custom):
         description = _read_frontmatter_description(path)
         if description:
             return description
@@ -152,21 +161,8 @@ def _read_frontmatter_description(path: Path) -> str:
 
 
 def _path_for(root: Path, name: str, *, prefer_custom: bool) -> str:
-    """Canonical SKILL.md path for a skill, relative to the workspace root.
-
-    Custom skills live under ``skills/``; stock and GitHub skills are read
-    from their installed copy under ``.claude/skills``.
-    """
-    candidates = []
-    if prefer_custom:
-        candidates.append(root / "skills" / name / "SKILL.md")
-    candidates.extend(
-        [
-            root / ".claude" / "skills" / name / "SKILL.md",
-            root / ".agents" / "skills" / name / "SKILL.md",
-        ]
-    )
-    for path in candidates:
+    """Canonical SKILL.md path for a skill, relative to the workspace root."""
+    for path in _skill_candidates(root, name, prefer_custom=prefer_custom):
         if path.exists():
             return _relative_or_absolute(path, root)
     return ""
@@ -198,16 +194,7 @@ def _installed_targets(root: Path, name: str) -> list[str]:
 
 
 def _content_for(root: Path, name: str, *, prefer_custom: bool) -> str:
-    candidates = []
-    if prefer_custom:
-        candidates.append(root / "skills" / name / "SKILL.md")
-    candidates.extend(
-        [
-            root / ".claude" / "skills" / name / "SKILL.md",
-            root / ".agents" / "skills" / name / "SKILL.md",
-        ]
-    )
-    for path in candidates:
+    for path in _skill_candidates(root, name, prefer_custom=prefer_custom):
         if path.exists():
             try:
                 return path.read_text(encoding="utf-8")
