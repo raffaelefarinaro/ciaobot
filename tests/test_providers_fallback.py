@@ -8,6 +8,8 @@ from ciao.providers.claude import _fallback_model_for
 
 
 def test_fallback_model_downgrades_tier() -> None:
+    assert _fallback_model_for("fable") == "opus"
+    assert _fallback_model_for("claude-fable-5") == "opus"
     assert _fallback_model_for("opus") == "sonnet"
     assert _fallback_model_for("claude-opus-4-7") == "sonnet"
     assert _fallback_model_for("sonnet") == "haiku"

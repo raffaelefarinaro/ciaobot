@@ -2,8 +2,8 @@
 
 Three SDK features worth knowing when you touch this file:
 
-- ``fallback_model``: picked by ``_fallback_model_for(primary)``. Opus → Sonnet,
-  Sonnet → Haiku, Haiku → none. Keeps schedules alive when the primary tier is
+- ``fallback_model``: picked by ``_fallback_model_for(primary)``. Fable →
+  Opus → Sonnet → Haiku → none. Keeps schedules alive when the primary tier is
   rate-limited.
 - ``hooks={"PreToolUse": ...}``: keeps Claude Bash jobs in the active turn.
   Workspace/project/date/entity context is already supplied by the shared
@@ -373,6 +373,8 @@ def _fallback_model_for(primary: str) -> str | None:
     doesn't fall back to itself.
     """
     low = (primary or "").lower()
+    if "fable" in low:
+        return "opus"
     if "opus" in low:
         return "sonnet"
     if "sonnet" in low:

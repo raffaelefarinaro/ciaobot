@@ -323,7 +323,7 @@ class CiaoConfig:
     # installed voice for transcription_locale" -- the right default when the
     # available voices differ on every machine.
     tts_local_voice: str = ""
-    claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku"])
+    claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku", "fable"])
     claude_default_model: str = "opus"
     # Per-workspace default models. Empty string falls back to
     # claude_default_model, so one workspace can prefer a cheaper tier
@@ -915,7 +915,7 @@ class CiaoConfig:
             except OSError:
                 workspaces_json = ""
 
-        claude_models = _split_csv(source.get("CLAUDE_MODELS", "opus,sonnet,haiku"))
+        claude_models = _split_csv(source.get("CLAUDE_MODELS", "opus,sonnet,haiku,fable"))
         claude_default_model = claude_models[0] if claude_models else "opus"
         default_model_personal = source.get("CLAUDE_DEFAULT_MODEL_PERSONAL", "").strip()
         default_model_work = source.get("CLAUDE_DEFAULT_MODEL_WORK", "").strip()
@@ -968,7 +968,7 @@ class CiaoConfig:
             transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
             or "en-US",
             tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
-            claude_models=list(claude_models or ["opus", "sonnet", "haiku"]),
+            claude_models=list(claude_models or ["opus", "sonnet", "haiku", "fable"]),
             claude_default_model=claude_default_model,
             claude_mode=normalize_claude_mode(
                 source.get("CLAUDE_EXECUTION_MODE", "")
