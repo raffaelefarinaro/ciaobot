@@ -79,6 +79,7 @@ class Entry:
     aliases: list[str] = field(default_factory=list)
     related: list[str] = field(default_factory=list)  # normalized repo-relative paths
     workspace: str = "personal"
+    description: str = ""
 
 
 def _is_excluded(rel_path: Path) -> bool:
@@ -249,6 +250,7 @@ def scan_vault(vault_root: Path | None = None) -> list[Entry]:
         entry_type = (fm.get("type") or "").strip() or _infer_type(rel_from_vault)
         tags = _coerce_list(fm.get("tags"))
         aliases = _coerce_list(fm.get("aliases"))
+        description = (fm.get("description") or "").strip()
         related_raw = _coerce_list(fm.get("related")) + _coerce_list(fm.get("relatedTo"))
         related_refs = [_normalize_related_value(r) for r in related_raw]
         related_refs = [r for r in related_refs if r]
@@ -269,6 +271,7 @@ def scan_vault(vault_root: Path | None = None) -> list[Entry]:
                 aliases=aliases,
                 related=related_refs,  # resolved below
                 workspace=_workspace_of(rel_from_vault),
+                description=description,
             )
         )
 

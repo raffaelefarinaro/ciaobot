@@ -478,6 +478,8 @@ vi.mock('../PinnedFilePanel.vue', () => ({ default: NoopStub }))
 vi.mock('../FileViewerModal.vue', () => ({ default: NoopStub }))
 vi.mock('../NewScheduleForm.vue', () => ({ default: NoopStub }))
 vi.mock('../SchedulePanel.vue', () => ({ default: NoopStub }))
+const MemoryMapStub = { name: 'MemoryMapStub', render: () => h('div', { 'data-testid': 'memory-map-stub' }) }
+vi.mock('../MemoryMapView.vue', () => ({ default: MemoryMapStub }))
 vi.mock('../NotificationBell.vue', () => ({ default: NoopStub }))
 vi.mock('../ProjectSidebar.vue', () => ({ default: NoopStub }))
 vi.mock('../InAppToast.vue', () => ({ default: NoopStub }))
@@ -492,6 +494,7 @@ function makeRouter() {
       { path: '/chat/:chatId?', name: 'chat-detail', component: Stub },
       { path: '/project/:projectId', name: 'project', component: Stub },
       { path: '/schedules', name: 'schedules', component: Stub },
+      { path: '/memory', name: 'memory', component: Stub },
       { path: '/settings', name: 'settings', component: Stub },
       { path: '/settings/:tab', name: 'settings-tab', component: Stub },
       { path: '/login', name: 'login', component: Stub },
@@ -561,6 +564,24 @@ describe('component mount smoke', () => {
     await nextTick()
 
     expect(wrapper.find('button[aria-label="Open sidebar"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('ChatLayout renders the memory view at /memory', async () => {
+    const router = makeRouter()
+    await router.push('/memory')
+    await router.isReady()
+    const mod = await import('../ChatLayout.vue')
+    const wrapper = mount(mod.default as never, {
+      global: {
+        plugins: [router],
+        stubs: { Teleport: true },
+      },
+    })
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="memory-map-stub"]').exists()).toBe(true)
     wrapper.unmount()
   })
 

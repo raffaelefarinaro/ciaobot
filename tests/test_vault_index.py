@@ -99,6 +99,23 @@ def test_scan_vault_picks_up_body_wikilinks_as_edges(tmp_path: Path):
     assert mo_path in foo.related, f"expected body wikilink edge, got {foo.related}"
 
 
+def test_scan_vault_captures_frontmatter_description(tmp_path: Path):
+    _write(
+        tmp_path / "Projects" / "Bar.md",
+        "---\nname: Bar\ntype: project\ndescription: A short blurb.\n---\n# Bar\n",
+    )
+    _write(
+        tmp_path / "Projects" / "Baz.md",
+        "---\nname: Baz\ntype: project\n---\n# Baz\n",
+    )
+
+    entries = _scan(tmp_path)
+    by_path = {str(e.path): e for e in entries}
+
+    assert by_path["memory-vault/Projects/Bar.md"].description == "A short blurb."
+    assert by_path["memory-vault/Projects/Baz.md"].description == ""
+
+
 def test_scan_vault_assigns_workspace_from_first_path_segment(tmp_path: Path):
     _write(
         tmp_path / "client" / "projects" / "active" / "Apollo.md",

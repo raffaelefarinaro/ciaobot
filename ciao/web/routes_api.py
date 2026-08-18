@@ -63,6 +63,7 @@ from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
+from ciao.vault_index import _build_graph, filter_entries, scan_vault
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import (
@@ -4101,6 +4102,56 @@ async def vault_backlinks(request: Request) -> JSONResponse:
             if len(backlinks) >= _BACKLINKS_LIMIT:
                 return JSONResponse({"backlinks": backlinks})
     return JSONResponse({"backlinks": backlinks})
+
+
+async def vault_graph(request: Request) -> JSONResponse:
+    """Return the vault as a note graph for the Memory Map page.
+
+    Nodes are notes with frontmatter (or an inferred type); edges come from
+    both frontmatter ``related:``/``relatedTo:`` and body ``[[wikilinks]]``,
+    already merged and resolved to real paths by ``vault_index.scan_vault``.
+    Optional ``?workspace=`` scopes to one logical workspace; cross-workspace
+    edges are dropped rather than left dangling.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip() or None
+    entries = scan_vault(config.vault_root)
+    workspaces = sorted({e.workspace for e in entries})
+    scoped = filter_entries(entries, workspace=workspace) if workspace else entries
+    graph = _build_graph(scoped)
+    by_path = {str(e.path) for e in scoped}
+    nodes = [
+        {
+            "id": str(e.path),
+            "title": e.title,
+            "type": e.type,
+            "tags": e.tags,
+            "aliases": e.aliases,
+            "description": e.description,
+            "workspace": e.workspace,
+            "degree": len(graph.get(str(e.path), ())),
+        }
+        for e in scoped
+    ]
+    seen: set[tuple[str, str]] = set()
+    edges = []
+    for src, targets in graph.items():
+        if src not in by_path:
+            continue
+        for tgt in targets:
+            if tgt not in by_path:
+                continue
+            key = tuple(sorted((src, tgt)))
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append({"source": key[0], "target": key[1]})
+    return JSONResponse({
+        "workspace": workspace or "all",
+        "workspaces": workspaces,
+        "nodes": nodes,
+        "edges": edges,
+    })
 
 
 # Binary downloads (PDFs, ZIPs, office docs) live under their own endpoint so
