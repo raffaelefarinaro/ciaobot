@@ -1020,3 +1020,121 @@ def test_locate_rejects_marker_quoted_before_subagents_block() -> None:
         "## Subagents\n\n#### Turn 1\n\nsub\n"
     )
     assert insights.locate_insights_section(text) is None
+
+
+# ── text-mode extraction ─────────────────────────────────────────────────
+
+
+def test_extract_appends_in_text_mode_against_archive_body(tmp_path: Path) -> None:
+    """``text_mode=True`` uses the rendered archive, not the JSONL, as input."""
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Existing\n\nbody text\n", encoding="utf-8")
+
+    seen: dict[str, object] = {}
+
+    async def fake_text_call(body: str, model: str, **kwargs: object) -> str:
+        seen["body"] = body
+        return "## Decisions\n- chose A\n"
+
+    with patch.object(insights, "_call_text_model", side_effect=fake_text_call):
+        asyncio.run(insights.extract_and_append(
+            archive_path=archive,
+            filtered_jsonl="should-not-be-used",
+            config=_config(),
+            model="deepseek-v4-flash:0731-cloud",
+            text_mode=True,
+        ))
+
+    assert "should-not-be-used" not in str(seen.get("body", ""))
+    assert "body text" in str(seen.get("body", ""))
+    assert "## Session insights" in archive.read_text(encoding="utf-8")
+
+
+def test_extract_text_mode_skips_when_archive_already_has_insights(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "archive.md"
+    archive.write_text(
+        "# Existing\n\n## Session insights\n\nold\n", encoding="utf-8"
+    )
+
+    async def fake_text_call(body: str, model: str, **kwargs: object) -> str:
+        return "fresh"
+
+    with patch.object(insights, "_call_text_model", side_effect=fake_text_call):
+        asyncio.run(insights.extract_and_append(
+            archive_path=archive,
+            filtered_jsonl="",
+            config=_config(),
+            model="deepseek-v4-flash:0731-cloud",
+            text_mode=True,
+        ))
+
+    text = archive.read_text(encoding="utf-8")
+    assert text.count("## Session insights") == 1
+    assert "old" in text
+    assert "fresh" not in text
+
+
+def test_run_text_model_with_retry_retries_once_then_reports_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n", encoding="utf-8")
+
+    calls = {"count": 0}
+
+    async def flaky_call(body: str, model: str, **kwargs: object) -> str:
+        calls["count"] += 1
+        raise RuntimeError("boom")
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    with patch.object(insights, "_call_text_model", side_effect=flaky_call), \
+         patch.object(insights.asyncio, "sleep", side_effect=no_sleep):
+        output, error = asyncio.run(insights._run_text_model_with_retry(
+            archive_path=archive,
+            model="deepseek-v4-flash:0731-cloud",
+        ))
+
+    assert calls["count"] == 2
+    assert output == ""
+    assert "boom" in error
+
+
+def test_retry_insights_for_chat_runs_text_mode_and_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retried chat is always text-mode and skips trajectory/proposals."""
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n\nbody\n", encoding="utf-8")
+
+    config = _config()
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
+
+    called: dict[str, object] = {}
+
+    async def fake_extract_and_append(**kwargs: object) -> None:
+        called.update(kwargs)
+        archive.write_text(
+            archive.read_text(encoding="utf-8")
+            + "\n\n<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- x\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(insights, "extract_and_append", fake_extract_and_append)
+
+    ok = asyncio.run(insights.retry_insights_for_chat(
+        config=config,
+        archive_path=archive,
+        model="",
+        provider="claude",
+        workspace="work",
+    ))
+
+    assert ok is True
+    assert called["text_mode"] is True
+    assert called["trajectories_enabled"] is False
+    assert called["memory_proposals_enabled"] is False
+    assert called["filtered_jsonl"] == ""

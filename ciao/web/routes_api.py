@@ -2564,6 +2564,33 @@ async def chat_archive(request: Request) -> JSONResponse:
     })
 
 
+async def chat_retry_insights(request: Request) -> JSONResponse:
+    """Re-run session-insights extraction for a single archived chat.
+
+    The retry works in text mode against the rendered archive (the raw session
+    JSONL is reclaimed at archive time). Returns a job status; a pipeline that
+    is already running for the chat is left alone.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    status = pcm.retry_insights(chat_id)
+    if status == "not_found":
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if status == "not_archived":
+        return JSONResponse(
+            {"error": "chat is not archived", "chat_id": chat_id}, status_code=409
+        )
+    if status == "no_archive":
+        return JSONResponse(
+            {"error": "no archive file for this chat", "chat_id": chat_id}, status_code=409
+        )
+    if status == "already_has":
+        return JSONResponse({"status": "already_has", "chat_id": chat_id}, status_code=200)
+    if status == "running":
+        return JSONResponse({"status": "running", "chat_id": chat_id}, status_code=202)
+    return JSONResponse({"status": "started", "chat_id": chat_id}, status_code=202)
+
+
 def _overlay_assistant_timings(
     entries: list[dict], timings: dict
 ) -> None:

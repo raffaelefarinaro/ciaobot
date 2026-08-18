@@ -1931,6 +1931,34 @@ describe('postprocessingChats (home tidying list)', () => {
     ] as unknown as typeof store.chats
     expect(store.postprocessingChats().map(c => c.chat_id)).toEqual(['c-fresher', 'c-running'])
   })
+
+  test('insightsFailedChats lists only settled chats whose insights step errored', () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', workspace: 'work' },
+      { project_id: 'p2', workspace: 'personal' },
+    ] as unknown as typeof store.projects
+    store.chats = [
+      { chat_id: 'c-failed', project_id: 'p1', title: 'Failed', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'error' } } } },
+      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'insights', expected: [], steps: {} } },
+      { chat_id: 'c-ok', project_id: 'p2', title: 'Ok', archived: true, last_activity_at: '2026-08-14T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'ok' } } } },
+      { chat_id: 'c-skipped', project_id: 'p2', title: 'Skipped', archived: true, last_activity_at: '2026-08-13T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'skipped' } } } },
+      { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
+    ] as unknown as typeof store.chats
+    expect(store.insightsFailedChats().map(c => c.chat_id)).toEqual(['c-failed'])
+    // Workspace counts follow the project → workspace mapping.
+    expect(store.workspaceInsightsFailedCount('work')).toBe(1)
+    expect(store.workspaceInsightsFailedCount('personal')).toBe(0)
+  })
+})
+
+describe('retryInsights', () => {
+  test('posts to the per-chat retry-insights endpoint', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValue({ status: 'started' })
+    await store.retryInsights('c1')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/retry-insights')
+  })
 })
 
 describe('chat_streaming_done clears stale streaming for inactive chats', () => {

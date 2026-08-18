@@ -23,6 +23,9 @@
               <!-- Third fragment, in the muted register: background tidy-up
                    never needs the user, so it must not read as a demand. -->
               <span v-if="laneTidyCount(lane)" class="home-lane-tidy"> · <span class="home-lane-tidy-dot" aria-hidden="true" />{{ laneTidyLabel(lane) }}</span>
+              <!-- A failed extraction is a recovery case, so it reads in the
+                   warn register — it is the one tidy signal that can act. -->
+              <span v-if="laneInsightsFailedCount(lane)" class="home-lane-failed"> · <b>{{ laneInsightsFailedCount(lane) }}</b> insights failed</span>
             </span>
           </div>
           <div v-if="lane.newAction" class="home-lane-new-split">
@@ -163,6 +166,35 @@
               </span>
             </button>
           </div>
+
+          <!-- Archived chats whose insights extraction failed. Unlike tidy-up
+               (which is background work that never needs the user), a failed
+               extraction is a recovery case: the row carries a retry button
+               that re-runs it. -->
+          <div v-if="lane.failedChats.length" class="home-tier home-tier--failed">
+            <div class="home-tier-label"><span>insights failed</span></div>
+            <div
+              v-for="chat in lane.failedChats"
+              :key="`failed-${chat.chat_id}`"
+              class="home-chat-item home-chat-item--failed"
+              :data-workspace-color="colorOf(chat)"
+            >
+              <span class="home-chat-heading">
+                <span class="home-chat-title">{{ chat.title }}</span>
+              </span>
+              <span class="home-chat-meta">
+                <span class="home-chat-tidy-note home-chat-tidy-note--failed">insights failed</span>
+                <button
+                  type="button"
+                  class="home-chat-retry"
+                  :disabled="retryingChats[chat.chat_id]"
+                  :aria-label="`Retry extracting insights for ${chat.title}`"
+                  @click.stop="retryInsightsFor(chat.chat_id)"
+                >{{ retryingChats[chat.chat_id] ? '…' : 'retry' }}</button>
+                <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
+              </span>
+            </div>
+          </div>
         </div>
       </section>
     </div>
@@ -175,6 +207,7 @@ import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo, WorkspaceName } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
 import { postprocessLabel, tidyingSummary } from '../lib/postprocessView'
+import { errorMessage } from '../lib/errorMessage'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -189,11 +222,27 @@ const emit = defineEmits<{
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 const hasHomeActivity = computed(() => (
-  store.activeChatsAll.length > 0 || store.postprocessingChats().length > 0
+  store.activeChatsAll.length > 0
+  || store.postprocessingChats().length > 0
+  || store.insightsFailedChats().length > 0
 ))
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
 const openProjectLane = ref<string | null>(null)
+// Chats whose insights retry is in flight, so the button shows a busy state.
+const retryingChats = ref<Record<string, boolean>>({})
+
+async function retryInsightsFor(chatId: string): Promise<void> {
+  if (retryingChats.value[chatId]) return
+  retryingChats.value[chatId] = true
+  try {
+    await store.retryInsights(chatId)
+  } catch (e) {
+    store.pushErrorToast('Could not retry insights', errorMessage(e))
+  } finally {
+    retryingChats.value[chatId] = false
+  }
+}
 
 function closeProjectMenuOnOutsideClick(event: MouseEvent): void {
   if (!openProjectLane.value) return
@@ -217,6 +266,7 @@ interface HomeLane {
   projects: ProjectInfo[]
   tiers: HomeTiers
   tidyChats: ChatInfo[]
+  failedChats: ChatInfo[]
 }
 
 const lanes = computed<HomeLane[]>(() => {
@@ -293,6 +343,11 @@ function makeLane(
           chat => store.projectFor(chat.chat_id)?.workspace === workspace,
         )
       : [],
+    failedChats: workspace && workspace !== 'unknown'
+      ? store.insightsFailedChats().filter(
+          chat => store.projectFor(chat.chat_id)?.workspace === workspace,
+        )
+      : [],
   }
 }
 
@@ -356,6 +411,12 @@ function laneTidyCount(lane: HomeLane): number {
 
 function laneTidyLabel(lane: HomeLane): string {
   return tidyingSummary(laneTidyCount(lane))
+}
+
+/** Insights-failed count for a lane's workspace, for the header fragment. */
+function laneInsightsFailedCount(lane: HomeLane): number {
+  if (!lane.workspace || lane.workspace === 'unknown') return 0
+  return store.workspaceInsightsFailedCount(lane.workspace as WorkspaceName)
 }
 
 function newActionFor(workspace: string | null): NewWorkspaceChatAction | null {
@@ -752,6 +813,16 @@ watch(() => store.activeWorkspace, async () => {
   animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
 }
 
+/* A failed extraction is a recovery case, not a quiet background fact, so it
+   reads in the warn register — the one tidy signal that can act. */
+.home-lane-failed {
+  color: var(--warning);
+}
+
+.home-lane-failed b {
+  font-weight: 700;
+}
+
 @keyframes home-lane-tidy-breathe {
   0%, 100% { opacity: 0.35; }
   50%      { opacity: 0.9; }
@@ -970,7 +1041,8 @@ watch(() => store.activeWorkspace, async () => {
 .home-chat-item--unread,
 .home-chat-item--quiet,
 .home-chat-item--older,
-.home-chat-item--tidying {
+.home-chat-item--tidying,
+.home-chat-item--failed {
   flex-direction: row;
   align-items: center;
   gap: 8px;
@@ -986,7 +1058,8 @@ watch(() => store.activeWorkspace, async () => {
 .home-chat-item--unread:hover,
 .home-chat-item--quiet:hover,
 .home-chat-item--older:hover,
-.home-chat-item--tidying:hover {
+.home-chat-item--tidying:hover,
+.home-chat-item--failed:hover {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
@@ -1003,7 +1076,8 @@ watch(() => store.activeWorkspace, async () => {
 .home-chat-item--unread .home-chat-heading,
 .home-chat-item--quiet .home-chat-heading,
 .home-chat-item--older .home-chat-heading,
-.home-chat-item--tidying .home-chat-heading {
+.home-chat-item--tidying .home-chat-heading,
+.home-chat-item--failed .home-chat-heading {
   flex: 1;
   align-items: center;
 }
@@ -1029,7 +1103,8 @@ watch(() => store.activeWorkspace, async () => {
 .home-chat-item--unread .home-chat-title,
 .home-chat-item--quiet .home-chat-title,
 .home-chat-item--older .home-chat-title,
-.home-chat-item--tidying .home-chat-title {
+.home-chat-item--tidying .home-chat-title,
+.home-chat-item--failed .home-chat-title {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1103,6 +1178,41 @@ watch(() => store.activeWorkspace, async () => {
   background: var(--fg3);
   vertical-align: middle;
   animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
+}
+
+/* A failed extraction is a recovery case, so its note carries the warn colour
+   rather than the muted tidy grey. */
+.home-chat-tidy-note--failed {
+  color: var(--warning);
+}
+
+/* The retry button on a failed-insights row. Small bordered control in the
+   warn register: it is an action, but a secondary one for a routine recovery,
+   not the single most important thing on screen. */
+.home-chat-retry {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--warning);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.home-chat-retry:hover,
+.home-chat-retry:focus-visible {
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border-color: var(--warning);
+}
+
+.home-chat-retry:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .remote-chip {

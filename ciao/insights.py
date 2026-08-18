@@ -451,8 +451,16 @@ async def extract_and_append(
     memory_proposals_enabled: bool = True,
     provider: str = "claude",
     project_doc_path: str = "",
+    text_mode: bool = False,
 ) -> None:
     """Call the model with the filtered transcript and append insights to the archive.
+
+    When ``text_mode`` is set, ``filtered_jsonl`` is ignored and the rendered
+    archive markdown itself is used as the extraction input (the same fallback
+    the backfill task uses for archives whose raw session JSONL is gone). This
+    is the recovery path for a retried archive: the JSONL is deleted at archive
+    time, so a failed extraction can only be re-attempted against the archive
+    text.
 
     Idempotent: skips if the archive already contains a Session insights
     section. Retries once on failure (30s delay), then logs and skips.
@@ -508,12 +516,20 @@ async def extract_and_append(
             if note:
                 run.extra["fallback"] = note
                 logger.info("Insights %s", note)
-            output, model_error = await _run_model_with_retry(
-                filtered_jsonl=filtered_jsonl,
-                model=effective_model,
-                provider=provider,
-                cwd=workspace_root,
-            )
+            if text_mode:
+                output, model_error = await _run_text_model_with_retry(
+                    archive_path=archive_path,
+                    model=effective_model,
+                    provider=provider,
+                    cwd=workspace_root,
+                )
+            else:
+                output, model_error = await _run_model_with_retry(
+                    filtered_jsonl=filtered_jsonl,
+                    model=effective_model,
+                    provider=provider,
+                    cwd=workspace_root,
+                )
             if output:
                 _append_section(archive_path, output)
                 logger.info("Appended session insights to %s", archive_path)
@@ -641,6 +657,48 @@ async def extract_and_append(
                 "Memory proposals skipped for %s: workspace owner unavailable",
                 archive_path,
             )
+
+
+async def retry_insights_for_chat(
+    *,
+    config,
+    archive_path: Path,
+    model: str,
+    provider: str = "claude",
+    workspace: str = "",
+    trajectory_meta: dict[str, str] | None = None,
+    workspace_root: Path | None = None,
+    vault_root: Path | None = None,
+    project_doc_path: str = "",
+) -> bool:
+    """Re-run insights extraction for a single archived chat.
+
+    The raw session JSONL is reclaimed at archive time, so this always works in
+    text mode against the rendered archive markdown. Returns True when the
+    archive now carries a Session insights section.
+
+    Trajectory is deliberately not re-run here: a failed extraction already
+    wrote one (the pipeline's trajectory step runs in a ``finally``), and the
+    insights section this retry appends is what memory curation reads.
+    """
+    effective_model = model or resolve_insights_model(config, workspace or None)
+    await extract_and_append(
+        archive_path=archive_path,
+        filtered_jsonl="",
+        config=config,
+        model=effective_model,
+        session_id="",
+        trajectory_meta=trajectory_meta,
+        trajectories_enabled=False,
+        memory_proposals_enabled=False,
+        workspace_root=workspace_root,
+        vault_root=vault_root,
+        proposal_vault_root=None,
+        provider=provider,
+        project_doc_path=project_doc_path,
+        text_mode=True,
+    )
+    return _has_insights_section(archive_path)
 
 
 def locate_insights_section(text: str) -> tuple[int, int] | None:
@@ -776,6 +834,93 @@ async def _run_model_with_retry(
         return await call(), ""
     except Exception as exc:  # noqa: BLE001
         logger.exception("Insights model call failed twice; skipping")
+        return "", str(exc).strip() or type(exc).__name__
+
+
+def _text_user_prompt(body: str) -> str:
+    """Prompt for text-mode extraction (archive markdown, no JSONL indices)."""
+    return (
+        "Below is a rendered Markdown chat transcript. Tool calls, errors, "
+        "and thinking blocks are not preserved - only user/assistant text. "
+        "Extract durable signal per the system prompt's section schema.\n\n"
+        f"{body}"
+    )
+
+
+async def _call_text_model(
+    body: str,
+    model: str,
+    *,
+    provider: str = "claude",
+    cwd: Path | None = None,
+) -> str:
+    """Run text-mode extraction for ``model`` on a rendered archive body."""
+    if native_sidecar.is_apple_model(model):
+        apple_body, dropped = native_sidecar.fit_apple_input(body)
+        if dropped:
+            logger.info(
+                "Apple insights transcript over the %d-char budget; "
+                "dropped %d oldest line(s)",
+                native_sidecar.APPLE_MAX_INPUT_CHARS,
+                dropped,
+            )
+        return await native_sidecar.respond(
+            _text_user_prompt(apple_body),
+            instructions=_TEXT_MODE_SYSTEM_PROMPT,
+            timeout=_insights_timeout_s(),
+        )
+    from ciao.providers.oneshot import run_oneshot
+
+    return await run_oneshot(
+        _text_user_prompt(body),
+        system_prompt=_TEXT_MODE_SYSTEM_PROMPT,
+        model=model,
+        timeout_s=_insights_timeout_s(),
+        cwd=cwd,
+        provider=provider,
+    )
+
+
+async def _run_text_model_with_retry(
+    *,
+    archive_path: Path,
+    model: str,
+    provider: str = "claude",
+    cwd: Path | None = None,
+) -> tuple[str, str]:
+    """Run text-mode extraction on ``archive_path``; retry once on failure.
+
+    Mirrors :func:`_run_model_with_retry` for the rendered-archive input, so a
+    failed archive can be retried even after its raw JSONL is reclaimed.
+    """
+    try:
+        body = archive_path.read_text(encoding="utf-8")
+    except OSError:
+        logger.exception("Could not read archive %s for insights retry", archive_path)
+        return "", "archive unreadable"
+
+    async def call() -> str:
+        return await _call_text_model(body, model, provider=provider, cwd=cwd)
+
+    try:
+        return await call(), ""
+    except Exception as exc:  # noqa: BLE001
+        if (
+            native_sidecar.is_apple_model(model)
+            and not native_sidecar.apple_model_available()
+        ):
+            logger.info("Apple FoundationModels is unavailable; not retrying: %s", exc)
+            return "", str(exc).strip() or type(exc).__name__
+        if is_terminal_failure(exc):
+            logger.error("Insights text call rejected terminally (%s); not retrying", exc)
+            return "", str(exc).strip() or type(exc).__name__
+        logger.info("Insights text call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
+
+    await asyncio.sleep(_RETRY_DELAY_S)
+    try:
+        return await call(), ""
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Insights text call failed twice; skipping")
         return "", str(exc).strip() or type(exc).__name__
 
 

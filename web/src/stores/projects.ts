@@ -16,7 +16,7 @@ import {
 import { archiveFailedToast, archiveProcessingToast, archiveStoppedToast } from '../lib/archiveCopy'
 import { errorMessage } from '../lib/errorMessage'
 import { readChatDraft } from '../lib/chatDrafts'
-import { isPostprocessing } from '../lib/postprocessView'
+import { isPostprocessing, postprocessNeedsInsights } from '../lib/postprocessView'
 import type {
   ArchiveChatResponse,
   ProjectInfo,
@@ -666,6 +666,25 @@ export const useProjectStore = defineStore('projects', () => {
       .sort((a, b) =>
         (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at),
       )
+  }
+
+  /** Archived chats whose insights extraction failed and can be retried. */
+  function insightsFailedChats(): ChatInfo[] {
+    return chats.value
+      .filter(c => postprocessNeedsInsights(c.postprocess))
+      .sort((a, b) =>
+        (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at),
+      )
+  }
+
+  /** Insights-failed count for one workspace, for the home lane header. */
+  function workspaceInsightsFailedCount(ws: WorkspaceName): number {
+    const wsProjectIds = new Set(
+      projects.value.filter(p => p.workspace === ws).map(p => p.project_id),
+    )
+    return chats.value.filter(
+      c => wsProjectIds.has(c.project_id) && postprocessNeedsInsights(c.postprocess),
+    ).length
   }
 
   function projectPostprocessingCount(projectId: string): number {
@@ -1996,6 +2015,17 @@ export const useProjectStore = defineStore('projects', () => {
       connectWs(chatId)
     }
     return c
+  }
+
+  /** Re-run session-insights extraction for one archived chat (text-mode). */
+  async function retryInsights(chatId: string): Promise<void> {
+    const res = await api.post<{ status: string }>(`/api/chats/${chatId}/retry-insights`)
+    const status = res?.status
+    if (status === 'already_has') {
+      pushToast({ chat_id: '', title: 'Insights already added', body: 'This chat already has a Session insights section.' })
+    } else if (status === 'running') {
+      pushToast({ chat_id: '', title: 'Already tidying', body: 'This chat is already being processed.' })
+    }
   }
 
   function replaceChat(chat: ChatInfo) {
@@ -4366,12 +4396,13 @@ export const useProjectStore = defineStore('projects', () => {
     chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, clearUnread, markRead, markAllRead,
     recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
+    insightsFailedChats, workspaceInsightsFailedCount,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     createChat, newChatInGeneral, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, requestReentrySummaryIfUseful, archiveChat, continueArchivedChat, newSession,
-    setChatRetry, stopChatRetry, tryChatRetryNow,
+    setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest,
     sendMessage, stopChat, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,

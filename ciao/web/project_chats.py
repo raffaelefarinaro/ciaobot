@@ -4037,6 +4037,67 @@ class ProjectChatManager:
         finally:
             self._end_postprocess(chat_id)
 
+    def retry_insights(self, chat_id: str) -> str:
+        """Kick off a text-mode insights retry for an archived chat.
+
+        Returns a job status string: ``"started"`` when the retry task is
+        launched, ``"running"`` when this chat's pipeline is already live
+        (nothing is re-launched), or ``"not_found"`` / ``"not_archived"`` /
+        ``"no_archive"`` / ``"already_has"`` for the non-starts. Used by the
+        ``/api/chats/{chat_id}/retry-insights`` route.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return "not_found"
+        if not chat.archived:
+            return "not_archived"
+        if not chat.archive_path:
+            return "no_archive"
+        if chat_id in self._postprocessing:
+            return "running"
+
+        archive_path = Path(chat.archive_path)
+        if not archive_path.is_absolute():
+            archive_path = self._config.workspace_root / archive_path
+
+        from ciao.insights import _has_insights_section, retry_insights_for_chat
+
+        try:
+            if _has_insights_section(archive_path):
+                return "already_has"
+        except OSError:
+            return "no_archive"
+
+        project = self._projects.get(chat.project_id) if chat.project_id else None
+        workspace = project.workspace if project else ""
+        self._begin_postprocess(chat_id, ["insights"])
+
+        async def _run() -> None:
+            try:
+                from ciao.insights import resolve_insights_model
+
+                workspace_ctx = workspace or None
+                insights_models = getattr(self._config, "provider_insights_models", {}) or {}
+                model = insights_models.get(chat.provider or "", "") or resolve_insights_model(
+                    self._config, workspace_ctx
+                )
+                await retry_insights_for_chat(
+                    config=self._config,
+                    archive_path=archive_path,
+                    model=model,
+                    provider=chat.provider or "claude",
+                    workspace=workspace,
+                    trajectory_meta={"chat_id": chat_id, "project_id": chat.project_id},
+                    workspace_root=self._config.workspace_root,
+                    vault_root=self._config.vault_root,
+                    project_doc_path=project.vault_doc_path if project and not project.is_auto else "",
+                )
+            except Exception:  # noqa: BLE001 — the job event already surfaces failures
+                logger.exception("Insights retry failed for chat %s", chat_id)
+
+        asyncio.create_task(self._tracked_postprocess(chat_id, _run()))
+        return "started"
+
     def run_archive_postprocess(
         self,
         chat_id: str,

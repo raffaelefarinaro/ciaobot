@@ -20,6 +20,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/chats/{chat_id}/reentry-summary": "browser-only ephemeral Apple Intelligence orientation note",
     "/api/chats/{chat_id}/images": "browser image upload",
     "/api/chats/{chat_id}/continue": "browser continuation of archived chat",
+    "/api/chats/{chat_id}/retry-insights": "browser home-page retry of a failed insights extraction",
     "/api/chats/{chat_id}/prompt": "agents trigger prompts via ciao create-chat, not curl",
     "/api/schedules": "agents create/edit schedules via the schedule_* MCP tools, not curl",
     "/api/schedules/{schedule_id}": "agents edit schedules via the schedule_* MCP tools, not curl",
