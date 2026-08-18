@@ -12,6 +12,11 @@ def _manager(config=None, *, chats=None, projects=None) -> ProjectChatManager:
     manager._projects = projects or {}
     manager._chats = chats or {}
     manager._save = lambda: None
+    manager._titling = set()
+    # Production waits ~30s in total for the provider to publish its title.
+    # Keep the retry *shape* (so the give-up path is still exercised) without
+    # the wall-clock cost.
+    manager._TITLE_POLL_DELAYS = (0.0, 0.001, 0.001)
     return manager
 
 
@@ -228,6 +233,7 @@ async def test_drive_finally_runs_second_title_pass_for_meta_question(
     manager._events = SimpleNamespace(publish=lambda *_args, **_kwargs: None)  # type: ignore[assignment,misc]
     manager._save = lambda: None  # type: ignore[assignment,method-assign,misc]
     manager._chats = {"chat-q2": FakeChat()}  # type: ignore[assignment,dict-item]
+    manager._titling = set()
 
     calls = []
 
@@ -269,6 +275,7 @@ async def test_drive_overwrites_title_when_assistant_framing_disagrees(
 
     manager = ProjectChatManager.__new__(ProjectChatManager)
     manager._chats = {"chat-q3": FakeChat()}  # type: ignore[assignment,dict-item]
+    manager._titling = set()
 
     async def fake_auto_title(self, chat_id, user_text, assistant_text):
         return "Automation Page Job Log"
@@ -298,3 +305,104 @@ async def test_drive_overwrites_title_when_assistant_framing_disagrees(
     ]
     # Title is rewritten on the chat record too.
     assert manager._chats["chat-q3"].title == "Automation Page Job Log"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_auto_title_waits_for_late_provider_title(monkeypatch) -> None:
+    """The provider writes its title *after* the turn, so the first read finds
+    nothing. Every previous test handed the title back on read #1, which is why
+    the suite stayed green while every real chat sat on "New Chat"."""
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
+
+    reads = 0
+
+    async def fake_read_thread(_workspace, _sid):
+        nonlocal reads
+        reads += 1
+        # opencode's title agent has not run yet on the first two reads.
+        title = "Late Native Title" if reads >= 3 else ""
+        return {"info": {"title": title}, "messages": []}
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    assert await manager.auto_title_if_default("chat-1", "hello") == "Late Native Title"
+    assert manager._chats["chat-1"].title == "Late Native Title"
+    assert reads == 3
+
+
+@pytest.mark.asyncio
+async def test_auto_title_polls_until_session_exists(monkeypatch) -> None:
+    """The first-message trigger fires before the provider session exists. A
+    missing session_id must retry, not abandon titling for the whole chat."""
+    from ciao.web import project_chats as pc
+
+    chat = _chat(provider="opencode", session_id="")
+    manager = _manager(chats={"chat-1": chat})
+
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": "Arrived Late"}, "messages": []}
+
+    # The turn assigns the session while the poller is waiting.
+    async def grant_session(*_args, **_kwargs):
+        chat.session_id = "sess-late"
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(pc.asyncio, "sleep", grant_session)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") == "Arrived Late"
+    assert chat.title == "Arrived Late"
+
+
+@pytest.mark.asyncio
+async def test_auto_title_stops_when_user_renames_mid_poll(monkeypatch) -> None:
+    """A rename during the poll window must win over the provider's title."""
+    from ciao.web import project_chats as pc
+
+    chat = _chat(provider="opencode")
+    manager = _manager(chats={"chat-1": chat})
+
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": ""}, "messages": []}
+
+    async def rename_during_wait(*_args, **_kwargs):
+        chat.title = "User Picked This"
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(pc.asyncio, "sleep", rename_during_wait)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") is None
+    assert chat.title == "User Picked This"
+
+
+@pytest.mark.asyncio
+async def test_auto_title_and_publish_runs_once_per_chat(monkeypatch) -> None:
+    """Both triggers fire for the same chat; only one poll may run."""
+    from ciao.web.project_chats import ProjectChatManager
+    import asyncio as _asyncio
+
+    class FakeChat:
+        title = "New Chat"
+        title_status = "pending"
+
+    manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._chats = {"c": FakeChat()}  # type: ignore[assignment,dict-item]
+    manager._titling = set()
+    manager._save = lambda: None  # type: ignore[assignment,method-assign,misc]
+    manager._events = SimpleNamespace(publish=lambda *_a, **_k: None)  # type: ignore[assignment]
+
+    started = 0
+
+    async def slow_title(self, chat_id, user_text, assistant_text):
+        nonlocal started
+        started += 1
+        await _asyncio.sleep(0)
+        return "Only Once"
+
+    monkeypatch.setattr(ProjectChatManager, "auto_title_if_default", slow_title)
+
+    await _asyncio.gather(
+        manager._auto_title_and_publish("c", "prompt", ""),
+        manager._auto_title_and_publish("c", "prompt", "reply"),
+    )
+    assert started == 1

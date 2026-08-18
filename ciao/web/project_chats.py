@@ -1223,6 +1223,12 @@ class ProjectChatManager:
         # arrives. Cleared as soon as the turn finishes — wall-clock ISO
         # timestamps are the persisted record on `user_turn_timings`.
         self._turn_perf_started: dict[tuple[str, int], float] = {}
+        # Chats with a native-title poll in flight. Both the first-message and
+        # the end-of-turn trigger want to title the same chat, and each poll
+        # costs real provider reads (an opencode read spawns a throwaway
+        # `opencode serve`), so the second trigger joins the first instead of
+        # racing it.
+        self._titling: set[str] = set()
         # Chats whose post-archive pipeline is running right now. Mirrors
         # `postprocess["state"] == "running"` on the chat, kept as a set so the
         # /ws/events connect snapshot and the home-screen count are O(1) reads.
@@ -6506,6 +6512,12 @@ class ProjectChatManager:
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str
     ) -> None:
+        # One poll per chat. The end-of-turn trigger fires while the
+        # first-message poll is usually still running; a second poller would
+        # only double the provider reads to reach the same answer.
+        if chat_id in self._titling:
+            return
+        self._titling.add(chat_id)
         new_title: str | None = None
         try:
             new_title = await self.auto_title_if_default(
@@ -6513,6 +6525,8 @@ class ProjectChatManager:
             )
         except Exception:
             logger.exception("Auto-title failed for %s", chat_id)
+        finally:
+            self._titling.discard(chat_id)
         # Always clear the pending shimmer and emit a ready event, even if
         # title generation produced nothing (e.g. user renamed mid-flight,
         # or all fallbacks returned None). Leaving title_status="pending"
@@ -7592,6 +7606,14 @@ class ProjectChatManager:
 
     # ── Auto-title generation ────────────────────────────────────────────
 
+    # A provider writes its session title asynchronously, *after* the turn it
+    # was derived from: opencode's `title` agent runs once the first exchange
+    # lands, Claude Code writes `aiTitle` after the turn is persisted, and
+    # Codex names the thread on its own schedule. A single read at turn end
+    # therefore almost always finds nothing, which left every chat stuck on
+    # "New Chat". Poll instead, with a bounded backoff, and give up quietly.
+    _TITLE_POLL_DELAYS: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
+
     async def auto_title_if_default(
         self, chat_id: str, user_text: str, assistant_text: str = ""
     ) -> str | None:
@@ -7602,26 +7624,37 @@ class ProjectChatManager:
         there is no separate model call or title-model setting. Returns the new
         title or None if nothing was changed.
 
+        The provider publishes that title some time after the turn, so this
+        polls ``_TITLE_POLL_DELAYS`` rather than reading once. Every wait
+        re-checks the chat, so a manual rename or a delete during the poll
+        stops it instead of overwriting the user.
+
         ``user_text`` / ``assistant_text`` are accepted for call-site
         compatibility but unused: the native title is authoritative.
         """
-        chat = self._chats.get(chat_id)
-        if chat is None or chat.title != "New Chat":
-            return None
-        if not chat.session_id:
-            return None
+        for delay in self._TITLE_POLL_DELAYS:
+            if delay:
+                await asyncio.sleep(delay)
+            chat = self._chats.get(chat_id)
+            # Bail on rename/delete, but not on a missing session: the turn
+            # may still be creating it, and a later poll will find it.
+            if chat is None or chat.title != "New Chat":
+                return None
+            if not chat.session_id:
+                continue
 
-        title = await self._native_chat_title(chat)
-        if not title:
-            return None
+            title = await self._native_chat_title(chat)
+            if not title:
+                continue
 
-        # Re-check: user may have renamed while we were reading.
-        chat = self._chats.get(chat_id)
-        if chat is None or chat.title != "New Chat":
-            return None
-        chat.title = title
-        self._save()
-        return title
+            # Re-check: user may have renamed while we were reading.
+            chat = self._chats.get(chat_id)
+            if chat is None or chat.title != "New Chat":
+                return None
+            chat.title = title
+            self._save()
+            return title
+        return None
 
     async def _native_chat_title(self, chat: ChatInfo) -> str | None:
         """Read the provider's own session title for a chat."""
