@@ -121,3 +121,47 @@ def test_release_wheel_bundles_every_ciao_module(tmp_path: Path) -> None:
     missing = sorted(expected_modules - bundled)
     assert not missing, f"wheel is missing modules: {missing}"
     assert "ciao/native_sidecar.py" in bundled
+
+
+@pytest.mark.skipif(importlib.util.find_spec("build") is None, reason="build is required")
+def test_release_wheel_bundles_every_stock_skill_file(tmp_path: Path) -> None:
+    """Build the release wheel and assert every file under ciao/stock/skills/ ships."""
+    repo = Path(__file__).resolve().parents[1]
+    outdir = tmp_path / "wheels"
+    outdir.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--outdir",
+            str(outdir),
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"python -m build failed:\n{result.stdout}\n{result.stderr}"
+
+    wheels = sorted(outdir.glob("*.whl"))
+    assert wheels, f"no wheel produced in {outdir}"
+
+    stock_root = repo / "ciao" / "stock" / "skills"
+    expected_files = {
+        path.relative_to(repo).as_posix()
+        for path in stock_root.rglob("*")
+        if path.is_file()
+    }
+    assert expected_files, "no stock skill files found to assert"
+
+    with zipfile.ZipFile(wheels[-1]) as wheel:
+        bundled = set(wheel.namelist())
+
+    missing = sorted(expected_files - bundled)
+    assert not missing, f"wheel is missing stock skill files: {missing}"
+    assert "ciao/stock/skills/visual-plan/SKILL.md" in bundled
+    assert "ciao/stock/skills/visual-plan/plan-template.md" in bundled
+    assert "ciao/stock/skills/visual-plan/visual-output.md" in bundled
