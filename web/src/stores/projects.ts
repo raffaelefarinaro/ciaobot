@@ -30,6 +30,7 @@ import type {
   EventsWsMessage,
   VoiceResult,
   InAppToast,
+  PackageStatus,
   PendingPermission,
   RuntimeProvider,
   WorkspaceInfo,
@@ -392,6 +393,7 @@ export const useProjectStore = defineStore('projects', () => {
   const eventsSocket = ref<WebSocket | null>(null)
   const toasts = ref<InAppToast[]>([])
   let toastCounter = 0
+  const packageStatus = ref<PackageStatus | null>(null)
 
   // Reactive mirror of document.visibilityState so `chatUnread` (and any other
   // computed that cares about foreground/background) re-evaluates correctly
@@ -412,6 +414,9 @@ export const useProjectStore = defineStore('projects', () => {
   // sends a message. The watchdog below force-reconnects such sockets.
   const WS_STALE_MS = 12000 // ~2 missed keepalives + margin
   const WS_LIVENESS_CHECK_MS = 2000
+  // Cheap GET; frequent enough that a background-app-store style badge
+  // reflects reality without checking on every render or route change.
+  const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000
   let lastEventsFrameAt = 0
   const lastChatFrameAt: Record<string, number> = {}
   const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
@@ -762,6 +767,37 @@ export const useProjectStore = defineStore('projects', () => {
   function dismissToast(id: number) {
     const idx = toasts.value.findIndex(t => t.id === id)
     if (idx >= 0) toasts.value.splice(idx, 1)
+  }
+
+  // Keyed by version so the toast fires once per newly-available release, not
+  // once per session for an update the user already knows about and hasn't
+  // installed yet. The Settings nav badge (ProjectSidebar.vue) is intentionally
+  // not gated the same way: it just mirrors packageStatus.update_available for
+  // as long as that stays true, the way the bell badge mirrors unread count.
+  const UPDATE_TOAST_SEEN_KEY = 'ciao-update-toast-seen-version'
+
+  async function checkPackageStatus() {
+    try {
+      const status = await api.get<PackageStatus>('/api/package/status')
+      packageStatus.value = status
+      if (status.update_available && status.latest_version) {
+        const seen = typeof localStorage !== 'undefined'
+          ? localStorage.getItem(UPDATE_TOAST_SEEN_KEY)
+          : null
+        if (seen !== status.latest_version) {
+          pushToast({
+            chat_id: '',
+            title: 'Update available',
+            body: `Ciaobot ${status.latest_version} is ready to install — see Settings.`,
+          })
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(UPDATE_TOAST_SEEN_KEY, status.latest_version)
+          }
+        }
+      }
+    } catch {
+      // Best-effort: the update badge just stays off if the check fails.
+    }
   }
 
   // Open a fresh chat in the active workspace's auto-managed General project,
@@ -1374,6 +1410,10 @@ export const useProjectStore = defineStore('projects', () => {
       // notificationclick didn't fire (iOS quirk), the SW still has the
       // target chat cached. Query it and navigate if present.
       checkPendingTarget()
+      if (!bootstrapped.value) {
+        void checkPackageStatus()
+        window.setInterval(checkPackageStatus, UPDATE_CHECK_INTERVAL_MS)
+      }
     } finally {
       bootstrapped.value = true
     }
@@ -4526,5 +4566,6 @@ export const useProjectStore = defineStore('projects', () => {
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart,
     pushToast, pushErrorToast, dismissToast, fixError, restoreDraft,
+    packageStatus, checkPackageStatus,
   }
 })

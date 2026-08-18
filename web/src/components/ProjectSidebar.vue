@@ -92,8 +92,8 @@
             to="/settings"
             class="nav-item touch-hit"
             :class="{ 'nav-item--active': mode === 'settings' }"
-            title="settings"
-            aria-label="settings"
+            :title="store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings'"
+            :aria-label="store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings'"
           >
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -106,6 +106,7 @@
               <rect x="15" y="15" width="4" height="4" fill="currentColor" />
             </svg>
                       <span class="nav-item-label" aria-hidden="true">settings</span>
+            <span v-if="store.packageStatus?.update_available" class="nav-item-badge" aria-hidden="true" />
           </router-link>
           <NotificationBell class="sidebar-bell" />
         </div>
@@ -1584,6 +1585,7 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .nav-item {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1618,6 +1620,25 @@ async function confirmDeleteChat(chatId: string) {
    max-width so it animates, and aria-hidden because .nav-item already carries a
    full aria-label - otherwise the accessible name would read "automations
    automations". */
+/* Mirrors NotificationBell's unread badge — a persistent signal, not a
+   count, so a pulsing dot reads better here than a numeral. */
+.nav-item-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent, #4c8bf5);
+  box-shadow: 0 0 0 2px var(--bg-elev, #1b1e26);
+  animation: nav-item-badge-pulse 2s ease-in-out infinite;
+}
+
+@keyframes nav-item-badge-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.85); }
+}
+
 .nav-item-label {
   max-width: 0;
   overflow: hidden;

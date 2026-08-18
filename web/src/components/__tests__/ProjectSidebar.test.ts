@@ -221,3 +221,63 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 })
+
+describe('ProjectSidebar update badge', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  function mountSidebar() {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    return router.push('/').then(() => router.isReady()).then(() => mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: {
+        plugins: [router],
+        stubs: { NotificationBell: true },
+      },
+    }))
+  }
+
+  it('shows a pulsing dot on the settings nav item when an update is available', async () => {
+    const store = useProjectStore()
+    store.packageStatus = {
+      current_version: '0.9.1',
+      latest_version: '9.9.9',
+      update_available: true,
+      mode: 'bundled_app',
+    }
+    const wrapper = await mountSidebar()
+    await nextTick()
+
+    const settingsLink = wrapper.get('a[href="/settings"]')
+    expect(settingsLink.find('.nav-item-badge').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('shows no badge when already up to date', async () => {
+    const store = useProjectStore()
+    store.packageStatus = {
+      current_version: '0.9.1',
+      latest_version: '0.9.1',
+      update_available: false,
+      mode: 'bundled_app',
+    }
+    const wrapper = await mountSidebar()
+    await nextTick()
+
+    const settingsLink = wrapper.get('a[href="/settings"]')
+    expect(settingsLink.find('.nav-item-badge').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+})

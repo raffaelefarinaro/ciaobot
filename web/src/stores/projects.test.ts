@@ -2906,6 +2906,49 @@ describe('orphaned draft recovery on load', () => {
   })
 })
 
+describe('update-available notification', () => {
+  test('checkPackageStatus sets packageStatus and toasts once per new version', async () => {
+    const store = useProjectStore()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/package/status') {
+        return Promise.resolve({
+          current_version: '0.9.1', latest_version: '9.9.9', update_available: true, mode: 'bundled_app',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await store.checkPackageStatus()
+
+    expect(store.packageStatus?.update_available).toBe(true)
+    const toast = store.toasts.find(t => t.title === 'Update available')
+    expect(toast).toBeTruthy()
+    expect(toast?.body).toContain('9.9.9')
+
+    // A second check for the same version must not toast again.
+    store.toasts.length = 0
+    await store.checkPackageStatus()
+    expect(store.toasts.some(t => t.title === 'Update available')).toBe(false)
+  })
+
+  test('checkPackageStatus does not toast when already up to date', async () => {
+    const store = useProjectStore()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/package/status') {
+        return Promise.resolve({
+          current_version: '0.9.1', latest_version: '0.9.1', update_available: false, mode: 'bundled_app',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await store.checkPackageStatus()
+
+    expect(store.packageStatus?.update_available).toBe(false)
+    expect(store.toasts.some(t => t.title === 'Update available')).toBe(false)
+  })
+})
+
 describe('gws health toast', () => {
   test('surfaces an error toast whose Fix action routes to Settings → Workspaces', () => {
     const store = useProjectStore()
