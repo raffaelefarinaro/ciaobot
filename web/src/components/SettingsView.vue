@@ -825,11 +825,13 @@
                 <label class="settings-field">
                   <span class="ws-label">Default model</span>
                   <ModelSelector
+                    v-if="section.configurable"
                     :model-value="providerDefaultModelSelectorValue(section.key)"
                     :sections="providerDefaultModelSectionsFor(section.key)"
                     :disabled="routinesSaving || !section.available"
                     @update:model-value="saveProviderDefaultModel(section.key, $event)"
                   />
+                  <span v-else class="hint hint--compact">Automatic — Claude Code picks its own default.</span>
                 </label>
                 <label class="settings-field">
                   <span class="ws-label">Default thinking</span>
@@ -1741,7 +1743,10 @@
             </div>
           </template>
         </div>
+      </template>
 
+      <!-- COMMANDS TAB -->
+      <template v-if="currentTab === 'commands'">
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
@@ -3531,10 +3536,15 @@ function assetOriginClass(origin: AssetOrigin): string {
 }
 
 function commandOrigin(command: { editable?: boolean; scope?: string }): AssetOrigin {
-  if (command.editable || command.scope === 'custom') return 'custom'
+  // Scope is definitive when set: stock commands/subagents are seeded into
+  // the same editable location as custom ones (so users can override them
+  // in place), so `editable` alone can't distinguish "built-in" from
+  // "custom" — it's only a fallback for the rare case scope is unset.
+  if (command.scope === 'custom') return 'custom'
   if (command.scope === 'built-in') return 'builtin'
   if (command.scope === 'global') return 'global'
-  return 'installed'
+  if (command.scope === 'installed') return 'installed'
+  return command.editable ? 'custom' : 'installed'
 }
 
 function subagentOrigin(agent: { editable?: boolean; scope?: string }): AssetOrigin {

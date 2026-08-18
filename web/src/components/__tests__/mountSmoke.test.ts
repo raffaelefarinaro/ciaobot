@@ -301,9 +301,10 @@ vi.mock('../../lib/api', () => {
       models: ['haiku', 'sonnet', 'opus', 'fable'],
       default: 'sonnet',
       provider_models: {
+        claude: ['haiku', 'sonnet', 'opus', 'fable'],
         codex: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'],
       },
-      provider_defaults: { codex: 'gpt-5.6-terra' },
+      provider_defaults: { claude: 'sonnet', codex: 'gpt-5.6-terra' },
       codex_models: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'],
       alias_tiers: {
         codex: {
@@ -853,7 +854,9 @@ describe('component mount smoke', () => {
     expect(providerOptions).toContain('Anthropic (via Claude Code)')
     expect(providerOptions).toContain('OpenAI (via Codex)')
     expect(providerOptions).toContain('opencode')
-    expect(wrapper.findAll('select.workspace-select')).toHaveLength(3)
+    // Provider and GWS profile are native selects; Default model uses the
+    // custom ModelSelector component, not a third native <select>.
+    expect(wrapper.findAll('select.workspace-select')).toHaveLength(2)
 
     const providerField = wrapper.findAll('label.settings-field')
       .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
@@ -1073,15 +1076,12 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView shows signed-out providers with their defaults disabled', async () => {
-    // Drive the mock by patching /api/settings/routines: the mock merges the
-    // body into the shared routineSettings, so a subsequent GET (which
-    // fetchRoutines issues on mount) returns the flipped backends.
-    const original = await api.get<Record<string, unknown>>('/api/settings/routines')
-    const originalBackends = original.backends as Record<string, boolean>
-    await api.patch('/api/settings/routines', {
-      backends: { anthropic: true },
-    })
+  it('SettingsView omits the defaults row for a signed-out provider', async () => {
+    // aliasProviderSections (SettingsView.vue) derives availability from
+    // /api/models' provider_models / {provider}_models, not from
+    // /api/settings/routines' backends field. The shared fixture already
+    // omits opencode there, so it is "signed out" by default: its
+    // "defaults per provider" row must not render at all.
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -1092,15 +1092,12 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    try {
-      // A signed-out provider (opencode) is not available; its default-model
-      // selector is disabled rather than offering models.
-      const disabledSelectors = wrapper.findAll('.model-selector--disabled')
-      expect(disabledSelectors.length).toBeGreaterThan(0)
-    } finally {
-      await api.patch('/api/settings/routines', { backends: originalBackends })
-      wrapper.unmount()
-    }
+    const rowTitles = wrapper.findAll('.provider-defaults-row .provider-defaults-title').map((el) => el.text())
+    expect(rowTitles).toContain('Anthropic (via Claude Code)')
+    expect(rowTitles).toContain('OpenAI (via Codex)')
+    expect(rowTitles).not.toContain('opencode')
+
+    wrapper.unmount()
   })
 
   it('SettingsView saves routine models by provider', async () => {
