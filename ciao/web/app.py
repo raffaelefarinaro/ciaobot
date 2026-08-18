@@ -102,7 +102,6 @@ from ciao.web.routes_api import (
     setup_status_endpoint,
     list_automation,
     trigger_backfill_insights,
-    compare_apple_insights_route,
     list_completed_projects,
     list_projects,
     list_loops,
@@ -279,7 +278,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Automation status (read-only) — Settings → Automation page
         Route("/api/automation", list_automation, methods=["GET"]),
         Route("/api/automation/backfill-insights", trigger_backfill_insights, methods=["POST"]),
-        Route("/api/automation/compare-apple-insights", compare_apple_insights_route, methods=["POST"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
         Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)

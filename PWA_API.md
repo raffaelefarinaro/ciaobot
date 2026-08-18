@@ -79,7 +79,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | PATCH, DELETE | `/api/loops/{loop_id}` | Update, start/stop (`{"running": bool}`), or delete a loop |
 | GET | `/api/automation` | Background-job status (Settings → Automations): per job its trigger, last run, duration, model, errors, and bulk `sub_jobs`. Omits retired jobs and schedule-only jobs whose schedule is not installed |
 | POST | `/api/automation/backfill-insights` | Run Session insights over every archived chat missing them. Optional `{"model": "<model-id>"}` runs this pass with a different model without changing the stored setting |
-| POST | `/api/automation/compare-apple-insights` | Compare Apple Intelligence with existing archived Session insights; does not modify archives |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/agent-assets` | List instruction sources, subagents, slash commands, and workspace health for Settings |

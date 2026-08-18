@@ -46,7 +46,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/profiles/add": "browser Settings action; registers a Google account for linking",
     "/api/integrations/gws/profiles/remove": "browser Settings action; deletes a Google account and its local credentials",
     "/api/automation/backfill-insights": "browser Settings button to trigger insights backfill",
-    "/api/automation/compare-apple-insights": "browser Settings button for an on-device insights comparison",
     "/api/node/connect": "browser Settings host/client connect; tunnels this node to a remote host",
     "/api/node/demote": "node state management endpoint; demotes active node to standby",
     "/api/node/handover": "node state management endpoint; hands over active role to peer",

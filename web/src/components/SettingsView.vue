@@ -497,35 +497,6 @@
                     &middot; {{ getJobLastError('insights') }}
                   </span>
                 </div>
-                <div class="routine-actions">
-                  <button
-                    v-if="appleModelAvailable"
-                    type="button"
-                    class="btn-small"
-                    :disabled="insightsComparisonPending || routinesSaving"
-                    @click="compareAppleInsights"
-                  >{{ insightsComparisonPending ? 'Comparing…' : 'Compare Apple Intelligence' }}</button>
-                </div>
-                <div v-if="insightsComparison" class="routine-comparison">
-                  <span v-if="!insightsComparison.available" class="hint--warn">
-                    {{ insightsComparison.reason || 'Apple Intelligence is unavailable.' }}
-                  </span>
-                  <span v-else-if="!insightsComparison.results.length" class="hint">
-                    {{ insightsComparison.reason || 'No archived chats with Session insights were found.' }}
-                  </span>
-                  <template v-else>
-                    <span class="hint">Apple re-ran the text-only extraction on {{ insightsComparison.results.length }} existing archive(s). Shared headings show where the signal matched.</span>
-                    <div v-for="result in insightsComparison.results" :key="result.archive" class="routine-comparison-result">
-                      <strong>{{ result.archive }}</strong>
-                      <span v-if="result.error" class="hint--warn"> · {{ result.error }}</span>
-                      <span v-else> · shared: {{ result.shared_sections?.join(', ') || 'none' }}</span>
-                      <details v-if="result.apple_output">
-                        <summary>Apple output</summary>
-                        <pre>{{ result.apple_output }}</pre>
-                      </details>
-                    </div>
-                  </template>
-                </div>
               </div>
               <div
                 class="routine-model-controls"
@@ -2636,20 +2607,6 @@ const routinesLoaded = ref(false)
 const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
-const insightsComparisonPending = ref(false)
-type InsightsComparison = {
-  available: boolean
-  reason?: string
-  results: Array<{
-    archive: string
-    shared_sections?: string[]
-    existing_only?: string[]
-    apple_only?: string[]
-    apple_output?: string
-    error?: string
-  }>
-}
-const insightsComparison = ref<InsightsComparison | null>(null)
 
 // Every provider with models is a runtime provider now.
 type AliasProviderKey = RuntimeProvider
@@ -2697,22 +2654,6 @@ async function saveRoutines(patch: Record<string, unknown>) {
 // Apple's on-device model is hardware-gated: it shows only when this machine
 // can run it. No app-side opt-in flag any more.
 const appleModelAvailable = computed(() => routines.value?.apple_model_available === true)
-
-async function compareAppleInsights() {
-  insightsComparisonPending.value = true
-  insightsComparison.value = null
-  try {
-    insightsComparison.value = await api.post<InsightsComparison>('/api/automation/compare-apple-insights', { limit: 2 })
-  } catch (e) {
-    insightsComparison.value = {
-      available: false,
-      reason: errorMessage(e, 'Comparison failed'),
-      results: [],
-    }
-  } finally {
-    insightsComparisonPending.value = false
-  }
-}
 
 function parseModelList(raw: string): string[] {
   const seen = new Set<string>()

@@ -4661,23 +4661,6 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
     return JSONResponse({"status": "started", "model": model}, status_code=202)
 
 
-async def compare_apple_insights_route(request: Request) -> JSONResponse:
-    """Compare Apple Intelligence with a small sample of existing insights."""
-    from ciao.insights import compare_apple_insights
-
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001 — empty body uses the default sample size
-        body = {}
-    raw_limit = (body or {}).get("limit", 2) if isinstance(body, dict) else 2
-    try:
-        limit = max(1, min(int(raw_limit), 5))
-    except (TypeError, ValueError):
-        limit = 2
-    result = await compare_apple_insights(request.app.state.config, limit=limit)
-    return JSONResponse(result)
-
-
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     state = request.app.state.state_store
