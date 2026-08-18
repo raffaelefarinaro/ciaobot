@@ -2,19 +2,6 @@
   <div class="memory-map">
     <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')">
       <template #actions>
-        <div v-if="workspaceOptions.length > 1" class="mm-workspace-toggle">
-          <button
-            v-for="ws in workspaceOptions"
-            :key="ws.name"
-            type="button"
-            class="touch-hit"
-            :class="{ active: activeWorkspace === ws.name }"
-            :data-workspace-color="colorForWorkspace(ws)"
-            @click="selectWorkspace(ws.name)"
-          >
-            {{ workspaceLabel(ws.name) }}
-          </button>
-        </div>
         <div class="mm-seg">
           <button type="button" :class="{ active: view === 'graph' }" @click="view = 'graph'">Graph</button>
           <button type="button" :class="{ active: view === 'list' }" @click="view = 'list'">List</button>
@@ -23,58 +10,8 @@
     </PaneHeader>
 
     <div class="mm-body">
-      <aside class="mm-sidebar">
-        <h3>Vault</h3>
-        <div class="mm-stat-grid">
-          <div class="mm-stat"><div class="n">{{ visibleNodes.length }}</div><div class="l">notes shown</div></div>
-          <div class="mm-stat"><div class="n">{{ visibleEdgeCount }}</div><div class="l">links</div></div>
-          <div class="mm-stat"><div class="n">{{ orphanCount }}</div><div class="l">orphaned</div></div>
-          <div class="mm-stat"><div class="n">{{ nodes.length }}</div><div class="l">total</div></div>
-        </div>
-
-        <div class="mm-search">
-          <input v-model="search" type="text" placeholder="Search notes, tags…" autocomplete="off" />
-        </div>
-
-        <div class="mm-row-between">
-          <h3>Categories</h3>
-          <button type="button" class="mm-link" @click="resetCategories">reset</button>
-        </div>
-        <div class="mm-chip-row">
-          <div
-            v-for="cat in categoryList"
-            :key="cat.key"
-            class="mm-chip"
-            :class="{ off: !activeCats.has(cat.key) }"
-            @click="toggleCategory(cat.key)"
-          >
-            <span class="dot" :style="{ background: cat.color }" />
-            <span class="label">{{ cat.label }}</span>
-            <span class="cnt">{{ cat.count }}</span>
-            <button type="button" class="only" @click.stop="isolateCategory(cat.key)">only</button>
-          </div>
-        </div>
-
-        <template v-if="mostConnected.length">
-          <h3>Most connected</h3>
-          <div class="mm-link-list">
-            <div v-for="n in mostConnected" :key="n.id" class="mm-link-item" @click="focusNode(n.id)">
-              <span class="dot" :style="{ background: colorForNode(n) }" />
-              <span class="label">{{ n.title }}</span>
-              <span class="cnt">{{ n.degree }}</span>
-            </div>
-          </div>
-        </template>
-
-        <h3>Path finder</h3>
-        <p class="mm-hint">
-          {{ pathHint }}
-        </p>
-        <button v-if="pathStart || pathEnd" type="button" class="mm-link" @click="resetPath">clear path</button>
-      </aside>
-
-      <div v-if="loading" class="mm-empty">Loading vault graph…</div>
-      <div v-else-if="loadError" class="mm-empty">{{ loadError }}</div>
+      <div v-if="mm.loading" class="mm-empty">Loading vault graph…</div>
+      <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
       <div v-else-if="view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
         <canvas
           ref="canvasEl"
@@ -101,7 +38,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="n in sortedVisibleNodes" :key="n.id" @click="selectNode(n.id)">
+            <tr v-for="n in sortedVisibleNodes" :key="n.id" @click="mm.selectNode(n.id)">
               <td><span class="dot" :style="{ background: colorForNode(n) }" />{{ n.title }}</td>
               <td class="muted">{{ categoryLabelFor(n) }}</td>
               <td>
@@ -114,29 +51,29 @@
       </div>
 
       <aside class="mm-detail">
-        <div v-if="!selectedNode" class="mm-empty-detail">
+        <div v-if="!mm.selectedNode" class="mm-empty-detail">
           Select a note to see its tags, description, and what it links to.
         </div>
         <template v-else>
-          <div class="mm-detail-type">{{ categoryLabelFor(selectedNode) }}</div>
-          <div class="mm-detail-title">{{ selectedNode.title }}</div>
-          <div v-if="selectedNode.description" class="mm-detail-desc">{{ selectedNode.description }}</div>
-          <div class="mm-detail-path">{{ selectedNode.id }}</div>
+          <div class="mm-detail-type">{{ categoryLabelFor(mm.selectedNode) }}</div>
+          <div class="mm-detail-title">{{ mm.selectedNode.title }}</div>
+          <div v-if="mm.selectedNode.description" class="mm-detail-desc">{{ mm.selectedNode.description }}</div>
+          <div class="mm-detail-path">{{ mm.selectedNode.id }}</div>
 
-          <div v-if="selectedNode.tags.length" class="mm-detail-section">
+          <div v-if="mm.selectedNode.tags.length" class="mm-detail-section">
             <h4>Tags</h4>
-            <span v-for="t in selectedNode.tags" :key="t" class="pill">{{ t }}</span>
+            <span v-for="t in mm.selectedNode.tags" :key="t" class="pill">{{ t }}</span>
           </div>
-          <div v-if="selectedNode.aliases.length" class="mm-detail-section">
+          <div v-if="mm.selectedNode.aliases.length" class="mm-detail-section">
             <h4>Aliases</h4>
-            <span v-for="a in selectedNode.aliases" :key="a" class="pill">{{ a }}</span>
+            <span v-for="a in mm.selectedNode.aliases" :key="a" class="pill">{{ a }}</span>
           </div>
 
           <div class="mm-detail-section">
-            <h4>Linked notes ({{ neighborsOf(selectedNode.id).length }})</h4>
-            <div v-if="!neighborsOf(selectedNode.id).length" class="mm-hint">No links found — orphaned note.</div>
+            <h4>Linked notes ({{ mm.neighborsOf(mm.selectedNode.id).length }})</h4>
+            <div v-if="!mm.neighborsOf(mm.selectedNode.id).length" class="mm-hint">No links found — orphaned note.</div>
             <div
-              v-for="nb in neighborsOf(selectedNode.id)"
+              v-for="nb in mm.neighborsOf(mm.selectedNode.id)"
               :key="nb.id"
               class="mm-link-item"
               @click="focusNode(nb.id)"
@@ -152,249 +89,43 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
 import { useProjectStore } from '../stores/projects'
-import { api } from '../lib/api'
-import { workspaceLabel } from '../lib/workspaceLabel'
-import { colorForWorkspace } from '../lib/workspaceColors'
+import { useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, type MemoryGraphNode } from '../stores/memoryMap'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
-interface GraphNode {
-  id: string
-  title: string
-  type: string
-  tags: string[]
-  aliases: string[]
-  description: string
-  workspace: string
-  degree: number
-  // simulation state
-  x: number
-  y: number
-  vx: number
-  vy: number
-}
-interface GraphEdge { source: string; target: string }
-
 const store = useProjectStore()
-const workspaceOptions = computed(() => store.workspaceOptions)
-const activeWorkspace = ref(store.activeWorkspace || 'personal')
+const mm = useMemoryMapStore()
 
-function selectWorkspace(name: string) {
-  if (activeWorkspace.value === name) return
-  activeWorkspace.value = name
-  loadGraph()
+function colorForNode(n: MemoryGraphNode): string {
+  return categoryColorFor(catKeyFor(n))
 }
 
-function colorForNode(n: GraphNode): string {
-  return categoryColor(catKey(n))
-}
-
-// ---------- data load ----------
-const nodes = ref<GraphNode[]>([])
-const edges = ref<GraphEdge[]>([])
-const nodesById = computed(() => {
-  const map = new Map<string, GraphNode>()
-  nodes.value.forEach(n => map.set(n.id, n))
-  return map
-})
-const adjacency = computed(() => {
-  const map = new Map<string, string[]>()
-  nodes.value.forEach(n => map.set(n.id, []))
-  edges.value.forEach(e => {
-    map.get(e.source)?.push(e.target)
-    map.get(e.target)?.push(e.source)
-  })
-  return map
-})
-const loading = ref(false)
-const loadError = ref('')
-
-async function loadGraph() {
-  loading.value = true
-  loadError.value = ''
-  try {
-    const data = await api.get<{ nodes: any[]; edges: GraphEdge[] }>(
-      `/api/vault/graph?workspace=${encodeURIComponent(activeWorkspace.value)}`,
-    )
-    nodes.value = (data.nodes || []).map(n => ({
-      ...n,
-      tags: n.tags || [],
-      aliases: n.aliases || [],
-      description: n.description || '',
-      x: (Math.random() - 0.5) * 800,
-      y: (Math.random() - 0.5) * 800,
-      vx: 0,
-      vy: 0,
-    }))
-    edges.value = (data.edges || []).filter(e => e.source !== e.target)
-    activeCats.clear()
-    categoryList.value.forEach(c => activeCats.add(c.key))
-    selectedId.value = null
-    resetPath()
-    resetCamera()
-  } catch (err) {
-    loadError.value = err instanceof Error ? err.message : 'Failed to load the vault graph.'
-  } finally {
-    loading.value = false
-  }
-}
-
-// ---------- categories ----------
-const TYPE_META: Record<string, { label: string; color: string }> = {
-  'person-self': { label: 'You', color: '#eab676' },
-  'person-family': { label: 'Family & partner', color: '#f2789f' },
-  'person-friend': { label: 'Friends', color: '#f2a65a' },
-  'person-colleague': { label: 'Colleagues', color: '#7dc4e4' },
-  'person-external': { label: 'External contacts', color: '#9aa5b1' },
-  'person-person': { label: 'Other people', color: '#b48ead' },
-  project: { label: 'Projects', color: '#7aa2f7' },
-  'project-log': { label: 'Project logs', color: '#5f7fd6' },
-  resource: { label: 'Resources', color: '#38bdae' },
-  reference: { label: 'References', color: '#e0af68' },
-  note: { label: 'Notes', color: '#9099b2' },
-  log: { label: 'Logs', color: '#6b7280' },
-  idea: { label: 'Ideas', color: '#f7768e' },
-  place: { label: 'Places', color: '#73daca' },
-  plan: { label: 'Plans', color: '#7c82e0' },
-  analysis: { label: 'Analysis', color: '#61dafb' },
-  document: { label: 'Documents', color: '#c99b6a' },
-  hub: { label: 'Workspace hubs', color: '#ffffff' },
-  'skill-proposal': { label: 'Skill proposals', color: '#576079' },
-}
-function personSubtype(tags: string[]): string {
-  const t = new Set(tags)
-  if (t.has('self')) return 'self'
-  if (t.has('family')) return 'family'
-  if (t.has('friend')) return 'friend'
-  if (t.has('customer') || t.has('external')) return 'external'
-  if (t.has('scandit') || t.has('colleague')) return 'colleague'
-  return 'person'
-}
-function catKey(n: GraphNode): string {
-  if (n.type === 'person') return 'person-' + personSubtype(n.tags)
-  return n.type || 'note'
-}
-function categoryColor(key: string): string {
-  return TYPE_META[key]?.color || '#8892a6'
-}
-function categoryLabelFor(n: GraphNode): string {
-  return TYPE_META[catKey(n)]?.label || (n.type || 'note')
-}
-
-const activeCats = reactive(new Set<string>())
-const categoryList = computed(() => {
-  const counts = new Map<string, number>()
-  nodes.value.forEach(n => {
-    const key = catKey(n)
-    counts.set(key, (counts.get(key) || 0) + 1)
-  })
-  return [...counts.entries()]
-    .map(([key, count]) => ({ key, count, label: TYPE_META[key]?.label || key, color: categoryColor(key) }))
-    .sort((a, b) => b.count - a.count)
-})
-
-function toggleCategory(key: string) {
-  if (activeCats.has(key)) activeCats.delete(key)
-  else activeCats.add(key)
-}
-function isolateCategory(key: string) {
-  activeCats.clear()
-  activeCats.add(key)
-}
-function resetCategories() {
-  activeCats.clear()
-  categoryList.value.forEach(c => activeCats.add(c.key))
-}
-
-// ---------- search / filtering ----------
-const search = ref('')
-function matchesSearch(n: GraphNode, term: string): boolean {
-  const t = term.toLowerCase()
-  return (
-    n.title.toLowerCase().includes(t) ||
-    n.aliases.some(a => a.toLowerCase().includes(t)) ||
-    n.tags.some(tag => tag.toLowerCase().includes(t))
-  )
-}
-const visibleNodes = computed(() =>
-  nodes.value.filter(n => activeCats.has(catKey(n)) && (!search.value.trim() || matchesSearch(n, search.value))),
-)
-const visibleIds = computed(() => new Set(visibleNodes.value.map(n => n.id)))
-const visibleEdgeCount = computed(
-  () => edges.value.filter(e => visibleIds.value.has(e.source) && visibleIds.value.has(e.target)).length,
-)
-const orphanCount = computed(() => visibleNodes.value.filter(n => n.degree === 0).length)
-const mostConnected = computed(() =>
-  [...visibleNodes.value].sort((a, b) => b.degree - a.degree).slice(0, 6).filter(n => n.degree > 0),
-)
-
-function neighborsOf(id: string): GraphNode[] {
-  return (adjacency.value.get(id) || []).map(nid => nodesById.value.get(nid)).filter(Boolean) as GraphNode[]
-}
+// The graph always follows the workspace switcher shared with every other
+// view (sidebar toggle, number-key shortcut, chat header) — the store
+// itself watches `store.activeWorkspace` and reloads, so a switch made
+// while this view isn't even mounted still lands correctly next time it is.
+watch(() => store.activeWorkspace, () => resetCamera())
 
 // ---------- selection / detail panel ----------
-const selectedId = ref<string | null>(null)
-const selectedNode = computed(() => (selectedId.value ? nodesById.value.get(selectedId.value) || null : null))
-function selectNode(id: string | null) {
-  selectedId.value = id
-}
+// The sidebar's "most connected" list and this view's own neighbor links
+// both go through `mm.requestFocus`, which bumps `focusSignal` below; the
+// canvas is the only thing that knows how to pan/zoom, so it is the only
+// thing that reacts to it.
 function focusNode(id: string) {
-  selectedId.value = id
-  const n = nodesById.value.get(id)
+  mm.requestFocus(id)
+}
+watch(() => mm.focusSignal.seq, () => {
+  const id = mm.focusSignal.id
+  if (!id) return
+  const n = mm.nodesById.get(id)
   if (n) {
     camera.x = -n.x * camera.scale
     camera.y = -n.y * camera.scale
   }
-}
-
-// ---------- path finder ----------
-const pathStart = ref<string | null>(null)
-const pathEnd = ref<string | null>(null)
-const pathIds = computed<Set<string>>(() => {
-  if (!pathStart.value || !pathEnd.value) return new Set()
-  const visited = new Map<string, string | null>([[pathStart.value, null]])
-  const queue = [pathStart.value]
-  while (queue.length) {
-    const cur = queue.shift() as string
-    if (cur === pathEnd.value) break
-    for (const nb of adjacency.value.get(cur) || []) {
-      if (!visited.has(nb)) {
-        visited.set(nb, cur)
-        queue.push(nb)
-      }
-    }
-  }
-  if (!visited.has(pathEnd.value)) return new Set()
-  const chain: string[] = []
-  let cur: string | null = pathEnd.value
-  while (cur !== null) {
-    chain.push(cur)
-    cur = visited.get(cur) ?? null
-  }
-  return new Set(chain)
 })
-const pathHint = computed(() => {
-  if (!pathStart.value) return 'Shift-click a note to start, then shift-click another to trace the shortest path between them.'
-  if (!pathEnd.value) return `Start: ${nodesById.value.get(pathStart.value)?.title || pathStart.value}. Shift-click another note.`
-  if (pathIds.value.size === 0) return 'No path found between those two notes.'
-  return `${pathIds.value.size} notes on the path.`
-})
-function resetPath() {
-  pathStart.value = null
-  pathEnd.value = null
-}
-function handleNodeClick(id: string, shiftKey: boolean) {
-  if (shiftKey) {
-    if (!pathStart.value) pathStart.value = id
-    else if (!pathEnd.value) pathEnd.value = id
-    else { pathStart.value = id; pathEnd.value = null }
-    return
-  }
-  selectNode(id)
-}
 
 // ---------- canvas force layout ----------
 const canvasEl = ref<HTMLCanvasElement | null>(null)
@@ -430,7 +161,7 @@ function worldToScreen(x: number, y: number): [number, number] {
 function screenToWorld(sx: number, sy: number): [number, number] {
   return [(sx - W / 2 - camera.x) / camera.scale, (sy - H / 2 - camera.y) / camera.scale]
 }
-function nodeRadius(n: GraphNode): number {
+function nodeRadius(n: MemoryGraphNode): number {
   return 4 + Math.min(10, Math.sqrt(n.degree + 1) * 2.4)
 }
 function hexToRgba(hex: string, a: number): string {
@@ -441,8 +172,27 @@ function hexToRgba(hex: string, a: number): string {
   return `rgba(${r},${g},${b},${a})`
 }
 
+// `v-if="loading"` (and the load-error branch) unmount the `<canvas>` and
+// its wrapper entirely while a fetch is in flight — including on a
+// workspace switch, which reloads the graph. Re-acquiring the 2D context
+// and re-observing the new wrapper here, instead of only once in
+// onMounted, is what keeps the canvas from going permanently blank after a
+// workspace switch: without it, `ctx`/`ro` kept pointing at the DOM nodes
+// from the *previous* graph load, which had already been discarded.
+function attachCanvas() {
+  if (!canvasEl.value || !canvasWrap.value) return
+  ctx = canvasEl.value.getContext('2d')
+  ro?.disconnect()
+  ro = new ResizeObserver(() => resizeCanvas())
+  ro.observe(canvasWrap.value)
+  resizeCanvas()
+}
+watch(canvasEl, (el) => {
+  if (el) nextTick(() => attachCanvas())
+})
+
 function stepSimulation() {
-  const vis = visibleNodes.value
+  const vis = mm.visibleNodes
   const REPEL = 2600
   const SPRING = 0.02
   const SPRING_LEN = 90
@@ -469,11 +219,11 @@ function stepSimulation() {
     fy += -a.y * CENTER
     forces.set(a.id, { fx, fy })
   }
-  const visSet = visibleIds.value
-  edges.value.forEach(e => {
+  const visSet = mm.visibleIds
+  mm.edges.forEach(e => {
     if (!visSet.has(e.source) || !visSet.has(e.target)) return
-    const a = nodesById.value.get(e.source)
-    const b = nodesById.value.get(e.target)
+    const a = mm.nodesById.get(e.source)
+    const b = mm.nodesById.get(e.target)
     if (!a || !b) return
     const dx = b.x - a.x
     const dy = b.y - a.y
@@ -499,21 +249,21 @@ function stepSimulation() {
 function draw() {
   if (!ctx) return
   ctx.clearRect(0, 0, W, H)
-  const vis = visibleNodes.value
-  const visSet = visibleIds.value
-  const highlightSet = pathIds.value.size
-    ? pathIds.value
-    : selectedId.value
-      ? new Set([selectedId.value, ...(adjacency.value.get(selectedId.value) || [])])
+  const vis = mm.visibleNodes
+  const visSet = mm.visibleIds
+  const highlightSet = mm.pathIds.size
+    ? mm.pathIds
+    : mm.selectedId
+      ? new Set([mm.selectedId, ...(mm.adjacency.get(mm.selectedId) || [])])
       : null
 
   ctx.lineWidth = dpr
-  edges.value.forEach(e => {
+  mm.edges.forEach(e => {
     if (!visSet.has(e.source) || !visSet.has(e.target)) return
-    const a = nodesById.value.get(e.source)
-    const b = nodesById.value.get(e.target)
+    const a = mm.nodesById.get(e.source)
+    const b = mm.nodesById.get(e.target)
     if (!a || !b) return
-    const onPath = pathIds.value.has(e.source) && pathIds.value.has(e.target)
+    const onPath = mm.pathIds.has(e.source) && mm.pathIds.has(e.target)
     const dim = highlightSet && !(highlightSet.has(e.source) && highlightSet.has(e.target))
     const [ax, ay] = worldToScreen(a.x, a.y)
     const [bx, by] = worldToScreen(b.x, b.y)
@@ -533,7 +283,7 @@ function draw() {
     const [sx, sy] = worldToScreen(n.x, n.y)
     const r = nodeRadius(n) * dpr * Math.max(0.7, Math.min(1.6, camera.scale))
     const dim = highlightSet && !highlightSet.has(n.id)
-    const isSel = n.id === selectedId.value || pathIds.value.has(n.id)
+    const isSel = n.id === mm.selectedId || mm.pathIds.has(n.id)
     ctx!.beginPath()
     ctx!.arc(sx, sy, r, 0, Math.PI * 2)
     ctx!.fillStyle = dim ? hexToRgba(colorForNode(n), 0.18) : colorForNode(n)
@@ -558,8 +308,8 @@ function tick() {
   rafId = requestAnimationFrame(tick)
 }
 
-function hitTest(wx: number, wy: number): GraphNode | null {
-  const vis = visibleNodes.value
+function hitTest(wx: number, wy: number): MemoryGraphNode | null {
+  const vis = mm.visibleNodes
   for (let i = vis.length - 1; i >= 0; i--) {
     const n = vis[i]
     const r = nodeRadius(n) + 3
@@ -570,7 +320,7 @@ function hitTest(wx: number, wy: number): GraphNode | null {
   return null
 }
 
-let dragging: GraphNode | null = null
+let dragging: MemoryGraphNode | null = null
 let panStart: { x: number; y: number; cx: number; cy: number } | null = null
 let dragged = false
 
@@ -607,8 +357,8 @@ function onMouseMove(e: MouseEvent) {
   }
 }
 function onMouseUp() {
-  if (dragging && !dragged) handleNodeClick(dragging.id, !!(dragging as any)._shiftIntent)
-  else if (!dragging && !dragged) selectNode(null)
+  if (dragging && !dragged) mm.handleNodeClick(dragging.id, !!(dragging as any)._shiftIntent)
+  else if (!dragging && !dragged) mm.selectNode(null)
   dragging = null
   panStart = null
   window.removeEventListener('mousemove', onMouseMove)
@@ -628,7 +378,7 @@ function setSort(key: 'title' | 'type' | 'degree') {
   else { sortKey.value = key; sortDir.value = 1 }
 }
 const sortedVisibleNodes = computed(() => {
-  const arr = [...visibleNodes.value]
+  const arr = [...mm.visibleNodes]
   arr.sort((a, b) => {
     const av = sortKey.value === 'degree' ? a.degree : (a as any)[sortKey.value] || ''
     const bv = sortKey.value === 'degree' ? b.degree : (b as any)[sortKey.value] || ''
@@ -641,14 +391,10 @@ const sortedVisibleNodes = computed(() => {
 
 // ---------- lifecycle ----------
 onMounted(async () => {
-  await loadGraph()
+  await mm.loadGraph(store.activeWorkspace)
+  resetCamera()
   await nextTick()
-  if (canvasEl.value) ctx = canvasEl.value.getContext('2d')
-  resizeCanvas()
-  if (canvasWrap.value) {
-    ro = new ResizeObserver(() => resizeCanvas())
-    ro.observe(canvasWrap.value)
-  }
+  attachCanvas()
   rafId = requestAnimationFrame(tick)
 })
 onBeforeUnmount(() => {
@@ -670,55 +416,28 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 210px 1fr 280px;
+  grid-template-columns: 1fr 280px;
 }
 @media (max-width: 900px) {
   .mm-body { grid-template-columns: 1fr; }
-  .mm-sidebar, .mm-detail { display: none; }
+  .mm-detail { display: none; }
 }
 
-.mm-sidebar, .mm-detail {
+.mm-detail {
   overflow-y: auto;
   padding: var(--space-3);
   background: var(--bg2);
+  border-left: 1px solid var(--border);
 }
-.mm-sidebar { border-right: 1px solid var(--border); }
-.mm-detail { border-left: 1px solid var(--border); }
 
-.mm-sidebar h3, .mm-detail h4 {
+.mm-detail h4 {
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--fg3);
   margin: var(--space-4) 0 var(--space-2);
 }
-.mm-sidebar h3:first-child { margin-top: 0; }
-.mm-row-between { display: flex; align-items: baseline; justify-content: space-between; }
-.mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
 .mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
-
-.mm-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
-.mm-stat { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; }
-.mm-stat .n { font-size: var(--text-lg); font-weight: 600; }
-.mm-stat .l { font-size: var(--text-xs); color: var(--fg3); }
-
-.mm-search input { width: 100%; font-size: var(--text-sm); }
-
-.mm-chip-row { display: flex; flex-direction: column; gap: 2px; }
-.mm-chip {
-  display: flex; align-items: center; gap: 7px; padding: 5px 6px; border-radius: var(--radius-sm);
-  cursor: pointer; font-size: var(--text-sm); color: var(--fg2);
-}
-.mm-chip:hover { background: var(--bg3); }
-.mm-chip.off { opacity: 0.35; }
-.mm-chip .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.mm-chip .cnt { margin-left: auto; color: var(--fg3); font-variant-numeric: tabular-nums; }
-.mm-chip .only {
-  display: none; margin-left: auto; background: none; border: none; color: var(--accent);
-  font-size: var(--text-xs); padding: 1px 4px; border-radius: 4px; cursor: pointer;
-}
-.mm-chip:hover .cnt { display: none; }
-.mm-chip:hover .only { display: inline; }
 
 .mm-link-list { display: flex; flex-direction: column; gap: 2px; }
 .mm-link-item {
@@ -758,9 +477,9 @@ onBeforeUnmount(() => {
 .mm-detail-section { margin: var(--space-3) 0; }
 .pill { display: inline-block; background: var(--bg3); border-radius: var(--radius-pill); padding: 2px 9px; font-size: var(--text-xs); margin: 0 4px 4px 0; color: var(--fg2); }
 
-.mm-seg, .mm-workspace-toggle { display: flex; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
-.mm-seg button, .mm-workspace-toggle button {
+.mm-seg { display: flex; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.mm-seg button {
   background: transparent; border: none; color: var(--fg2); padding: 6px 12px; font-size: var(--text-sm); cursor: pointer; font-family: var(--font);
 }
-.mm-seg button.active, .mm-workspace-toggle button.active { background: var(--accent); color: #fff; }
+.mm-seg button.active { background: var(--accent); color: #fff; }
 </style>

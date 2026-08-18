@@ -351,6 +351,72 @@
       </div>
     </template>
 
+    <template v-if="!collapsed && mode === 'memory'">
+      <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
+        <button
+          v-for="workspace in store.workspaceOptions"
+          :key="workspace.name"
+          :class="{ active: store.activeWorkspace === workspace.name }"
+          :aria-pressed="store.activeWorkspace === workspace.name"
+          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
+          :data-workspace-color="colorForWorkspace(workspace)"
+          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
+          @click="store.switchWorkspace(workspace.name, { transition: false })"
+        >
+          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
+          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
+        </button>
+      </div>
+
+      <div class="mm-sidebar-scroll">
+        <h3>Vault</h3>
+        <div class="mm-stat-grid">
+          <div class="mm-stat"><div class="n">{{ mm.visibleNodes.length }}</div><div class="l">notes shown</div></div>
+          <div class="mm-stat"><div class="n">{{ mm.visibleEdgeCount }}</div><div class="l">links</div></div>
+          <div class="mm-stat"><div class="n">{{ mm.orphanCount }}</div><div class="l">orphaned</div></div>
+          <div class="mm-stat"><div class="n">{{ mm.nodes.length }}</div><div class="l">total</div></div>
+        </div>
+
+        <div class="mm-search">
+          <input v-model="mm.search" type="text" placeholder="Search notes, tags…" autocomplete="off" />
+        </div>
+
+        <div class="mm-row-between">
+          <h3>Categories</h3>
+          <button type="button" class="mm-link" @click="mm.resetCategories()">reset</button>
+        </div>
+        <div class="mm-chip-row">
+          <div
+            v-for="cat in mm.categoryList"
+            :key="cat.key"
+            class="mm-chip"
+            :class="{ off: !mm.activeCats.has(cat.key) }"
+            @click="mm.toggleCategory(cat.key)"
+          >
+            <span class="dot" :style="{ background: cat.color }" />
+            <span class="label">{{ cat.label }}</span>
+            <span class="cnt">{{ cat.count }}</span>
+            <button type="button" class="only" @click.stop="mm.isolateCategory(cat.key)">only</button>
+          </div>
+        </div>
+
+        <template v-if="mm.mostConnected.length">
+          <h3>Most connected</h3>
+          <div class="mm-link-list">
+            <div v-for="n in mm.mostConnected" :key="n.id" class="mm-link-item" @click="mm.requestFocus(n.id)">
+              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
+              <span class="label">{{ n.title }}</span>
+              <span class="cnt">{{ n.degree }}</span>
+            </div>
+          </div>
+        </template>
+
+        <h3>Path finder</h3>
+        <p class="mm-hint">{{ mm.pathHint }}</p>
+        <button v-if="mm.pathStart || mm.pathEnd" type="button" class="mm-link" @click="mm.resetPath()">clear path</button>
+      </div>
+    </template>
+
     <template v-if="!collapsed && (!mode || mode === 'chat' || mode === 'project')">
       <!-- Workspace toggle -->
       <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
@@ -716,6 +782,7 @@ import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
+import { useMemoryMapStore, categoryColorFor, catKeyFor } from '../stores/memoryMap'
 import NotificationBell from './NotificationBell.vue'
 import ChatSignals from './ChatSignals.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
@@ -731,6 +798,7 @@ const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }
 const store = useProjectStore()
 const taskStore = useTaskStore()
 const fileViewer = useFileViewerStore()
+const mm = useMemoryMapStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -2467,6 +2535,58 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg);
   border-right: 2px solid var(--accent);
 }
+
+/* Memory Map sidebar (vault stats, search, categories, path finder) */
+.mm-sidebar-scroll {
+  overflow-y: auto;
+  padding: var(--space-3);
+  flex: 1;
+  min-height: 0;
+}
+.mm-sidebar-scroll h3 {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg3);
+  margin: var(--space-4) 0 var(--space-2);
+}
+.mm-sidebar-scroll h3:first-child { margin-top: 0; }
+.mm-row-between { display: flex; align-items: baseline; justify-content: space-between; }
+.mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
+.mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
+
+.mm-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+.mm-stat { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; }
+.mm-stat .n { font-size: var(--text-lg); font-weight: 600; }
+.mm-stat .l { font-size: var(--text-xs); color: var(--fg3); }
+
+.mm-search { margin-top: var(--space-3); }
+.mm-search input { width: 100%; font-size: var(--text-sm); }
+
+.mm-chip-row { display: flex; flex-direction: column; gap: 2px; }
+.mm-chip {
+  display: flex; align-items: center; gap: 7px; padding: 5px 6px; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: var(--text-sm); color: var(--fg2);
+}
+.mm-chip:hover { background: var(--bg3); }
+.mm-chip.off { opacity: 0.35; }
+.mm-chip .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.mm-chip .cnt { margin-left: auto; color: var(--fg3); font-variant-numeric: tabular-nums; }
+.mm-chip .only {
+  display: none; margin-left: auto; background: none; border: none; color: var(--accent);
+  font-size: var(--text-xs); padding: 1px 4px; border-radius: 4px; cursor: pointer;
+}
+.mm-chip:hover .cnt { display: none; }
+.mm-chip:hover .only { display: inline; }
+
+.mm-link-list { display: flex; flex-direction: column; gap: 2px; }
+.mm-link-item {
+  display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: var(--text-sm); color: var(--fg);
+}
+.mm-link-item:hover { background: var(--bg3); }
+.mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
 </style>
 
 <!-- Non-scoped: teleported context menus live outside this component's DOM -->

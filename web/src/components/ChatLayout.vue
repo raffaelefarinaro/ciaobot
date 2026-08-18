@@ -537,6 +537,7 @@ const pageDocumentTitle = computed(() => {
     }
     return 'automations'
   }
+  if (viewMode.value === 'memory') return 'memory'
   if (projectIdParam.value) {
     const project = store.projects.find(p => p.project_id === projectIdParam.value)
     return project?.name || 'project'
