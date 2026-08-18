@@ -17,6 +17,7 @@ from ciao.config import CiaoConfig
 from ciao.setup_status import setup_status
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
+    provider_connection_action,
     setup_finish_endpoint,
     setup_list_dirs_endpoint,
     setup_mkdir_endpoint,
@@ -995,6 +996,46 @@ def test_discover_claude_mcps_filters_connected_and_caches(monkeypatch, tmp_path
         tmp_path, config_path=config
     ) == ["Airtable", "Figma"]
     assert calls["n"] == 2
+
+
+async def test_provider_verify_action_busts_claude_discovery_cache(
+    monkeypatch, tmp_path
+) -> None:
+    """Verify must not just echo the up-to-5-minute discovery cache.
+
+    A stale "Configured MCP Servers" list that never reflects a connector the
+    user just disconnected (or reconnected) would be worse than showing
+    nothing, so hitting Verify for Claude has to bust the discovery cache
+    before recomputing the payload. Other providers don't have this cache, so
+    they should be left alone.
+    """
+    from ciao.web import routes_api
+
+    calls = {"clear": 0, "payload": 0}
+
+    def fake_clear() -> None:
+        calls["clear"] += 1
+
+    def fake_payload(_config):
+        calls["payload"] += 1
+        return {"connections": {"claude": {"mcps": ["Airtable"]}, "codex": {}}}
+
+    monkeypatch.setattr("ciao.setup_status.clear_claude_discovery_cache", fake_clear)
+    monkeypatch.setattr(routes_api, "_provider_config_payload", fake_payload)
+
+    config = _config(tmp_path)
+    request = SimpleNamespace(
+        path_params={"provider": "claude", "action": "verify"},
+        app=SimpleNamespace(state=SimpleNamespace(config=config)),
+    )
+
+    response = await provider_connection_action(request)
+    assert json.loads(response.body) == {"mcps": ["Airtable"]}
+    assert calls == {"clear": 1, "payload": 1}
+
+    request.path_params["provider"] = "codex"
+    await provider_connection_action(request)
+    assert calls == {"clear": 1, "payload": 2}
 
 
 def test_discover_claude_system_skills_filters_enabled_and_caches(monkeypatch) -> None:

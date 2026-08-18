@@ -1035,6 +1035,10 @@ async def provider_connection_action(request: Request) -> JSONResponse:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse({"ok": True, "opened": opened, "command": command}, status_code=202)
     if action == "verify":
+        if provider == "claude":
+            from ciao.setup_status import clear_claude_discovery_cache
+
+            await asyncio.to_thread(clear_claude_discovery_cache)
         payload = await asyncio.to_thread(_provider_config_payload, config)
         return JSONResponse(payload["connections"].get(provider, {}))
     if action == "logout":

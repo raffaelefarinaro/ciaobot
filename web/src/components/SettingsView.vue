@@ -587,7 +587,10 @@
                  this machine can run them and, if not, why. -->
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
-                <span class="routine-name">Hear</span>
+                <span class="routine-name">
+                  <svg class="routine-voice-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+                  Hear
+                </span>
               </div>
               <div class="routine-model-controls routine-model-controls--single">
                 <span class="routine-model-hint">
@@ -605,7 +608,10 @@
             </div>
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
-                <span class="routine-name">Speak</span>
+                <span class="routine-name">
+                  <svg class="routine-voice-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+                  Speak
+                </span>
               </div>
               <div class="routine-model-controls routine-model-controls--single">
                 <span class="routine-model-hint">
@@ -5308,6 +5314,13 @@ a.btn-secondary {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.routine-voice-icon {
+  flex: none;
+  color: var(--fg-muted);
 }
 .routine-detail {
   font-size: var(--text-xs);

@@ -275,10 +275,21 @@ vi.mock('../../lib/api', () => {
           name: 'remember',
           description: 'Store a durable memory',
           argument_hint: '<note>',
-          source: 'project',
-          scope: 'installed',
-          path: '.claude/commands/remember.md',
-          editable: false,
+          source: 'ciaobot',
+          scope: 'built-in',
+          path: 'commands/remember.md',
+          editable: true,
+          vault_path: '',
+          content: '',
+        },
+        {
+          name: 'summarize-decision',
+          description: 'A user-authored slash command',
+          argument_hint: '<notes>',
+          source: 'workspace',
+          scope: 'custom',
+          path: 'commands/summarize-decision.md',
+          editable: true,
           vault_path: '',
           content: '',
         },
@@ -666,6 +677,44 @@ describe('component mount smoke', () => {
     expect(wrapper.text()).toContain('custom skills')
     expect(wrapper.text()).toContain('brainstorming')
     expect(wrapper.text()).toContain('github / package skills')
+    wrapper.unmount()
+  })
+
+  it('SettingsView keeps subagents and commands on separate settings pages', async () => {
+    const router = makeRouter()
+    await router.push('/settings/subagents')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.text()).toContain('researcher')
+    expect(wrapper.text()).not.toContain('/remember')
+    expect(wrapper.text()).not.toContain('+ New command')
+    wrapper.unmount()
+  })
+
+  it('SettingsView labels an unmodified stock command as Built-in on /settings/commands', async () => {
+    const router = makeRouter()
+    await router.push('/settings/commands')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const rememberRow = wrapper.findAll('.command-row').find((row) => row.text().includes('/remember'))
+    expect(rememberRow).toBeTruthy()
+    expect(rememberRow!.text()).toContain('Built-in')
+
+    const customRow = wrapper.findAll('.command-row').find((row) => row.text().includes('/summarize-decision'))
+    expect(customRow).toBeTruthy()
+    expect(customRow!.text()).toContain('Custom')
     wrapper.unmount()
   })
 

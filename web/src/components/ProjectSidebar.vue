@@ -310,6 +310,13 @@
           subagents
         </router-link>
         <router-link
+          to="/settings/commands"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/commands' }"
+        >
+          commands
+        </router-link>
+        <router-link
           to="/settings/mcp"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/mcp' }"

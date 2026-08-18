@@ -2213,11 +2213,14 @@ export const useProjectStore = defineStore('projects', () => {
   // behind the result event (buffered writes, WS reconnect races). Retry
   // loadMessages until the server's history ends with a final assistant
   // reply, so the bubble lands without needing a manual close/reopen.
+  // Background: this fires on every turn while the chat is already open and
+  // rendered, so it must not flash the "Updating conversation…" indicator on
+  // each of its up-to-6 retries.
   async function reconcileAfterResult(chatId: string) {
     const delays = [0, 300, 700, 1500, 3000, 5000]
     for (const delay of delays) {
       if (delay) await new Promise(r => setTimeout(r, delay))
-      await loadMessages(chatId)
+      await loadMessages(chatId, { background: true })
       const msgs = messages.value[chatId] || []
       const last = msgs[msgs.length - 1]
       // Stop once the turn is capped by a non-error assistant reply or an
