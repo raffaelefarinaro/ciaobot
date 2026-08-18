@@ -10,6 +10,12 @@ interface DraftEntry {
   text: string
   projectId: string
   updatedAt: number
+  // The workspace the draft's project lived in. Captured at write time
+  // because it can no longer be looked up once the project is deleted —
+  // the only case where an orphaned draft needs it (restoring into the
+  // right workspace's General project). '' for drafts written before this
+  // field existed.
+  workspace: string
 }
 
 export interface OrphanDraft {
@@ -17,6 +23,7 @@ export interface OrphanDraft {
   text: string
   projectId: string
   updatedAt: number
+  workspace: string
 }
 
 function defaultStorage(): DraftStorage | null {
@@ -30,24 +37,45 @@ function defaultStorage(): DraftStorage | null {
 // rather than being treated as permanently ageless or instantly expired.
 // Anything else (number, array, null, an object missing `text`) is dropped,
 // matching the previous "ignore malformed values" contract.
+//
+// The migrated shape (with its fresh timestamp) is written back to storage
+// immediately so the stamp is set exactly once. Without this, a caller that
+// never persists via `writeChatDraft` (e.g. `readOrphanCandidates`, which is
+// read-only) would otherwise get a brand-new `Date.now()` on every call,
+// and the orphan-recovery TTL would never elapse for that draft.
 function readDrafts(storage: DraftStorage): Record<string, DraftEntry> {
   try {
     const parsed = JSON.parse(storage.getItem(CHAT_DRAFTS_STORAGE_KEY) || '{}')
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
 
     const out: Record<string, DraftEntry> = {}
+    let migrated = false
     for (const [chatId, value] of Object.entries(parsed)) {
       if (typeof value === 'string') {
-        if (value) out[chatId] = { text: value, projectId: '', updatedAt: Date.now() }
+        if (value) {
+          out[chatId] = { text: value, projectId: '', updatedAt: Date.now(), workspace: '' }
+          migrated = true
+        }
       } else if (value && typeof value === 'object' && typeof (value as { text?: unknown }).text === 'string') {
         const entry = value as Partial<DraftEntry>
         if (entry.text) {
+          const hasTimestamp = typeof entry.updatedAt === 'number'
           out[chatId] = {
             text: entry.text,
             projectId: typeof entry.projectId === 'string' ? entry.projectId : '',
-            updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
+            updatedAt: hasTimestamp ? (entry.updatedAt as number) : Date.now(),
+            workspace: typeof entry.workspace === 'string' ? entry.workspace : '',
           }
+          if (!hasTimestamp) migrated = true
         }
+      }
+    }
+    if (migrated) {
+      try {
+        writeDrafts(storage, out)
+      } catch {
+        // Persisting the migration is best-effort; the in-memory result is
+        // still correct for this call either way.
       }
     }
     return out
@@ -111,7 +139,7 @@ export function writeChatDraft(
   chatId: string | null | undefined,
   text: string,
   storage: DraftStorage | null = defaultStorage(),
-  opts?: { projectId?: string },
+  opts?: { projectId?: string; workspace?: string },
 ): void {
   if (!chatId || !storage) return
 
@@ -122,6 +150,7 @@ export function writeChatDraft(
         text,
         projectId: opts?.projectId ?? drafts[chatId]?.projectId ?? '',
         updatedAt: Date.now(),
+        workspace: opts?.workspace ?? drafts[chatId]?.workspace ?? '',
       }
     } else {
       delete drafts[chatId]
@@ -155,7 +184,13 @@ export function readOrphanCandidates(
   for (const [chatId, entry] of Object.entries(readDrafts(storage))) {
     if (validChatIds.has(chatId)) continue
     if (now - entry.updatedAt > ORPHAN_DRAFT_MAX_AGE_MS) continue
-    out.push({ chatId, text: entry.text, projectId: entry.projectId, updatedAt: entry.updatedAt })
+    out.push({
+      chatId,
+      text: entry.text,
+      projectId: entry.projectId,
+      updatedAt: entry.updatedAt,
+      workspace: entry.workspace,
+    })
   }
   return out
 }

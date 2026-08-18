@@ -770,10 +770,10 @@ export const useProjectStore = defineStore('projects', () => {
   // (falling back to a GitHub issue if the bug is in Ciaobot itself).
   // The active workspace's auto-managed General project, or null if absent.
   // Shared by fixError and the Cmd+T "new chat in General" shortcut.
-  function generalProject() {
+  function generalProject(workspace: WorkspaceName = activeWorkspace.value) {
     return (
       projects.value.find(
-        p => p.workspace === activeWorkspace.value && p.is_auto && p.name === 'General',
+        p => p.workspace === workspace && p.is_auto && p.name === 'General',
       ) ?? null
     )
   }
@@ -812,8 +812,15 @@ export const useProjectStore = defineStore('projects', () => {
   // when that still exists, otherwise General. Only ever called from an
   // explicit user "Restore" click — never speculatively — so a chat is only
   // created when the user actually asked for one.
-  async function restoreDraft(payload: { originalChatId: string; projectId: string; text: string }) {
-    const project = projects.value.find(p => p.project_id === payload.projectId) ?? generalProject()
+  async function restoreDraft(payload: {
+    originalChatId: string
+    projectId: string
+    text: string
+    workspace?: string
+  }) {
+    const project =
+      projects.value.find(p => p.project_id === payload.projectId) ??
+      generalProject((payload.workspace as WorkspaceName) || activeWorkspace.value)
     if (!project) throw new Error('No project available to restore into')
     if (project.workspace !== activeWorkspace.value) {
       await switchWorkspace(project.workspace)
@@ -1396,7 +1403,12 @@ export const useProjectStore = defineStore('projects', () => {
           title: 'Recovered an unsent draft',
           body: `From ${origin}: ${preview}`,
           variant: 'error',
-          restoreDraft: { originalChatId: orphan.chatId, projectId: orphan.projectId, text: orphan.text },
+          restoreDraft: {
+            originalChatId: orphan.chatId,
+            projectId: orphan.projectId,
+            text: orphan.text,
+            workspace: project?.workspace ?? orphan.workspace,
+          },
         })
       }
     }
@@ -1732,7 +1744,11 @@ export const useProjectStore = defineStore('projects', () => {
       messages.value[c.chat_id] = []
       // Write before switching: ChatPanel reads the draft once at mount, so
       // this must already be in storage before the new panel mounts below.
-      if (seedDraft) writeChatDraft(c.chat_id, seedDraft, undefined, { projectId })
+      if (seedDraft) {
+        const seedWorkspace = projects.value.find(p => p.project_id === projectId)?.workspace
+          ?? activeWorkspace.value
+        writeChatDraft(c.chat_id, seedDraft, undefined, { projectId, workspace: seedWorkspace })
+      }
       // We just created it, so there is no history to fetch.
       switchChat(c.chat_id, { skipHistory: true })
       return c

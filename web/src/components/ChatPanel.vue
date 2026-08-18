@@ -1354,7 +1354,10 @@ watch(inputText, (text) => {
   if (!settingPromptHistoryText) {
     promptHistoryIndex.value = -1
     promptHistoryDraft.value = ''
-    writeChatDraft(draftChatId, text, undefined, { projectId: chat.value?.project_id })
+    writeChatDraft(draftChatId, text, undefined, {
+      projectId: chat.value?.project_id,
+      workspace: store.activeWorkspace,
+    })
   }
 }, { flush: 'sync' })
 
@@ -3196,7 +3199,7 @@ onBeforeUnmount(() => {
     draftChatId,
     promptHistoryIndex.value < 0 ? inputText.value : promptHistoryDraft.value,
     undefined,
-    { projectId: chat.value?.project_id },
+    { projectId: chat.value?.project_id, workspace: store.activeWorkspace },
   )
   window.removeEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)

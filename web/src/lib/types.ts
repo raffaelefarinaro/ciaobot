@@ -413,7 +413,10 @@ export interface InAppToast {
   // draft in `projectId` (falling back to General if that project is gone)
   // instead of the error/fixRoute flow. `originalChatId` is the dead chat's
   // id, cleared from storage once the text has a new home or is dismissed.
-  restoreDraft?: { originalChatId: string; projectId: string; text: string }
+  // `workspace`, when known, is the draft's original workspace so the
+  // General fallback opens there instead of whichever workspace happens to
+  // be active when the user clicks Restore.
+  restoreDraft?: { originalChatId: string; projectId: string; text: string; workspace?: string }
 }
 
 // A pending approval surfaced to the user by Auto mode's classifier. One
