@@ -55,6 +55,10 @@ Re-verified by symbol against the working tree before any dispatch:
   the one checkout with a disjoint file set. Avoids merge resolution on a weak model's
   output and lets the coordinator read `git diff -- <owned paths>` per phase.
 - **Delegates do not commit.** Coordinator reviews the diff, runs the suites, commits.
+- **Archive a delegate chat once its work is committed.** Standing operator preference
+  (2026-08-19). Archiving preserves the transcript under `memory-vault/Logs/Chats/` and
+  triggers the normal post-archive processing, so nothing is lost and the sidebar stays
+  readable. Keep only running delegates open.
 - **Serialization points.** `ciao/os_audit.py` is touched by P1, P2, P3, P4 — those four
   never run together. `ciao/web/project_chats.py` is touched by P7 and P8 — same.
   `ciao/vault_rehome.py` is touched by P3 and P5.9 — same. `ciao/cli.py` is touched by
@@ -390,3 +394,9 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
 - 2026-08-19 — `web/src/components/ChatLayout.vue` is still UNCOMMITTED (7 permission-shortcut lines
   live in the working tree). Commit `7c7e21f9` touches that file but is an earlier, unrelated change
   ("fix(home): show loading feedback...", 16:42) already in HEAD. P4.7 stays blocked.
+- 2026-08-19 — Archived the five finished delegates whose work is committed: P2-retry
+  (`chat-038347fd`), P7-retry (`chat-0a09a22d`), P5-server (`chat-35f8da7d`), P3
+  (`chat-23268601`), P8 (`chat-5e5fee60`). Twelve of fourteen delegate chats are now archived;
+  only P9 (`chat-1c687242`) and P4 (`chat-4710c68d`) remain open, both running. Nothing was needed
+  from the archived ones: their diffs are committed and the deferred P4.2 / P4.7 items are
+  coordinator work, not theirs.
