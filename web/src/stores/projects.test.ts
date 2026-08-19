@@ -1550,6 +1550,43 @@ describe('Codex structured questions', () => {
     expect(store.chatNeedsInput(chatId)).toBe(false)
   })
 
+  test('chatNeedsInput rolls up a nested delegate blocked on an approval', () => {
+    const store = useProjectStore()
+    const supervisorId = 'supervisor-chat'
+    const delegateId = 'delegate-chat'
+    store.chats = [{
+      chat_id: supervisorId,
+      project_id: 'p1',
+      title: 'Supervisor',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }, {
+      chat_id: delegateId,
+      project_id: 'p1',
+      title: 'Delegate',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'thread-2',
+      created_at: '',
+      archived: false,
+      spawned_from_chat_id: supervisorId,
+      pending_permission: JSON.stringify({
+        request_id: 'req-1', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x',
+      }),
+    }]
+
+    expect(store.chatNeedsInput(delegateId)).toBe(true)
+    expect(store.chatNeedsInput(supervisorId)).toBe(true)
+
+    store.chats[1].pending_permission = ''
+    expect(store.chatNeedsInput(supervisorId)).toBe(false)
+  })
+
   test('rebuilds the Approve/Deny card from a persisted pending_permission on chat open', async () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()

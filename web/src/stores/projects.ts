@@ -1302,12 +1302,22 @@ export const useProjectStore = defineStore('projects', () => {
   // on the chat and mirrored in ephemeral activeQuestions/pendingPermissions
   // while the picker/card is live. Unlike unread, this stays visible even
   // when the chat is the active tab.
-  function chatNeedsInput(chatId: string): boolean {
+  //
+  // Also true when a delegate nested under this chat (recursively) is
+  // blocked the same way: a supervisor whose subagent is stuck on an
+  // Approve/Deny prompt is exactly as blocked as one asked a question
+  // directly, and mirroring only chatHasActiveDelegates's "still working"
+  // signal left an approval request reading as mere background activity
+  // instead of something the user must act on.
+  function chatNeedsInput(chatId: string, seen: Set<string> = new Set()): boolean {
     if (activeQuestions.value[chatId]?.length) return true
     if (pendingPermissions.value[chatId]?.length) return true
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (parseQuestions(chat?.pending_question).length > 0) return true
-    return Boolean(chat?.pending_permission)
+    if (chat?.pending_permission) return true
+    if (seen.has(chatId)) return false
+    seen.add(chatId)
+    return activeDelegatesFor(chatId).some(d => chatNeedsInput(d.chat_id, seen))
   }
 
   // The first outstanding question is useful on the home card, where it can
