@@ -38,8 +38,15 @@ def capabilities_for(provider: str) -> ProviderCapabilities:
 class ProviderService:
     """Routes requests to a provider and tracks its live operation."""
 
-    def __init__(self, config: BridgeConfig, provider: str = "") -> None:
+    def __init__(
+        self,
+        config: BridgeConfig,
+        provider: str = "",
+        *,
+        agent_root: Path | None = None,
+    ) -> None:
         self._config = config
+        self._agent_root = agent_root
         self._provider: ProviderImpl | None = None
         self._active_handle: ActiveHandle | None = None
         if provider:
@@ -49,7 +56,12 @@ class ProviderService:
         """Create the provider instance on first use based on provider name."""
         if self._provider is None:
             factory = provider_registry.require(provider).factory()
-            self._provider = factory(self._config.workspace_root, config=self._config)
+            # The agent root is data threaded from the caller, not re-derived
+            # here. A caller that supplies none still lands on ``workspace_root``,
+            # which matches ``CiaoConfig.agent_root`` today, so this is a no-op
+            # seam until the re-rooting release flips ``agent_root``.
+            root = self._agent_root if self._agent_root is not None else self._config.workspace_root
+            self._provider = factory(root, config=self._config)
         return self._provider
 
     def has_active_process(self) -> bool:

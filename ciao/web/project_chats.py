@@ -4357,10 +4357,28 @@ class ProjectChatManager:
         if chat_id not in self._providers:
             chat = self._chats.get(chat_id)
             provider_name = chat.provider if chat else ""
+            agent_root = self._agent_root_for_chat(chat_id)
             self._providers[chat_id] = ProviderService(
-                self._config, provider=provider_name
+                self._config,
+                provider=provider_name,
+                agent_root=agent_root,
             )
         return self._providers[chat_id]
+
+    def _agent_root_for_chat(self, chat_id: str) -> Path:
+        """Resolve the agent root for a chat's owning workspace.
+
+        The chat's project names a workspace; that workspace's agent root is
+        threaded to the provider factory. A project with no workspace, or a
+        chat with no project at all, falls back to ``primary_workspace()`` so
+        every caller still lands on ``workspace_root`` today.
+        """
+        chat = self._chats.get(chat_id)
+        project = self._projects.get(chat.project_id) if chat else None
+        workspace = project.workspace if project else ""
+        if not self._is_known_workspace(workspace):
+            workspace = self._config.primary_workspace()
+        return self._config.agent_root(workspace)
 
     def _revoke_mcp_chat(self, chat_id: str) -> None:
         service = self._mcp_service
