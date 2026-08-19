@@ -40,7 +40,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
-| P8 Session paths | delegate | RUNNING | chat-5e5fee60 |
+| P8 Session paths | delegate | DONE | commit 001639e6 |
 | P9 Per-root memory + MCP allowlist | delegate | RUNNING | chat-1c687242 |
 | P10 The cut | — | TODO | gated on all of P1–P9 + V1–V3 |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
@@ -352,3 +352,24 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   needs `os_audit.py` (held by P9) and `routes_api.py` (held by P8). Its brief must additionally
   forbid the `review-queue-depth` detector from calling `GET /api/proposals`, because that endpoint
   walks the vault via `_rehome_signal` and would break the cheap-detection rule through the back door.
+- 2026-08-19 — P8 verified and committed as `001639e6`. Two problems, both fixed by the coordinator.
+  **It added the parameter but left the important callers passing nothing.** Only
+  `routes_api.py:3573` passed `agent_root`. The two `find_parent_session_file` calls in
+  `project_chats.py` (6871, and 7909 which `_await_schedule_subagents` polls) and all three
+  `_claude_session_exists` calls still used the global `workspace_root`, so the readers the work
+  order specifically names were untouched in practice. Wired four of them through
+  `_agent_root_for_chat`, which P7 had already added. The fifth has only a transcript row and no
+  chat, so there is no workspace to resolve from; commented rather than left looking overlooked.
+  Updating the signature broke 7 monkeypatched stubs in `test_chat_subagents.py` and
+  `test_schedule_subagent_wait.py`, which took the old positional signature; updated.
+  **It also introduced the failure the phase exists to prevent.** Where `agent_root` was supplied,
+  both functions returned early instead of falling back to the `~/.claude/projects` glob scan, to
+  isolate roots from each other. That glob is the ONLY way to find a session recorded under a
+  different cwd slug, which is precisely the amnesia this phase guards against, and the early
+  return removed it NOW, while `agent_root` still resolves to the same directory for every
+  workspace. Reproduced directly: with `agent_root` the lookup returned None for a session the
+  fallback finds. Net restored for every caller; isolation deferred to P10.
+  Its own two tests asserted that cross-root invisibility, so they encoded the premature isolation.
+  Rewritten to assert the slug differs per root and to document why the net stays until roots
+  actually differ. Also fixed a shadowed `root` local in `_claude_session_exists`.
+  Suite: 2548 passed / 1 pre-existing failure (P9's two files excluded, another delegate holds them).
