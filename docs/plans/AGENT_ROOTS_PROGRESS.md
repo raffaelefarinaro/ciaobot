@@ -32,18 +32,18 @@ Re-verified by symbol against the working tree before any dispatch:
 
 | Step | Owner | Status | Notes |
 |---|---|---|---|
-| P1 Proposal-kind registry | delegate | REVIEW | verified, 12 tests pass; coordinator fixed a corruption bug and a private-import leak |
-| P2 Audit split (D2) | — | TODO | needs P1 (shares `os_audit.py`) |
+| P1 Proposal-kind registry | delegate | DONE | commit 83000847 |
+| P2 Audit split (D2) | delegate | RUNNING | wave 2; also owns the pre-existing os-audit test failure |
 | P3 unrehomed_people notice | — | TODO | needs P1/P2 (`os_audit.py`), P5.9 (`vault_rehome.py`) |
 | P4 Surfaced-actions strip | — | TODO | needs P2, P3 |
-| P5 Queue review UI | — | TODO | needs P1, P5.9 |
-| P5.9 User.md must never move | delegate | REVIEW | verified by coordinator, 43 rehome tests pass; not committed |
-| P6 Vocabulary + agent_root | delegate | REVIEW | verified, 26 config tests pass; coordinator rewrote 3 doc claims |
-| P7 Provider seam | — | TODO | needs P6 |
+| P5 Queue review UI | split | RUNNING | wave 2 = server half (P5.1-P5.4); UI half deferred to wave 3 |
+| P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
+| P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
+| P7 Provider seam | delegate | RUNNING | wave 2 |
 | P8 Session paths | — | TODO | needs P6; shares `project_chats.py` with P7 |
 | P9 Per-root memory + MCP allowlist | — | TODO | needs P2, P6 |
 | P10 The cut | — | TODO | gated on all of P1–P9 + V1–V3 |
-| V1 workspace-census | delegate | REVIEW | verified, 10 tests pass, read-only proven on the real vault |
+| V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | — | TODO | with P10 |
 | V3 Real-data rehearsal | — | TODO | with P10 |
 | V4 Full suites | coordinator | PARTIAL | python 2597 pass / 2 pre-existing fails; npm not a wave-1 gate (no web files touched) |
@@ -181,3 +181,30 @@ Follow-ups queued, none blocking:
 4. Decide destinations for `.obsidian/` and the 3 loose root notes, which D5 does not cover.
 5. Migrate `parse_bullet` into the call sites; they still use raw `match.group(1..3)`, so the
    typed `ProposalBullet` API is written but unused.
+
+## Wave 2 (dispatched 2026-08-19)
+
+Wave 1 committed as `efa2b6d6`, `83000847`, `1ac96430`, `796d84af` plus the ledger.
+Three delegates, file sets disjoint:
+
+- **P2** owns `ciao/os_audit.py`, `ciao/cli.py`, `ciao/web/agent_assets.py`,
+  `tests/test_os_audit.py`, `tests/test_cli.py`. Also assigned the pre-existing
+  os-audit exit-code failure, since it sits inside the code P2 rewrites.
+- **P7** owns `ciao/provider_service.py`, `ciao/web/project_chats.py`, its tests.
+- **P5-server** owns `ciao/web/routes_api.py`, `tests/test_web_proposals.py`,
+  `docs/PWA_API.md`.
+
+P5 was SPLIT. The server half (endpoints, batch ops, skill-proposal surface, the D7
+leak flag) runs now; the UI half waits for the response shape to exist. P3 is still
+blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py`.
+
+- 2026-08-19 — Verified before briefing P2: **no frontend file consumes
+  `/api/agent-assets/audit`** (`grep -rn "agent-assets/audit" web/src/` is empty). The work
+  order's P2.3 claims "the Settings audit view changes with it". There is no such view. P2's
+  brief says so explicitly and forbids inventing one. The proposal COUNT reaches Settings by
+  a different path: `/api/agent-assets` -> `_memory_proposal_assets` ->
+  `_count_proposal_bullets`, which P1 already fixed to include `[rehome]` and `[profile]`.
+- 2026-08-19 — Briefs now carry the wave-1 lessons: use `.venv/bin/python`, the two
+  pre-existing failures and which delegate owns them, hands off the operator's `web/` work,
+  never state a future layout in the present tense, and add the ARCHITECTURE.md module-index
+  line when creating a `ciao/` module.
