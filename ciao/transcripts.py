@@ -801,6 +801,8 @@ def extract_cli_transcripts(
     workspace_root: Path,
     archive_root: Path,
     tracking_path: Path,
+    *,
+    agent_root: Path | None = None,
 ) -> list[Path]:
     """Extract new CLI JSONL sessions to readable .md transcripts.
 
@@ -813,11 +815,15 @@ def extract_cli_transcripts(
         workspace_root: Project workspace root (e.g. /Users/me/ciao).
         archive_root: Where to write transcripts (e.g. memory-vault/Logs/CLI/).
         tracking_path: JSON file tracking already-extracted session IDs.
+        agent_root: Per-workspace agent root whose session directory to read.
+            Defaults to ``workspace_root`` so callers that supply nothing keep
+            today's behaviour.
 
     Returns:
         List of paths to newly created transcript files.
     """
-    projects_dir = _claude_projects_dir(workspace_root)
+    root = agent_root if agent_root is not None else workspace_root
+    projects_dir = _claude_projects_dir(root)
     if not projects_dir.is_dir():
         return []
 

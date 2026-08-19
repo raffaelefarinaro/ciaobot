@@ -2340,7 +2340,9 @@ class ProjectChatManager:
         if new_chats_discovered or pruned_chats:
             self._save(reason="archived_transcript_discovery")
 
-    def _claude_session_exists(self, session_id: str) -> bool:
+    def _claude_session_exists(
+        self, session_id: str, *, agent_root: Path | None = None
+    ) -> bool:
         if not session_id:
             return False
         # Claude session ids are UUIDs; anything else (e.g. an opencode
@@ -2350,12 +2352,18 @@ class ProjectChatManager:
             uuid.UUID(session_id)
         except ValueError:
             return False
-        projects_dir = _claude_projects_dir(self._config.workspace_root)
+        root = agent_root if agent_root is not None else self._config.workspace_root
+        projects_dir = _claude_projects_dir(root)
         if (projects_dir / f"{session_id}.jsonl").exists():
             return True
+        # The glob scan stays for every caller. The projects dir is a slug of
+        # the cwd, so a session recorded under a different cwd is only findable
+        # this way. Isolating roots belongs in the re-rooting release, when
+        # agent_root actually differs; removing the net now would drop sessions
+        # while the hazard is still live.
         try:
-            root = Path.home() / ".claude" / "projects"
-            return root.exists() and any(root.glob(f"*/{session_id}.jsonl"))
+            projects_root = Path.home() / ".claude" / "projects"
+            return projects_root.exists() and any(projects_root.glob(f"*/{session_id}.jsonl"))
         except OSError:
             return False
 
@@ -2389,6 +2397,10 @@ class ProjectChatManager:
             if audit_status == "deleted":
                 continue
             if provider == "claude":
+                # No chat in hand here, only a transcript row, so there is no
+                # workspace to resolve an agent root from. Defaults to
+                # workspace_root, which is what every root resolves to until the
+                # re-rooting release.
                 if (
                     not self._claude_session_exists(session_id)
                     and audit_status != "present"
@@ -2486,7 +2498,7 @@ class ProjectChatManager:
             if not archive_dir.is_dir() or not any(archive_dir.glob("*.md")):
                 continue  # never archived -> not the corrupt state
             if chat.provider == "claude" and self._claude_session_exists(
-                chat.session_id
+                chat.session_id, agent_root=self._agent_root_for_chat(chat.chat_id)
             ):
                 continue  # session blob still present -> not archived
             chat.archived = True
@@ -3040,7 +3052,9 @@ class ProjectChatManager:
         # provider (codex, opencode, pi, ...) owns its sessions and resumes
         # them by id through its own server, so treat those as local.
         if chat.provider in ("", "claude"):
-            return self._claude_session_exists(chat.session_id)
+            return self._claude_session_exists(
+                chat.session_id, agent_root=self._agent_root_for_chat(chat.chat_id)
+            )
         return True
 
     def list_chats_dicts(self, project_id: str | None = None) -> list[dict]:
@@ -6860,7 +6874,9 @@ class ProjectChatManager:
             await self._watch_opencode_subagent_completion(chat_id, project_id)
             return
         path = subagent_tracking.find_parent_session_file(
-            chat.session_id, self._config.workspace_root
+            chat.session_id,
+            self._config.workspace_root,
+            agent_root=self._agent_root_for_chat(chat_id),
         )
         if path is None:
             return
@@ -7898,7 +7914,9 @@ class ProjectChatManager:
             return True, False
         try:
             path = subagent_tracking.find_parent_session_file(
-                chat.session_id, self._config.workspace_root
+                chat.session_id,
+                self._config.workspace_root,
+                agent_root=self._agent_root_for_chat(chat_id),
             )
         except Exception:  # noqa: BLE001
             logger.exception("Subagent wait: session file lookup failed for %s", chat_id)

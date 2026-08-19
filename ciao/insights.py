@@ -285,7 +285,12 @@ Rules:
 """
 
 
-def filter_session_jsonl(workspace_root: Path, session_id: str) -> str | None:
+def filter_session_jsonl(
+    workspace_root: Path,
+    session_id: str,
+    *,
+    agent_root: Path | None = None,
+) -> str | None:
     """Read and pre-filter a Claude Code session JSONL into a compact string.
 
     Returns None when the file doesn't exist or can't be parsed.
@@ -299,10 +304,15 @@ def filter_session_jsonl(workspace_root: Path, session_id: str) -> str | None:
     - Keep any tool_result with is_error=true in full.
     - Truncate Read/Glob/Grep/WebFetch tool_result bodies to a head + size.
     - Annotate every kept message with a sequential ``idx`` for citation.
+
+    ``agent_root`` is the per-workspace agent root whose session directory to
+    read; it defaults to ``workspace_root`` so callers that supply nothing
+    keep today's behaviour.
     """
     if not session_id:
         return None
-    path = _claude_projects_dir(workspace_root) / f"{session_id}.jsonl"
+    root = agent_root if agent_root is not None else workspace_root
+    path = _claude_projects_dir(root) / f"{session_id}.jsonl"
     if not path.exists():
         return None
 
@@ -1060,12 +1070,17 @@ async def backfill_insights_task(
     concurrency: int = 2,
     workspace: str = "",
     model_override: str = "",
+    agent_root: Path | None = None,
 ) -> dict[str, int]:
     """Scan archived transcripts and return counts for the completed run.
 
     *model_override* runs this pass with an explicit model instead of the
     configured one, without changing the stored setting — the retry path when
     the configured insights model keeps failing.
+
+    *agent_root* is the per-workspace agent root whose session directory to
+    read; it defaults to ``config.workspace_root`` so callers that supply
+    nothing keep today's behaviour.
     """
     stats = _empty_backfill_stats()
     vault_root = config.vault_root
@@ -1074,7 +1089,8 @@ async def backfill_insights_task(
     # container that holds Logs/, MEMORY.md, etc.
     base = vault_root / "Logs" / "Chats"
 
-    project_dir = _claude_projects_dir(config.workspace_root)
+    root = agent_root if agent_root is not None else config.workspace_root
+    project_dir = _claude_projects_dir(root)
 
     def _discover() -> tuple[list[tuple[Path, str, bool]], int, int]:
         """Walk the archive tree and decide what needs backfilling.
@@ -1166,7 +1182,7 @@ async def backfill_insights_task(
             try:
                 insights_model = model_override or resolve_insights_model(config)
                 if has_jsonl:
-                    filtered = filter_session_jsonl(config.workspace_root, session_id)
+                    filtered = filter_session_jsonl(root, session_id)
                     if not filtered:
                         logger.warning("Session JSONL empty or filtered to nothing for %s", archive_path)
                         return "skipped"

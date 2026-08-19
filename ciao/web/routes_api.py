@@ -681,16 +681,25 @@ def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
     return rendered
 
 
-def _local_session_jsonl_paths(session_id: str, workspace_root: Path) -> list[Path]:
+def _local_session_jsonl_paths(
+    session_id: str, workspace_root: Path, *, agent_root: Path | None = None
+) -> list[Path]:
     """Find local Claude Code JSONL files for ``session_id``."""
     try:
         from ciao.transcripts import _claude_projects_dir
     except ImportError:
         return []
     paths: list[Path] = []
-    preferred = _claude_projects_dir(workspace_root) / f"{session_id}.jsonl"
+    root = agent_root if agent_root is not None else workspace_root
+    preferred = _claude_projects_dir(root) / f"{session_id}.jsonl"
     if preferred.exists():
         paths.append(preferred)
+    # When an agent root is supplied, the preferred path already scopes to
+    # that root's own projects dir, so a session under another root stays
+    # invisible (the re-rooting isolation). Without a root, keep the global
+    # scan so callers that supply nothing behave exactly as today.
+    if agent_root is not None:
+        return paths
     projects_root = Path.home() / ".claude" / "projects"
     try:
         for path in projects_root.glob(f"*/{session_id}.jsonl"):
@@ -738,7 +747,9 @@ def _read_jsonl_messages(path: Path) -> list[dict]:
     return messages
 
 
-def _local_subagent_transcripts(session_id: str, workspace_root: Path) -> list[dict]:
+def _local_subagent_transcripts(
+    session_id: str, workspace_root: Path, *, agent_root: Path | None = None
+) -> list[dict]:
     """Fallback parser for nested subagent JSONL files and progress entries."""
     projects_root = Path.home() / ".claude" / "projects"
     grouped: dict[str, list[dict]] = {}
@@ -752,7 +763,7 @@ def _local_subagent_transcripts(session_id: str, workspace_root: Path) -> list[d
         if msgs:
             grouped.setdefault(path.stem, []).extend(msgs)
 
-    for path in _local_session_jsonl_paths(session_id, workspace_root):
+    for path in _local_session_jsonl_paths(session_id, workspace_root, agent_root=agent_root):
         try:
             with path.open(encoding="utf-8") as f:
                 for line in f:
@@ -3496,24 +3507,38 @@ async def chat_subagents(request: Request) -> JSONResponse:
         return JSONResponse(opencode_entries)
 
     workspace = str(config.workspace_root)
+    resolver = getattr(pcm, "_agent_root_for_chat", None)
+    agent_root = resolver(chat_id) if resolver is not None else None
 
     def _finalize(entries: list[dict]) -> JSONResponse:
         _merge_subagent_dispatch_meta(
-            entries, chat.session_id, Path(config.workspace_root)
+            entries, chat.session_id, Path(config.workspace_root), agent_root=agent_root
         )
         return JSONResponse(entries)
 
     try:
         from claude_agent_sdk import get_subagent_messages, list_subagents
     except ImportError:
-        return _finalize(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
+        return _finalize(
+            _local_subagent_transcripts(
+                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+            )
+        )
 
     try:
         agent_ids = list_subagents(chat.session_id, directory=workspace)
     except (FileNotFoundError, ValueError):
-        return _finalize(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
+        return _finalize(
+            _local_subagent_transcripts(
+                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+            )
+        )
     except Exception:  # noqa: BLE001 — defensive against SDK surprises
-        return _finalize(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
+        return _finalize(
+            _local_subagent_transcripts(
+                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+            )
+        )
 
     result: list[dict] = []
     for agent_id in agent_ids:
@@ -3532,18 +3557,22 @@ async def chat_subagents(request: Request) -> JSONResponse:
         result.append({"agent_id": agent_id, "messages": rendered})
 
     if not result:
-        result = _local_subagent_transcripts(chat.session_id, Path(config.workspace_root))
+        result = _local_subagent_transcripts(
+            chat.session_id, Path(config.workspace_root), agent_root=agent_root
+        )
 
     return _finalize(result)
 
 
 def _merge_subagent_dispatch_meta(
-    entries: list[dict], session_id: str, workspace_root: Path
+    entries: list[dict], session_id: str, workspace_root: Path, *, agent_root: Path | None = None
 ) -> None:
     """Attach dispatch metadata from the parent session JSONL in place."""
     if not entries:
         return
-    path = subagent_tracking.find_parent_session_file(session_id, workspace_root)
+    path = subagent_tracking.find_parent_session_file(
+        session_id, workspace_root, agent_root=agent_root
+    )
     if path is None:
         return
     try:
