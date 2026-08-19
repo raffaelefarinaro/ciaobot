@@ -36,7 +36,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P2 Audit split (D2) | delegate | DONE | commit c121678b; pre-existing os-audit failure fixed too |
 | P3 unrehomed_people notice | delegate | RUNNING | chat-23268601 |
 | P4 Surfaced-actions strip | — | TODO | needs P2, P3 |
-| P5 Queue review UI | split | RUNNING | server half re-dispatched chat-35f8da7d; UI half in wave 3 |
+| P5 Queue review UI | split | PARTIAL | server half DONE, commit b77f78b4; UI half still TODO |
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
@@ -292,3 +292,31 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   Its brief carries the D4 receipt bug, the ban on scanning the vault from the detection path, and
   an explicit instruction not to hardcode the stale 87/15 and 42/53 counts the incoming briefs
   quoted. P8 is still blocked behind P5-server on `routes_api.py`.
+- 2026-08-19 — P5 server half verified and committed as `b77f78b4`. Response schema is genuinely
+  good: content-derived ids with a duplicate counter, `rehome: {destination, candidates, justified,
+  reason}` where `justified` is only true for the `mechanical` bucket, and `leak_warning` on region
+  rows sourced outside the primary workspace. That shape supports all three real cases without a UI
+  re-reading the vault. Skill-proposal files are included without being disguised as bullets.
+  Isolated verification in a worktree at HEAD: 2621 passed, 1 pre-existing failure.
+- 2026-08-19 — **The delegate's work was complete, documented, and completely unreachable.** No
+  route in `ciao/web/app.py` served any of it, and `tests/test_web_proposals.py` mounted the
+  handlers on a hand-built Starlette app, so 15 tests passed while production had no endpoint.
+  This is my fault: my brief restricted the delegate to three files and did not grant `app.py`,
+  which registration requires. The delegate flagged the conflict and correctly obeyed the
+  restriction instead of reaching outside it.
+  Coordinator registered the four routes and added
+  `test_the_real_app_serves_every_documented_proposal_route`, which asserts the real `app.py`
+  route table. Mutation-checked by un-registering one route: the test fails, as it must.
+  Registering them then made `tests/test_pwa_api_docs.py` fail, because the templated path
+  `/api/proposals/{id}/{action}` was not in PWA_API.md. So the doc test WOULD have caught the
+  missing registration all along; it was silent only because there was no route to check.
+  Lesson for every remaining brief: **any phase that adds an HTTP route must own `app.py`**, and
+  a route test that builds its own app proves nothing about reachability.
+- 2026-08-19 — Brief error corrected by the delegate: `PWA_API.md` is at the repo root, not
+  `docs/PWA_API.md` as my brief said. It found the real path.
+- 2026-08-19 — Follow-up, not blocking: `_rehome_signal` calls
+  `vault_rehome.detect_misfiled_people`, which walks every person note on every
+  `GET /api/proposals`. Acceptable for a user-initiated list, but P4's `review-queue-depth`
+  detector must NOT reach this endpoint for a count, or the cheap-detection rule (P4.3) is broken
+  through the back door. Once P3's survey receipt exists, this should read the receipt instead.
+  P4's brief must say so.
