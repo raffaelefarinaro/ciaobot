@@ -778,6 +778,8 @@ def test_run_os_audit_pending_only_is_healthy(tmp_path: Path) -> None:
     assert report["status"] == "healthy"
     assert report["total_issues"] == 0
     assert report["defect_count"] == 0
+    # One pending action: the vault-location notice. The re-home notice needs
+    # more than one registered workspace, and this config registers one.
     assert report["pending_action_count"] == 1
     assert report["has_pending_actions"] is True
     markdown = format_audit_markdown(report)
@@ -800,6 +802,8 @@ def test_run_os_audit_split_counts_keep_pending_actions_out_of_defects(
     )
 
     assert report["defect_count"] == 1
+    # One pending action: the vault-location notice. The re-home notice needs
+    # more than one registered workspace, and this config registers one.
     assert report["pending_action_count"] == 1
     assert report["has_pending_actions"] is True
     assert report["status"] == "needs_attention"
@@ -816,3 +820,217 @@ def test_run_os_audit_clean_has_no_pending_actions(tmp_path: Path) -> None:
     assert report["defect_count"] == 0
     assert report["pending_action_count"] == 0
     assert report["has_pending_actions"] is False
+
+
+def _rehome_config(workspace: Path):
+    """Config with TWO registered workspaces, the shape the damage needs.
+
+    With a single workspace `detect_misfiled_people` still buckets an untagged
+    note as needs_judgement, but its target and destination come back empty:
+    there is nowhere to move it, so the migration has nothing to offer. The
+    notice is gated on more than one workspace, so its tests must register two.
+    """
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    for name in ("personal", "work"):
+        (workspace / "memory-vault" / name / "People").mkdir(parents=True, exist_ok=True)
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=workspace,
+        vault_root=workspace / "memory-vault",
+        state_path=workspace / ".runtime" / "state.json",
+        media_root=workspace / ".runtime" / "media",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal"),
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+
+
+def _rehome_notice(report: dict) -> list[dict]:
+    return [
+        notice
+        for notice in report["upgrade_notices"]["notices"]
+        if notice["type"] == "unrehomed_people"
+    ]
+
+
+def _write_survey_receipt(runtime: Path, **counts: int) -> None:
+    """Write a surveyed re-home receipt with whatever counts the test wants."""
+    (runtime / "migration").mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "status": "surveyed",
+        "surveyed_at": "2026-08-19T00:00:00Z",
+        "vault_root": str(runtime),
+        "mechanical": counts.get("mechanical", 3),
+        "needs_judgement": counts.get("needs_judgement", 2),
+        "conflicts": counts.get("conflicts", 1),
+    }
+    (runtime / "migration" / "vault-rehome.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def _write_migrated_receipt(runtime: Path) -> None:
+    """Write a completed re-home receipt, which must silence the notice."""
+    (runtime / "migration").mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "status": "migrated",
+        "rehomed_at": "2026-08-19T00:00:00Z",
+        "vault_root": str(runtime),
+        "moves": [],
+        "rewrites": [],
+        "needs_judgement": [],
+        "proposals": [],
+    }
+    (runtime / "migration" / "vault-rehome.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def test_rehome_notice_fires_when_receipt_is_absent(tmp_path: Path) -> None:
+    """Nothing ever surveyed the vault, so the damage may exist and is unseen."""
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    assert _rehome_notice(report)
+    assert "no re-home survey" in _rehome_notice(report)[0]["detail"]
+
+
+def test_rehome_notice_is_silent_once_migrated(tmp_path: Path) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    _write_migrated_receipt(runtime)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    assert _rehome_notice(report) == []
+
+
+def test_rehome_notice_still_fires_on_a_surveyed_receipt(tmp_path: Path) -> None:
+    """Surveyed is not migrated: the D4 point, a survey proves the work is pending."""
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    _write_survey_receipt(runtime)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    assert _rehome_notice(report)
+
+
+def test_rehome_notice_reads_counts_from_the_receipt_not_the_vault(
+    tmp_path: Path,
+) -> None:
+    """The notice reports the receipt's numbers even when the vault disagrees.
+
+    The vault below holds far more person notes than the receipt claims. If a
+    future edit "helpfully" switched the notice to scan the vault, this test
+    fails — the whole point of the survey/apply split is that detection never
+    walks the vault.
+    """
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    # A vault that would report different counts than the receipt.
+    for i in range(9):
+        note = vault / "personal" / "People" / f"Note{i}.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            "---\ntype: person\ntags: [person, colleague]\n---\n# X\n",
+            encoding="utf-8",
+        )
+    _write_survey_receipt(runtime, mechanical=1, needs_judgement=0, conflicts=0)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    detail = _rehome_notice(report)[0]["detail"]
+    assert "1 to move" in detail
+    assert "0 needing a decision" in detail
+    assert "0 conflicting" in detail
+
+
+def test_rehome_notice_remedy_names_the_inverse_command(tmp_path: Path) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    remedy = _rehome_notice(report)[0]["remedy"]
+    assert "ciao vault-rehome" in remedy
+    assert "ciao vault-rehome --apply" in remedy
+    assert "ciao vault-unrehome --apply" in remedy
+
+
+def test_rehome_notice_keeps_status_healthy_and_raises_pending(tmp_path: Path) -> None:
+    """A re-home offer is an optional pending action, never a defect: it must not
+    turn the audit red, and it must not raise defect_count."""
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    assert report["status"] == "healthy"
+    assert report["defect_count"] == 0
+    assert report["pending_action_count"] >= 1
+    assert report["has_pending_actions"] is True
+
+
+def test_unrehomed_people_notice_is_silent_on_a_single_workspace_install(
+    tmp_path: Path,
+) -> None:
+    """One workspace has nowhere to misfile a note to, so there is nothing to offer.
+
+    detect_misfiled_people only makes a note a candidate when another registered
+    workspace could hold it. Without the workspace-count gate a fresh install
+    with one workspace and an empty vault was told its person notes may be in
+    the wrong place, which is an action the operator cannot take.
+    """
+    import json as _json
+
+    from ciao.config import CiaoConfig
+    from ciao.os_audit import audit_upgrade_notices
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "workspaces.json").write_text(
+        _json.dumps([{"name": "personal", "vault_root": "memory-vault/personal"}]),
+        encoding="utf-8",
+    )
+    (tmp_path / "memory-vault" / "personal").mkdir(parents=True)
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "t",
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(runtime),
+    })
+
+    result = audit_upgrade_notices(config, runtime)
+
+    kinds = [notice["type"] for notice in result["notices"]]
+    assert "unrehomed_people" not in kinds

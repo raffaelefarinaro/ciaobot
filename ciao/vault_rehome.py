@@ -165,6 +165,33 @@ def receipt_path(runtime_root: Path) -> Path:
 
 
 def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
+    """The reverse map of a completed migration, or None.
+
+    Gates on ``status == "migrated"`` rather than on the file existing: the
+    survey writes a receipt too, and a survey has migrated nothing, so it must
+    not block the real migration's refusal check. Gating on presence instead
+    would let a survey permanently bar the run that fixes the vault.
+    """
+    path = receipt_path(runtime_root)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data if data.get("status") == "migrated" else None
+
+
+def peek_receipt(runtime_root: Path) -> dict[str, Any] | None:
+    """Read the receipt file whatever its status, for the detection side.
+
+    The upgrade notice reads this rather than :func:`read_receipt`, because a
+    survey receipt is a file with work still to do: `read_receipt` correctly
+    returns None for it, which would hide the damage from a notice whose whole
+    job is to surface it.
+    """
     path = receipt_path(runtime_root)
     if not path.is_file():
         return None
@@ -176,7 +203,7 @@ def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
 
 
 def write_receipt(runtime_root: Path, summary: dict[str, Any]) -> Path:
-    """Persist the reverse map atomically, keeping any earlier one.
+    """Persist a receipt atomically, keeping any earlier reverse map.
 
     Written through a `.tmp` sibling and `replace()` so a crash mid-write cannot
     leave a truncated reverse map — a half-written receipt is worse than none,
@@ -186,26 +213,73 @@ def write_receipt(runtime_root: Path, summary: dict[str, Any]) -> Path:
     real work, and the two cannot be merged: the second pass rewrites text the
     first pass already shifted. So an existing receipt is moved aside under a
     timestamped name instead of being lost.
+
+    A **survey** receipt holds counts, not a reverse map, and must never mask the
+    reverse map that undoes real work: if the migration is already recorded, the
+    survey is a no-op that leaves that file untouched.
     """
     path = receipt_path(runtime_root)
     path.parent.mkdir(parents=True, exist_ok=True)
+    status = summary.get("status", "migrated")
+    existing = peek_receipt(runtime_root)
+    if status == "surveyed" and existing is not None and existing.get("status") == "migrated":
+        return path  # a survey must not hide the reverse map that undoes real work
     if path.is_file():
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path.replace(path.with_name(f"{path.stem}.{stamp}{path.suffix}"))
-    payload = {
-        "schema_version": RECEIPT_VERSION,
-        "rehomed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "vault_root": summary.get("vault_root", ""),
-        "git_head_before": summary.get("git_head_before", ""),
-        "moves": summary.get("moves", []),
-        "rewrites": summary.get("rewrites", []),
-        "needs_judgement": summary.get("needs_judgement", []),
-        "proposals": summary.get("proposals", []),
-    }
+    if status == "surveyed":
+        payload = {
+            "schema_version": RECEIPT_VERSION,
+            "status": "surveyed",
+            "surveyed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "vault_root": summary.get("vault_root", ""),
+            "mechanical": summary.get("mechanical", 0),
+            "needs_judgement": summary.get("needs_judgement", 0),
+            "conflicts": summary.get("conflicts", 0),
+        }
+    else:
+        payload = {
+            "schema_version": RECEIPT_VERSION,
+            "status": "migrated",
+            "rehomed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "vault_root": summary.get("vault_root", ""),
+            "git_head_before": summary.get("git_head_before", ""),
+            "moves": summary.get("moves", []),
+            "rewrites": summary.get("rewrites", []),
+            "needs_judgement": summary.get("needs_judgement", []),
+            "proposals": summary.get("proposals", []),
+        }
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
     return path
+
+
+def survey_vault_people(
+    vault_root: Path, runtime_root: Path, *, workspaces: Sequence[str] | None = None
+) -> dict[str, Any]:
+    """Reuse the planning pass to record what a migration would do, applying nothing.
+
+    The point is to leave evidence on disk once per install without ever moving
+    a note: :func:`rehome_people` writes its receipt only when applied, so the
+    survey is the one cheap path that tells the operator the damage exists. The
+    receipt is written with ``status: "surveyed"``, which keeps it out of
+    :func:`read_receipt`'s "migrated" gate, so the real migration stays runnable.
+    """
+    plan = plan_rehome(vault_root, workspaces=workspaces)
+    summary: dict[str, Any] = {
+        "vault_root": str(vault_root),
+        "applied": False,
+        "status": "surveyed",
+        "mechanical": len(plan.get("mechanical", [])),
+        "needs_judgement": len(plan.get("needs_judgement", [])),
+        "conflicts": len(plan.get("conflicts", [])),
+    }
+    if "skipped" in plan:
+        summary["skipped"] = plan["skipped"]
+        return summary
+    summary["receipt_path"] = str(write_receipt(runtime_root, summary))
+    return summary
 
 
 def remove_receipt(runtime_root: Path) -> bool:

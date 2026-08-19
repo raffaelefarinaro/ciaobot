@@ -945,6 +945,56 @@ def audit_upgrade_notices(
         except Exception:  # noqa: BLE001 — advisory section, never fail the audit
             logger.exception("upgrade notices: link-dialect check failed")
 
+    # Person notes filed into the wrong workspace by the per-workspace curation
+    # bug. Surfaced, never applied, and detected from the survey receipt only:
+    # `plan_rehome` walks every person note, and this routine runs on every app
+    # open, so a vault walk here is exactly the cost the survey/apply split
+    # exists to avoid. The notice reads the counts the survey left behind, which
+    # is also why it can never auto-apply: the judgement bucket is non-empty by
+    # construction, and a note with no workspace-naming tag has no single correct
+    # destination. A pending action like the link notice, never a defect.
+    # With one registered workspace every candidate comes back with an empty
+    # target and destination: `detect_misfiled_people` still buckets an untagged
+    # note as needs_judgement, but there is no counterpart to move it to, so the
+    # migration has nothing to do. Firing here would tell a fresh install its
+    # people are misfiled and offer no move, and an unactionable tile is how
+    # operators learn to ignore the whole strip.
+    if runtime_dir is not None and len(names) > 1:
+        try:
+            from ciao.vault_rehome import peek_receipt
+
+            receipt = peek_receipt(runtime_dir)
+            # Absent, or surveyed-but-not-migrated, means the damage was never
+            # fixed. Absent with no survey is the worst case: nothing has ever
+            # recorded the state, so the fix is to survey first.
+            if receipt is None or receipt.get("status") != "migrated":
+                if receipt is not None:
+                    detail = (
+                        "Person notes may be filed in the wrong workspace: the "
+                        f"survey recorded {receipt.get('mechanical', 0)} to move, "
+                        f"{receipt.get('needs_judgement', 0)} needing a decision, "
+                        f"{receipt.get('conflicts', 0)} conflicting."
+                    )
+                else:
+                    detail = (
+                        "Person notes may be filed in the wrong workspace, but no "
+                        "re-home survey has been recorded yet, so nothing has "
+                        "checked."
+                    )
+                notices.append({
+                    "type": "unrehomed_people",
+                    "workspace": "",
+                    "detail": detail,
+                    "remedy": (
+                        "Preview with `ciao vault-rehome` (dry-run by default), "
+                        "then apply with `ciao vault-rehome --apply`. Every move "
+                        "and link rewrite is recorded, so `ciao vault-unrehome "
+                        "--apply` restores the notes and their references."
+                    ),
+                })
+        except Exception:  # noqa: BLE001 — advisory section, never fail the audit
+            logger.warning("upgrade notices: person re-home check failed")
+
     return {"notices": notices, "notices_found": len(notices), "errors": errors}
 
 
