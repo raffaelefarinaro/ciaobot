@@ -36,10 +36,10 @@ Re-verified by symbol against the working tree before any dispatch:
 | P2 Audit split (D2) | delegate | RUNNING | wave 2; also owns the pre-existing os-audit test failure |
 | P3 unrehomed_people notice | — | TODO | needs P1/P2 (`os_audit.py`), P5.9 (`vault_rehome.py`) |
 | P4 Surfaced-actions strip | — | TODO | needs P2, P3 |
-| P5 Queue review UI | split | RUNNING | wave 2 = server half (P5.1-P5.4); UI half deferred to wave 3 |
+| P5 Queue review UI | split | RUNNING | server half re-dispatched chat-35f8da7d; UI half in wave 3 |
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
-| P7 Provider seam | delegate | RUNNING | wave 2 |
+| P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | — | TODO | needs P6; shares `project_chats.py` with P7 |
 | P9 Per-root memory + MCP allowlist | — | TODO | needs P2, P6 |
 | P10 The cut | — | TODO | gated on all of P1–P9 + V1–V3 |
@@ -243,3 +243,21 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   each with a live `opencode serve` started at the matching local time. Running normally.
   The `server_errors.log` holds nothing relevant: one 09:02Z schedule-classifier JSON error and
   five `ClientDisconnect` traces from the MCP HTTP endpoint, all unrelated to delegate startup.
+- 2026-08-19 — P7 verified and committed as `06b94e6c`. `_ensure_provider` takes an optional
+  keyword-only `agent_root`; `_agent_root_for_chat` resolves the chat's project's workspace and
+  falls back to `primary_workspace()` for a project with no workspace, a project missing from the
+  manager's map, and a chat with no project. Confirmed `_is_known_workspace`
+  (project_chats.py:1697) and `primary_workspace` (config.py:456) both already existed, so no
+  new helper was invented.
+  Verified the no-behaviour-change claim properly: applied ONLY P7's diff in a throwaway worktree
+  at HEAD, so the other delegate's in-flight `os_audit.py` edits could not contaminate the
+  measurement. Result 2601 passed / 2 pre-existing failed, no regressions.
+  Mutation-checked the new tests: pointing the resolver at a wrong path fails 3 of 4, and the 4th
+  is the one that deliberately bypasses the resolver. The tests have teeth.
+  Coordinator fixed one test-isolation hazard: the `_CAPTURED` spy dict was module-level and never
+  cleared, so an assertion could read the PREVIOUS test's root and pass even when the factory was
+  never called. Proved it by deleting the triggering call and watching the test go from pass to
+  fail after adding `_CAPTURED.clear()`.
+- 2026-08-19 — P5-server re-dispatched (`chat-35f8da7d`) now that P7 proved the delegate path
+  works. P8 is blocked behind it: both need `ciao/web/routes_api.py`. P3 is still blocked behind P2
+  on `ciao/os_audit.py`.
