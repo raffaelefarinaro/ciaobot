@@ -714,6 +714,7 @@ class CiaoControlPlane:
         prompt: str | None = None,
     ) -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
+        requested_mode = mode
         mode = self._child_mode(principal, mode)
         chat = self.pcm.create_chat(
             project.project_id, title=title, provider=provider, model=model, mode=mode
@@ -722,6 +723,9 @@ class CiaoControlPlane:
             chat.control_surface = control_surface
             self.pcm._save()
         result = chat.to_dict(local=True)
+        if requested_mode and requested_mode != mode:
+            result["mode_clamped"] = True
+            result["requested_mode"] = requested_mode
         text = (prompt or "").strip()
         if text:
             if self.pcm.queue_message(chat.chat_id, text):
@@ -747,6 +751,7 @@ class CiaoControlPlane:
         chat_id = self._chat_id(principal, chat_id)
         if project_id is not None:
             self._project(principal, project_id)
+        requested_mode = mode
         if mode is not None:
             # A normal/auto MCP caller must not upgrade its own or another
             # chat to bypass through the auto-approved metadata tool. Keep the
@@ -785,7 +790,11 @@ class CiaoControlPlane:
                     if provider_service is not None:
                         asyncio.create_task(provider_service.disconnect())
             self.pcm._save()
-        return _ok(updated.to_dict(local=self.pcm.is_session_local(updated)))
+        result = updated.to_dict(local=self.pcm.is_session_local(updated))
+        if requested_mode and requested_mode != mode:
+            result["mode_clamped"] = True
+            result["requested_mode"] = requested_mode
+        return _ok(result)
 
     def chat_send(self, principal: McpPrincipal, chat_id: str, prompt: str) -> dict[str, Any]:
         chat = self._chat(principal, chat_id)
@@ -983,6 +992,7 @@ class CiaoControlPlane:
             )
         if not prompt.strip():
             raise ControlPlaneError("empty_prompt", "prompt is required.")
+        requested_mode = mode
         mode = self._child_mode(principal, mode)
         active = self.pcm.active_delegate_count(parent.chat_id)
         if active >= _MAX_ACTIVE_DELEGATES:
@@ -1019,6 +1029,9 @@ class CiaoControlPlane:
         result = chat.to_dict(local=True)
         result["send_status"] = send_status
         result["active_delegates"] = active + 1
+        if requested_mode and requested_mode != mode:
+            result["mode_clamped"] = True
+            result["requested_mode"] = requested_mode
         return _ok(result)
 
     def delegates_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:

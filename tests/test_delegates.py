@@ -529,6 +529,8 @@ def test_delegate_spawn_clamps_child_mode_to_parent(tmp_path: Path) -> None:
     child = manager.get_chat(result["data"]["chat_id"])
     assert child is not None
     assert child.mode == "normal"
+    assert result["data"]["mode_clamped"] is True
+    assert result["data"]["requested_mode"] == "bypass"
 
 
 def test_chat_update_cannot_upgrade_mode_through_mcp(tmp_path: Path) -> None:
@@ -537,13 +539,15 @@ def test_chat_update_cannot_upgrade_mode_through_mcp(tmp_path: Path) -> None:
     parent = manager.create_chat(project.project_id, title="Supervisor", mode="normal")
     plane = _control_plane(manager)
 
-    plane.chat_update(
+    result = plane.chat_update(
         _principal(parent.chat_id, project.project_id),
         "",
         mode="bypass",
     )
 
     assert manager.get_chat(parent.chat_id).mode == "normal"
+    assert result["data"]["mode_clamped"] is True
+    assert result["data"]["requested_mode"] == "bypass"
 
 
 def test_finished_delegates_free_their_slot(tmp_path: Path) -> None:

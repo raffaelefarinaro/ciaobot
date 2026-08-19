@@ -537,9 +537,11 @@ def test_chat_create_clamps_child_mode_to_calling_chat() -> None:
     pcm = _ChatCreatePcm(parent_mode="normal")
     control_plane = _chat_create_control_plane(pcm)
 
-    control_plane.chat_create(_chat_create_principal(), mode="bypass")
+    result = control_plane.chat_create(_chat_create_principal(), mode="bypass")
 
     assert pcm.created[-1]["mode"] == "normal"
+    assert result["data"]["mode_clamped"] is True
+    assert result["data"]["requested_mode"] == "bypass"
 
 
 def test_schedule_create_resolves_project_by_name(tmp_path: Path) -> None:
