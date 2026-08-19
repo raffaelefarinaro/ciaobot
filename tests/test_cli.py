@@ -156,6 +156,20 @@ def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> N
     assert str(called[0].vault_root) == "/tmp/vault"
 
 
+def test_cli_workspace_census_dispatches_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = []
+
+    monkeypatch.setattr(
+        cli, "_workspace_census_command", lambda args: called.append(args) or 0
+    )
+
+    assert cli.main(["workspace-census", "--vault-root", "/tmp/vault", "--json"]) == 0
+    assert str(called[0].vault_root) == "/tmp/vault"
+    assert called[0].json is True
+
+
 def _write_healthy_audit_workspace(root: Path) -> None:
     from ciao.memory_tool import ensure_regions
 

@@ -1742,6 +1742,25 @@ def _os_audit_command(args: argparse.Namespace) -> int:
     }.get(report["status"], 2)
 
 
+def _workspace_census_command(args: argparse.Namespace) -> int:
+    """Survey a vault root and print the reported shapes.
+
+    Read-only by design: this is the survey the per-workspace migration's
+    fixtures must match, not a check. It always exits 0, because an unregistered
+    directory is information the migration needs, not a failure for the caller.
+    """
+    from ciao.workspace_census import format_census, survey_vault
+
+    vault_root = _resolve_vault_root(args.vault_root)
+    census = survey_vault(vault_root)
+
+    if args.json:
+        print(json.dumps(census.as_dict(), indent=2))
+    else:
+        print(format_census(census))
+    return 0
+
+
 def _memory_audit_command(args: argparse.Namespace) -> int:
     """Audit only the bounded-memory regions.
 
@@ -2635,6 +2654,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output raw JSON audit report.",
     )
     os_audit_parser.set_defaults(func=_os_audit_command)
+
+    census_parser = subparsers.add_parser(
+        "workspace-census",
+        help="Survey a vault root into migration fixture shapes.",
+        description=(
+            "Read-only census of a vault root: note and non-markdown counts per "
+            "top-level directory, symlinks, max depth, duplicate stems, "
+            "frontmatter-less notes, and registered vs unregistered directories."
+        ),
+    )
+    census_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+    )
+    census_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output raw JSON census report.",
+    )
+    census_parser.set_defaults(func=_workspace_census_command)
 
     memory_audit_parser = subparsers.add_parser(
         "memory-audit",
