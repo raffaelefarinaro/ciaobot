@@ -37,12 +37,12 @@
             <button
               type="button"
               class="home-lane-new"
-              :class="{ 'home-lane-new--split': lane.projects.length > 1 }"
+              :class="{ 'home-lane-new--split': lane.projects.length > 1, 'home-lane-new--creating': lane.newAction.isCreating }"
               :data-workspace-color="lane.color"
               :disabled="lane.newAction.isCreating"
               :aria-label="`New chat in ${lane.label || 'workspace'}`"
               @click="emit('new-workspace-chat', lane.newAction)"
-            >{{ lane.newAction.isCreating ? '...' : '+ new' }}</button>
+            ><span v-if="lane.newAction.isCreating" class="home-lane-new-spinner" aria-hidden="true" /><span>{{ lane.newAction.isCreating ? 'Creating…' : '+ new' }}</span></button>
             <!-- Dimmed at rest rather than hover-revealed: the PWA is used on
                  phones, where there is no hover, so a hover-only affordance is
                  simply missing. Hover and focus bring it up to full strength. -->
@@ -849,6 +849,9 @@ watch(() => store.activeWorkspace, async () => {
 }
 
 .home-lane-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-height: var(--touch, 44px);
   flex: 0 0 auto;
   padding: 5px 9px;
@@ -870,6 +873,28 @@ watch(() => store.activeWorkspace, async () => {
 .home-lane-new:disabled {
   cursor: wait;
   opacity: 0.65;
+}
+
+/* Solid, not dashed — mid-creation this is a status readout, not an
+   affordance to invite another click. Ellipsis text alone read as inert
+   during the multi-second round trip to create the chat, so the spinner
+   carries the "still working" signal. */
+.home-lane-new--creating {
+  border-style: solid;
+}
+
+.home-lane-new-spinner {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: home-lane-new-spin 0.8s linear infinite;
+}
+
+@keyframes home-lane-new-spin {
+  to { transform: rotate(360deg); }
 }
 
 /* Split control: "+ new" keeps its one-click meaning (a chat in General) and
@@ -1270,5 +1295,6 @@ watch(() => store.activeWorkspace, async () => {
 @media (prefers-reduced-motion: reduce) {
   .home-chat-item { transition: none; }
   .title-shimmer { animation: none; }
+  .home-lane-new-spinner { animation: none; }
 }
 </style>

@@ -40,6 +40,12 @@
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+            <div class="home-boot-body">
+              <div class="home-boot-card" role="status" aria-live="polite">
+                <span class="home-boot-spinner" aria-hidden="true"></span>
+                <span>Loading your workspaces…</span>
+              </div>
+            </div>
           </div>
           <!-- On mobile, the sidebar already lists every active chat. Showing the
                homepage behind it after closing a chat would just duplicate the
@@ -127,6 +133,12 @@
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+          <div class="home-boot-body">
+            <div class="home-boot-card" role="status" aria-live="polite">
+              <span class="home-boot-spinner" aria-hidden="true"></span>
+              <span>Loading your workspaces…</span>
+            </div>
+          </div>
         </div>
         <!-- On mobile, the sidebar already lists every active chat. Showing the
              homepage behind it after closing a chat would just duplicate the
@@ -990,6 +1002,55 @@ onBeforeUnmount(() => {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+/* fetchAll() (workspaces/projects/chats) is still in flight here — a bare
+   header over an empty flex area used to read as broken rather than loading. */
+.home-boot-body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+
+.home-boot-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 14px);
+  background: color-mix(in srgb, var(--bg2) 82%, transparent);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  animation: home-boot-enter 220ms ease-out both;
+}
+
+.home-boot-spinner {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: home-boot-spin 0.8s linear infinite;
+}
+
+@keyframes home-boot-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes home-boot-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-boot-card,
+  .home-boot-spinner {
+    animation: none;
+  }
 }
 
 .empty-state {
