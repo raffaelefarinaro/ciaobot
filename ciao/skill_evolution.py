@@ -94,19 +94,43 @@ def _resolve_skills_roots() -> tuple[Path, ...]:
 _DEFAULT_SKILLS_ROOTS: tuple[Path, ...] = _resolve_skills_roots()
 
 
-def _resolve_proposals_dir() -> Path:
-    """Resolve the active workspace's registry-owned proposal queue."""
+def _resolve_proposals_dir(workspace: str | None = None) -> Path:
+    """Resolve a workspace's registry-owned proposal queue.
+
+    ``workspace`` names it explicitly; otherwise the active one is used, falling
+    back to the primary. Passing it explicitly is what lets one pass write each
+    workspace's findings to that workspace's queue instead of pooling every
+    workspace's evidence into whichever one happened to be primary.
+    """
     from ciao.config import CiaoConfig
 
     config = CiaoConfig.from_env()
-    workspace = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
-    if config.workspace(workspace) is None:
-        workspace = config.primary_workspace()
+    name = (workspace or os.environ.get("CIAO_ACTIVE_WORKSPACE", "")).strip()
+    if config.workspace(name) is None:
+        name = config.primary_workspace()
     return (
-        config.workspace_vault_root(workspace)
+        config.workspace_vault_root(name)
         / "Workspace"
         / "Skill-Proposals"
     )
+
+
+def evolution_workspaces() -> list[str]:
+    """Workspaces the evolution pass should run for, one queue each.
+
+    The skill catalog is global (see :func:`_resolve_skills_roots`), so the pass
+    is not fanned out into N schedules — one run covers every workspace and
+    routes its findings. Only the *evidence* and the *queue* are per-workspace.
+    """
+    from ciao.config import CiaoConfig
+
+    try:
+        config = CiaoConfig.from_env()
+        names = [name for name in config.workspace_names() if name]
+    except Exception:  # noqa: BLE001 — a broken registry must not skip the pass
+        logger.exception("Failed to resolve workspaces for skill evolution")
+        return []
+    return names
 
 
 # Resolved per call, not at import: an import-time constant that depended on
@@ -781,8 +805,14 @@ async def run_evolution_pass(
     tests_root: Path | None = None,
     now: datetime | None = None,
     retention_months: int | None = DEFAULT_RETENTION_MONTHS,
+    workspace: str | None = None,
 ) -> list[Path]:
     """Mine trajectories and write skill proposals. Returns written paths.
+
+    ``workspace`` scopes both halves: only that workspace's trajectories are
+    read, and proposals default to that workspace's queue. Without it the pass
+    reads every workspace's sessions and writes to a single queue, so work
+    session content was quoted into the personal vault.
 
     Tail step: if ``retention_months`` is set, prune
     ``~/.ciao/trajectories/YYYY-MM/`` dirs older than that window. Pass
@@ -803,11 +833,11 @@ async def run_evolution_pass(
     timing lands in ``.runtime/job_runs.jsonl`` with label
     ``skillevo:<skill>:<node>``.
     """
-    output_dir = output_dir or _default_proposals_dir()
+    output_dir = output_dir or _resolve_proposals_dir(workspace)
     now = now or datetime.now(UTC)
     since = now - timedelta(days=since_days)
 
-    trajectories = _load_trajectories(since=since)
+    trajectories = _load_trajectories(since=since, workspace=workspace)
     flagged = find_underperforming_skills(
         trajectories, min_sessions=min_sessions
     )
@@ -878,9 +908,11 @@ async def run_evolution_pass(
     return written
 
 
-def _load_trajectories(*, since: datetime) -> list[dict[str, Any]]:
+def _load_trajectories(
+    *, since: datetime, workspace: str | None = None
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for path in list_trajectories(since=since):
+    for path in list_trajectories(since=since, workspace=workspace):
         try:
             out.append(load_trajectory(path))
         except (OSError, json.JSONDecodeError) as exc:
@@ -1013,19 +1045,32 @@ def _main(argv: list[str] | None = None) -> int:
         if note:
             run.extra["fallback"] = note
             logger.info("Skill evolution %s", note)
-        paths = asyncio.run(
-            run_evolution_pass(
-                since_days=args.since_days,
-                skills_root=args.skills_root,
-                output_dir=args.output_dir,
-                model=args.model,
-                min_sessions=args.min_sessions,
-                enable_test_gate=args.test_gate,
-                enable_semantic_check=args.semantic_check,
-                retention_months=args.retention_months or None,
+        # One pass per workspace: the skill catalog is global, so this is not
+        # N schedules, but each workspace's evidence must land in its own queue.
+        # An explicit --output-dir overrides the routing and pools everything,
+        # which is what a targeted manual run wants.
+        scopes: list[str | None] = [None]
+        if args.output_dir is None:
+            scopes = list(evolution_workspaces()) or [None]
+        paths: list[Path] = []
+        for scope in scopes:
+            paths.extend(
+                asyncio.run(
+                    run_evolution_pass(
+                        since_days=args.since_days,
+                        skills_root=args.skills_root,
+                        output_dir=args.output_dir,
+                        model=args.model,
+                        min_sessions=args.min_sessions,
+                        enable_test_gate=args.test_gate,
+                        enable_semantic_check=args.semantic_check,
+                        retention_months=args.retention_months or None,
+                        workspace=scope,
+                    )
+                )
             )
-        )
         run.extra["proposals"] = len(paths)
+        run.extra["workspaces"] = [scope for scope in scopes if scope]
         if not paths:
             run.skip("no proposals written")
     print(f"Wrote {len(paths)} proposal(s)")

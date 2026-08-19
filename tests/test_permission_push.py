@@ -13,6 +13,7 @@ used for final-reply pushes.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,35 @@ def test_notify_permission_invokes_callback(tmp_path: Path) -> None:
     assert calls == [(chat.chat_id, "Bash", "Run risky shell?", "req-42")]
 
 
+def test_notify_permission_persists_pending_permission_on_chat(tmp_path: Path) -> None:
+    """A backgrounded chat must be able to show it needs attention in-app,
+
+    not just via the OS push — before this fix `pending_permission` didn't
+    exist and only the push callback + the open ChatPanel's ephemeral state
+    ever learned about an outstanding Approve/Deny prompt.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+
+    event = PermissionRequestEvent(
+        type="permission_request",
+        tool_name="Bash",
+        tool_input='{"command": "rm -rf /"}',
+        message="Approve use of Bash?",
+        request_id="req-42",
+    )
+    pcm._notify_permission(chat.chat_id, event)
+
+    stored = pcm._chats[chat.chat_id].pending_permission
+    assert json.loads(stored) == {
+        "request_id": "req-42",
+        "tool_name": "Bash",
+        "message": "Approve use of Bash?",
+        "tool_input": '{"command": "rm -rf /"}',
+    }
+
+
 def test_notify_permission_skips_delegate_chat(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("General", workspace="personal")
@@ -90,6 +120,10 @@ def test_notify_permission_skips_delegate_chat(tmp_path: Path) -> None:
     pcm._notify_permission(child.chat_id, event)
 
     assert calls == []
+    # A nested delegate's own turn is internal model-to-model traffic; the
+    # supervisor is the chat a human would open, so the delegate must not
+    # pick up its own attention flag either.
+    assert pcm._chats[child.chat_id].pending_permission == ""
 
 
 def test_notify_permission_is_no_op_without_callback(tmp_path: Path) -> None:

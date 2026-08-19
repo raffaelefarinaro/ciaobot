@@ -172,6 +172,13 @@ export interface ChatInfo {
   // an unanswered question. Lets the PWA rebuild the picker after a reload.
   // Cleared by the server on the next user send.
   pending_question?: string
+  // Raw PermissionRequestEvent JSON (`{request_id, tool_name, message,
+  // tool_input}`) when the chat is blocked mid-turn on an unanswered
+  // Approve/Deny prompt. Lets the PWA rebuild the card after a reload and
+  // count the chat as needing attention even when it isn't the foreground
+  // chat receiving the live WS stream. Cleared by the server on answer or
+  // turn end.
+  pending_permission?: string
   retry?: ChatRetryInfo | null
   forked_from_chat_id?: string
   forked_from_turn_index?: number | null

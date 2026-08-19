@@ -100,6 +100,7 @@ import {
   groupAutomations,
   retryModelOptions as buildRetryModelOptions,
 } from '../../lib/automationView'
+import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import type { AutomationProcess, RoutineSettings } from '../../lib/types'
 import AutomationRow from './AutomationRow.vue'
@@ -126,6 +127,7 @@ const props = defineProps<{
 }>()
 
 const taskStore = useTaskStore()
+const projectStore = useProjectStore()
 
 const groups = computed(() => groupAutomations(props.automationItems))
 const headline = computed(() => automationHeadline(props.automationItems))
@@ -151,8 +153,22 @@ const legacyJobSchedules: Record<string, string> = {
   skill_evolution: 'system-skill-evolution',
 }
 
+/**
+ * The schedule id to actually POST for this row's "Run now".
+ *
+ * A per-workspace system routine is installed as `<base>@<workspace>`, so the
+ * packaged id the API reports names no real schedule and running it 404s. Match
+ * on the base id and prefer the row for the workspace the user is looking at.
+ */
 function scheduleFor(item: AutomationProcess): string {
-  return item.schedule_id || legacyJobSchedules[item.job] || ''
+  const base = item.schedule_id || legacyJobSchedules[item.job] || ''
+  if (!base) return ''
+  const matches = taskStore.schedules.filter(
+    s => s.schedule_id === base || s.schedule_id.startsWith(`${base}@`),
+  )
+  if (!matches.length) return base
+  const active = matches.find(s => s.workspace === projectStore.activeWorkspace)
+  return (active ?? matches[0]).schedule_id
 }
 
 /**

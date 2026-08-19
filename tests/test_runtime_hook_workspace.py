@@ -1,19 +1,21 @@
-"""Regression tests for the UserPromptSubmit runtime-context hook.
+"""Regression tests for the ``<ciao-runtime>`` context lines.
 
-The hook callback runs in the ciao server process, so ``os.environ`` only
+``_runtime_lines`` runs in the ciao server process, so ``os.environ`` only
 holds global defaults. The active chat's workspace arrives via ``extra_env``
 (the per-request env the provider builds). These tests pin that ``extra_env``
-wins, so the injected ``<ciao-runtime>`` block tracks the PWA workspace toggle
-instead of always printing the server default.
+wins, so the rendered block tracks the PWA workspace toggle instead of always
+printing the server default.
+
+Entity-tag injection is covered by ``test_context_capsule.py`` — the
+Claude-only ``UserPromptSubmit`` builder these tests also exercised was
+deleted once ``ciao.context.capsule`` became the single injection point.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from ciao.observability.hooks import _runtime_lines, build_user_prompt_submit_hook
+from ciao.observability.hooks import _runtime_lines
 
 
 def test_runtime_lines_prefers_extra_env_workspace(monkeypatch) -> None:
@@ -57,85 +59,3 @@ def test_runtime_lines_always_includes_today_and_cwd(monkeypatch) -> None:
     lines = _runtime_lines(Path("/repo/x"))
     assert any(ln.startswith("today=") for ln in lines)
     assert "cwd=/repo/x" in lines
-
-
-@pytest.mark.asyncio
-async def test_user_prompt_hook_filters_entities_to_active_workspace(tmp_path: Path) -> None:
-    (tmp_path / "INDEX.md").write_text(
-        "\n".join([
-            "- `personal/Projects/Apollo` (aliases: Apollo)",
-            "- `work/Projects/Apollo` (aliases: Apollo)",
-            "- `shared/People/Alba` (aliases: Alba)",
-            "- `personal/People/Defne` (aliases: Defne)",
-        ]),
-        encoding="utf-8",
-    )
-    hook = build_user_prompt_submit_hook(
-        tmp_path,
-        {
-            "CIAO_WORKSPACE": "/repo",
-            "CIAO_ACTIVE_WORKSPACE": "work",
-            "GWS_PROFILE": "work",
-        },
-    )
-
-    out = await hook(
-        {"prompt": "Apollo update with Alba and Defne", "cwd": "/repo"},
-        None,
-        None,
-    )
-
-    ctx = out["hookSpecificOutput"]["additionalContext"]
-    assert "[[work/Projects/Apollo]]" in ctx
-    assert "[[shared/People/Alba]]" in ctx
-    assert "[[personal/Projects/Apollo]]" not in ctx
-    assert "[[personal/People/Defne]]" not in ctx
-
-
-@pytest.mark.asyncio
-async def test_user_prompt_hook_does_not_leak_unprefixed_legacy_entities(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "INDEX.md").write_text(
-        "- `People/Alba` (aliases: Alba)\n",
-        encoding="utf-8",
-    )
-    hook = build_user_prompt_submit_hook(
-        tmp_path,
-        {
-            "CIAO_ACTIVE_WORKSPACE": "work",
-            "CIAO_LEGACY_ENTITY_WORKSPACE": "personal",
-        },
-    )
-
-    out = await hook({"prompt": "Ask Alba", "cwd": "/repo"}, None, None)
-
-    assert "[[People/Alba]]" not in out["hookSpecificOutput"]["additionalContext"]
-
-
-@pytest.mark.asyncio
-async def test_user_prompt_hook_ignores_injected_context_wrapper(tmp_path: Path) -> None:
-    # The CIAO_CONTEXT wrapper is prepended before the hook runs. Entity
-    # detection must scan the user's words, not the injected canonical-doc
-    # path, so a bare "fix it" prompt yields no <ciao-entities> block.
-    (tmp_path / "INDEX.md").write_text(
-        "- `personal/projects/active/consulting/README` (tags: project)\n",
-        encoding="utf-8",
-    )
-    hook = build_user_prompt_submit_hook(
-        tmp_path,
-        {"CIAO_ACTIVE_WORKSPACE": "personal", "GWS_PROFILE": "personal"},
-    )
-    wrapped = (
-        "[CIAO_CONTEXT_BEGIN]\n"
-        '[Project: "CONSULTING"]\n'
-        "[Canonical doc: personal/projects/active/consulting/README.md]\n"
-        "[CIAO_CONTEXT_END]\n\n"
-        "fix it"
-    )
-
-    out = await hook({"prompt": wrapped, "cwd": "/repo"}, None, None)
-
-    ctx = out["hookSpecificOutput"]["additionalContext"]
-    assert "<ciao-entities>" not in ctx
-    assert "consulting" not in ctx

@@ -419,7 +419,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     transcript_root = config.vault_root / "Logs" / "Chats"
     transcripts = TranscriptStore(config.state_path.parent, transcript_root)
 
-    schedule_store = ScheduleStore(config.state_path.parent, include_system=True)
+    # `workspace_names` is read on every list, not captured once, so adding a
+    # workspace produces its per-workspace system routines without a restart.
+    schedule_store = ScheduleStore(
+        config.state_path.parent,
+        include_system=True,
+        workspace_names=config.workspace_names,
+    )
 
     # Create ProjectChatManager
     pcm = ProjectChatManager(

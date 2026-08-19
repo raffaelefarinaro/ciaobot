@@ -375,8 +375,9 @@ scripts/dev-commands.sh all         # everything above
 
 `ciao vault-lint` is a read-only, deterministic check for the Markdown vault.
 It validates the frontmatter on each page, including a non-empty string
-`type`, and reports broken relative Markdown links, broken wikilinks, orphan
-pages, and duplicate stems. `INDEX.md`, `MEMORY.md`, and `log.md` are exempt
+`type`, and reports broken relative Markdown links, orphan pages, and
+duplicate stems. Relative Markdown links are the vault's only cross-link
+dialect, so there is one broken-link bucket, not one per dialect. `INDEX.md`, `MEMORY.md`, and `log.md` are exempt
 from the frontmatter requirement. External URLs, absolute paths, and anchors
 are not treated as vault links.
 
@@ -388,7 +389,7 @@ inspect every path.
 ### AI OS audit
 
 `ciao os-audit` checks required workspace roots, vault frontmatter, relative
-Markdown links, wikilinks, orphans and duplicate stems, skill budgets,
+Markdown links, orphans and duplicate stems, skill budgets,
 instruction clashes, bounded-memory hygiene, pending memory proposals, and
 failed background jobs. Human-readable Markdown is the default; use `--json`
 for automation. A vault scan that cannot inspect all paths is reported as an

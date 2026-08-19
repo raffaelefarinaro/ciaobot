@@ -320,7 +320,7 @@
           <!-- Backlinks Tab -->
           <div v-if="store.tab === 'backlinks'" class="fv-backlinks-pane">
             <div v-if="loadingBacklinks" class="fv-loading">Loading backlinks…</div>
-            <div v-else-if="backlinks.length === 0" class="fv-empty-backlinks">No incoming wikilinks found for this note</div>
+            <div v-else-if="backlinks.length === 0" class="fv-empty-backlinks">No incoming links found for this note</div>
             <ul v-else class="fv-backlinks-list">
               <li v-for="b in backlinks" :key="b.path">
                 <button
@@ -410,7 +410,7 @@ import { useProjectStore } from '../stores/projects'
 import { api } from '../lib/api'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
-import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
+import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } from '../lib/terminalDiff'
 import { isCsvPath } from '../lib/csv'
@@ -584,20 +584,21 @@ const fmProse = computed(() => {
   return ''
 })
 
-// `related`/`links` frontmatter items are [[wikilink]] references to other
-// vault notes — resolve them to file paths so the pills are clickable (same
-// resolution as body wikilinks). `aliases` are alternative names for THIS
-// note, not links, so they stay plain text.
+// `related`/`links` frontmatter items are bare vault refs (`People/Mo`) —
+// resolve them to file paths so the pills are clickable (same resolution as
+// body links). A `[[...]]` wrapper is still tolerated so notes that predate
+// the markdown-link swap keep working. `aliases` are alternative names for
+// THIS note, not links, so they stay plain text.
 const _LINK_LIST_KEYS = new Set(['related', 'links'])
-const _wikiIndex = computed(() => buildMarkdownIndex(store.markdownPaths || []))
-const _wikiPathSet = computed(() => new Set<string>(store.markdownPaths || []))
+const _linkIndex = computed(() => buildMarkdownIndex(store.markdownPaths || []))
+const _linkPathSet = computed(() => new Set<string>(store.markdownPaths || []))
 
 function resolveListItem(raw: string): { label: string; path: string | null } {
   const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
   const [ref, alias] = inner.split('|')
   const label = (alias ?? ref).trim()
   const path = ref.trim()
-    ? resolveWikilinkTarget(ref.trim(), store.path, _wikiIndex.value, _wikiPathSet.value)
+    ? resolveVaultLinkTarget(ref.trim(), store.path, _linkIndex.value, _linkPathSet.value)
     : null
   return { label, path }
 }
@@ -1644,7 +1645,7 @@ if (typeof window !== 'undefined') {
 .fv-md :deep(a:hover) {
   color: var(--accent-strong);
 }
-.fv-md :deep(.wikilink-unresolved) {
+.fv-md :deep(.vault-link-unresolved) {
   color: var(--fg-muted, #888);
   text-decoration: underline dotted;
   cursor: help;

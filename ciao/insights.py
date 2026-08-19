@@ -253,7 +253,7 @@ Rules:
   preference that should hold in future sessions, phrased as a present-tense
   standing rule; omit it for one-off fixes.
 - "New entities" = people/projects/places/products mentioned for the first time, not generic nouns.
-- When citing wikilinks, use bare [[Target]] or [[Target|Display]] syntax. Do NOT wrap wikilinks in backticks, quotes, or other formatting.
+- When citing a vault note, use a relative Markdown link with the path from the vault root: [Mo](./People/Mo.md). Do NOT use [[wikilinks]] and do NOT wrap the link in backticks, quotes, or other formatting.
 - Be terse. One line per item where possible.
 
 ## Errors

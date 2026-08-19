@@ -137,8 +137,9 @@ def _index_directory(
         # Skip excluded directories
         if any(p in exclude_dirs for p in rel.parts):
             continue
-        # Skip specific excluded files
-        if rel.name in exclude_files:
+        # Skip specific excluded files (casefolded: the reserved names are
+        # spelled lowercase by OKF and titlecase by this vault's history)
+        if rel.name.casefold() in exclude_files:
             continue
 
         found_paths.add(rel_str)
@@ -191,13 +192,15 @@ def _index_directory(
 
 def index_vault(conn: sqlite3.Connection, vault_root: Path) -> tuple[int, int]:
     """Incremental indexer for core vault files (excludes Logs, Templates)."""
+    from ciao.vault_index import GENERATED_VAULT_FILES
+
     return _index_directory(
         conn=conn,
         root_dir=vault_root,
         meta_table="vault_meta",
         fts_table="vault_fts",
         exclude_dirs=EXCLUDED_VAULT_DIRS,
-        exclude_files={"INDEX.md", "MEMORY.md"},
+        exclude_files=set(GENERATED_VAULT_FILES),
     )
 
 

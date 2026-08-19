@@ -13,14 +13,14 @@ def client(tmp_path):
     (vault / "work").mkdir(parents=True)
 
     # A relates to B via frontmatter `related:` and to C (a different
-    # workspace) via an inline wikilink.
+    # workspace) via an inline relative markdown link.
     (vault / "personal" / "A.md").write_text(
         "---\n"
         "type: note\n"
         "related: [B]\n"
         "description: Note A.\n"
         "---\n"
-        "# A\n\nSee [[C]] too.\n",
+        "# A\n\nSee [C](../work/C.md) too.\n",
         encoding="utf-8",
     )
     (vault / "personal" / "B.md").write_text(

@@ -871,13 +871,16 @@ def test_was_dispatched_since_handles_both_stamp_formats():
 
 
 def test_system_routines_ship_descriptions_and_set(tmp_path: Path) -> None:
-    """Packaged system routines must carry a user-facing description, and the
-    shipped set is memory-curation + workspace-hygiene + skill-evolution
-    (the operator-only self-improvement review is no longer shipped)."""
+    """Packaged system routines must carry a user-facing description.
+
+    Without a `workspace_names` resolver a `per_workspace` definition stays a
+    single entry, so this sees the packaged ids rather than fanned-out ones.
+    """
     store = ScheduleStore(tmp_path, include_system=True)
     system = {e.schedule_id: e for e in store.list_entries() if e.scope == "system"}
     assert set(system) == {
         "system-memory-curation",
+        "system-vault-index",
         "system-workspace-hygiene",
         "system-skill-evolution",
     }
@@ -887,20 +890,35 @@ def test_system_routines_ship_descriptions_and_set(tmp_path: Path) -> None:
 
 
 def test_workspace_hygiene_runs_structured_os_audit(tmp_path: Path) -> None:
+    """Hygiene audits one workspace and no longer rebuilds the index.
+
+    The rebuild moved to `system-vault-index` because it regenerates one shared
+    pair of files; running it inside a per-workspace routine would rebuild the
+    same INDEX.md and VOCABULARY.md once per workspace.
+    """
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-workspace-hygiene")
     assert entry is not None
     prompt = entry.prompt.lower()
-    assert "ciao vault-index --write" in entry.prompt
     assert "ciao os-audit --json" in entry.prompt
+    assert "ciao vault-index --write" not in entry.prompt
     assert "ciao vault-lint" not in entry.prompt
     assert "exit code 1" in prompt
     assert "exit code 2" in prompt
-    assert prompt.index("ciao vault-index --write") < prompt.index("ciao os-audit --json")
     assert "summarize command output" in prompt
-    assert "run `ciao os-audit --json` again" in prompt
-    assert "if vault-index fails" in prompt
     assert "do not claim" in prompt
+    # Scoped by the dispatch env, so the static prompt must not name a workspace.
+    assert "--workspace-name" not in entry.prompt
+
+
+def test_vault_index_routine_is_global_and_runs_before_hygiene(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path, include_system=True)
+    index = store.get("system-vault-index")
+    hygiene = store.get("system-workspace-hygiene")
+    assert index is not None and hygiene is not None
+    assert "ciao vault-index --write" in index.prompt
+    # Hygiene reads what this writes, so it must fire first.
+    assert index.daily_time_utc < hygiene.daily_time_utc
 
 
 def test_user_schedule_description_round_trips(tmp_path: Path) -> None:

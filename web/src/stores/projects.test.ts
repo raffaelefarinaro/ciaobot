@@ -1519,6 +1519,64 @@ describe('Codex structured questions', () => {
     expect(store.chatNeedsInput(chatId)).toBe(false)
   })
 
+  test('chatNeedsInput reflects live and persisted permission-approval state', () => {
+    const store = useProjectStore()
+    const chatId = 'approval-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Approval',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'req-1', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x',
+      }),
+    }]
+
+    // Persisted-only (e.g. a chat reopened before the live WS event arrives).
+    expect(store.chatNeedsInput(chatId)).toBe(true)
+
+    store.pendingPermissions[chatId] = [{
+      request_id: 'req-1', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x', received_at: Date.now(),
+    }]
+    expect(store.chatNeedsInput(chatId)).toBe(true)
+
+    delete store.pendingPermissions[chatId]
+    store.chats[0].pending_permission = ''
+    expect(store.chatNeedsInput(chatId)).toBe(false)
+  })
+
+  test('rebuilds the Approve/Deny card from a persisted pending_permission on chat open', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'approval-reload'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Approval',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'req-42', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x',
+      }),
+    }]
+
+    await store.loadMessages(chatId)
+
+    expect(store.pendingPermissions[chatId]).toHaveLength(1)
+    expect(store.pendingPermissions[chatId][0]).toMatchObject({
+      request_id: 'req-42', tool_name: 'Bash',
+    })
+  })
+
   test('parses alternate text/type AskUserQuestion payloads', () => {
     // MiniMax (and possibly other Claude-compatible providers) emit
     // `text` + `type: single_select` instead of `question`/`multiSelect`.
@@ -2216,6 +2274,43 @@ describe('deep-link chat navigation', () => {
     expect(store.activeWorkspace).toBe('work')
     expect(store.activeChatId).toBe('c-work')
     expect(routerPush).toHaveBeenCalledWith('/chat/c-work')
+  })
+
+  // Reproduces the notification-tap bug: the chat was already active when the
+  // reply finished server-side, but the per-chat socket went half-open while
+  // backgrounded, so `streaming` never got cleared and the finished reply
+  // never made it into local history. Tapping the notification re-opens the
+  // same already-active chat, and must reconcile instead of no-opping.
+  test('openChatFromDeepLink reconciles an already-active chat with stuck streaming state', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'personal'
+    store.activeChatId = 'c1'
+    store.connectWs('c1')
+    const staleSocket = fakeSockets[0]
+    store.streaming['c1'] = true
+
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats/c1/messages') {
+        return Promise.resolve([
+          { role: 'user', content: 'hi', sent_at: '2026-01-01T00:00:00Z' },
+          { role: 'assistant', content: 'the answer', sent_at: '2026-01-01T00:00:05Z' },
+        ])
+      }
+      return Promise.resolve([])
+    })
+
+    await store.openChatFromDeepLink('c1')
+
+    expect(store.messages['c1']?.map(m => m.content)).toEqual(['hi', 'the answer'])
+    expect(store.streaming['c1']).toBe(false)
+    expect(staleSocket.close).toBeDefined()
+    expect(fakeSockets.length).toBeGreaterThan(1)
   })
 
   test('open_chat event over /ws/events navigates to the target chat', async () => {

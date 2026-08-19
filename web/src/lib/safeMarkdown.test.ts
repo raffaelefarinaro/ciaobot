@@ -84,8 +84,11 @@ describe('safe markdown rendering', () => {
     expect(html.indexOf('</table>')).toBeLessThan(html.indexOf('</div>'))
   })
 
-  it('resolves Obsidian wikilinks into file-link anchors', () => {
-    const html = renderFileMarkdown('See [[README|Rossmann MVP]] for context.', {
+  // The viewer only intercepts `a.file-link` (onMdClick), so a relative
+  // markdown link left to the default renderer is a link that does nothing
+  // when clicked. This is the regression test for that.
+  it('renders a relative markdown link as a clickable vault file-link', () => {
+    const html = renderFileMarkdown('See [Rossmann MVP](./README.md) for context.', {
       resolveImageSrc: (href) => href,
       filePath: 'memory-vault/work/projects/active/rossmann/Shelf Recognition Spec.md',
       markdownPaths: [
@@ -94,8 +97,78 @@ describe('safe markdown rendering', () => {
       ],
     })
 
-    expect(html).toContain('class="file-link wikilink"')
+    expect(html).toContain('class="file-link"')
+    expect(html).toContain('href="#"')
     expect(html).toContain('data-file-path="memory-vault/work/projects/active/rossmann/README.md"')
     expect(html).toContain('>Rossmann MVP</a>')
+    expect(html).not.toContain('href="./README.md"')
+  })
+
+  it('resolves an up-directory vault link to its real path', () => {
+    const html = renderFileMarkdown('Owner: [Mo](../../../../People/Mo.md)', {
+      resolveImageSrc: (href) => href,
+      filePath: 'memory-vault/work/projects/active/rossmann/Shelf Recognition Spec.md',
+      markdownPaths: [
+        'memory-vault/work/projects/active/rossmann/Shelf Recognition Spec.md',
+        'memory-vault/People/Mo.md',
+      ],
+    })
+
+    expect(html).toContain('data-file-path="memory-vault/People/Mo.md"')
+  })
+
+  it('leaves external links alone instead of hijacking them as vault links', () => {
+    const html = renderFileMarkdown('Spec at [OKF](https://example.com/okf/SPEC.md).', {
+      resolveImageSrc: (href) => href,
+      filePath: 'memory-vault/People/Mo.md',
+      markdownPaths: ['memory-vault/People/Mo.md'],
+    })
+
+    expect(html).toContain('href="https://example.com/okf/SPEC.md"')
+    expect(html).not.toContain('file-link')
+    expect(html).not.toContain('data-file-path')
+  })
+
+  it('marks a dangling vault link non-clickable rather than emitting a dead anchor', () => {
+    const html = renderFileMarkdown('Missing [Nowhere](./Nowhere/Note.md).', {
+      resolveImageSrc: (href) => href,
+      filePath: 'memory-vault/People/Mo.md',
+      markdownPaths: ['memory-vault/People/Mo.md'],
+    })
+
+    expect(html).toContain('class="vault-link-unresolved"')
+    expect(html).toContain('title="./Nowhere/Note.md"')
+    expect(html).toContain('>Nowhere</span>')
+    expect(html).not.toContain('<a')
+  })
+
+  it('keeps vault links out of code spans and fences', () => {
+    const html = renderFileMarkdown([
+      'Inline `[Skip](./README.md)` stays literal.',
+      '',
+      '```md',
+      '[Also skip](./README.md)',
+      '```',
+    ].join('\n'), {
+      resolveImageSrc: (href) => href,
+      filePath: 'memory-vault/work/projects/active/rossmann/Shelf Recognition Spec.md',
+      markdownPaths: [
+        'memory-vault/work/projects/active/rossmann/README.md',
+        'memory-vault/work/projects/active/rossmann/Shelf Recognition Spec.md',
+      ],
+    })
+
+    expect(html).not.toContain('data-file-path')
+    expect(html).toContain('[Skip](./README.md)')
+    expect(html).toContain('[Also skip](./README.md)')
+  })
+
+  it('does not linkify note links when no vault path index is supplied', () => {
+    const html = renderFileMarkdown('See [README](./README.md).', {
+      resolveImageSrc: (href) => href,
+    })
+
+    expect(html).toContain('href="./README.md"')
+    expect(html).not.toContain('data-file-path')
   })
 })

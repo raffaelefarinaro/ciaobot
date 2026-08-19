@@ -250,14 +250,24 @@ def _per_workspace_vault_paths(
     *,
     error_type: str,
     what: str,
+    workspace: str = "",
 ) -> tuple[list[Path], list[dict[str, str]]]:
     """Resolve ``<vault>/<relative>`` plus the same file in each child vault.
 
     Every workspace keeps its own vault directory under *vault_root*, so a
     per-workspace file exists once at the root and once per child.
+
+    ``workspace`` narrows the scan to one logical workspace. Without it a single
+    audit reports every workspace's findings, and the routine that runs it lands
+    in one chat — so work-vault findings surfaced in a personal chat, the same
+    cross-workspace disclosure the entity index fails closed on.
     """
     candidates = [vault_root / relative]
     errors: list[dict[str, str]] = []
+    if workspace:
+        # Named directly rather than discovered: a scoped audit must not depend
+        # on what happens to be sitting in the vault root.
+        return [vault_root / workspace / relative], errors
     if vault_root.is_dir():
         try:
             children = sorted(vault_root.iterdir(), key=lambda path: path.name)
@@ -267,6 +277,9 @@ def _per_workspace_vault_paths(
                 _diagnostic(error_type, vault_root, f"failed to discover {what}: {exc}")
             )
         for child in children:
+            # `iterdir` sees Logs/, Templates/ and any stray folder as a
+            # workspace. Harmless while the candidate file does not exist, but
+            # it is a guess; a scoped run above never makes it.
             if child.is_dir():
                 candidates.append(child / relative)
     unique: list[Path] = []
@@ -283,6 +296,7 @@ def audit_rules(
     workspace_dir: Path,
     vault_root: Path | None = None,
     config: Any | None = None,
+    workspace_name: str = "",
 ) -> dict[str, Any]:
     """Find exact cross-file overlaps and obvious opposite-polarity rules."""
     occurrences: list[dict[str, Any]] = []
@@ -390,6 +404,7 @@ def audit_rules(
             "MEMORY.md",
             error_type="unreadable_vault_root",
             what="workspace MEMORY.md files",
+            workspace=workspace_name,
         )
         errors.extend(vault_md_errors)
 
@@ -448,12 +463,14 @@ def audit_rules(
 
 def _proposal_paths(
     vault_root: Path,
+    workspace: str = "",
 ) -> tuple[list[Path], list[dict[str, str]]]:
     return _per_workspace_vault_paths(
         vault_root,
         "Workspace/Memory-Proposals.md",
         error_type="unreadable_proposal_root",
         what="workspace proposal queues",
+        workspace=workspace,
     )
 
 
@@ -466,6 +483,7 @@ def audit_memory(
     memory_char_limit: int = DEFAULT_MEMORY_CHAR_LIMIT,
     user_char_limit: int = DEFAULT_USER_CHAR_LIMIT,
     workspace_dir: Path | None = None,
+    workspace_name: str = "",
 ) -> dict[str, Any]:
     """Audit bounded memory regions and proposal queues.
 
@@ -543,7 +561,7 @@ def audit_memory(
     proposal_errors: list[dict[str, str]] = []
     if vault_root is not None:
         if proposal_paths is None:
-            paths, discovery_errors = _proposal_paths(vault_root)
+            paths, discovery_errors = _proposal_paths(vault_root, workspace_name)
             proposal_errors.extend(discovery_errors)
         else:
             paths = proposal_paths
@@ -788,7 +806,6 @@ def audit_job_runs(
 def _vault_audit(vault_root: Path) -> dict[str, Any]:
     if not vault_root.is_dir():
         return {
-            "broken_links": [],
             "orphans": [],
             "duplicates": [],
             "frontmatter_errors": [],
@@ -812,7 +829,6 @@ def _vault_audit(vault_root: Path) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.exception("OS audit: vault validation failed")
         return {
-            "broken_links": [],
             "orphans": [],
             "duplicates": [],
             "frontmatter_errors": [],
@@ -829,7 +845,9 @@ def _vault_audit(vault_root: Path) -> dict[str, Any]:
     return result
 
 
-def audit_upgrade_notices(config: Any | None) -> dict[str, Any]:
+def audit_upgrade_notices(
+    config: Any | None, runtime_dir: Path | None = None
+) -> dict[str, Any]:
     """Actions an upgrade left for the operator, detected from the install.
 
     A release note only works if someone reads it and then remembers to act.
@@ -893,6 +911,38 @@ def audit_upgrade_notices(config: Any | None) -> dict[str, Any]:
                 ),
             })
 
+    # The vault still speaks the retired link dialect. Surfaced, never applied:
+    # rewriting a user's own notes is not a decision an upgrade makes on their
+    # behalf, and this is the notice that makes the choice visible instead of
+    # leaving it in a release note nobody re-reads. Because notices count toward
+    # `actionable_count`, the weekly hygiene routine reports it too.
+    if runtime_dir is not None:
+        try:
+            from ciao.vault_migrate_links import has_unmigrated_links, read_receipt
+
+            if read_receipt(runtime_dir) is None:
+                example = has_unmigrated_links(Path(vault_raw))
+                if example:
+                    notices.append({
+                        "type": "unmigrated_vault_links",
+                        "workspace": "",
+                        "detail": (
+                            "The vault still uses `[[wikilinks]]`, which nothing "
+                            "reads any more: they are not graph edges, not "
+                            "backlinks, and not clickable in the file viewer. "
+                            f"First example: {example}."
+                        ),
+                        "remedy": (
+                            "Preview with `ciao vault-migrate-links` (dry-run by "
+                            "default), then apply with "
+                            "`ciao vault-migrate-links --apply`. Every rewrite is "
+                            "recorded, so `ciao vault-unmigrate-links --apply` "
+                            "restores the notes byte for byte."
+                        ),
+                    })
+        except Exception:  # noqa: BLE001 — advisory section, never fail the audit
+            logger.exception("upgrade notices: link-dialect check failed")
+
     return {"notices": notices, "notices_found": len(notices), "errors": errors}
 
 
@@ -937,8 +987,14 @@ def run_os_audit(
     proposal_paths: list[Path] | None = None,
     today: datetime.date | None = None,
     config: Any | None = None,
+    workspace_name: str = "",
 ) -> dict[str, Any]:
     """Execute a complete AI OS audit pass.
+
+    ``workspace_name`` scopes the per-workspace evidence (that workspace's
+    ``MEMORY.md`` and proposal queue) to one logical workspace. The hygiene
+    routine runs once per workspace and reports into that workspace's chat, so
+    an unscoped audit would surface another workspace's findings there.
 
     ``config`` is optional for programmatic callers. The CLI and PWA both pass
     the live registry so upgrade notices are consistent across surfaces.
@@ -953,7 +1009,9 @@ def run_os_audit(
     setup_result = audit_setup(workspace, vault, runtime)
     vault_result = _vault_audit(vault)
     skill_result = audit_skills(workspace)
-    rule_result = audit_rules(workspace, vault_root=vault, config=config)
+    rule_result = audit_rules(
+        workspace, vault_root=vault, config=config, workspace_name=workspace_name
+    )
     memory_result = audit_memory(
         guide_path=guide_path,
         vault_root=vault,
@@ -962,9 +1020,10 @@ def run_os_audit(
         memory_char_limit=memory_char_limit,
         user_char_limit=user_char_limit,
         workspace_dir=workspace,
+        workspace_name=workspace_name,
     )
     job_result = audit_job_runs(workspace, runtime_dir=runtime)
-    upgrade_result = audit_upgrade_notices(config)
+    upgrade_result = audit_upgrade_notices(config, runtime_dir=runtime)
 
     collected_errors = [
         *setup_result["errors"],
@@ -998,7 +1057,6 @@ def run_os_audit(
             scan_errors.append(error)
     actionable_count = (
         len(setup_result["issues"])
-        + len(vault_result.get("broken_links", []))
         + len(vault_result.get("orphans", []))
         + len(vault_result.get("duplicates", []))
         + len(vault_result.get("frontmatter_errors", []))
@@ -1057,7 +1115,6 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
         f"- Setup findings: {len(report['setup_audit']['issues'])}",
         "",
         "## 2. Vault & Knowledge Hygiene",
-        f"- Broken wikilinks: {len(report['vault_hygiene'].get('broken_links', []))}",
         f"- Frontmatter errors: {len(report['vault_hygiene'].get('frontmatter_errors', []))}",
         f"- Broken Markdown links: {len(report['vault_hygiene'].get('broken_markdown_links', []))}",
         f"- Orphaned notes: {len(report['vault_hygiene'].get('orphans', []))}",
@@ -1160,8 +1217,15 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
     if notices:
         lines.extend(["", "## Upgrade Actions"])
         for notice in notices:
-            lines.append(f"- ⚠️ **{notice['workspace']}**: {notice['detail']}")
-            lines.append(f"  - Fix: `{notice['remedy']}`")
+            # A vault-wide notice has no workspace, and rendering the label
+            # unconditionally printed a bare `****:` in front of it.
+            scope = str(notice.get("workspace") or "").strip()
+            prefix = f"**{scope}**: " if scope else ""
+            lines.append(f"- ⚠️ {prefix}{notice['detail']}")
+            # The remedy is prose containing its own backticked commands, so
+            # wrapping the whole sentence in backticks nested them and broke the
+            # code spans it already had.
+            lines.append(f"  - Fix: {notice['remedy']}")
 
     if report["scan_errors"]:
         lines.extend(["", "## Scan Errors"])

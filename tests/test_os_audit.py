@@ -539,7 +539,7 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
     ideas.mkdir(parents=True)
     resources.mkdir(parents=True)
     (ideas / "same.md").write_text(
-        "---\ntype: idea\n---\n# One\n\n[[missing-target]]\n",
+        "---\ntype: idea\n---\n# One\n\n[gone](./missing-target.md)\n",
         encoding="utf-8",
     )
     (resources / "same.md").write_text(
@@ -578,7 +578,7 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
         today=datetime.date(2026, 7, 26),
     )
     assert report["status"] == "needs_attention"
-    # Vault: 1 broken link + 2 orphans + 1 duplicate.
+    # Vault: 1 broken markdown link + 2 orphans + 1 duplicate.
     # Skills: 1 missing SKILL.md + 1 over budget.
     # Rules: 1 conflict. Memory: 1 expired + 1 invalid tag + 1 proposal.
     # Jobs: 1 unresolved latest failure.

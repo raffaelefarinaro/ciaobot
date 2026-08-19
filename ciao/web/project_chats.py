@@ -893,6 +893,16 @@ class ChatInfo:
     # `to_dict` so the PWA can rebuild its interactive picker after a reload
     # instead of showing the dead `{"questions": ...}` trace row.
     pending_question: str = ""
+    # Raw PermissionRequestEvent fields (JSON: request_id/tool_name/message/
+    # tool_input) when the model is blocked mid-turn on an unanswered
+    # Approve/Deny prompt. Unlike `pending_question`, this does not pause the
+    # turn across a reconnect — it exists so a chat sitting in the background
+    # (not the currently open WS stream) still shows up as needing attention
+    # in-app instead of only firing an OS push. Cleared on answer
+    # (respond_permission) or when the turn ends by any other path (the
+    # `finally` in `_drive`'s turn loop), since no permission can outlive its
+    # turn.
+    pending_permission: str = ""
     # User messages that were queued (mode="queue") while a turn was running
     # and then parked when that turn paused on an AskUserQuestion. The pause
     # tears down the stream (and its in-memory pending queue), so they are
@@ -955,6 +965,7 @@ class ChatInfo:
             "last_read_at": self.last_read_at,
             "title_status": self.title_status,
             "pending_question": self.pending_question,
+            "pending_permission": self.pending_permission,
             "forked_from_chat_id": self.forked_from_chat_id,
             "forked_from_turn_index": self.forked_from_turn_index,
             "fork_root_chat_id": self.fork_root_chat_id,
@@ -1353,6 +1364,7 @@ class ProjectChatManager:
                 context_digest=cd.get("context_digest", ""),
                 context_session_id=cd.get("context_session_id", ""),
                 pending_question=cd.get("pending_question", ""),
+                pending_permission=cd.get("pending_permission", ""),
                 pending_queue=list(cd.get("pending_queue", [])),
                 forked_from_chat_id=cd.get("forked_from_chat_id", ""),
                 forked_from_turn_index=cd.get("forked_from_turn_index"),
@@ -1449,6 +1461,7 @@ class ProjectChatManager:
                     "context_digest": c.context_digest,
                     "context_session_id": c.context_session_id,
                     "pending_question": c.pending_question,
+                    "pending_permission": c.pending_permission,
                     "pending_queue": c.pending_queue,
                     "forked_from_chat_id": c.forked_from_chat_id,
                     "forked_from_turn_index": c.forked_from_turn_index,
@@ -1691,6 +1704,36 @@ class ProjectChatManager:
         registry and the legacy-path handling.
         """
         return self._config.workspace_vault_root(workspace)
+
+    def _workspace_vault_display(self, workspace: str) -> str:
+        """The workspace's vault as a path the model can use verbatim.
+
+        Relative to the provider's cwd (`config.workspace_root`) when it sits
+        underneath it, which is the normal layout — so the model gets
+        `memory-vault/work`, not an absolute path it would have to trim.
+        """
+        if not workspace or not self._is_known_workspace(workspace):
+            return ""
+        try:
+            root = self._workspace_vault_root(workspace)
+        except ValueError:
+            return ""
+        try:
+            return str(root.relative_to(Path(self._config.workspace_root)))
+        except ValueError:
+            return str(root)
+
+    def _entity_index_root(self) -> Path:
+        """Return the root that owns the vault entity index.
+
+        Entity hints resolve against ``<vault>/INDEX.md``, which exists only at
+        the top-level vault root — ``vault-index --write`` writes exactly one.
+        Passing a per-workspace subtree here reads a non-existent (or stale,
+        empty) index and silently matches nothing, so this is deliberately not
+        ``_workspace_vault_root``. Workspace scoping is applied inside
+        ``find_entities`` via its ``workspace`` argument.
+        """
+        return Path(self._config.vault_root)
 
     def _ensure_defaults(self) -> None:
         """Ensure each workspace has its auto-managed `General` project.
@@ -4296,6 +4339,7 @@ class ProjectChatManager:
         # with follow-ups parked for that answer turn — they must not leak
         # into the new conversation.
         chat.pending_question = ""
+        chat.pending_permission = ""
         chat.pending_queue = []
         if chat.retry_status:
             self._clear_chat_retry(chat)
@@ -4353,11 +4397,7 @@ class ProjectChatManager:
             or chat.handover_context_pending
         )
         handover = self._format_handover_context(chat)
-        vault_root = (
-            self._workspace_vault_root(workspace)
-            if workspace
-            else Path(self._config.vault_root)
-        )
+        vault_root = self._entity_index_root()
         capsule = build_context_capsule(
             prompt=prompt,
             workspace=workspace,
@@ -4366,6 +4406,7 @@ class ProjectChatManager:
             project_context=project_context,
             canonical_doc=canonical_doc,
             vault_root=vault_root,
+            workspace_vault_root=self._workspace_vault_display(workspace),
             legacy_entity_workspace=self._config.legacy_entity_workspace(),
             unattended=unattended,
             handover=handover,
@@ -4403,11 +4444,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        vault_root = (
-            self._workspace_vault_root(workspace)
-            if workspace
-            else Path(self._config.vault_root)
-        )
+        vault_root = self._entity_index_root()
         capsule = build_context_capsule(
             prompt="",
             workspace=workspace,
@@ -4416,6 +4453,7 @@ class ProjectChatManager:
             project_context=project_context,
             canonical_doc=canonical_doc,
             vault_root=vault_root,
+            workspace_vault_root=self._workspace_vault_display(workspace),
             legacy_entity_workspace=self._config.legacy_entity_workspace(),
             include_stable=True,
         )
@@ -4622,20 +4660,35 @@ class ProjectChatManager:
         return self._config.default_provider_for_workspace(workspace)
 
     def _schedule_workspace_hint(self, entry: object) -> str:
-        """Return the persisted or legacy-inferred workspace for a schedule."""
+        """Return the persisted or legacy-inferred workspace for a schedule.
+
+        Per-workspace system routines are fanned out with a real ``workspace``
+        already set, so they never reach the fallback. What does reach it is a
+        global routine and any pre-`workspace`-field user entry, which is why the
+        fallback resolves rather than failing: skipping the dispatch would stop
+        the routine firing at all, which is worse than running it in the primary
+        workspace. The mismatch is logged so a misconfigured entry is visible.
+        """
         workspace = (getattr(entry, "workspace", "") or "").strip().lower()
         if self._is_known_workspace(workspace):
             return workspace
 
         schedule_id = getattr(entry, "schedule_id", "") or ""
-        legacy_workspace = (
-            "work" if schedule_id.startswith("sched-work") else "personal"
-        )
-        if self._is_known_workspace(legacy_workspace):
-            return legacy_workspace
+        if schedule_id.startswith("sched-work") and self._is_known_workspace("work"):
+            return "work"
 
-        names = self._config.workspace_names()
-        return names[0] if names else legacy_workspace
+        # `primary_workspace` owns the "no better idea" choice; callers must not
+        # hardcode "personal", since an install may have no workspace by that
+        # name at all.
+        primary = self._config.primary_workspace()
+        if workspace:
+            logger.info(
+                "Schedule %s names unknown workspace %r; running in %r",
+                schedule_id or "<unknown>",
+                workspace,
+                primary,
+            )
+        return primary
 
     def schedule_workspace(self, entry: object) -> str:
         """Resolve the workspace that owns a schedule's execution context."""
@@ -6473,6 +6526,15 @@ class ProjectChatManager:
                 # ResultEvent (errored / aborted turn) so the dict stays bounded.
                 if current_turn_index is not None:
                     self._turn_perf_started.pop((chat_id, current_turn_index), None)
+                # A permission prompt cannot outlive its turn: the gate's own
+                # cancel_all denies anything still pending as the turn tears
+                # down (stop/error/disconnect), but that path doesn't know
+                # about the persisted attention flag. Clear it here so a
+                # denied-by-teardown prompt doesn't leave the chat stuck
+                # looking like it still needs approval.
+                if chat_meta is not None and chat_meta.pending_permission:
+                    chat_meta.pending_permission = ""
+                    self._save()
                 # Always clean up the per-chat stream entry first so subsequent
                 # sends can start a new one immediately.
                 stream.finish()
@@ -7472,15 +7534,18 @@ class ProjectChatManager:
     def _notify_permission(
         self, chat_id: str, event: PermissionRequestEvent
     ) -> None:
-        """Fire the configured permission-push callback, if any.
+        """Persist the pending approval and fire the push callback, if any.
+
+        Persisting onto the chat (mirroring `pending_question`) is what lets
+        the PWA's attention state — home banner, sidebar dot, menu bar — see a
+        chat blocked on Approve/Deny even when it isn't the foreground chat
+        receiving the live WS stream; before this the prompt only reached the
+        OS push and the open ChatPanel's ephemeral `pendingPermissions`.
 
         Callback errors are swallowed: a broken push subscription or a transient
         send failure must never kill the turn (the user can still answer via
         the in-app bubble on their current device).
         """
-        cb = self.notify_permission_cb
-        if cb is None:
-            return
         chat = self._chats.get(chat_id)
         if chat is not None and chat.spawned_from_chat_id:
             logger.debug(
@@ -7488,6 +7553,22 @@ class ProjectChatManager:
                 chat_id,
                 chat.spawned_from_chat_id,
             )
+            return
+        if chat is not None:
+            payload = json.dumps(
+                {
+                    "request_id": event.request_id,
+                    "tool_name": event.tool_name,
+                    "message": event.message,
+                    "tool_input": event.tool_input,
+                },
+                ensure_ascii=False,
+            )
+            if chat.pending_permission != payload:
+                chat.pending_permission = payload
+                self._save()
+        cb = self.notify_permission_cb
+        if cb is None:
             return
         try:
             cb(chat_id, event.tool_name, event.message, event.request_id)
@@ -7552,6 +7633,19 @@ class ProjectChatManager:
         replies still indicate the user has dealt with the prompt, and
         the buffered event should not pop back up.
         """
+        # Clear the persisted attention flag only if it still names this
+        # request — a stale/duplicate reply for an already-superseded prompt
+        # must not wipe out a newer pending one.
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.pending_permission:
+            try:
+                stored = json.loads(chat.pending_permission)
+            except (TypeError, json.JSONDecodeError):
+                stored = {}
+            if not isinstance(stored, dict) or stored.get("request_id") == request_id:
+                chat.pending_permission = ""
+                self._save()
+
         provider_service = self._providers.get(chat_id)
         provider = provider_service.provider if provider_service is not None else None
 
@@ -7949,11 +8043,11 @@ class ProjectChatManager:
                     provider=classifier_provider,
                     cwd=self._config.workspace_root,
                 )
-                raw = text.strip()
-                if raw.startswith("```"):
-                    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                    raw = re.sub(r"\s*```$", "", raw)
-                verdict = json.loads(raw)
+                from ciao.critique import extract_json
+
+                verdict = extract_json(text)
+                if verdict is None:
+                    raise ValueError("classifier returned no parseable JSON")
                 needs_user = bool(verdict.get("needs_user", True))
                 run.extra["needs_user"] = needs_user
                 reason = str(verdict.get("reason", "")).strip()

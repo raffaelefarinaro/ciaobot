@@ -399,6 +399,36 @@ export const useProjectStore = defineStore('projects', () => {
     if (resolvedQuestions.value[chatId]?.has(questionsSignature(qs))) return
     activeQuestions.value[chatId] = qs
   }
+
+  // Same idea as `rebuildPendingQuestion`, for the Approve/Deny card: it
+  // lives in ephemeral `pendingPermissions` (set only by the live stream),
+  // but the server persists the unanswered request on the chat so a chat
+  // opened after the prompt already fired (reload, other device, chat
+  // switch) still shows the card instead of nothing.
+  function rebuildPendingPermission(chatId: string) {
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    const raw = chat?.pending_permission
+    if (!raw) return
+    let parsed: { request_id?: string; tool_name?: string; message?: string; tool_input?: string }
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return
+    }
+    if (!parsed.request_id) return
+    const list = pendingPermissions.value[chatId] || []
+    if (list.some(p => p.request_id === parsed.request_id)) return
+    pendingPermissions.value[chatId] = [
+      ...list,
+      {
+        request_id: parsed.request_id,
+        tool_name: parsed.tool_name || '',
+        tool_input: parsed.tool_input || '',
+        message: parsed.message || '',
+        received_at: Date.now(),
+      },
+    ]
+  }
   const eventsSocket = ref<WebSocket | null>(null)
   const toasts = ref<InAppToast[]>([])
   let toastCounter = 0
@@ -1255,13 +1285,16 @@ export const useProjectStore = defineStore('projects', () => {
     return activity && activity > read ? 1 : 0
   }
 
-  // A chat blocked on AskUserQuestion — persisted on the chat and mirrored in
-  // ephemeral activeQuestions while the picker is live. Unlike unread, this
-  // stays visible even when the chat is the active tab.
+  // A chat blocked on AskUserQuestion or an Approve/Deny prompt — persisted
+  // on the chat and mirrored in ephemeral activeQuestions/pendingPermissions
+  // while the picker/card is live. Unlike unread, this stays visible even
+  // when the chat is the active tab.
   function chatNeedsInput(chatId: string): boolean {
     if (activeQuestions.value[chatId]?.length) return true
+    if (pendingPermissions.value[chatId]?.length) return true
     const chat = chats.value.find(c => c.chat_id === chatId)
-    return parseQuestions(chat?.pending_question).length > 0
+    if (parseQuestions(chat?.pending_question).length > 0) return true
+    return Boolean(chat?.pending_permission)
   }
 
   // The first outstanding question is useful on the home card, where it can
@@ -2232,6 +2265,7 @@ export const useProjectStore = defineStore('projects', () => {
     // interactive picker again instead of the dead trace row. Independent of
     // server history, so it survives the early returns below.
     rebuildPendingQuestion(chatId)
+    rebuildPendingPermission(chatId)
     // Fetch authoritative history from the SDK session on the server.
     // This catches schedule outputs, turns from other devices, etc.
     try {
@@ -2442,6 +2476,21 @@ export const useProjectStore = defineStore('projects', () => {
   async function openChatFromDeepLink(chatId: string) {
     if (!chatExistsInList(chatId)) return
     await ensureWorkspaceForChat(chatId)
+    if (activeChatId.value === chatId) {
+      // switchChat's "already active" fast path only marks read — fine for
+      // e.g. re-clicking the same sidebar entry, but arriving via a
+      // notification is exactly the signal that local state may be stale
+      // (the socket can go half-open while backgrounded, leaving `streaming`
+      // stuck true and the finished reply never pulled in). Force the same
+      // reconcile the liveness watchdog and resume-from-background path use.
+      const { router } = await import('../router')
+      if (router.currentRoute.value.params.chatId !== chatId) {
+        router.push(`/chat/${chatId}`)
+      }
+      void markRead(chatId)
+      await reloadAndReconnectChat(chatId)
+      return
+    }
     await switchChat(chatId)
   }
 
@@ -3425,6 +3474,11 @@ export const useProjectStore = defineStore('projects', () => {
         delete activeQuestions.value[chatId]
       }
     }
+    // Clear the persisted attention flag optimistically too, so a
+    // GET /api/chats refresh that lands before the server's own clear
+    // round-trips doesn't resurrect the card via rebuildPendingPermission.
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat?.pending_permission) chat.pending_permission = ''
     const ws = sockets.value[chatId]
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(

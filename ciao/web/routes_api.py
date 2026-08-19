@@ -5472,8 +5472,10 @@ async def active_chats_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"active_chat_ids": pcm.active_chat_ids()})
 
 
-def _menubar_chat_needs_input(pending_question: str) -> bool:
-    """True when AskUserQuestion JSON is waiting for an answer."""
+def _menubar_chat_needs_input(pending_question: str, pending_permission: str = "") -> bool:
+    """True when AskUserQuestion JSON or an Approve/Deny prompt is waiting."""
+    if (pending_permission or "").strip():
+        return True
     raw = (pending_question or "").strip()
     if not raw:
         return False
@@ -5536,7 +5538,9 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             and getattr(chat, "spawned_from_chat_id", "") in active_chat_ids
         )
         unread = not nested_delegate and bool(activity) and activity > read
-        needs_input = _menubar_chat_needs_input(chat.pending_question)
+        needs_input = _menubar_chat_needs_input(
+            chat.pending_question, getattr(chat, "pending_permission", "")
+        )
         if unread or needs_input:
             attention_count += 1
         rows.append(

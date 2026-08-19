@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Callable, Coroutine, Protocol
 from zoneinfo import ZoneInfo
 
@@ -36,6 +37,43 @@ SYSTEM_STATE_FIELDS = {
     "last_run_chat_id",
     "workspace",
 }
+
+# Separator between a packaged system routine's id and the workspace it was
+# fanned out for: `system-memory-curation@work`. Chosen because no generated or
+# packaged schedule_id contains it, so `system_base_id` is unambiguous.
+SYSTEM_ID_SEPARATOR = "@"
+
+
+def system_base_id(schedule_id: str) -> str:
+    """Return the packaged definition id behind a possibly fanned-out id.
+
+    Call this anywhere a literal `system-*` id is compared against a live
+    schedule — the fan-out makes the stored id workspace-qualified, and an exact
+    match against the base id silently stops finding it.
+    """
+    return (schedule_id or "").split(SYSTEM_ID_SEPARATOR, 1)[0]
+
+
+def system_schedule_id(base_id: str, workspace: str) -> str:
+    return f"{base_id}{SYSTEM_ID_SEPARATOR}{workspace}"
+
+
+def _stagger_time(daily_time_utc: str, offset: int, *, step_minutes: int = 7) -> str:
+    """Offset a fanned-out routine's fire time by whole minutes.
+
+    All rows inherit one packaged ``daily_time_utc``, so without this every
+    workspace's curation run would dispatch in the same minute and contend for
+    the same provider capacity. Malformed input is returned untouched;
+    ``compute_next_run`` already treats that as "never fires".
+    """
+    if offset <= 0:
+        return daily_time_utc
+    try:
+        hours, minutes = (int(part) for part in daily_time_utc.split(":", 1))
+    except (ValueError, AttributeError):
+        return daily_time_utc
+    total = (hours * 60 + minutes + offset * step_minutes) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
 
 
 def normalize_archive_policy(value: str | None) -> str:
@@ -266,10 +304,21 @@ class ScheduleEntry:
 class ScheduleStore:
     """JSON-backed storage for user schedules plus packaged system schedules."""
 
-    def __init__(self, runtime_root: Path, *, include_system: bool = False) -> None:
+    def __init__(
+        self,
+        runtime_root: Path,
+        *,
+        include_system: bool = False,
+        workspace_names: Callable[[], Sequence[str]] | None = None,
+    ) -> None:
         self._path = runtime_root / "schedules.json"
         self._system_state_path = runtime_root / "system_schedules_state.json"
         self._include_system = include_system
+        # Needed to fan a `per_workspace` system definition out into one entry
+        # per registered workspace. Optional so a caller that only reads user
+        # schedules (and every existing test) keeps working: without it, a
+        # per-workspace definition degrades to the single legacy entry.
+        self._workspace_names = workspace_names
         self._lock = threading.RLock()
 
     def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
@@ -411,20 +460,67 @@ class ScheduleStore:
             entry.archive_policy = "manual"
         return entry
 
+    def _fanout_workspaces(self) -> list[str]:
+        """Registered workspaces a `per_workspace` definition expands into.
+
+        Empty when no resolver was supplied, which keeps the definition as one
+        legacy entry rather than guessing at a workspace.
+        """
+        if self._workspace_names is None:
+            return []
+        try:
+            names = [str(name).strip() for name in self._workspace_names()]
+        except Exception:  # noqa: BLE001 — a broken registry must not hide routines
+            logger.exception("Failed to resolve workspaces for system schedules")
+            return []
+        return [name for name in names if name]
+
     def _system_entries(self) -> list[ScheduleEntry]:
+        """Materialize the packaged system routines.
+
+        A definition marked ``per_workspace`` becomes one entry per registered
+        workspace, with a ``<base-id>@<workspace>`` id so each row carries its
+        own overlay (enable state, last run) — the inputs and write targets of
+        those routines are partitioned by workspace, so one shared run can only
+        ever curate one vault. Unmarked definitions stay single: their subject is
+        a shared artifact (one ``INDEX.md``, one global skill catalog) and
+        running them N times would duplicate the work.
+
+        System routines are derived here on every read rather than persisted:
+        ``list_entries`` drops runtime rows with ``scope == "system"``, so the
+        set cannot be extended by writing to ``schedules.json``. Deriving also
+        means a newly added workspace gets its row with no migration.
+        """
         state = self._load_system_state()
         entries: list[ScheduleEntry] = []
-        for item in self._load_system_definitions():
-            item = {"chat_id": 0, "created_at": "1970-01-01T00:00:00Z", **item}
-            entry = self._entry_from_item(item)
-            overlay = state.get(entry.schedule_id, {})
-            for key, value in overlay.items():
-                if key in SYSTEM_STATE_FIELDS and hasattr(entry, key):
-                    setattr(entry, key, value)
-            entry.scope = "system"
-            entry.editable = False
-            entry.removable = False
-            entries.append(entry)
+        for definition in self._load_system_definitions():
+            per_workspace = bool(definition.get("per_workspace"))
+            item = {"chat_id": 0, "created_at": "1970-01-01T00:00:00Z", **definition}
+            targets: list[str | None] = []
+            if per_workspace:
+                targets = list(self._fanout_workspaces())
+            for offset, workspace in enumerate(targets or [None]):
+                entry = self._entry_from_item(item)
+                allowed = SYSTEM_STATE_FIELDS
+                if workspace is not None:
+                    entry.schedule_id = system_schedule_id(entry.schedule_id, workspace)
+                    entry.workspace = workspace
+                    # Fanned-out rows share one packaged time; stagger them so N
+                    # workspaces don't all dispatch in the same minute.
+                    entry.daily_time_utc = _stagger_time(entry.daily_time_utc, offset)
+                    if entry.title:
+                        entry.title = f"{entry.title} ({workspace})"
+                    # The workspace is part of this row's identity, so a stored
+                    # overlay must never move it.
+                    allowed = SYSTEM_STATE_FIELDS - {"workspace"}
+                overlay = state.get(entry.schedule_id, {})
+                for key, value in overlay.items():
+                    if key in allowed and hasattr(entry, key):
+                        setattr(entry, key, value)
+                entry.scope = "system"
+                entry.editable = False
+                entry.removable = False
+                entries.append(entry)
         return entries
 
     def _load_system_definitions(self) -> list[dict]:
@@ -439,6 +535,30 @@ class ScheduleStore:
             if isinstance(item, dict) and item.get("scope") == "system"
         ]
 
+    def _normalized_overlay(self, overlay: dict) -> dict:
+        """Drop a persisted workspace that no longer names a registered one.
+
+        ``workspace`` is in :data:`SYSTEM_STATE_FIELDS` and
+        ``_replace_system_state`` writes every field in that set on any save, so
+        the packaged value gets copied into the overlay the first time anything
+        about a routine changes. A sentinel like ``"default"`` — or a workspace
+        the user has since renamed — then shadows the definition forever, which
+        is what pinned memory curation to one vault. Dropping the unresolvable
+        value lets the definition (and the fan-out) win instead.
+        """
+        workspace = str(overlay.get("workspace", "") or "").strip()
+        if not workspace:
+            return overlay
+        if self._workspace_names is None:
+            return overlay
+        if workspace in self._fanout_workspaces():
+            return overlay
+        logger.info(
+            "Dropping unresolvable workspace %r from system schedule state",
+            workspace,
+        )
+        return {key: value for key, value in overlay.items() if key != "workspace"}
+
     def _load_system_state(self) -> dict[str, dict]:
         if not self._system_state_path.exists():
             return {}
@@ -447,7 +567,13 @@ class ScheduleStore:
         except json.JSONDecodeError:
             return {}
         raw = data.get("schedules", {})
-        return raw if isinstance(raw, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            key: self._normalized_overlay(value)
+            for key, value in raw.items()
+            if isinstance(value, dict)
+        }
 
     def _save_system_state(self, payload: dict[str, dict]) -> None:
         self._system_state_path.parent.mkdir(parents=True, exist_ok=True)

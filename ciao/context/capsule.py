@@ -40,12 +40,16 @@ def build_context_capsule(
     project_context: str = "",
     canonical_doc: str = "",
     vault_root: Path | None = None,
+    workspace_vault_root: str = "",
     legacy_entity_workspace: str = "",
     unattended: bool = False,
     handover: str = "",
     include_stable: bool = True,
 ) -> str:
     """Render the compact context visible to every provider.
+
+    ``workspace_vault_root`` is the active workspace's vault, relative to the
+    provider's cwd, so a path the model writes is usable verbatim.
 
     Stable project facts can be omitted after the first turn of a provider
     session. Date, entity hints, retrieval routing, and handover data remain
@@ -54,6 +58,14 @@ def build_context_capsule(
     stable: list[str] = []
     if workspace:
         stable.append(f"workspace={_field(workspace, limit=120)}")
+    if workspace_vault_root:
+        # The workspace *name* is not a location. Without this the model knew it
+        # was in "work" but had to guess where that workspace's vault lived, and
+        # guessed from precedent — which on a vault whose People/ folder had been
+        # filled by the old single-workspace curator meant writing every new
+        # contact back into the wrong workspace. Naming the path is what stops
+        # the misfiling recurring at the write step.
+        stable.append(f"vault={_field(workspace_vault_root, limit=300)}")
     if gws_profile:
         stable.append(f"gws_profile={_field(gws_profile, limit=120)}")
     if project_name and project_name != "General":

@@ -30,6 +30,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ciao.schedules import system_base_id
+
 logger = logging.getLogger(__name__)
 
 JOB_RUNS_NAME = "job_runs.jsonl"
@@ -214,9 +216,10 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Commits and pulls the workspace on server startup.", False, False,
             trigger="On server startup."),
     JobSpec("vault_index", "Vault index refresh", "system",
-            "Regenerates memory-vault/INDEX.md from frontmatter.", False, False,
-            trigger="On server startup, and weekly via system-workspace-hygiene.",
-            schedule_id="system-workspace-hygiene"),
+            "Regenerates memory-vault/INDEX.md and VOCABULARY.md from frontmatter.",
+            False, False,
+            trigger="On server startup, and weekly via system-vault-index.",
+            schedule_id="system-vault-index"),
     JobSpec("skills_update", "Skills update", "system",
             "Updates installed agent skills.", False, False,
             trigger="On server startup."),
@@ -231,6 +234,14 @@ REGISTRY: tuple[JobSpec, ...] = (
             "One-time move of legacy memory files into the CLAUDE.md memory regions.",
             False, True,
             trigger="Once, on the first skills sync after upgrading. A no-op afterwards.",
+            one_time=True),
+    JobSpec("vault_vocabulary_migration", "Vault vocabulary migration", "system",
+            "One-time rename of non-canonical frontmatter types (doc -> document, "
+            "project-log -> log). Types with no canonical equivalent are reported "
+            "for you to categorise, never guessed.",
+            False, True,
+            trigger="Once, on the first skills sync after upgrading or onboarding an "
+                    "existing vault. A no-op afterwards.",
             one_time=True),
     JobSpec("backfill_insights", "Insights backfill", "system",
             "Runs session insights over every archive that is missing them.", True, True,
@@ -699,10 +710,14 @@ def automation_summary(
         if spec.step_of:
             steps.append((spec, g))
             continue
+        # Compare on the base id: a per-workspace system routine is installed as
+        # `<base>@<workspace>`, so an exact match against the packaged id stops
+        # finding it and silently hides the job row.
         if (
             spec.schedule_only
             and installed_schedules is not None
-            and spec.schedule_id not in installed_schedules
+            and spec.schedule_id
+            not in {system_base_id(item) for item in installed_schedules}
         ):
             continue
         row = entry(spec, g)

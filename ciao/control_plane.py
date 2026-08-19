@@ -585,14 +585,28 @@ class CiaoControlPlane:
         return _ok(rows)
 
     def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
-        root = self._vault_root(principal)
-        entries = vault_index.scan_vault(root)
-        vault_index.write_index_file(entries, root / "INDEX.md")
+        """Rebuild the shared entity index and this workspace's search index.
+
+        The two roots differ on purpose. ``INDEX.md`` is a single shared
+        artifact: entity lookup resolves ``<vault>/INDEX.md`` and applies its
+        own per-workspace visibility filter, which needs every workspace's
+        prefixed paths in one file — so it is written at the top-level root,
+        matching ``ciao vault-index --write`` and the startup refresh. Writing a
+        per-workspace subtree instead produced an index whose paths no filter
+        recognized, and left the real one stale.
+
+        The FTS index stays workspace-scoped: it backs ``vault_search``, whose
+        isolation boundary is ``_vault_root(principal)``.
+        """
+        search_root = self._vault_root(principal)
+        index_root = Path(self.config.vault_root)
+        entries = vault_index.scan_vault(index_root)
+        vault_index.write_index_file(entries, index_root / "INDEX.md")
         db_path = get_db_path()
         conn = sqlite3.connect(db_path)
         try:
             init_db(conn)
-            indexed, removed = index_vault(conn, root)
+            indexed, removed = index_vault(conn, search_root)
         finally:
             conn.close()
         return _ok({"notes": len(entries), "fts_indexed": indexed, "fts_removed": removed})

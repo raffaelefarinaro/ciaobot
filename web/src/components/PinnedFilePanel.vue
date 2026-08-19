@@ -293,7 +293,7 @@ import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, r
 import { useProjectStore } from '../stores/projects'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
-import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
+import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
@@ -460,19 +460,20 @@ const fmProse = computed(() => {
   return ''
 })
 
-// `related`/`links` items are [[wikilink]] refs to other vault notes —
-// resolve to file paths so the pills are clickable (same as body wikilinks).
-// `aliases` are alternative names for this note, not links, so stay plain.
+// `related`/`links` items are bare vault refs (`People/Mo`) to other notes —
+// resolve to file paths so the pills are clickable (same as body links). A
+// `[[...]]` wrapper is still tolerated for notes that predate the
+// markdown-link swap. `aliases` name this note, not links, so stay plain.
 const _LINK_LIST_KEYS = new Set(['related', 'links'])
-const _wikiIndex = computed(() => buildMarkdownIndex(markdownPaths.value || []))
-const _wikiPathSet = computed(() => new Set(markdownPaths.value || []))
+const _linkIndex = computed(() => buildMarkdownIndex(markdownPaths.value || []))
+const _linkPathSet = computed(() => new Set(markdownPaths.value || []))
 
 function resolveListItem(raw: string): { label: string; path: string | null } {
   const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
   const [ref, alias] = inner.split('|')
   const label = (alias ?? ref).trim()
   const path = ref.trim()
-    ? resolveWikilinkTarget(ref.trim(), cleanPath.value, _wikiIndex.value, _wikiPathSet.value)
+    ? resolveVaultLinkTarget(ref.trim(), cleanPath.value, _linkIndex.value, _linkPathSet.value)
     : null
   return { label, path }
 }
@@ -1406,6 +1407,13 @@ watch(() => props.filePath, () => {
 }
 .pfp-md :deep(a:hover) {
   color: var(--accent-strong);
+}
+/* A vault link whose target does not exist: readable, but not styled or
+   shaped like something you can tap. Mirrors the file viewer modal. */
+.pfp-md :deep(.vault-link-unresolved) {
+  color: var(--fg-muted, #888);
+  text-decoration: underline dotted;
+  cursor: help;
 }
 .pfp-md :deep(img) {
   max-width: 100%;

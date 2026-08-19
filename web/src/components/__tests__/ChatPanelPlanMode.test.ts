@@ -78,13 +78,13 @@ function makeProject(): ProjectInfo {
   }
 }
 
-function makeChat(chatId: string, mode: string = 'normal'): ChatInfo {
+function makeChat(chatId: string, mode: string = 'normal', provider: string = 'claude'): ChatInfo {
   return {
     chat_id: chatId,
     project_id: 'project-1',
     title: chatId,
     model: 'sonnet',
-    provider: 'claude',
+    provider,
     mode,
     session_id: '',
     created_at: '',
@@ -135,6 +135,7 @@ function planReturnModeStorageKey(chatId: string): string {
 
 async function mountPanel(options: {
   mode?: string
+  provider?: string
   commandsFail?: boolean
   commands?: Array<{ name: string; description: string; argument_hint: string; source: 'project' | 'user' | 'builtin' | 'skill'; path: string }>
   skills?: Array<{ name: string; description: string; argument_hint: string; source: 'skill'; path: string }>
@@ -143,7 +144,7 @@ async function mountPanel(options: {
   setActivePinia(pinia)
   const store = useProjectStore()
   store.projects = [makeProject()]
-  store.chats = [makeChat('chat-1', options.mode), makeChat('chat-2')]
+  store.chats = [makeChat('chat-1', options.mode, options.provider), makeChat('chat-2')]
   store.activeChatId = 'chat-1'
   store.messages = { 'chat-1': [], 'chat-2': [] }
   store.bootstrapped = true
@@ -285,6 +286,30 @@ describe('ChatPanel plan mode', () => {
     await flushPromises()
 
     expect(textareaValue(wrapper)).toBe('half-written prompt')
+    wrapper.unmount()
+  })
+
+  it('warns opencode chats that Auto still gates shell commands', async () => {
+    // opencode has no native "auto" tier — Ciaobot's is a synthetic middle
+    // ground (edits allowed outright, shell still classified). The generic
+    // copy used for every other provider reads as CLI-auto parity, which it
+    // isn't, so opencode gets its own Auto tooltip.
+    const { wrapper } = await mountPanel({ provider: 'opencode' })
+    await wrapper.get('button.model-picker-btn').trigger('click')
+
+    const autoChip = wrapper.findAll('button.mode-row-chip').find(button => button.text() === 'Auto')
+    expect(autoChip?.attributes('title')).toBe(
+      'Fewer prompts; shell commands still ask unless read-only',
+    )
+    wrapper.unmount()
+  })
+
+  it('keeps the generic Auto tooltip for non-opencode providers', async () => {
+    const { wrapper } = await mountPanel({ provider: 'claude' })
+    await wrapper.get('button.model-picker-btn').trigger('click')
+
+    const autoChip = wrapper.findAll('button.mode-row-chip').find(button => button.text() === 'Auto')
+    expect(autoChip?.attributes('title')).toBe('Fewer prompts, classifier approves safe actions')
     wrapper.unmount()
   })
 

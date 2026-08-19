@@ -121,7 +121,8 @@ The vault is markdown-first.
 Common paths:
 
 - `memory-vault/MEMORY.md`: durable workspace memory.
-- `memory-vault/INDEX.md`: generated index from frontmatter and wikilinks.
+- `memory-vault/INDEX.md`: generated index from frontmatter and markdown links.
+- `memory-vault/VOCABULARY.md`: generated list of the canonical `type:` values and the tags in use.
 - `memory-vault/projects/active/`: active projects.
 - `memory-vault/projects/completed/`: completed projects.
 - `memory-vault/Logs/Chats/`: archived chat transcripts.

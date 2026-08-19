@@ -1278,6 +1278,24 @@ def _ensure_linked_workspace_guides(workspace: Path) -> None:
         return
 
 
+def _resolve_vault_root(workspace: Path) -> Path:
+    """Vault root for a workspace checkout, honouring the env override.
+
+    Mirrors ``ciao.cli``'s resolution rather than building a ``CiaoConfig``: this
+    runs inside skill sync, which must not fail because the wider config is
+    mid-setup.
+    """
+    raw = os.environ.get("CIAO_VAULT_ROOT", "").strip() or "memory-vault"
+    root = Path(raw).expanduser()
+    return root if root.is_absolute() else workspace / root
+
+
+def _resolve_runtime_root(workspace: Path) -> Path:
+    raw = os.environ.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime"
+    root = Path(raw).expanduser()
+    return root if root.is_absolute() else workspace / root
+
+
 def sync_workspace_skills(
     workspace: Path | str,
     *,
@@ -1308,6 +1326,35 @@ def sync_workspace_skills(
     except Exception:  # noqa: BLE001 — never block skill sync on memory regions
         logger.exception(
             "memory region ensure/migrate failed for %s; continuing skill sync",
+            root,
+        )
+
+    try:
+        from ciao import job_runs
+        from ciao.vault_migration import migrate_if_needed, read_receipt
+
+        vault_root = _resolve_vault_root(root)
+        runtime_root = _resolve_runtime_root(root)
+        # Receipt-gated so an existing install pays for the vault scan once, not
+        # on every boot. `vault-lint` starts reporting non-canonical types on
+        # upgrade, so without this an existing vault would hand the user a
+        # permanently failing `os-audit`.
+        if read_receipt(runtime_root) is None:
+            with job_runs.track_sync(
+                "vault_vocabulary_migration", "Vault vocabulary migration"
+            ) as run:
+                summary = migrate_if_needed(vault_root, runtime_root)
+                renamed = summary.get("renamed") or []
+                unresolved = summary.get("unresolved") or {}
+                run.extra["renamed"] = len(renamed)
+                run.extra["unresolved"] = sorted(unresolved)
+                if summary.get("skipped"):
+                    run.skip(str(summary["skipped"]))
+                elif not renamed and not unresolved:
+                    run.skip("vault types already canonical")
+    except Exception:  # noqa: BLE001 — never block skill sync on the vault
+        logger.exception(
+            "vault vocabulary migration failed for %s; continuing skill sync",
             root,
         )
 

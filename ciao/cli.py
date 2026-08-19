@@ -876,6 +876,26 @@ def setup_workspace(
         )
         (scaffold_vault_path / "Logs" / "Chats").mkdir(parents=True, exist_ok=True)
         written.append(scaffold_vault_path)
+        # Onboarding an existing folder is the one path that adopts notes this
+        # app did not write, so it is also the one that can inherit the retired
+        # link dialect. Surface it here rather than waiting for the weekly audit:
+        # the user is looking at setup output right now, and the conversion is
+        # far cheaper before they have built on top of it.
+        if vault_mode == "existing":
+            try:
+                from ciao.vault_migrate_links import has_unmigrated_links
+
+                example = has_unmigrated_links(scaffold_vault_path)
+            except Exception:  # noqa: BLE001 — never fail setup over an advisory
+                example = ""
+            if example:
+                print(
+                    f"\nNote: {scaffold_vault_path} uses `[[wikilinks]]`, which "
+                    "Ciaobot no longer reads as links.\n"
+                    "      Preview the conversion with `ciao vault-migrate-links`, "
+                    "apply it with `--apply`.\n"
+                    "      It is reversible: `ciao vault-unmigrate-links --apply`.",
+                )
 
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
@@ -1115,13 +1135,45 @@ def _auth_command(args: argparse.Namespace) -> int:
 
 
 def _resolve_vault_root(raw: Path | str | None = None) -> Path:
+    """Locate the vault.
+
+    A relative value resolves against `CIAO_WORKSPACE`, not the current
+    directory, for the same reason `_resolve_runtime_root` does: the bundled
+    engine's launcher `cd`s into `Ciaobot.app/.../ciao-runtime` before exec'ing
+    Python, so a relative `CIAO_VAULT_ROOT=memory-vault` resolved against the cwd
+    pointed inside the app bundle. Every vault command run from a routine — whose
+    prompts deliberately pass no `--vault-root` — failed with a
+    FileNotFoundError under the runtime directory.
+    """
     if raw is not None:
         root = Path(raw).expanduser()
     else:
         env_root = os.environ.get("CIAO_VAULT_ROOT", "").strip()
         root = Path(env_root).expanduser() if env_root else Path("memory-vault")
     if not root.is_absolute():
-        root = Path.cwd() / root
+        workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
+        base = Path(workspace).expanduser() if workspace else Path.cwd()
+        root = base / root
+    return root.resolve()
+
+
+def _resolve_runtime_root(raw: Path | str | None = None) -> Path:
+    """Locate `.runtime`, where migration receipts live.
+
+    A relative value resolves against `CIAO_WORKSPACE` rather than the current
+    directory: the receipt has to land in the same `.runtime` the server uses, and
+    a CLI invoked from anywhere else would otherwise mark a `.runtime` beside the
+    shell's cwd as migrated.
+    """
+    if raw is not None:
+        root = Path(raw).expanduser()
+    else:
+        env_root = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
+        root = Path(env_root).expanduser() if env_root else Path(".runtime")
+    if not root.is_absolute():
+        workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
+        base = Path(workspace).expanduser() if workspace else Path.cwd()
+        root = base / root
     return root.resolve()
 
 
@@ -1195,10 +1247,380 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _vault_migrate_command(args: argparse.Namespace) -> int:
+    """Bring a vault's frontmatter types onto the canonical vocabulary.
+
+    Dry-run by default, like ``vault-index`` needing ``--write``: this rewrites
+    the user's notes, so applying is opt-in even though the substitution is
+    mechanical.
+    """
+    from ciao.vault_migration import migrate_vault_vocabulary
+
+    vault_root = _resolve_vault_root(args.vault_root)
+    if not vault_root.is_dir():
+        print(
+            f"Vault root is missing or not a directory: `{vault_root}`",
+            file=sys.stderr,
+        )
+        return 1
+
+    summary = migrate_vault_vocabulary(vault_root, apply=args.apply)
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 1 if summary["unresolved"] or summary["failed"] else 0
+
+    changes = summary["renamed"] if args.apply else summary["planned"]
+    verb = "Renamed" if args.apply else "Would rename"
+    if changes:
+        print(f"{verb} {len(changes)} note(s):")
+        for change in changes:
+            print(f"  {change['from']} -> {change['to']}  {change['path']}")
+    else:
+        print("No aliased types to rename.")
+
+    if summary["unresolved"]:
+        print("\nNo canonical equivalent — categorise these yourself:")
+        for raw_type, paths in sorted(summary["unresolved"].items()):
+            print(f"  type: {raw_type}")
+            for path in paths:
+                print(f"    {path}")
+
+    if summary["failed"]:
+        print("\nFailed:", file=sys.stderr)
+        for change in summary["failed"]:
+            print(f"  {change['path']}: {change['error']}", file=sys.stderr)
+
+    if not args.apply and changes:
+        print("\nRe-run with --apply to write these changes.")
+    return 1 if summary["unresolved"] or summary["failed"] else 0
+
+
+def _print_link_migration_skip(summary: dict) -> int:
+    print(f"Nothing done: {summary['skipped']}.", file=sys.stderr)
+    if summary["skipped"] == "vault has uncommitted changes":
+        print(
+            "Commit or stash the vault first, or pass --force to rewrite anyway.",
+            file=sys.stderr,
+        )
+    elif summary["skipped"] == "already migrated":
+        print(
+            f"Receipt: {summary.get('receipt_path', '')} "
+            f"({summary.get('migrated_at', 'unknown date')}). "
+            "Pass --force to migrate again.",
+            file=sys.stderr,
+        )
+    return 1
+
+
+def _vault_migrate_links_command(args: argparse.Namespace) -> int:
+    """Convert a vault's `[[wikilinks]]` to relative markdown links.
+
+    Dry-run by default, like ``vault-migrate``: this rewrites the prose of the
+    user's own notes, so applying is opt-in. Two extra rails, because unlike a
+    frontmatter type swap this touches every line — it refuses on an existing
+    receipt (whose reverse map a second pass would overwrite) and on a vault with
+    uncommitted changes (so `git checkout` stays a working undo).
+    """
+    from ciao.vault_migrate_links import migrate_links
+
+    vault_root = _resolve_vault_root(args.vault_root)
+    if not vault_root.is_dir():
+        print(
+            f"Vault root is missing or not a directory: `{vault_root}`",
+            file=sys.stderr,
+        )
+        return 1
+
+    summary = migrate_links(
+        vault_root,
+        _resolve_runtime_root(args.runtime_root),
+        apply=args.apply,
+        force=args.force,
+    )
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 1 if summary.get("skipped") or summary.get("failed") else 0
+    if "skipped" in summary:
+        return _print_link_migration_skip(summary)
+
+    verb = "Rewrote" if args.apply else "Would rewrite"
+    rewrites = summary["rewrites"]
+    if rewrites:
+        print(
+            f"{verb} {len(rewrites)} link(s) in {summary['files_rewritten']} "
+            f"of {summary['files_scanned']} note(s):"
+        )
+        for change in rewrites:
+            print(
+                f"  {change['path']}:{change['line']}  "
+                f"{change['from']} -> {change['to']}"
+            )
+    else:
+        print(f"No wikilinks found in {summary['files_scanned']} note(s).")
+
+    if summary["unresolved"]:
+        print(
+            "\nConverted but pointing at nothing — these were already dead "
+            "wikilinks and now report as broken markdown links:"
+        )
+        for item in summary["unresolved"]:
+            print(f"  {item['path']}:{item['line']}  [[{item['ref']}]]")
+
+    if summary["anchors_dropped"]:
+        print("\nHeading anchors dropped (recorded in the receipt):")
+        for item in summary["anchors_dropped"]:
+            print(f"  {item['path']}:{item['line']}  [[{item['ref']}#{item['anchor']}]]")
+
+    if summary["failed"]:
+        print("\nFailed:", file=sys.stderr)
+        for item in summary["failed"]:
+            print(f"  {item['path']}: {item['error']}", file=sys.stderr)
+
+    if args.apply and rewrites:
+        print(f"\nReceipt: {summary.get('receipt_path', '')}")
+        print("Reverse it exactly with `ciao vault-unmigrate-links --apply`.")
+    elif not args.apply and rewrites:
+        print("\nRe-run with --apply to write these changes.")
+    return 1 if summary["failed"] else 0
+
+
+def _vault_unmigrate_links_command(args: argparse.Namespace) -> int:
+    """Restore the wikilinks recorded in the migration receipt.
+
+    Exact rather than a re-derivation: only the spans the receipt names are put
+    back, so markdown links the user wrote by hand are never converted into
+    wikilinks they never had.
+    """
+    from ciao.vault_migrate_links import unmigrate_links
+
+    vault_root = _resolve_vault_root(args.vault_root)
+    if not vault_root.is_dir():
+        print(
+            f"Vault root is missing or not a directory: `{vault_root}`",
+            file=sys.stderr,
+        )
+        return 1
+
+    summary = unmigrate_links(
+        vault_root,
+        _resolve_runtime_root(args.runtime_root),
+        apply=args.apply,
+        force=args.force,
+    )
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 1 if summary.get("skipped") or summary.get("failed") else 0
+    if "skipped" in summary:
+        return _print_link_migration_skip(summary)
+
+    verb = "Restored" if args.apply else "Would restore"
+    if summary["restored"]:
+        print(f"{verb} {summary['files_restored']} note(s):")
+        for path in summary["restored"]:
+            print(f"  {path}")
+    else:
+        print("Nothing to restore.")
+
+    if summary["failed"]:
+        print("\nLeft untouched (changed since the migration):", file=sys.stderr)
+        for item in summary["failed"]:
+            print(f"  {item['path']}: {item['error']}", file=sys.stderr)
+
+    if not args.apply and summary["restored"]:
+        print("\nRe-run with --apply to write these changes.")
+    return 1 if summary["failed"] else 0
+
+
+def _vault_rehome_command(args: argparse.Namespace) -> int:
+    """Re-file person notes a global curation run filed in the wrong workspace.
+
+    Dry-run by default, like the other two vault migrations: this moves the user's
+    own notes between workspaces and rewrites every reference to them, so applying
+    is opt-in. Only the tag-obvious cases move; a note with no workspace-naming tag
+    is queued in that workspace's `Workspace/Memory-Proposals.md` for review and
+    left exactly where it is.
+
+    ``--workspace-name`` names the registered workspaces. Without it they are derived
+    from the vault's own directories, which is right for a CLI run but is *not*
+    the registry — a caller with a `CiaoConfig` should pass
+    ``config.workspace_names()`` to the library function instead.
+    """
+    from ciao.vault_rehome import rehome_people
+
+    vault_root = _resolve_vault_root(args.vault_root)
+    if not vault_root.is_dir():
+        print(
+            f"Vault root is missing or not a directory: `{vault_root}`",
+            file=sys.stderr,
+        )
+        return 1
+
+    summary = rehome_people(
+        vault_root,
+        _resolve_runtime_root(args.runtime_root),
+        apply=args.apply,
+        force=args.force,
+        workspaces=args.workspace_name or None,
+    )
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 1 if summary.get("skipped") or summary.get("failed") else 0
+    if "skipped" in summary:
+        return _print_link_migration_skip(summary)
+
+    verb = "Moved" if args.apply else "Would move"
+    if summary["moves"]:
+        print(
+            f"{verb} {len(summary['moves'])} person note(s), rewriting "
+            f"{len(summary['rewrites'])} reference(s) in "
+            f"{summary['files_rewritten']} of {summary['notes_scanned']} note(s):"
+        )
+        for candidate in summary["mechanical"]:
+            print(
+                f"  {candidate['path']} -> {candidate['destination']}  "
+                f"({candidate['reason']})"
+            )
+    else:
+        print(f"No tag-obvious misfiled people in {summary['notes_scanned']} note(s).")
+
+    if summary["needs_judgement"]:
+        queued = "Queued for review" if args.apply else "Would queue for review"
+        print(f"\n{queued} — not moved, the tags do not decide it:")
+        for candidate in summary["needs_judgement"]:
+            destination = candidate["destination"] or "(no destination)"
+            print(f"  {candidate['path']} -> {destination}  ({candidate['reason']})")
+        for path in summary["proposals"]:
+            print(f"  written to {path}")
+
+    if summary["conflicts"]:
+        print("\nSkipped — a note already exists at the destination:", file=sys.stderr)
+        for candidate in summary["conflicts"]:
+            print(f"  {candidate['path']} -> {candidate['destination']}", file=sys.stderr)
+
+    if summary["failed"]:
+        print("\nFailed:", file=sys.stderr)
+        for item in summary["failed"]:
+            print(f"  {item['path']}: {item['error']}", file=sys.stderr)
+
+    if args.apply and summary["moves"]:
+        print(f"\nReceipt: {summary.get('receipt_path', '')}")
+        print("Reverse it exactly with `ciao vault-unrehome --apply`.")
+    elif not args.apply and (summary["moves"] or summary["needs_judgement"]):
+        print("\nRe-run with --apply to write these changes.")
+    return 1 if summary["failed"] or summary["conflicts"] else 0
+
+
+def _vault_unrehome_command(args: argparse.Namespace) -> int:
+    """Move the re-homed notes back and restore the references, from the receipt.
+
+    Exact rather than a re-derivation: only the moves and spans the receipt names
+    are reversed, so a note the user filed by hand is never dragged back with
+    them. Deliberately not gated on a clean vault — the re-homing is what made it
+    dirty.
+    """
+    from ciao.vault_rehome import unrehome_people
+
+    vault_root = _resolve_vault_root(args.vault_root)
+    if not vault_root.is_dir():
+        print(
+            f"Vault root is missing or not a directory: `{vault_root}`",
+            file=sys.stderr,
+        )
+        return 1
+
+    summary = unrehome_people(
+        vault_root,
+        _resolve_runtime_root(args.runtime_root),
+        apply=args.apply,
+        force=args.force,
+    )
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 1 if summary.get("skipped") or summary.get("failed") else 0
+    if "skipped" in summary:
+        return _print_link_migration_skip(summary)
+
+    verb = "Moved back" if args.apply else "Would move back"
+    if summary["moves_reverted"]:
+        print(f"{verb} {len(summary['moves_reverted'])} person note(s):")
+        for move in summary["moves_reverted"]:
+            print(f"  {move['from']} -> {move['to']}")
+    else:
+        print("No notes to move back.")
+
+    if summary["restored"]:
+        restored = "Restored" if args.apply else "Would restore"
+        print(f"\n{restored} references in {summary['files_restored']} note(s):")
+        for path in summary["restored"]:
+            print(f"  {path}")
+
+    if summary["failed"]:
+        print("\nLeft untouched (changed since the re-homing):", file=sys.stderr)
+        for item in summary["failed"]:
+            print(f"  {item['path']}: {item['error']}", file=sys.stderr)
+
+    if not args.apply and (summary["moves_reverted"] or summary["restored"]):
+        print("\nRe-run with --apply to write these changes.")
+    return 1 if summary["failed"] else 0
+
+
+def _vault_export_command(args: argparse.Namespace) -> int:
+    """Write a portable OKF bundle from the vault or one workspace of it."""
+    from ciao.okf import export_bundle
+
+    vault_root = _resolve_vault_root(args.vault_root)
+    summary = export_bundle(
+        vault_root,
+        args.dest,
+        workspace=(args.workspace_name or "").strip(),
+        force=args.force,
+    )
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0 if summary.get("written") else 1
+
+    if summary.get("skipped"):
+        print(f"Nothing written: {summary['skipped']}", file=sys.stderr)
+        if summary.get("example"):
+            print(
+                f"  First example: {summary['example']}\n"
+                "  Convert with `ciao vault-migrate-links --apply`, or pass "
+                "--force to ship a bundle whose links no consumer can follow.",
+                file=sys.stderr,
+            )
+        return 1
+
+    scope = summary["workspace"] or "whole vault"
+    print(
+        f"Wrote {summary['dest']} — {summary['concepts']} concept(s) "
+        f"from {scope}, OKF {summary['okf_version']}."
+    )
+    if summary["cross_workspace_links"]:
+        print(
+            f"  {summary['cross_workspace_links']} link(s) point outside this "
+            "workspace and will be dangling inside the bundle."
+        )
+    return 0
+
+
 def _vault_lint_command(args: argparse.Namespace) -> int:
     from ciao.vault_lint import VaultTraversalError, run_validation
 
     vault_root = _resolve_vault_root(args.vault_root)
+    # `--migrate-links` is the in-place remedy for the one finding the linter
+    # cannot fix by reporting: a vault still written in the retired dialect. It
+    # delegates rather than reimplementing, so the receipt and both safety rails
+    # behave exactly as they do from `vault-migrate-links`.
+    if getattr(args, "migrate_links", False):
+        return _vault_migrate_links_command(
+            argparse.Namespace(
+                vault_root=args.vault_root,
+                runtime_root=None,
+                apply=args.apply,
+                force=args.force,
+                json=False,
+            )
+        )
     if not vault_root.is_dir():
         print(
             f"Vault root is missing or not a directory: `{vault_root}`",
@@ -1212,13 +1634,9 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
         return 1
 
     has_issues = False
-    if issues["broken_links"]:
-        has_issues = True
-        print("### Dead Wikilinks\n")
-        for item in issues["broken_links"]:
-            print(f"- `{item['source']}` links to missing `[[{item['target']}]]`")
-        print()
-
+    # No "Dead Wikilinks" section: with markdown links the only dialect, every
+    # dead link lands in "Broken Markdown Links" below. The count did not change,
+    # only the bucket it is reported in.
     if issues["frontmatter_errors"]:
         has_issues = True
         print("### Frontmatter Errors\n")
@@ -1298,11 +1716,18 @@ def _os_audit_command(args: argparse.Namespace) -> int:
         "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "os-audit",
     })
     audit_config = CiaoConfig.from_env(config_source)
+    # Defaults from the dispatch env so the per-workspace hygiene routine needs
+    # no prompt templating: its packaged prompt is one static string, and the
+    # fanned-out entry already exports its workspace.
+    workspace_name = (
+        args.workspace_name or os.environ.get("CIAO_ACTIVE_WORKSPACE") or ""
+    ).strip()
     report = run_os_audit(
         workspace_dir=workspace,
         vault_root=vault,
         runtime_dir=runtime,
         config=audit_config,
+        workspace_name=workspace_name,
     )
 
     if args.json:
@@ -1978,6 +2403,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index_parser.set_defaults(func=_vault_index_command)
 
+    export_parser = subparsers.add_parser(
+        "vault-export",
+        help="Export the vault as a portable OKF bundle (.tar.gz).",
+        description=(
+            "Package the vault, or one workspace of it, as an Open Knowledge "
+            "Format bundle: the notes plus a bundle-root index.md carrying "
+            "okf_version. Refuses a vault still written in wikilinks, whose "
+            "edges no other consumer can follow."
+        ),
+    )
+    export_parser.add_argument("dest", type=Path, help="Destination .tar.gz path.")
+    export_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+    )
+    export_parser.add_argument(
+        "--workspace-name",
+        default="",
+        help=(
+            "Export only this logical workspace; its subtree becomes the bundle "
+            "root. Omit to export the whole vault."
+        ),
+    )
+    export_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Export even when the vault still uses wikilinks.",
+    )
+    export_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the raw summary as JSON.",
+    )
+    export_parser.set_defaults(func=_vault_export_command)
+
     lint_parser = subparsers.add_parser(
         "vault-lint",
         help="Run vault hygiene checks.",
@@ -1989,7 +2451,151 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
     )
+    lint_parser.add_argument(
+        "--migrate-links",
+        action="store_true",
+        help=(
+            "Instead of linting, convert `[[wikilinks]]` to relative Markdown "
+            "links. Dry-run unless --apply is also passed."
+        ),
+    )
+    lint_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="With --migrate-links, write the conversion.",
+    )
+    lint_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --migrate-links --apply, override the safety refusals.",
+    )
     lint_parser.set_defaults(func=_vault_lint_command)
+
+    migrate_parser = subparsers.add_parser(
+        "vault-migrate",
+        help="Rename non-canonical frontmatter types onto the vocabulary.",
+        description=(
+            "One-off migration for an existing vault: renames aliased types "
+            "(doc -> document, project-log -> log) and reports types with no "
+            "canonical equivalent. Dry-run unless --apply is passed."
+        ),
+    )
+    migrate_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+    )
+    migrate_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the renames. Without this, only report what would change.",
+    )
+    migrate_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the raw summary as JSON.",
+    )
+    migrate_parser.set_defaults(func=_vault_migrate_command)
+
+    for name, help_text, description, handler in (
+        (
+            "vault-migrate-links",
+            "Convert vault [[wikilinks]] to relative markdown links.",
+            (
+                "One-off migration for an existing vault: rewrites body "
+                "[[wikilinks]] as relative markdown links and normalizes "
+                "frontmatter related: values to bare refs, skipping code spans, "
+                "escaped links, Logs/, Templates/, and generated files. Records "
+                "an exact reverse map under .runtime/migration/. Dry-run unless "
+                "--apply is passed."
+            ),
+            _vault_migrate_links_command,
+        ),
+        (
+            "vault-unmigrate-links",
+            "Undo vault-migrate-links from its receipt.",
+            (
+                "Restores exactly the spans recorded by vault-migrate-links. "
+                "Dry-run unless --apply is passed."
+            ),
+            _vault_unmigrate_links_command,
+        ),
+        (
+            "vault-rehome",
+            "Re-file person notes filed in the wrong workspace.",
+            (
+                "One-off cleanup for a vault whose people were all filed into one "
+                "workspace by a global memory-curation run: moves the notes whose "
+                "tags name another workspace and repoints every reference to them "
+                "(wikilinks, relative markdown links, frontmatter refs). Notes "
+                "with no workspace-naming tag are queued in that workspace's "
+                "Workspace/Memory-Proposals.md and never moved. Records an exact "
+                "reverse map under .runtime/migration/. Dry-run unless --apply "
+                "is passed."
+            ),
+            _vault_rehome_command,
+        ),
+        (
+            "vault-unrehome",
+            "Undo vault-rehome from its receipt.",
+            (
+                "Moves back exactly the notes vault-rehome moved and restores the "
+                "reference spans it rewrote. Dry-run unless --apply is passed."
+            ),
+            _vault_unrehome_command,
+        ),
+    ):
+        links_parser = subparsers.add_parser(
+            name, help=help_text, description=description
+        )
+        links_parser.add_argument(
+            "--vault-root",
+            type=Path,
+            default=None,
+            help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+        )
+        links_parser.add_argument(
+            "--runtime-root",
+            type=Path,
+            default=None,
+            help=(
+                "Runtime root holding the migration receipt. Defaults to "
+                "CIAO_RUNTIME_ROOT or <workspace>/.runtime."
+            ),
+        )
+        links_parser.add_argument(
+            "--apply",
+            action="store_true",
+            help="Write the changes. Without this, only report what would change.",
+        )
+        links_parser.add_argument(
+            "--force",
+            action="store_true",
+            help=(
+                "Proceed despite a dirty vault git tree, or despite an existing "
+                "receipt (which is moved aside, not overwritten)."
+            ),
+        )
+        links_parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Output the raw summary as JSON.",
+        )
+        if name == "vault-rehome":
+            # Repeatable, and only here: workspace names are the user's, so the
+            # registry has to be passed in rather than guessed. Omitted, the
+            # command derives them from the vault's own directories.
+            links_parser.add_argument(
+                "--workspace-name",
+                action="append",
+                default=[],
+                help=(
+                    "A registered workspace name; repeat for each one. Defaults "
+                    "to the vault's workspace directories."
+                ),
+            )
+        links_parser.set_defaults(func=handler)
 
     os_audit_parser = subparsers.add_parser(
         "os-audit",
@@ -2013,6 +2619,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Runtime root. Defaults to CIAO_RUNTIME_ROOT or <workspace>/.runtime.",
+    )
+    os_audit_parser.add_argument(
+        "--workspace-name",
+        default="",
+        help=(
+            "Logical workspace to scope per-workspace evidence to (its MEMORY.md "
+            "and proposal queue). Defaults to CIAO_ACTIVE_WORKSPACE; empty audits "
+            "every workspace. Note --workspace is a filesystem path, not this."
+        ),
     )
     os_audit_parser.add_argument(
         "--json",

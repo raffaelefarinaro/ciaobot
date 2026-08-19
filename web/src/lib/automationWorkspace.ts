@@ -27,3 +27,14 @@ export function loopInWorkspace(
 ): boolean {
   return workspaceForLoop(loop, chats, projects) === workspace
 }
+
+/**
+ * Whether this schedule is one row of a per-workspace fan-out.
+ *
+ * A packaged routine marked `per_workspace` is installed once per workspace with
+ * a `<base-id>@<workspace>` id, so the separator is what distinguishes "this row
+ * owns a workspace" from "this row was pointed at one".
+ */
+export function isPerWorkspaceRoutine(schedule: Schedule): boolean {
+  return schedule.scope === 'system' && schedule.schedule_id.includes('@')
+}

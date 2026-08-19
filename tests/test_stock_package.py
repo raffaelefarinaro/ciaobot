@@ -21,6 +21,9 @@ EXPECTED_COMMANDS = {
 
 EXPECTED_SYSTEM_SCHEDULES = {
     "system-memory-curation",
+    # The index rebuild is its own routine because it regenerates ONE shared
+    # INDEX.md + VOCABULARY.md, while the hygiene audit it feeds is per-workspace.
+    "system-vault-index",
     "system-workspace-hygiene",
     "system-skill-evolution",
 }
@@ -64,7 +67,12 @@ def test_stock_schedules_are_read_only_system_entries() -> None:
         assert entry["editable"] is False
         assert entry["removable"] is False
         assert entry["enabled"] is True
-        assert entry["workspace"] == "default"
+        # Packaged definitions name no workspace. The old "default" sentinel was
+        # never a real workspace: the resolver fell through it to the primary
+        # one, so every routine curated a single vault. A `per_workspace`
+        # definition now gets a real workspace per fanned-out row, and a global
+        # one resolves at dispatch.
+        assert entry["workspace"] == ""
         assert "last_triggered_on" not in entry
         assert "last_dispatched_at" not in entry
 

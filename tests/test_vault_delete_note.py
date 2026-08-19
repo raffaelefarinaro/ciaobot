@@ -11,7 +11,7 @@ def client(tmp_path):
     vault = tmp_path / "memory-vault"
     (vault / "personal").mkdir(parents=True)
 
-    # A relates to B via frontmatter `related:` and a body wikilink also
+    # A relates to B via frontmatter `related:` and a body markdown link also
     # points at B, so deleting B should touch A's frontmatter and body.
     (vault / "personal" / "A.md").write_text(
         "---\n"
@@ -19,7 +19,7 @@ def client(tmp_path):
         "related:\n"
         "  - B\n"
         "---\n"
-        "# A\n\nSee [[B]] for context.\n",
+        "# A\n\nSee [B](./B.md) for context.\n",
         encoding="utf-8",
     )
     (vault / "personal" / "B.md").write_text(
@@ -44,6 +44,11 @@ def client(tmp_path):
 
 
 def test_delete_note_removes_file_and_cleans_backlinks(client):
+    """Deleting a note must strip the relative markdown links pointing at it.
+
+    Only wikilinks were stripped before, so a delete left every markdown link
+    to the note looking live while its target was gone.
+    """
     c, vault = client
     resp = c.delete("/api/vault/note?path=memory-vault/personal/B.md")
     assert resp.status_code == 200

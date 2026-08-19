@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ciao.vault_index import markdown_destination
+
 logger = logging.getLogger(__name__)
 
 # Cap scan cost: we truncate prompts before matching and cap the number
@@ -35,9 +37,13 @@ _FOLDER_FILENAMES = {"readme"}
 _SKIP_FILENAMES = {"log", "index"}
 
 # Bullet lines look like:
-#   - `People/Alba` (tags: person, friend; aliases: Alba)
-#   - `Projects/Ciaobot-Improvements` (tags: ...)
-_BULLET_RE = re.compile(r"^- `(?P<path>[^`]+)`(?P<rest>.*)$")
+#   - [People/Alba](./People/Alba.md) (tags: person, friend; aliases: Alba)
+#   - [Projects/Ciaobot-Improvements](./Projects/Ciaobot-Improvements.md) (tags: ...)
+# The label carries the vault-relative path, which is what disambiguates two
+# notes with the same stem; the destination is the same path made navigable.
+# Read the label, not the destination: it needs no unescaping and no `<...>`
+# unwrapping (see `vault_index.markdown_destination`).
+_BULLET_RE = re.compile(r"^- \[(?P<path>[^\]\n]+)\]\([^)\n]*\)(?P<rest>.*)$")
 _ALIASES_RE = re.compile(r"aliases:\s*([^)]+)")
 _CATEGORY_PARTS = {
     "People": "People",
@@ -200,19 +206,28 @@ def _entity_visible_in_workspace(
 ) -> bool:
     """Return whether an indexed entity is visible to ``workspace``.
 
-    Workspace-scoped vaults index paths as ``<workspace>/...``. Shared roots
-    use ``shared/...`` and are visible everywhere. Older single-workspace
-    indexes used unprefixed paths like ``People/Alba``; those belong to
-    ``legacy_workspace``, which the caller reads off the workspace registry.
+    Workspace-scoped vaults index paths as ``<workspace>/...``. Older
+    single-workspace indexes used unprefixed paths like ``People/Alba``; those
+    belong to ``legacy_workspace``, which the caller reads off the workspace
+    registry.
 
     An unknown ``legacy_workspace`` fails closed. Showing an unprefixed entity
     in every workspace is a cross-workspace disclosure; the provider request
     carries the registry-selected owner explicitly for normal PWA chats.
+
+    There is deliberately no cross-workspace visibility escape hatch. A
+    ``shared/`` prefix used to be treated as visible everywhere, but nothing
+    could reach such a note: every workspace-scoped tool resolves
+    ``<vault>/<workspace>`` as its root and ``_safe_relative`` rejects anything
+    outside it, so a promoted note became visible to the index and unreadable by
+    ``vault_search`` and ``file_read``. Measured on a real two-workspace vault it
+    had no users either — zero notes existed in both trees, and every
+    cross-workspace reference came from a note filed in the wrong workspace.
+    Workspaces are separate; a person belongs to whichever one you deal with them
+    in.
     """
     workspace = (workspace or "").strip()
     if not workspace:
-        return True
-    if entity.path.startswith("shared/"):
         return True
     if entity.path.startswith(f"{workspace}/"):
         return True
@@ -253,10 +268,19 @@ def find_entities(
 
 
 def format_entities(entities: list[VaultEntity]) -> str:
-    """Render matched entities as one compact additionalContext block."""
+    """Render matched entities as one compact additionalContext block.
+
+    Emits relative markdown links, the vault's only link dialect. Paths are
+    vault-root-relative with a `./` prefix because this block goes into a
+    *prompt*, not into a note — there is no containing file to be relative to,
+    and the vault root is the one anchor the model can rely on.
+    """
     if not entities:
         return ""
     lines: list[str] = []
     for entity in entities:
-        lines.append(f"- [[{entity.path}]] ({entity.category.rstrip('s').lower()})")
+        target = markdown_destination(f"./{entity.path}.md")
+        lines.append(
+            f"- [{entity.name}]({target}) ({entity.category.rstrip('s').lower()})"
+        )
     return "mentioned_entities:\n" + "\n".join(lines)

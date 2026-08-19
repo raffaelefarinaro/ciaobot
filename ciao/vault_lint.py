@@ -12,12 +12,16 @@ from urllib.parse import unquote, urlsplit
 
 import yaml
 
-# Match [[Target]], ignoring optional #anchors and |labels
-WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
+from ciao.vault_index import (
+    canonical_type,
+    is_generated_vault_file,
+    resolve_vault_link,
+    vault_link_ref,
+)
 
-# Fenced code blocks and inline code spans are prose *about* wikilinks, not
-# real links — guides and changelogs routinely document `[[wikilink]]` syntax.
-# Strip them before extracting links so documented syntax isn't flagged.
+# Fenced code blocks and inline code spans are prose *about* links, not real
+# links — guides and changelogs routinely document link syntax. Strip them
+# before extracting links so documented syntax isn't flagged.
 _FENCE_RE = re.compile(r"(?ms)^[ \t]*(`{3,}|~{3,}).*?^[ \t]*\1[ \t]*$")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 
@@ -25,7 +29,9 @@ _FRONTMATTER_RE = re.compile(
     r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)",
     re.DOTALL,
 )
-_FRONTMATTER_EXEMPT = {"index.md", "memory.md", "log.md"}
+# Reserved structural filenames that carry no frontmatter by design (the
+# generated ones plus OKF's `log.md`). Already casefolded at the call site.
+_FRONTMATTER_EXEMPT = {"index.md", "memory.md", "vocabulary.md", "log.md"}
 
 _REFERENCE_DESTINATION_RE = re.compile(
     r"(?m)^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*(<[^>\n]+>|[^\s]+)"
@@ -129,17 +135,21 @@ def _markdown_source_paths(
 
 
 def _links_in(text: str):
-    """Yield wikilink targets in ``text``, skipping code spans/fences,
-    backslash-escaped brackets, and ``<placeholder>`` template syntax — none
-    of which are real links."""
-    stripped = _without_code(text)
-    for m in WIKILINK_RE.finditer(stripped):
-        if m.start() > 0 and stripped[m.start() - 1] == "\\":
-            continue  # escaped \[[...]] — documenting the syntax
-        target = m.group(1).strip()
-        if "<" in target or ">" in target:
-            continue  # placeholder like [[projects/active/<folder>/<folder>]]
-        yield target
+    """Yield the in-vault markdown link refs in ``text``.
+
+    Refs come back *note-relative* and extension-less (`./People/Mo`,
+    `../Projects/Foo`): resolving them needs the containing note's path, which
+    only the caller has. Reuses `_markdown_destinations_in`, so code
+    spans/fences, backslash-escaped brackets, and reference-style definitions
+    behave exactly as they do for broken-link validation — one parser, one set
+    of rules. Anything that is not an in-vault markdown target (a URL, an
+    image, a `<placeholder>`, a bare `#anchor`, a leftover `[[wikilink]]`) is
+    dropped.
+    """
+    for destination in _markdown_destinations_in(text):
+        ref = vault_link_ref(destination)
+        if ref:
+            yield ref
 
 
 def _is_template(stem: str) -> bool:
@@ -187,6 +197,20 @@ def _frontmatter_error(file: _VaultFile) -> dict[str, str] | None:
             "source": file.relative.as_posix(),
             "kind": "invalid_type",
             "message": "frontmatter type must be a string",
+        }
+    # `type:` is a closed vocabulary. Without this the index grows one section
+    # per synonym and the agent has no reason to reuse an existing category.
+    # An aliased value names its target so the fix is a rename, not a decision.
+    canonical = canonical_type(page_type)
+    if canonical != page_type.strip():
+        suggestion = f"; use '{canonical}'" if canonical else ""
+        return {
+            "source": file.relative.as_posix(),
+            "kind": "unknown_type",
+            "message": (
+                f"frontmatter type '{page_type.strip()}' is not canonical"
+                f"{suggestion}"
+            ),
         }
     return None
 
@@ -463,15 +487,19 @@ def _is_non_local_decoded_path(path: str) -> bool:
 
 
 def run_validation(vault_root: Path) -> dict:
-    """Read-only scan for five vault health result lists.
+    """Read-only scan for four vault health result lists.
 
-    The returned keys are ``broken_links``, ``orphans``, ``duplicates``,
-    ``frontmatter_errors``, and ``broken_markdown_links``. Unreadable or
-    non-UTF-8 Markdown sources are skipped here; ``os-audit`` reports those
-    files separately as scan errors.
+    The returned keys are ``orphans``, ``duplicates``, ``frontmatter_errors``,
+    and ``broken_markdown_links``. Unreadable or non-UTF-8 Markdown sources are
+    skipped here; ``os-audit`` reports those files separately as scan errors.
+
+    There is no separate ``broken_links`` bucket any more. It reported dead
+    wikilinks, and with markdown links the only dialect, a dead link is a dead
+    markdown link — already found by ``_markdown_link_error`` over every file,
+    with a resolved path and a kind. Two buckets for one condition could only
+    disagree.
     """
     issues: dict[str, list[Any]] = {
-        "broken_links": [],
         "orphans": [],
         "duplicates": [],
         "frontmatter_errors": [],
@@ -494,14 +522,17 @@ def run_validation(vault_root: Path) -> dict:
         if error is not None:
             issues["frontmatter_errors"].append(error)
 
-    valid_targets = set()
     files_to_scan: list[_VaultFile] = []
+    # Keyed by vault-relative path without suffix — the one form a resolved
+    # markdown link produces. A wikilink could name a bare stem from anywhere in
+    # the vault; a relative link always names a location, so a second stem-keyed
+    # bucket would now be dead weight.
     incoming_links: dict[str, list[str]] = {}
 
     link_target_files = [
         file
         for file in vault_files
-        if file.relative.name not in {"INDEX.md", "MEMORY.md"}
+        if not is_generated_vault_file(file.relative.name)
     ]
     files_to_scan = [
         file
@@ -513,14 +544,7 @@ def run_validation(vault_root: Path) -> dict:
 
     for file in link_target_files:
         target_stem = file.path.stem
-        target_rel = file.relative.with_suffix("").as_posix()
-        valid_targets.add(target_stem)
-        valid_targets.add(target_rel)
-
-        # Template-named files are excluded from wikilink and orphan source
-        # checks, but remain eligible for Markdown-link validation.
-        incoming_links[target_stem] = []
-        incoming_links[target_rel] = []
+        incoming_links[file.relative.with_suffix("").as_posix()] = []
 
         # Duplicate detection: skip common structural stems (README/log/etc.)
         # that legitimately repeat per folder, and template files.
@@ -534,14 +558,12 @@ def run_validation(vault_root: Path) -> dict:
 
     for file in files_to_scan:
         rel_str = file.relative.as_posix()
-        for target in _links_in(file.content):
-            if target in valid_targets:
-                incoming_links.setdefault(target, []).append(rel_str)
-            else:
-                issues["broken_links"].append({
-                    "source": rel_str,
-                    "target": target
-                })
+        for ref in _links_in(file.content):
+            target = resolve_vault_link(file.relative, ref)
+            # A link to a file that does not exist is reported below as a
+            # broken markdown link; here it simply grants no incoming edge.
+            if target in incoming_links:
+                incoming_links[target].append(rel_str)
 
     # Check links from workspace memory roots. Any directly nested MEMORY.md in
     # the already discovered/read records counts, so alternate workspace names
@@ -557,13 +579,14 @@ def run_validation(vault_root: Path) -> dict:
     )
     memory_links = set()
     for record in memory_roots:
-        for target in _links_in(record.content):
-            memory_links.add(target)
+        for ref in _links_in(record.content):
+            target = resolve_vault_link(record.relative, ref)
+            if target:
+                memory_links.add(target)
 
     orphan_candidate_dirs = {"People", "Projects", "Ideas", "Resources", "Places", "projects", "references"}
 
     for file in files_to_scan:
-        stem = file.path.stem
         rel_path = file.relative
         rel_no_sfx = rel_path.with_suffix("").as_posix()
         rel_str = file.relative.as_posix()
@@ -571,13 +594,7 @@ def run_validation(vault_root: Path) -> dict:
         if not any(part in orphan_candidate_dirs for part in rel_path.parts):
             continue
 
-        has_incoming = False
-        if incoming_links.get(stem) or incoming_links.get(rel_no_sfx):
-            has_incoming = True
-        if stem in memory_links or rel_no_sfx in memory_links:
-            has_incoming = True
-
-        if not has_incoming:
+        if not incoming_links.get(rel_no_sfx) and rel_no_sfx not in memory_links:
             issues["orphans"].append(rel_str)
 
     for file in vault_files:

@@ -84,7 +84,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   const libreofficeInstalling = ref(false)
   const libreofficeInstallError = ref('')
 
-  // Markdown wikilink resolution uses a vault-wide path index from the API.
+  // Markdown vault-link resolution uses a vault-wide path index from the API.
   const markdownPaths = ref<string[]>([])
 
   // Artifact (.html) state. The source is deliberately NOT fetched on open:

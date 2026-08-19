@@ -11,6 +11,7 @@ PermissionGate:
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,35 @@ async def test_respond_permission_forwards_to_provider_gate(tmp_path: Path) -> N
 
     result = await pending
     assert isinstance(result, PermissionResultAllow)
+
+
+def test_respond_permission_clears_matching_pending_permission(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    chat.pending_permission = json.dumps({
+        "request_id": "req-1", "tool_name": "Bash", "message": "Approve use of Bash?", "tool_input": "",
+    })
+
+    pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
+
+    assert pcm._chats[chat.chat_id].pending_permission == ""
+
+
+def test_respond_permission_ignores_stale_reply_for_a_superseded_request(
+    tmp_path: Path,
+) -> None:
+    """A late reply for an already-superseded prompt must not wipe a newer one."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    chat.pending_permission = json.dumps({
+        "request_id": "req-2", "tool_name": "Bash", "message": "Approve use of Bash?", "tool_input": "",
+    })
+
+    pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
+
+    assert json.loads(pcm._chats[chat.chat_id].pending_permission)["request_id"] == "req-2"
 
 
 @pytest.mark.asyncio

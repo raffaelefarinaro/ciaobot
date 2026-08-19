@@ -1,20 +1,16 @@
 """Programmatic Claude Agent SDK hooks wired by ClaudeProvider.
 
-Three hooks are wired today:
+One hook is wired today: ``PreToolUse`` on ``Bash`` forces background shell
+commands to run in the foreground. A background process belongs to the Claude
+SDK subprocess and is stopped when the turn ends, while its terminal
+notification is not emitted until a later turn resumes the session.
 
-1. ``UserPromptSubmit`` injects two things into the model's context
-   before it sees a user turn.
-   a. Compact runtime context: today's date, active workspace, and GWS
-      profile. Keeps schedules and reconnected sessions in sync without
-      the user having to restate them.
-   b. Vault entity tags: whole-word matches against memory-vault/INDEX.md
-      get surfaced as ``- [[People/Name]] (person)`` bullets so the model
-      can load the right note without guessing who "Emma" or "Ciaobot-
-      Improvements" refers to.
-2. ``PreToolUse`` on ``Bash`` forces background shell commands to run in the
-   foreground. A background process belongs to the Claude SDK subprocess and
-   is stopped when the turn ends, while its terminal notification is not
-   emitted until a later turn resumes the session.
+There is deliberately no ``UserPromptSubmit`` hook. Runtime context (date,
+active workspace, GWS profile, cwd) and vault entity tags are built once by
+``ciao.context.capsule`` and prepended to the request for every provider, so a
+Claude-only second injection would duplicate them. ``_runtime_lines`` stays
+here because the Codex provider and the Settings context view render the same
+block from it.
 
 Kept small and fail-open: any exception becomes a DEBUG log and the
 original prompt/tool output reaches the model untouched.
@@ -22,25 +18,13 @@ original prompt/tool output reaches the model untouched.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
-import urllib.error
-import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ciao.context.entity_tagger import find_entities, format_entities
-
 logger = logging.getLogger(__name__)
-
-# The injected context wrapper (project context, canonical doc path, prior
-# entity block) is prepended to the prompt before this hook runs. Scanning
-# it makes entity detection trigger on injected file paths and boilerplate
-# instead of what the user actually typed, so strip it before matching.
-_CIAO_CONTEXT_RE = re.compile(r"(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*")
 
 
 def build_foreground_bash_hook():
@@ -123,58 +107,3 @@ def _runtime_lines(cwd: Path, extra_env: dict[str, str] | None = None) -> list[s
         lines.append(f"active_project={project}")
     lines.append(f"cwd={cwd}")
     return lines
-
-
-def build_user_prompt_submit_hook(
-    vault_root: Path, extra_env: dict[str, str] | None = None
-):
-    """Return a UserPromptSubmit callback bound to a vault root.
-
-    ``extra_env`` carries the per-request workspace/profile/project the
-    provider built for this chat (see ``_build_extra_env``). Captured in the
-    closure so the injected ``<ciao-runtime>`` block reflects the active chat
-    rather than the server's global default. The callback shape matches
-    claude_agent_sdk.types.HookCallback.
-    """
-
-    async def on_user_prompt_submit(
-        input_data: dict[str, Any],
-        tool_use_id: str | None,
-        context: Any,  # HookContext; untyped here to avoid an import cycle
-    ) -> dict[str, Any]:
-        del tool_use_id, context  # unused
-        try:
-            prompt = input_data.get("prompt") or ""
-            cwd = Path(input_data.get("cwd") or vault_root.parent)
-            runtime = _runtime_lines(cwd, extra_env)
-            env = {**os.environ, **(extra_env or {})}
-            workspace = (
-                env.get("CIAO_ACTIVE_WORKSPACE")
-                or _legacy_workspace_context(env.get("CIAO_WORKSPACE"))
-                or env.get("GWS_PROFILE")
-            )
-            legacy_workspace = env.get("CIAO_LEGACY_ENTITY_WORKSPACE", "")
-            scan_text = _CIAO_CONTEXT_RE.sub("", prompt)
-            entities = find_entities(
-                scan_text,
-                vault_root,
-                workspace=workspace,
-                legacy_workspace=legacy_workspace,
-            )
-            sections: list[str] = ["[SITUATIONAL CONTEXT: Runtime & Vault Entities]"]
-            sections.append("<ciao-runtime>\n" + "\n".join(runtime) + "\n</ciao-runtime>")
-            tagged = format_entities(entities)
-            if tagged:
-                sections.append("<ciao-entities>\n" + tagged + "\n</ciao-entities>")
-            additional = "\n".join(sections)
-        except Exception:  # noqa: BLE001 — never block a user turn on hook failure
-            logger.debug("UserPromptSubmit hook failed; skipping", exc_info=True)
-            return {}
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": additional,
-            }
-        }
-
-    return on_user_prompt_submit

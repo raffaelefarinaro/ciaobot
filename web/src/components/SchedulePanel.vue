@@ -287,15 +287,28 @@
               This target no longer exists — edit to choose an available one.
             </p>
             <div v-if="schedule.scope === 'system'" class="system-workspace-control">
-              <div class="form-group">
-                <label>Run this routine in</label>
-                <select :value="schedule.workspace" @change="onSystemWorkspaceChange">
-                  <option v-for="workspace in projectStore.workspaceOptions" :key="workspace.name" :value="workspace.name">
-                    {{ workspaceDisplayName(workspace.name) }}
-                  </option>
-                </select>
-              </div>
-              <p class="hint">The routine inherits this workspace's provider and default model.</p>
+              <!-- A per-workspace routine already has one row per workspace, so
+                   its workspace is identity, not a setting: offering to move it
+                   would collide with the sibling row. Only a global routine —
+                   one whose subject is a shared artifact — gets the choice. -->
+              <template v-if="isPerWorkspaceRoutine(schedule)">
+                <p class="hint">
+                  This routine runs once per workspace. You are looking at the
+                  {{ workspaceDisplayName(schedule.workspace) }} run; each one can be
+                  paused on its own and inherits that workspace's provider and default model.
+                </p>
+              </template>
+              <template v-else>
+                <div class="form-group">
+                  <label>Run this routine in</label>
+                  <select :value="schedule.workspace" @change="onSystemWorkspaceChange">
+                    <option v-for="workspace in projectStore.workspaceOptions" :key="workspace.name" :value="workspace.name">
+                      {{ workspaceDisplayName(workspace.name) }}
+                    </option>
+                  </select>
+                </div>
+                <p class="hint">The routine inherits this workspace's provider and default model.</p>
+              </template>
             </div>
           </template>
 
@@ -680,7 +693,7 @@ import NewLoopForm from './NewLoopForm.vue'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
-import { loopInWorkspace, scheduleInWorkspace, workspaceForLoop } from '../lib/automationWorkspace'
+import { isPerWorkspaceRoutine, loopInWorkspace, scheduleInWorkspace, workspaceForLoop } from '../lib/automationWorkspace'
 import { askConfirm } from '../lib/confirm'
 
 const props = defineProps<{ showNew?: boolean }>()

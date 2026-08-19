@@ -63,7 +63,7 @@ def test_codex_entity_context_uses_the_registry_selected_legacy_owner(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "INDEX.md").write_text(
-        "- `People/Alba` (aliases: Alba)\n",
+        "- [People/Alba](./People/Alba.md) (aliases: Alba)\n",
         encoding="utf-8",
     )
     config = SimpleNamespace(
@@ -97,8 +97,8 @@ def test_codex_entity_context_uses_the_registry_selected_legacy_owner(
         )
     )
 
-    assert "[[People/Alba]]" not in hidden
-    assert "[[People/Alba]]" in visible
+    assert "[Alba](./People/Alba.md)" not in hidden
+    assert "[Alba](./People/Alba.md)" in visible
 
 
 def test_codex_injects_memory_when_workspace_guides_diverge(tmp_path: Path) -> None:

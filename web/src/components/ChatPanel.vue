@@ -1633,7 +1633,20 @@ const MODE_PICKER_OPTIONS: ReadonlyArray<{ value: string; label: string; descrip
   { value: 'normal', label: 'Manual', description: 'Approve each tool call' },
   { value: 'plan', label: 'Plan', description: 'Read-only — propose, do not act' },
 ]
-const modePickerOptions = MODE_PICKER_OPTIONS
+// opencode has no native "auto" concept — only default-mostly-ask and
+// --auto (allow everything not explicitly denied). Ciaobot's Auto tier for
+// it is a synthetic middle ground (ciao/providers/opencode.py:519,
+// auto_approves_permission): edits are allowed outright, but shell stays
+// gated behind a read-only classifier. The generic description above reads
+// like CLI-auto parity, which it isn't — say so for this provider so Bypass
+// (opencode's real --auto equivalent) isn't a surprise.
+const OPENCODE_AUTO_DESCRIPTION = 'Fewer prompts; shell commands still ask unless read-only'
+const modePickerOptions = computed(() => {
+  if (chat.value?.provider !== 'opencode') return MODE_PICKER_OPTIONS
+  return MODE_PICKER_OPTIONS.map(opt =>
+    opt.value === 'auto' ? { ...opt, description: OPENCODE_AUTO_DESCRIPTION } : opt,
+  )
+})
 
 const modeChipSaving = ref(false)
 
