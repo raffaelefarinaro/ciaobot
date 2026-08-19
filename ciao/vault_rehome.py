@@ -117,6 +117,15 @@ VAULT_PREFIX = "memory-vault"
 # vault that renames it would otherwise be invisible here.
 PEOPLE_DIRS = frozenset(name for name, kind in DIR_TYPE_MAP.items() if kind == "person")
 
+# Person-note FILENAMES (not directories, so distinct from `EXCLUDED_TOP_DIRS`)
+# that are never candidates for re-homing. `People/User.md` is the operator's own
+# identity note: `ciao/memory_proposals.py` names it as the canonical home for
+# durable identity facts, and it belongs to the primary workspace by definition.
+# Matching is by exact filename, casefolded, so `user.md` and `User.md` are both
+# excluded while a note merely containing the word user (say `User-Group-Lead.md`)
+# still moves like any other contact.
+EXCLUDED_PERSON_FILENAMES = frozenset({"user.md"})
+
 # Tag -> the workspace *role* the tag implies.
 #
 # Roles, not names. `scandit` cannot point at a directory called `work`, because
@@ -393,6 +402,8 @@ def detect_misfiled_people(
         relative = entry.path.relative_to(VAULT_PREFIX)
         parts = relative.parts
         if len(parts) < 3 or parts[0] not in registered or parts[1] not in PEOPLE_DIRS:
+            continue
+        if parts[-1].casefold() in EXCLUDED_PERSON_FILENAMES:
             continue
         workspace = parts[0]
         tags = tuple(sorted({tag.strip().casefold() for tag in entry.tags if tag.strip()}))

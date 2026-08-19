@@ -169,6 +169,44 @@ def test_roles_bind_to_names_not_the_other_way_round() -> None:
     assert resolve_role_workspaces(["clientA", "clientB"]) == {}
 
 
+def test_the_operators_own_note_is_never_a_candidate(tmp_path: Path) -> None:
+    """`People/User.md` is the operator's identity note, named by memory_proposals
+    as the canonical home for durable identity facts, so it must never be
+    proposed for re-homing in any bucket. A generic accept would move it out of
+    the primary workspace and break identity resolution."""
+    vault = tmp_path / "memory-vault"
+    _note(vault, "personal/People/User.md", _person("[person]"))
+    _note(vault, "personal/People/Peter.md", _person("[person]"))
+
+    candidates = {c.path: c for c in detect_misfiled_people(vault)}
+
+    assert "personal/People/User.md" not in candidates
+    assert candidates["personal/People/Peter.md"].bucket == "needs_judgement"
+
+
+def test_the_operator_note_exclusion_is_case_insensitive(tmp_path: Path) -> None:
+    """A vault written on a case-insensitive filesystem can hold the note under any
+    casing, so the exclusion casefolds rather than matching one spelling."""
+    vault = tmp_path / "memory-vault"
+    _note(vault, "personal/People/user.md", _person("[person]"))
+    _note(vault, "work/People/USER.md", _person("[person]"))
+
+    assert detect_misfiled_people(vault) == []
+
+
+def test_a_note_only_containing_user_in_its_name_still_moves(tmp_path: Path) -> None:
+    """The exclusion is an exact filename match, not a substring match: a note
+    about a real person whose name happens to contain the word is still a
+    contact."""
+    vault = tmp_path / "memory-vault"
+    _note(vault, "personal/People/User-Group-Lead.md", _person("[person, colleague]"))
+    _note(vault, "work/projects/alpha.md", "---\ntype: project\n---\n# Alpha\n")
+
+    candidates = {c.path: c for c in detect_misfiled_people(vault)}
+
+    assert candidates["personal/People/User-Group-Lead.md"].bucket == "mechanical"
+
+
 def test_note_type_folders_are_not_mistaken_for_workspaces(tmp_path: Path) -> None:
     """A legacy single-root vault has `People/` at the top level; treating that as
     a workspace would make every person note a candidate for moving into a
