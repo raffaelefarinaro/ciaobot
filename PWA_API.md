@@ -48,6 +48,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/continue` | Create a new active chat continuing from this archived one |
 | POST | `/api/chats/{chat_id}/read` | Mark chat read |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
+| POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
 | POST | `/api/chats/{chat_id}/retry-insights` | Re-run session-insights extraction for an archived chat (text-mode, on demand) |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
@@ -347,6 +348,11 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
   -H 'content-type: application/json' -d '{"action":"try_now"}'
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/retry" \
   -H 'content-type: application/json' -d '{"action":"stop"}'
+
+# Stop an in-flight turn — {stopped: bool}. Same effect as the websocket
+# `stop` message; use this when driving a chat over plain HTTP or when a
+# socket may not be connected.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/stop"
 
 # Start a new provider session inside an existing chat (resets context).
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/new"

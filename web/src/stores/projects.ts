@@ -3475,7 +3475,13 @@ export const useProjectStore = defineStore('projects', () => {
     const ws = sockets.value[chatId]
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'stop' }))
+      return
     }
+    // The socket can be mid-reconnect (liveness watchdog, a network blip)
+    // right when the user clicks Stop, silently dropping the WS message with
+    // no way to retry from here. Fall back to the HTTP route so Stop always
+    // reaches the server even while the socket is unusable.
+    void api.post(`/api/chats/${chatId}/stop`, {})
   }
 
   function respondPermission(

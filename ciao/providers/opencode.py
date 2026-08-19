@@ -101,12 +101,14 @@ _EMPTY_MODEL_CACHE_TTL = 20.0
 _MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 # Session reads (`read_thread` / `read_collab_tree`) also cost a throwaway
-# `opencode serve`, and the PWA polls the routes they back on short intervals
-# (15s status sync plus a post-turn retry ladder for /messages, 4s for
-# /subagents while a turn streams). A TTL shorter than every poll interval
-# collapses the bursts to roughly one spawn per tick without making replays
-# feel stale.
-_READ_CACHE_TTL = 3.0
+# `opencode serve`. A chat with a live provider attached reuses that server
+# instead (see `has_live_server` / `read_live_collab_tree`), so this classmethod
+# path and its cache now mainly cover reads with nothing attached (an archived
+# chat, or a chat viewed from another device). The PWA still polls the routes
+# they back on short intervals (15s status sync, 4s for /subagents while a
+# turn streams), so the TTL stays above that cadence to collapse bursts to
+# roughly one spawn per tick rather than one per poll.
+_READ_CACHE_TTL = 6.0
 _THREAD_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _COLLAB_CACHE: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
 
@@ -727,6 +729,63 @@ class OpencodeProvider(BaseSDKProvider):
     @property
     def current_session_id(self) -> str | None:
         return self._session_id or None
+
+    @property
+    def has_live_server(self) -> bool:
+        """True while this chat's own opencode server is still running.
+
+        Lets read paths (the subagents poll) reuse this connection instead of
+        paying to spawn a throwaway server via ``_EphemeralServer`` every time
+        the 3-second read cache misses.
+        """
+        return (
+            self._client is not None
+            and self._process is not None
+            and self._process.returncode is None
+        )
+
+    async def read_live_collab_tree(self) -> list[dict[str, Any]]:
+        """``read_collab_tree`` read over this chat's already-running server.
+
+        Same shape as the classmethod, but skips ``_EphemeralServer`` entirely:
+        while a chat is attached, its own server is already up, so spawning a
+        second one just to poll subagent transcripts every few seconds wastes
+        a process start each time. Callers should check ``has_live_server``
+        first and fall back to the classmethod otherwise (e.g. a chat with no
+        attached provider, viewed from another device or after a restart).
+        """
+        client = self._client
+        if client is None or not self._session_id:
+            return []
+
+        async def _child_messages(child_id: str) -> list[Any]:
+            try:
+                messages = await client.get(f"/session/{child_id}/message")
+                messages.raise_for_status()
+                payload = messages.json()
+            except (httpx.HTTPError, ValueError):
+                return []
+            return payload if isinstance(payload, list) else []
+
+        try:
+            response = await client.get(f"/session/{self._session_id}/children")
+            response.raise_for_status()
+            children = response.json()
+        except (httpx.HTTPError, ValueError):
+            return []
+        if not isinstance(children, list):
+            return []
+        children = [
+            child for child in children
+            if isinstance(child, dict) and child.get("id")
+        ]
+        histories = await asyncio.gather(
+            *(_child_messages(str(child["id"])) for child in children)
+        )
+        return [
+            {"info": child, "messages": messages}
+            for child, messages in zip(children, histories)
+        ]
 
     @property
     def can_drain(self) -> bool:

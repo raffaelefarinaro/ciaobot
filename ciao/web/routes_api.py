@@ -2471,6 +2471,24 @@ async def chat_retry(request: Request) -> JSONResponse:
     return JSONResponse(chat.to_dict(local=pcm.is_session_local(chat)))
 
 
+async def chat_stop(request: Request) -> JSONResponse:
+    """Stop an in-flight turn over plain HTTP.
+
+    The websocket ``stop`` message (see routes_chat.py) is the normal path,
+    but it depends on that chat's socket being connected at the moment the
+    user clicks Stop. A socket cycling through reconnects (e.g. the per-chat
+    liveness watchdog force-reconnecting under load) can swallow the message
+    indefinitely with no visible error, leaving a turn nobody can interrupt.
+    This route reaches ``stop_chat`` independently of any socket state.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    stopped = await pcm.stop_chat(chat_id)
+    return JSONResponse({"stopped": stopped})
+
+
 async def chat_prompt(request: Request) -> JSONResponse:
     """Send a prompt to start a model turn in the chat (background task)."""
     from ciao.models import ImageAttachment
@@ -3440,9 +3458,19 @@ async def chat_subagents(request: Request) -> JSONResponse:
 
     if getattr(chat, "provider", "claude") == "opencode":
         opencode_entries: list[dict] = []
-        for item in await OpencodeProvider.read_collab_tree(
-            config.workspace_root, chat.session_id
+        provider_service = pcm._providers.get(chat_id)
+        live_provider = provider_service.provider if provider_service is not None else None
+        if (
+            isinstance(live_provider, OpencodeProvider)
+            and live_provider.has_live_server
+            and live_provider.current_session_id == chat.session_id
         ):
+            collab_tree = await live_provider.read_live_collab_tree()
+        else:
+            collab_tree = await OpencodeProvider.read_collab_tree(
+                config.workspace_root, chat.session_id
+            )
+        for item in collab_tree:
             info = item.get("info")
             info = info if isinstance(info, dict) else {}
             agent_id = str(info.get("id") or "")
