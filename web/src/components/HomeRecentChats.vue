@@ -360,7 +360,7 @@ function makeLane(
     tiers: groupHomeTiers(
       chats,
       chatId => store.chatNeedsInput(chatId),
-      chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId),
+      chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId) || store.chatHasActiveDelegates(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
     tidyChats: (workspace && workspace !== 'unknown' && tidyChatsByWorkspace.value.get(workspace)) || [],

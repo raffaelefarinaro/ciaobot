@@ -28,6 +28,15 @@
       <span v-if="density === 'card' && backgroundCount > 1" class="chat-signal-count">{{ backgroundCount }}</span>
     </span>
     <span
+      v-else-if="primarySignal === 'delegates'"
+      class="chat-signal chat-signal--delegates"
+      title="Sub-chats are still working"
+      aria-label="Sub-chats are still working"
+    >
+      <span class="activity-spinner activity-spinner--delegates" aria-hidden="true" />
+      <span v-if="density === 'card'" class="chat-signal-label">sub-chats working</span>
+    </span>
+    <span
       v-else-if="primarySignal === 'retry'"
       class="chat-signal chat-signal--retry"
       title="Retry scheduled"
@@ -85,6 +94,7 @@ const needsInput = computed(() => store.chatNeedsInput(props.chatId))
 const working = computed(() => store.isChatStreaming(props.chatId))
 const backgroundCount = computed(() => Number(store.backgroundAgents[props.chatId] || 0))
 const hasBackgroundAgents = computed(() => store.chatHasBackgroundAgents(props.chatId))
+const hasActiveDelegates = computed(() => store.chatHasActiveDelegates(props.chatId))
 const retryPending = computed(() => store.chats.find(c => c.chat_id === props.chatId)?.retry?.status === 'pending')
 const unread = computed(() => store.chatUnread(props.chatId) > 0)
 
@@ -96,10 +106,11 @@ const tidyingTitle = computed(() => `Ciaobot is ${tidyingLabel.value || 'tidying
 
 // Unread is a separate static notification dot. The per-chat value is binary,
 // so the numeric counts remain reserved for project/workspace rollups.
-const primarySignal = computed<'needs' | 'working' | 'agents' | 'retry' | 'tidying' | null>(() => {
+const primarySignal = computed<'needs' | 'working' | 'agents' | 'delegates' | 'retry' | 'tidying' | null>(() => {
   if (needsInput.value) return 'needs'
   if (working.value) return 'working'
   if (hasBackgroundAgents.value) return 'agents'
+  if (hasActiveDelegates.value) return 'delegates'
   if (props.density === 'row' && retryPending.value) return 'retry'
   if (tidying.value) return 'tidying'
   return null
@@ -178,8 +189,24 @@ const loopTitle = computed(() => {
    already said working. Kept in sync with .activity-spinner in ChatPanel.vue —
    if that changes, change this. */
 .chat-signal--working,
-.chat-signal--agents {
+.chat-signal--agents,
+.chat-signal--delegates {
   gap: var(--space-1);
+}
+
+/* Sub-chats working, not this chat directly: a hollow ring instead of the
+   solid dot used for .activity-spinner, so a supervisor whose delegate is
+   busy reads as related-but-distinct from the chat's own direct activity. */
+.activity-spinner--delegates {
+  box-sizing: border-box;
+  background: transparent;
+  border: 2px solid var(--accent);
+  box-shadow: none;
+}
+
+.activity-spinner--delegates::before {
+  background: transparent;
+  border: 1px solid var(--accent);
 }
 
 .activity-spinner {

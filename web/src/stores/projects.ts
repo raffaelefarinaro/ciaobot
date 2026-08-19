@@ -676,6 +676,19 @@ export const useProjectStore = defineStore('projects', () => {
     return (backgroundAgents.value[chatId] || 0) > 0
   }
 
+  // True when a delegate nested under this chat (or under one of its own
+  // delegates) is streaming or has background agents. A supervisor chat with
+  // no live turn of its own still has real work in flight while a delegate is
+  // busy, and the home lanes / per-row signal only checked the chat's own
+  // state — a project full of working subchats read as "quiet".
+  function chatHasActiveDelegates(chatId: string, seen: Set<string> = new Set()): boolean {
+    if (seen.has(chatId)) return false
+    seen.add(chatId)
+    return activeDelegatesFor(chatId).some(
+      d => isChatStreaming(d.chat_id) || chatHasBackgroundAgents(d.chat_id) || chatHasActiveDelegates(d.chat_id, seen),
+    )
+  }
+
   // ── Post-archive pipeline ────────────────────────────────────────────────
   // Archiving a chat starts insights extraction, a project-doc fold, a
   // trajectory and memory proposals. The state lives on the chat itself (so an
@@ -4645,7 +4658,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
     chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, clearUnread, markRead, markAllRead,
-    recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasActiveDelegates, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     insightsFailedChats, workspaceInsightsFailedCount,
     // Actions
