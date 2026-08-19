@@ -541,6 +541,23 @@ class CiaoConfig:
         except ValueError:
             return str(root)
 
+    def agent_root(self, name: str) -> Path:
+        """Per-workspace directory that will hold that workspace's agent assets.
+
+        The future home of a workspace's own ``CLAUDE.md``, ``.mcp.json``,
+        ``.claude/`` assets, and ``memory-vault/``. The derivation is
+        ``workspace_root / name``, but the per-workspace subdirectory only
+        exists after the re-rooting release, so every workspace still resolves
+        to ``workspace_root`` itself for now. A later phase flips the return to
+        the derived path; this method is the single seam for that change.
+        """
+        name = _clean_relative_path(name)
+        if not name or len(Path(name).parts) != 1 or any(
+            sep in name for sep in ("/", "\\")
+        ):
+            raise ValueError("workspace name must identify one folder")
+        return self.workspace_root
+
     def _resolve_vault_root(self, raw_root: str) -> Path:
         cleaned = _clean_relative_path(raw_root)
         if not cleaned:
