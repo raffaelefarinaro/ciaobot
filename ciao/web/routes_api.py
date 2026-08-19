@@ -3859,7 +3859,7 @@ _VAULT_MD_EXCLUDE_DIRS = frozenset({"Logs", "Templates", ".obsidian"})
 
 
 async def vault_markdown_paths(request: Request) -> JSONResponse:
-    """Return workspace-relative paths to markdown files for wikilink resolution."""
+    """Return workspace-relative paths to markdown files for link resolution."""
     config = request.app.state.config
     workspace = config.workspace_root.resolve()
     paths: list[str] = []
@@ -3920,7 +3920,7 @@ def _without_markdown_extension(path: str) -> str:
     return re.sub(r"\.(?:md|markdown)$", "", path, flags=re.IGNORECASE)
 
 
-def _normalize_wikilink_ref(ref: str) -> str:
+def _normalize_vault_link_ref(ref: str) -> str:
     normalized = ref.strip().replace("\\", "/")
     if normalized.startswith("memory-vault/"):
         normalized = normalized[len("memory-vault/"):]
@@ -3940,7 +3940,7 @@ def _add_backlink_index_entry(
 
 
 def _build_backlink_index(paths: Iterable[str]) -> dict[str, list[str]]:
-    """Build the same path/stem lookup keys as the frontend wikilink index."""
+    """Build the same path/stem lookup keys as the frontend vault-link index."""
     index: dict[str, list[str]] = {}
     for path in paths:
         no_ext = _without_markdown_extension(path)
@@ -3963,8 +3963,15 @@ def _resolve_backlink_target(
     index: dict[str, list[str]],
     path_set: set[str],
 ) -> str | None:
-    """Resolve one wikilink using the frontend's relative/path/stem rules."""
-    normalized = _normalize_wikilink_ref(ref)
+    """Resolve one link ref using the frontend's relative/path/stem rules.
+
+    ``ref`` comes from ``vault_lint._links_in`` and is already note-relative and
+    extension-less (`./People/Mo`), so the relative candidates below are the
+    exact target in the common case. The path/stem fallbacks still matter: a
+    note under ``Logs/`` cites vault-root-relative paths (see
+    ``ciao/insights.py``), and those only resolve through the index.
+    """
+    normalized = _normalize_vault_link_ref(ref)
     if not normalized:
         return None
 
@@ -4005,11 +4012,13 @@ def _references_note(
     index: dict[str, list[str]],
     path_set: set[str],
 ) -> bool:
-    """True if ``content`` contains a wikilink resolving to ``target_path``.
+    """True if ``content`` has a markdown link resolving to ``target_path``.
 
     Reuses ``vault_lint._links_in`` so links documented inside code fences/spans
-    or escaped (``\\[[...]]``) don't count. Resolution mirrors the frontend so
-    two notes with the same filename stem do not share false backlinks.
+    or escaped (``\\[label](x.md)``) don't count, and so a backlink and a
+    broken-link finding can never disagree about what a link is. Resolution
+    mirrors the frontend so two notes with the same filename stem do not share
+    false backlinks.
     """
     for ref in _links_in(content):
         if _resolve_backlink_target(ref, current_path, index, path_set) == target_path:
@@ -4018,7 +4027,7 @@ def _references_note(
 
 
 async def vault_backlinks(request: Request) -> JSONResponse:
-    """Return notes that wikilink to the given markdown path (incoming links)."""
+    """Return notes that link to the given markdown path (incoming links)."""
     target_path = request.query_params.get("path", "").strip()
     if not target_path:
         return JSONResponse({"backlinks": []})
@@ -4087,7 +4096,7 @@ async def vault_backlinks(request: Request) -> JSONResponse:
         except OSError:
             continue
 
-        # Cheap gate before the code-fence stripping + regex in _links_in.
+        # Cheap gate before the code-fence stripping + link parse in _links_in.
         if target_stem not in content.casefold():
             continue
 
@@ -4108,7 +4117,7 @@ async def vault_graph(request: Request) -> JSONResponse:
     """Return the vault as a note graph for the Memory Map page.
 
     Nodes are notes with frontmatter (or an inferred type); edges come from
-    both frontmatter ``related:``/``relatedTo:`` and body ``[[wikilinks]]``,
+    both frontmatter ``related:``/``relatedTo:`` and body markdown links,
     already merged and resolved to real paths by ``vault_index.scan_vault``.
     Optional ``?workspace=`` scopes to one logical workspace; cross-workspace
     edges are dropped rather than left dangling.
@@ -4123,6 +4132,23 @@ async def vault_graph(request: Request) -> JSONResponse:
     scoped = filter_entries(entries, workspace=workspace) if workspace else entries
     graph = _build_graph(scoped)
     by_path = {str(e.path) for e in scoped}
+
+    # `mtime` lets the Memory Map seed its local view from the note you touched
+    # most recently, which is a far more useful entry point than "whatever the
+    # biggest hub is". Entry carries no timestamp, so stat the files here; it is
+    # one stat per note against files scan_vault has just read anyway.
+    vault_root = Path(config.vault_root).expanduser()
+
+    def _mtime(rel: str) -> float:
+        prefix = "memory-vault/"
+        tail = rel[len(prefix):] if rel.startswith(prefix) else rel
+        try:
+            return (vault_root / tail).stat().st_mtime
+        except OSError:
+            # A note indexed but unreadable (race with a delete, broken
+            # symlink) must not fail the whole graph request.
+            return 0.0
+
     nodes = [
         {
             "id": str(e.path),
@@ -4133,6 +4159,7 @@ async def vault_graph(request: Request) -> JSONResponse:
             "description": e.description,
             "workspace": e.workspace,
             "degree": len(graph.get(str(e.path), ())),
+            "mtime": _mtime(str(e.path)),
         }
         for e in scoped
     ]
@@ -4166,7 +4193,7 @@ async def vault_delete_note(request: Request) -> JSONResponse:
     Deliberately scoped to ``config.vault_root`` — unlike the workspace-file
     endpoints, this is a permanent, unrecoverable delete, so it does not
     inherit their "any file on disk" reach. Every other note that links to it
-    (frontmatter ``related:``/``relatedTo:`` or a body ``[[wikilink]]``) is
+    (frontmatter ``related:``/``relatedTo:`` or a body markdown link) is
     rewritten first, so deleting a note never leaves a dangling link in the
     graph or in another note's text.
     """

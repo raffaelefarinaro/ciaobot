@@ -95,3 +95,33 @@ def test_vault_graph_surfaces_description_and_degree(client):
     a = _node(data, "A")
     assert a["description"] == "Note A."
     assert a["degree"] == 2
+
+
+def test_vault_graph_reports_note_mtimes(client):
+    """The Memory Map seeds its local view from the most recently written note,
+    so every node has to carry a usable timestamp."""
+    resp = client.get("/api/vault/graph")
+    assert resp.status_code == 200
+    nodes = resp.json()["nodes"]
+    assert nodes, "expected the fixture vault to produce nodes"
+    for node in nodes:
+        assert isinstance(node["mtime"], (int, float))
+        assert node["mtime"] > 0, f"{node['title']} has no mtime"
+
+
+def test_vault_graph_survives_a_note_that_cannot_be_stat_ed(client, tmp_path):
+    """A note indexed but unreadable (deleted between scan and stat, broken
+    symlink) must degrade to mtime 0 rather than failing the whole request."""
+    vault = tmp_path / "memory-vault"
+    (vault / "personal" / "Ghost.md").write_text(
+        "---\ntype: note\ndescription: Vanishes.\n---\n# Ghost\n", encoding="utf-8"
+    )
+    # Replace the file with a dangling symlink: still indexed by name, but
+    # stat() on it raises.
+    (vault / "personal" / "Ghost.md").unlink()
+    (vault / "personal" / "Ghost.md").symlink_to(vault / "personal" / "nope.md")
+
+    resp = client.get("/api/vault/graph")
+    assert resp.status_code == 200
+    titles = {n["title"] for n in resp.json()["nodes"]}
+    assert "Ghost" not in titles or _node(resp.json(), "Ghost")["mtime"] == 0.0

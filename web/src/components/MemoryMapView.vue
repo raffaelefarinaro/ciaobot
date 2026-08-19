@@ -23,8 +23,80 @@
           <button type="button" class="btn-icon touch-hit" @click="zoom(0.8)">−</button>
           <button type="button" class="btn-icon touch-hit" @click="resetCamera">⤢</button>
         </div>
+        <div class="mm-toolbar">
+          <div class="mm-seg mm-seg--sm" role="group" aria-label="Graph scope">
+            <button
+              type="button"
+              :class="{ active: mm.scope === 'local' }"
+              :aria-pressed="mm.scope === 'local'"
+              title="Show a neighbourhood around one note"
+              @click="mm.setScope('local')"
+            >Local</button>
+            <button
+              type="button"
+              :class="{ active: mm.scope === 'overview' }"
+              :aria-pressed="mm.scope === 'overview'"
+              title="Show the whole filtered vault"
+              @click="mm.setScope('overview')"
+            >Overview</button>
+          </div>
+
+          <div v-if="mm.scope === 'local'" class="mm-toolbar-group">
+            <span class="mm-toolbar-label">depth</span>
+            <button
+              type="button"
+              class="mm-step"
+              aria-label="Decrease depth"
+              :disabled="mm.localDepth <= 1"
+              @click="mm.setLocalDepth(mm.localDepth - 1)"
+            >−</button>
+            <span class="mm-toolbar-value">{{ mm.localDepth }}</span>
+            <button
+              type="button"
+              class="mm-step"
+              aria-label="Increase depth"
+              :disabled="mm.localDepth >= 4"
+              @click="mm.setLocalDepth(mm.localDepth + 1)"
+            >+</button>
+          </div>
+
+          <div class="mm-seg mm-seg--sm" role="group" aria-label="Colour by">
+            <button
+              type="button"
+              :class="{ active: mm.colorMode === 'category' }"
+              :aria-pressed="mm.colorMode === 'category'"
+              title="Colour notes by their type"
+              @click="mm.setColorMode('category')"
+            >Type</button>
+            <button
+              type="button"
+              :class="{ active: mm.colorMode === 'cluster' }"
+              :aria-pressed="mm.colorMode === 'cluster'"
+              title="Colour notes by detected cluster"
+              @click="mm.setColorMode('cluster')"
+            >Clusters</button>
+          </div>
+
+          <button
+            type="button"
+            class="mm-toggle"
+            :class="{ on: mm.hideOrphans }"
+            :aria-pressed="mm.hideOrphans"
+            :title="`${mm.orphanCount} notes have no links; hiding them declutters the layout`"
+            @click="mm.toggleHideOrphans()"
+          >{{ mm.hideOrphans ? 'Orphans hidden' : 'Hide orphans' }}</button>
+        </div>
+
         <div class="mm-hint-overlay">
-          Drag to pan · scroll to zoom · drag a node to move it · click for details · shift-click two notes to find a path
+          <span v-if="mm.scope === 'local' && localRootNode">
+            Around <strong>{{ localRootNode.title }}</strong> · {{ mm.visibleNodes.length }} of {{ mm.nodes.length }} notes ·
+            click a note to walk there
+          </span>
+          <span v-else>
+            {{ mm.visibleNodes.length }} notes ·
+            <template v-if="zoomedOut">zoom in for note titles</template>
+            <template v-else>shift-click two notes to trace a path</template>
+          </span>
         </div>
       </div>
       <div v-else class="mm-list-wrap">
@@ -107,8 +179,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import PaneHeader from './PaneHeader.vue'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
-import { useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, type MemoryGraphNode } from '../stores/memoryMap'
+import {
+  useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, clusterColorFor,
+  type MemoryGraphNode,
+} from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
+import { isLightTheme } from '../lib/theme'
+import { MIN_CLUSTER_SIZE } from '../lib/vaultAnalysis'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -116,9 +193,42 @@ const store = useProjectStore()
 const mm = useMemoryMapStore()
 const fileViewer = useFileViewerStore()
 
+// The canvas paints with literal colours while the rest of the app switches
+// theme through CSS custom properties, so it has to read the resolved values
+// itself. (Before this, label text was hardcoded near-white and was therefore
+// invisible on the light theme, whose --bg is #f4f4fa.) Cached rather than read
+// per frame: getComputedStyle forces a style recalc, which is not something to
+// do inside a RAF loop.
+const themeColors = reactive({
+  light: false,
+  label: 'rgba(231,232,240,0.85)',
+  labelDim: 'rgba(231,232,240,0.25)',
+  clusterLabel: '#e8e8f0',
+  surface: '#1a1a2e',
+  edge: 'rgba(150,160,190,0.35)',
+  edgeDim: 'rgba(120,126,150,0.08)',
+  selectRing: '#fff',
+})
+function refreshThemeColors() {
+  const light = isLightTheme.value
+  themeColors.light = light
+  themeColors.label = light ? 'rgba(32,33,48,0.88)' : 'rgba(231,232,240,0.85)'
+  themeColors.labelDim = light ? 'rgba(32,33,48,0.3)' : 'rgba(231,232,240,0.25)'
+  themeColors.clusterLabel = light ? '#1a1a2e' : '#e8e8f0'
+  themeColors.surface = light ? '#f4f4fa' : '#1a1a2e'
+  themeColors.edge = light ? 'rgba(80,86,120,0.35)' : 'rgba(150,160,190,0.35)'
+  themeColors.edgeDim = light ? 'rgba(120,126,150,0.12)' : 'rgba(120,126,150,0.08)'
+  themeColors.selectRing = light ? '#1a1a2e' : '#fff'
+}
 function colorForNode(n: MemoryGraphNode): string {
+  if (mm.colorMode === 'cluster') return clusterColorFor(mm.clusterSlotOf(n.id), themeColors.light)
   return categoryColorFor(catKeyFor(n))
 }
+
+const localRootNode = computed(() => (mm.localRoot ? mm.nodesById.get(mm.localRoot) || null : null))
+// Mirrors the canvas's own cluster-label threshold so the hint can tell the
+// user why they are looking at cluster names rather than note titles.
+const zoomedOut = computed(() => zoomRatio() < CLUSTER_LABEL_MAX_RATIO)
 
 // The graph always follows the workspace switcher shared with every other
 // view (sidebar toggle, number-key shortcut, chat header) — the store
@@ -229,14 +339,55 @@ function resizeCanvas() {
   canvasEl.value.style.width = w + 'px'
   canvasEl.value.style.height = h + 'px'
 }
+// A fixed default zoom can't stay correct: the layout's extent depends on how
+// many notes are visible and how hub-heavy they are, so one hardcoded number
+// was simultaneously too far out for a small filtered view and badly framed
+// for a full vault. Measure the settled bounding box and fit it instead.
+// Falls back to the old constant only before the canvas has been sized or
+// while there is nothing to frame, where there is no extent to measure.
+const FIT_MARGIN = 1.12
+const fitScale = ref(0.55)
+/** 1 = graph exactly framed; 2 = zoomed to twice that. */
+function zoomRatio(): number {
+  return camera.scale / (fitScale.value || 0.55)
+}
+function fitCamera() {
+  const vis = mm.visibleNodes
+  if (!vis.length || !W || !H) {
+    camera.x = 0
+    camera.y = 0
+    camera.scale = 0.55
+    fitScale.value = 0.55
+    requestRedraw()
+    return
+  }
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+  for (const n of vis) {
+    if (n.x < minX) minX = n.x
+    if (n.x > maxX) maxX = n.x
+    if (n.y < minY) minY = n.y
+    if (n.y > maxY) maxY = n.y
+  }
+  const bw = Math.max(1, maxX - minX) * FIT_MARGIN
+  const bh = Math.max(1, maxY - minY) * FIT_MARGIN
+  const scale = Math.max(0.15, Math.min(3, Math.min(W / bw, H / bh)))
+  const cx = (minX + maxX) / 2
+  const cy = (minY + maxY) / 2
+  // Remember what "fully zoomed out" means for this particular graph, so the
+  // label thresholds below can be expressed as "how far in has the user zoomed
+  // from the framed view" instead of absolute scale values. Absolute thresholds
+  // stopped being meaningful the moment the default zoom became data-dependent.
+  fitScale.value = scale
+  camera.scale = scale
+  camera.x = -cx * scale
+  camera.y = -cy * scale
+  requestRedraw()
+}
 function resetCamera() {
-  camera.x = 0
-  camera.y = 0
-  camera.scale = 0.55
   // draw() only runs inside the RAF loop; without this, resetting the
   // camera while the graph is at rest changed the reactive state but the
   // canvas kept showing the old view until something else woke it up.
-  requestRedraw()
+  fitCamera()
 }
 function zoom(factor: number) {
   camera.scale = Math.max(0.15, Math.min(3, camera.scale * factor))
@@ -269,6 +420,7 @@ function hexToRgba(hex: string, a: number): string {
 function attachCanvas() {
   if (!canvasEl.value || !canvasWrap.value) return
   ctx = canvasEl.value.getContext('2d')
+  refreshThemeColors()
   ro?.disconnect()
   ro = new ResizeObserver(() => resizeCanvas())
   ro.observe(canvasWrap.value)
@@ -277,6 +429,10 @@ function attachCanvas() {
   // switch since the canvas is torn down and rebuilt for each) — warm up
   // before the first paint, then run the brief settle animation.
   warmupSimulation(warmupStepsFor(mm.visibleNodes.length))
+  // Frame the graph only now: at onMounted the canvas had no size and the
+  // nodes were still at their random start positions, so there was no extent
+  // worth measuring.
+  fitCamera()
   wakeSimulation()
 }
 // A category/search filter change can bring previously-hidden nodes back
@@ -290,12 +446,40 @@ watch(() => mm.visibleIds, () => wakeSimulation())
 // change doesn't need physics, just one more frame; waking the existing loop
 // is simpler than adding a second, physics-free redraw path.
 watch(() => [mm.selectedId, mm.pathStart, mm.pathEnd], () => wakeSimulation())
+// Colour mode changes nothing about positions, so it needs a paint, not physics.
+watch(() => mm.colorMode, () => requestRedraw())
+// Scope and depth change *which* nodes exist in the layout, so the graph has to
+// be re-framed as well as re-settled — otherwise switching from a 12-note
+// neighbourhood to the full vault leaves the camera zoomed into empty space.
+watch(() => [mm.scope, mm.localRoot, mm.localDepth, mm.hideOrphans], async () => {
+  await nextTick()
+  warmupSimulation(warmupStepsFor(mm.visibleNodes.length))
+  fitCamera()
+  wakeSimulation()
+})
 watch(canvasEl, (el) => {
   if (el) nextTick(() => attachCanvas())
 })
 
 /** Advances the layout by one step; returns the fastest node's speed this step. */
 /** @param cooling 1 = full force, ramping to 0 forces velocity to zero regardless of residual imbalance. */
+// Repulsion is weighted by degree and springs are normalized by it, because a
+// uniform force model turns this vault's degree distribution (top hubs at 65,
+// 62, 50 links; median 2) into a hairball: 38% of notes ended up inside the
+// middle 40% of the layout's radius, so the core was unreadable while the
+// outer canvas sat empty. Two corrections, measured against the real 318-note
+// graph:
+//   - A hub's neighbours must be pushed apart from *each other*, not just from
+//     the hub, so repulsion scales with both endpoints' degree.
+//   - An un-normalized spring gives a 65-link note 65 inward pulls, which
+//     collapses its whole neighbourhood; dividing each endpoint's pull by
+//     sqrt(degree) keeps a hub from out-voting its own neighbours.
+// Together these take the core fraction 38% -> 23% and raise the number of
+// collision-free labels that fit at the default view by ~48%. Note that
+// spreading the layout in *world* units alone does nothing for legibility —
+// fitCamera() just zooms further out and the density returns; only making the
+// density uniform actually buys label room.
+const MIN_GAP = 40
 function stepSimulation(cooling = 1): number {
   const vis = mm.visibleNodes
   const REPEL = 2600
@@ -306,6 +490,7 @@ function stepSimulation(cooling = 1): number {
   const forces = new Map<string, { fx: number; fy: number }>()
   for (let i = 0; i < vis.length; i++) {
     const a = vis[i]
+    const aw = 1 + Math.sqrt(a.degree) * 0.5
     let fx = 0
     let fy = 0
     for (let j = 0; j < vis.length; j++) {
@@ -316,7 +501,11 @@ function stepSimulation(cooling = 1): number {
       let d2 = dx * dx + dy * dy
       if (d2 < 0.01) d2 = 0.01
       const d = Math.sqrt(d2)
-      const f = REPEL / d2
+      let f = (REPEL / d2) * aw * (1 + Math.sqrt(b.degree) * 0.5)
+      // Short-range shove: 1/d^2 is too weak to separate two nodes that are
+      // already nearly coincident, which is how label-on-label pairs survived
+      // an otherwise settled layout.
+      if (d < MIN_GAP) f += (MIN_GAP - d) * 0.25
       fx += (dx / d) * f
       fy += (dy / d) * f
     }
@@ -338,8 +527,10 @@ function stepSimulation(cooling = 1): number {
     const fy = (dy / d) * stretch
     const fa = forces.get(a.id)
     const fb = forces.get(b.id)
-    if (fa) { fa.fx += fx; fa.fy += fy }
-    if (fb) { fb.fx -= fx; fb.fy -= fy }
+    const na = Math.sqrt(Math.max(1, a.degree))
+    const nb = Math.sqrt(Math.max(1, b.degree))
+    if (fa) { fa.fx += fx / na; fa.fy += fy / na }
+    if (fb) { fb.fx -= fx / nb; fb.fy -= fy / nb }
   })
   let maxSpeed = 0
   vis.forEach(n => {
@@ -419,8 +610,8 @@ function draw() {
     ctx!.strokeStyle = onPath
       ? '#ffd166'
       : dim
-        ? 'rgba(120,126,150,0.08)'
-        : 'rgba(150,160,190,0.35)'
+        ? themeColors.edgeDim
+        : themeColors.edge
     ctx!.lineWidth = onPath ? 2.5 * dpr : dpr
     ctx!.beginPath()
     ctx!.moveTo(ax, ay)
@@ -439,16 +630,205 @@ function draw() {
     ctx!.fill()
     if (isSel) {
       ctx!.lineWidth = 2 * dpr
-      ctx!.strokeStyle = '#fff'
+      ctx!.strokeStyle = themeColors.selectRing
       ctx!.stroke()
     }
-    if (!dim && (camera.scale > 0.55 || isSel || n.degree > 3)) {
-      ctx!.fillStyle = dim ? 'rgba(231,232,240,0.25)' : 'rgba(231,232,240,0.85)'
-      ctx!.font = `${11 * dpr}px -apple-system, sans-serif`
-      ctx!.textBaseline = 'middle'
-      ctx!.fillText(n.title, sx + r + 4, sy)
-    }
   })
+
+  if (vis.length >= CLUSTER_LABEL_MIN_NODES && zoomRatio() < CLUSTER_LABEL_MAX_RATIO) {
+    drawClusterLabels(vis, highlightSet)
+  } else {
+    drawLabels(vis, highlightSet)
+  }
+}
+
+/**
+ * One label per visible cluster, at the centroid of its visible members. This
+ * is the readable form of the far-out view: ~6 theme names instead of 318
+ * overlapping note titles, and it doubles as the direct labelling the cluster
+ * palette's validator WARNs require.
+ */
+function drawClusterLabels(vis: MemoryGraphNode[], highlightSet: Set<string> | null) {
+  const sums = new Map<number, { x: number; y: number; n: number; slot: number }>()
+  for (const n of vis) {
+    if (highlightSet && !highlightSet.has(n.id)) continue
+    const cluster = mm.clusterOf(n.id)
+    if (!cluster) continue
+    const acc = sums.get(cluster.id)
+    if (acc) { acc.x += n.x; acc.y += n.y; acc.n += 1 }
+    else sums.set(cluster.id, { x: n.x, y: n.y, n: 1, slot: cluster.slot })
+  }
+  ctx!.textBaseline = 'middle'
+  ctx!.textAlign = 'center'
+  // Biggest clusters first: they get first claim on the space, and a smaller
+  // cluster whose centroid lands underneath is dropped rather than stacked.
+  // (Drawing them in the other order and letting later pills paint over
+  // earlier ones produced exactly the overlap this whole pass exists to avoid.)
+  const ordered = [...sums.entries()].sort((a, b) => b[1].n - a[1].n)
+  const placed: number[][] = []
+  const padX = 7 * dpr
+  const padY = 4 * dpr
+  const h = 15 * dpr
+  for (const [id, acc] of ordered) {
+    const cluster = mm.clusterById.get(id)
+    if (!cluster) continue
+    // One or two stray members of a cluster that mostly lives elsewhere is not
+    // a theme in *this* view; labelling it overstates what is on screen.
+    if (acc.n < MIN_CLUSTER_SIZE) continue
+    const [sx, sy] = worldToScreen(acc.x / acc.n, acc.y / acc.n)
+    // The count rides inside the pill. As a separate caption underneath it had
+    // no background of its own, so it read as debris floating over the nodes.
+    const text = `${cluster.label}  ${acc.n}`
+    ctx!.font = `600 ${14 * dpr}px -apple-system, sans-serif`
+    const w = ctx!.measureText(text).width
+    const x0 = sx - w / 2 - padX
+    const y0 = sy - h / 2 - padY
+    const x1 = x0 + w + padX * 2
+    const y1 = y0 + h + padY * 2
+    if (placed.some(b => x0 < b[2] && x1 > b[0] && y0 < b[3] && y1 > b[1])) continue
+    placed.push([x0, y0, x1, y1])
+    // A pill behind the text: cluster labels sit over the densest part of the
+    // graph by construction (that is where their members are), so plain text
+    // on top of nodes and edges would not read.
+    ctx!.fillStyle = themeColors.light ? 'rgba(244,244,250,0.92)' : 'rgba(26,26,46,0.9)'
+    roundRect(x0, y0, x1 - x0, y1 - y0, 5 * dpr)
+    ctx!.fill()
+    ctx!.strokeStyle = clusterColorFor(acc.slot, themeColors.light)
+    ctx!.lineWidth = 1.5 * dpr
+    ctx!.stroke()
+    ctx!.fillStyle = themeColors.clusterLabel
+    ctx!.fillText(text, sx, sy)
+  }
+  ctx!.textAlign = 'left'
+}
+
+function roundRect(x: number, y: number, w: number, h: number, r: number) {
+  ctx!.beginPath()
+  ctx!.moveTo(x + r, y)
+  ctx!.arcTo(x + w, y, x + w, y + h, r)
+  ctx!.arcTo(x + w, y + h, x, y + h, r)
+  ctx!.arcTo(x, y + h, x, y, r)
+  ctx!.arcTo(x, y, x + w, y, r)
+  ctx!.closePath()
+}
+
+// Labels get their own pass, run after every node is on screen, because
+// deciding what to label is a competition for screen space and the old
+// single-pass version never held one. Two things made it unreadable at real
+// vault scale: `camera.scale > 0.55` is true for *every* node as soon as you
+// zoom past the default, so all ~300 titles painted at once; and nothing
+// checked whether a label landed on top of one already drawn. Here the
+// candidates are ranked (selection first, then hubs), then each one is placed
+// only if its box is still free — so density is capped by the pixels actually
+// available rather than by a node count, and the labels that survive are the
+// ones worth reading.
+const LABEL_FONT_PX = 11
+const LABEL_MAX_W = 170
+const LABEL_PAD = 3
+const LABEL_CELL = 96
+
+// Below this zoom the canvas labels *clusters* instead of notes. At the framed
+// view a 300-note vault has no room for 300 titles no matter how they are
+// placed, but it has ample room for the handful of theme names that summarise
+// them — which is also the direct labelling that makes the cluster palette
+// legal (see CLUSTER_PALETTE).
+const CLUSTER_LABEL_MAX_RATIO = 1.6
+/**
+ * Cluster labels are a response to label *pressure*, not to zoom on its own.
+ * A 4-note local neighbourhood framed at fit scale has a low zoom ratio but
+ * acres of free space, and summarising it as "single-barcode-ai-value · 4
+ * notes" hides the only four titles the user came to read. Below this many
+ * visible notes, every label goes to a note.
+ */
+const CLUSTER_LABEL_MIN_NODES = 40
+// Minimum degree a node needs before it may claim a label, graded by how far
+// the user has zoomed in from the framed view: far out only hubs are legible at
+// all, close in everything that fits is welcome. This replaces the binary
+// hubs-only/everything switch that made one notch of zoom paint all 318.
+function labelDegreeFloor(visibleCount: number): number {
+  // A sparse view has room for everything; gating by degree there would leave
+  // a local neighbourhood of leaf notes completely unlabelled.
+  if (visibleCount <= CLUSTER_LABEL_MIN_NODES) return 0
+  const ratio = zoomRatio()
+  if (ratio >= 3.5) return 0
+  if (ratio >= 2.5) return 1
+  return 3
+}
+
+function ellipsize(text: string, maxW: number): string {
+  if (ctx!.measureText(text).width <= maxW) return text
+  let lo = 0
+  let hi = text.length
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (ctx!.measureText(text.slice(0, mid) + '\u2026').width <= maxW) lo = mid
+    else hi = mid - 1
+  }
+  return text.slice(0, lo) + '\u2026'
+}
+
+function drawLabels(vis: MemoryGraphNode[], highlightSet: Set<string> | null) {
+  ctx!.font = `${LABEL_FONT_PX * dpr}px -apple-system, sans-serif`
+  ctx!.textBaseline = 'middle'
+  ctx!.fillStyle = themeColors.label
+
+  const floor = labelDegreeFloor(vis.length)
+  const halfH = (LABEL_FONT_PX / 2 + LABEL_PAD) * dpr
+  const maxW = LABEL_MAX_W * dpr
+  const cell = LABEL_CELL * dpr
+  // Bucketing the placed boxes into a coarse grid keeps the overlap test near
+  // constant time per label instead of comparing against every earlier one.
+  const taken = new Map<string, number[][]>()
+  const bounds = (x0: number, y0: number, x1: number, y1: number) => [
+    Math.floor(x0 / cell), Math.floor(y0 / cell),
+    Math.floor(x1 / cell), Math.floor(y1 / cell),
+  ]
+  function free(x0: number, y0: number, x1: number, y1: number): boolean {
+    const [c0, r0, c1, r1] = bounds(x0, y0, x1, y1)
+    for (let c = c0; c <= c1; c++) {
+      for (let r = r0; r <= r1; r++) {
+        const bucket = taken.get(`${c}:${r}`)
+        if (!bucket) continue
+        for (const b of bucket) {
+          if (x0 < b[2] && x1 > b[0] && y0 < b[3] && y1 > b[1]) return false
+        }
+      }
+    }
+    return true
+  }
+  function claim(x0: number, y0: number, x1: number, y1: number) {
+    const [c0, r0, c1, r1] = bounds(x0, y0, x1, y1)
+    for (let c = c0; c <= c1; c++) {
+      for (let r = r0; r <= r1; r++) {
+        const key = `${c}:${r}`
+        const bucket = taken.get(key)
+        if (bucket) bucket.push([x0, y0, x1, y1])
+        else taken.set(key, [[x0, y0, x1, y1]])
+      }
+    }
+  }
+
+  const priority = (n: MemoryGraphNode) =>
+    n.id === mm.selectedId || mm.pathIds.has(n.id) ? Number.MAX_SAFE_INTEGER : n.degree
+  const candidates = vis
+    .filter(n => !(highlightSet && !highlightSet.has(n.id)))
+    .sort((a, b) => priority(b) - priority(a))
+
+  for (const n of candidates) {
+    const isSel = n.id === mm.selectedId || mm.pathIds.has(n.id)
+    if (!isSel && n.degree < floor) continue
+    const [sx, sy] = worldToScreen(n.x, n.y)
+    if (sx < 0 || sx > W || sy < 0 || sy > H) continue
+    const r = nodeRadius(n) * dpr * Math.max(0.7, Math.min(1.6, camera.scale))
+    const text = ellipsize(n.title, maxW)
+    const x0 = sx + r + 4 * dpr
+    const x1 = x0 + ctx!.measureText(text).width
+    const y0 = sy - halfH
+    const y1 = sy + halfH
+    if (!free(x0, y0, x1, y1)) continue
+    claim(x0, y0, x1, y1)
+    ctx!.fillText(text, x0, sy)
+  }
 }
 
 function tick() {
@@ -578,6 +958,12 @@ onMounted(async () => {
   await nextTick()
   attachCanvas()
 })
+// The canvas paints resolved colours rather than CSS vars, so a theme flip has
+// to be pushed into it explicitly; the shared flag does the DOM observing.
+watch(isLightTheme, () => {
+  refreshThemeColors()
+  requestRedraw()
+})
 onBeforeUnmount(() => {
   if (rafId) cancelAnimationFrame(rafId)
   if (redrawRafId) cancelAnimationFrame(redrawRafId)
@@ -702,4 +1088,32 @@ onBeforeUnmount(() => {
   background: transparent; border: none; color: var(--fg2); padding: 6px 12px; font-size: var(--text-sm); cursor: pointer; font-family: var(--font);
 }
 .mm-seg button.active { background: var(--accent); color: #fff; }
+
+/* Canvas toolbar: overlays the graph top-left, opposite the zoom controls.
+   Wraps rather than scrolls so a narrow window stacks the groups instead of
+   hiding the orphan toggle off the edge. */
+.mm-toolbar {
+  position: absolute; top: var(--space-3); left: var(--space-3);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  max-width: calc(100% - 96px);
+}
+.mm-seg--sm button { padding: 4px 10px; font-size: var(--text-xs); }
+.mm-toolbar-group {
+  display: flex; align-items: center; gap: 4px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 2px 6px;
+}
+.mm-toolbar-label { color: var(--fg3); font-size: var(--text-xs); }
+.mm-toolbar-value { color: var(--fg); font-size: var(--text-xs); min-width: 10px; text-align: center; }
+.mm-step {
+  background: transparent; border: none; color: var(--fg2); cursor: pointer;
+  font-family: var(--font); font-size: var(--text-sm); line-height: 1; padding: 2px 4px;
+}
+.mm-step:disabled { color: var(--fg3); cursor: default; }
+.mm-toggle {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--fg2); font-family: var(--font); font-size: var(--text-xs); padding: 4px 10px; cursor: pointer;
+}
+.mm-toggle.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.mm-hint-overlay strong { color: var(--fg2); font-weight: 600; }
 </style>

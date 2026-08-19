@@ -371,11 +371,18 @@
 
       <div class="mm-sidebar-scroll">
         <h3>Vault</h3>
-        <div class="mm-stat-grid">
-          <div class="mm-stat"><div class="n">{{ mm.visibleNodes.length }}</div><div class="l">notes shown</div></div>
+        <!-- Three tiles, not four: "notes shown" and "total" were separate
+             tiles showing the same number whenever nothing was filtered, so the
+             total moved into the sublabel and the freed slot went to cluster
+             count, which nothing else reported. Orphans left the grid entirely
+             — as a bare number it was not actionable, and it is now a list. -->
+        <div class="mm-stat-grid mm-stat-grid--3">
+          <div class="mm-stat">
+            <div class="n">{{ mm.visibleNodes.length }}</div>
+            <div class="l">of {{ mm.nodes.length }} shown</div>
+          </div>
           <div class="mm-stat"><div class="n">{{ mm.visibleEdgeCount }}</div><div class="l">links</div></div>
-          <div class="mm-stat"><div class="n">{{ mm.orphanCount }}</div><div class="l">orphaned</div></div>
-          <div class="mm-stat"><div class="n">{{ mm.nodes.length }}</div><div class="l">total</div></div>
+          <div class="mm-stat"><div class="n">{{ mm.clusters.length }}</div><div class="l">clusters</div></div>
         </div>
 
         <div class="mm-search">
@@ -401,6 +408,34 @@
           </div>
         </div>
 
+        <!-- Clusters double as the legend for the "Clusters" colour mode. It is
+             always present, not a toggle: only the first four clusters carry a
+             hue and the palette's residual CVD/contrast warnings are only
+             relieved by labelling, so identity must never be colour-alone. -->
+        <template v-if="mm.clusters.length">
+          <div class="mm-row-between">
+            <h3>Clusters</h3>
+            <button
+              type="button"
+              class="mm-link"
+              @click="mm.setColorMode(mm.colorMode === 'cluster' ? 'category' : 'cluster')"
+            >{{ mm.colorMode === 'cluster' ? 'colour by type' : 'colour by cluster' }}</button>
+          </div>
+          <div class="mm-link-list">
+            <div
+              v-for="c in mm.clusters"
+              :key="c.id"
+              class="mm-link-item"
+              :title="`${c.size} notes — centre on this cluster`"
+              @click="mm.setLocalRoot(c.memberIds[0])"
+            >
+              <span class="dot" :style="{ background: clusterColorFor(c.slot, isLightTheme) }" />
+              <span class="label">{{ c.label }}</span>
+              <span class="cnt">{{ c.size }}</span>
+            </div>
+          </div>
+        </template>
+
         <template v-if="mm.mostConnected.length">
           <h3>Most connected</h3>
           <div class="mm-link-list">
@@ -408,6 +443,76 @@
               <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
               <span class="label">{{ n.title }}</span>
               <span class="cnt">{{ n.degree }}</span>
+            </div>
+          </div>
+        </template>
+
+        <!-- Bridge notes rank by betweenness, not degree: these are the notes
+             that sit between clusters, so they are the ones whose removal would
+             split the vault. A degree ranking cannot surface them — a bridge
+             often has only two or three links. -->
+        <template v-if="mm.bridgeNotes.length">
+          <h3>Bridges between clusters</h3>
+          <div class="mm-link-list">
+            <div
+              v-for="n in mm.bridgeNotes"
+              :key="n.id"
+              class="mm-link-item"
+              title="Connects otherwise separate parts of the vault"
+              @click="mm.requestFocus(n.id)"
+            >
+              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
+              <span class="label">{{ n.title }}</span>
+              <span class="cnt">{{ Math.round(mm.betweennessOf(n.id) * 100) }}</span>
+            </div>
+          </div>
+        </template>
+
+        <!-- The gap list: notes nothing links to. This is the actionable half
+             of the old "orphaned" tile — each entry is either worth linking or
+             worth deleting, and a count told you neither. -->
+        <template v-if="mm.orphanNotes.length">
+          <div class="mm-row-between">
+            <h3>Unlinked ({{ mm.orphanNotes.length }})</h3>
+            <button type="button" class="mm-link" @click="mm.toggleHideOrphans()">
+              {{ mm.hideOrphans ? 'show in graph' : 'hide in graph' }}
+            </button>
+          </div>
+          <div class="mm-link-list">
+            <div
+              v-for="n in mm.orphanNotes.slice(0, orphanLimit)"
+              :key="n.id"
+              class="mm-link-item"
+              title="No note links to this one"
+              @click="mm.requestFocus(n.id)"
+            >
+              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
+              <span class="label">{{ n.title }}</span>
+            </div>
+          </div>
+          <button
+            v-if="mm.orphanNotes.length > orphanLimit"
+            type="button"
+            class="mm-link"
+            @click="orphanLimit += 20"
+          >show {{ Math.min(20, mm.orphanNotes.length - orphanLimit) }} more</button>
+        </template>
+
+        <!-- Entry points for the local view: the note you last touched is
+             almost always the one you opened the map about. -->
+        <template v-if="mm.recentNotes.length">
+          <h3>Recently written</h3>
+          <div class="mm-link-list">
+            <div
+              v-for="n in mm.recentNotes"
+              :key="n.id"
+              class="mm-link-item"
+              :class="{ current: mm.localRoot === n.id }"
+              title="Centre the local view here"
+              @click="mm.setLocalRoot(n.id)"
+            >
+              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
+              <span class="label">{{ n.title }}</span>
             </div>
           </div>
         </template>
@@ -783,7 +888,8 @@ import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
-import { useMemoryMapStore, categoryColorFor, catKeyFor } from '../stores/memoryMap'
+import { useMemoryMapStore, categoryColorFor, catKeyFor, clusterColorFor } from '../stores/memoryMap'
+import { isLightTheme } from '../lib/theme'
 import NotificationBell from './NotificationBell.vue'
 import ChatSignals from './ChatSignals.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
@@ -800,6 +906,10 @@ const store = useProjectStore()
 const taskStore = useTaskStore()
 const fileViewer = useFileViewerStore()
 const mm = useMemoryMapStore()
+// The unlinked list is the one section that can run to hundreds of entries on a
+// real vault, so it grows on demand rather than pushing every other section off
+// the bottom of the sidebar.
+const orphanLimit = ref(8)
 const route = useRoute()
 const router = useRouter()
 
@@ -2587,6 +2697,7 @@ async function confirmDeleteChat(chatId: string) {
 .mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
 
 .mm-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+.mm-stat-grid--3 { grid-template-columns: repeat(3, 1fr); }
 .mm-stat { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; }
 .mm-stat .n { font-size: var(--text-lg); font-weight: 600; }
 .mm-stat .l { font-size: var(--text-xs); color: var(--fg3); }
@@ -2618,6 +2729,10 @@ async function confirmDeleteChat(chatId: string) {
 .mm-link-item:hover { background: var(--bg3); }
 .mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
+/* Marks which note the local view is currently centred on, so the recent list
+   doubles as a "you are here" indicator rather than just a jump list. */
+.mm-link-item.current { background: var(--bg3); color: var(--fg); }
+.mm-link-item.current .label { font-weight: 600; }
 </style>
 
 <!-- Non-scoped: teleported context menus live outside this component's DOM -->

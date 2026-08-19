@@ -17,6 +17,9 @@
   "dependencies": {
     "@excalidraw/excalidraw": "^0.18.1",
     "dompurify": "^3.4.12",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
+    "graphology-metrics": "^2.4.0",
     "highlight.js": "^11.11.1",
     "marked": "^18.0.6",
     "marked-highlight": "^2.2.4",
