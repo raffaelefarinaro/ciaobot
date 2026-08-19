@@ -63,7 +63,7 @@ from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
-from ciao.vault_index import _build_graph, filter_entries, scan_vault
+from ciao.vault_index import _build_graph, filter_entries, scan_vault, strip_references
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import (
@@ -4156,6 +4156,44 @@ async def vault_graph(request: Request) -> JSONResponse:
         "nodes": nodes,
         "edges": edges,
     })
+
+
+async def vault_delete_note(request: Request) -> JSONResponse:
+    """Permanently delete one vault note from the Memory Map.
+
+    ``path`` is the same id the graph, backlinks, and file viewer already use
+    (the ``Entry.path`` string form, e.g. "memory-vault/work/People/Mo.md").
+    Deliberately scoped to ``config.vault_root`` — unlike the workspace-file
+    endpoints, this is a permanent, unrecoverable delete, so it does not
+    inherit their "any file on disk" reach. Every other note that links to it
+    (frontmatter ``related:``/``relatedTo:`` or a body ``[[wikilink]]``) is
+    rewritten first, so deleting a note never leaves a dangling link in the
+    graph or in another note's text.
+    """
+    config = request.app.state.config
+    raw = request.query_params.get("path", "").strip()
+    if not raw:
+        return JSONResponse({"error": "missing path"}, status_code=400)
+    if not raw.startswith("memory-vault/"):
+        return JSONResponse({"error": "not a vault note"}, status_code=400)
+    if Path(raw).suffix.lower() not in {".md", ".markdown"}:
+        return JSONResponse({"error": "unsupported type"}, status_code=415)
+
+    try:
+        vault_root = Path(config.vault_root).expanduser().resolve()
+        resolved = (vault_root / Path(raw[len("memory-vault/"):])).resolve()
+        resolved.relative_to(vault_root)
+    except (OSError, ValueError):
+        return JSONResponse({"error": "bad path"}, status_code=400)
+    if not resolved.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    edited = await asyncio.to_thread(strip_references, vault_root, raw)
+    try:
+        await asyncio.to_thread(resolved.unlink)
+    except OSError as exc:
+        return JSONResponse({"error": f"delete failed: {exc}"}, status_code=500)
+    return JSONResponse({"ok": True, "edited_backlinks": edited})
 
 
 # Binary downloads (PDFs, ZIPs, office docs) live under their own endpoint so

@@ -212,3 +212,128 @@ def test_scan_vault_neighbors_walk_uses_body_edges(tmp_path: Path):
     hops = vi.neighbors(entries, "memory-vault/Projects/Foo.md", depth=1)
     paths = [str(e.path) for _, e in hops]
     assert "memory-vault/People/Mo.md" in paths
+
+
+# ---- strip_references (delete-note backlink cleanup) ------------------------
+
+
+def test_strip_body_wikilinks_bare_ref_becomes_plain_text():
+    body = "Worked with [[People/Mo]] on this.\n"
+    entries = [
+        vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person"),
+    ]
+    idx = vi._build_filename_index(entries)
+    new_body, changed = vi._strip_body_wikilinks(body, idx, "memory-vault/People/Mo.md")
+    assert changed is True
+    assert new_body == "Worked with Mo on this.\n"
+
+
+def test_strip_body_wikilinks_alias_kept_as_display_text():
+    body = "See [[People/Mo|Mo B.]] for details.\n"
+    entries = [vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person")]
+    idx = vi._build_filename_index(entries)
+    new_body, changed = vi._strip_body_wikilinks(body, idx, "memory-vault/People/Mo.md")
+    assert changed is True
+    assert new_body == "See Mo B. for details.\n"
+
+
+def test_strip_body_wikilinks_leaves_unrelated_links_alone():
+    body = "See [[People/Mo]] and [[Projects/Foo]].\n"
+    entries = [
+        vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person"),
+        vi.Entry(path=Path("memory-vault/Projects/Foo.md"), title="Foo", type="project"),
+    ]
+    idx = vi._build_filename_index(entries)
+    new_body, changed = vi._strip_body_wikilinks(body, idx, "memory-vault/People/Mo.md")
+    assert changed is True
+    assert new_body == "See Mo and [[Projects/Foo]].\n"
+
+
+def test_strip_body_wikilinks_ignores_fenced_code():
+    body = "Real: [[People/Mo]].\n```\nExample: [[People/Mo]]\n```\n"
+    entries = [vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person")]
+    idx = vi._build_filename_index(entries)
+    new_body, changed = vi._strip_body_wikilinks(body, idx, "memory-vault/People/Mo.md")
+    assert changed is True
+    assert new_body == "Real: Mo.\n```\nExample: [[People/Mo]]\n```\n"
+
+
+def test_strip_frontmatter_related_removes_single_matching_item_keeps_others():
+    fm = "name: Foo\ntype: project\nrelated:\n  - People/Mo\n  - Projects/Bar\n"
+    entries = [
+        vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person"),
+        vi.Entry(path=Path("memory-vault/Projects/Bar.md"), title="Bar", type="project"),
+    ]
+    idx = vi._build_filename_index(entries)
+    new_fm, changed = vi._strip_frontmatter_related(fm, idx, "memory-vault/People/Mo.md")
+    assert changed is True
+    assert "People/Mo" not in new_fm
+    assert "Projects/Bar" in new_fm
+    assert "related:" in new_fm
+
+
+def test_strip_frontmatter_related_drops_key_when_last_item_removed():
+    fm = "name: Foo\ntype: project\nrelated:\n  - People/Mo\n"
+    entries = [vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person")]
+    idx = vi._build_filename_index(entries)
+    new_fm, changed = vi._strip_frontmatter_related(fm, idx, "memory-vault/People/Mo.md")
+    assert changed is True
+    assert "related:" not in new_fm
+    assert "name: Foo" in new_fm and "type: project" in new_fm
+
+
+def test_strip_frontmatter_related_inline_flow_list():
+    fm = "name: Foo\nrelated: [People/Mo, Projects/Bar]\n"
+    entries = [
+        vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person"),
+        vi.Entry(path=Path("memory-vault/Projects/Bar.md"), title="Bar", type="project"),
+    ]
+    idx = vi._build_filename_index(entries)
+    new_fm, changed = vi._strip_frontmatter_related(fm, idx, "memory-vault/People/Mo.md")
+    assert changed is True
+    assert "related: [Projects/Bar]" in new_fm
+
+
+def test_strip_frontmatter_related_single_scalar_drops_key():
+    fm = "name: Foo\nrelated: People/Mo\n"
+    entries = [vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person")]
+    idx = vi._build_filename_index(entries)
+    new_fm, changed = vi._strip_frontmatter_related(fm, idx, "memory-vault/People/Mo.md")
+    assert changed is True
+    assert "related" not in new_fm
+
+
+def test_strip_references_end_to_end_edits_backlinks_before_delete(tmp_path: Path):
+    _write(
+        tmp_path / "People" / "Mo.md",
+        "---\nname: Mo\ntype: person\n---\n# Mo\n",
+    )
+    _write(
+        tmp_path / "Projects" / "Foo.md",
+        "---\n"
+        "name: Foo\n"
+        "type: project\n"
+        "related:\n"
+        "  - People/Mo\n"
+        "---\n"
+        "# Foo\n\n"
+        "Worked with [[People/Mo]] on this.\n",
+    )
+    _write(
+        tmp_path / "Projects" / "Untouched.md",
+        "---\nname: Untouched\ntype: project\n---\n# Untouched\n\nNo relation here.\n",
+    )
+
+    edited = vi.strip_references(tmp_path, "memory-vault/People/Mo.md")
+
+    assert edited == ["memory-vault/Projects/Foo.md"]
+    foo_text = (tmp_path / "Projects" / "Foo.md").read_text(encoding="utf-8")
+    assert "People/Mo" not in foo_text
+    assert "related:" not in foo_text
+    assert "Worked with Mo on this." in foo_text
+    untouched_text = (tmp_path / "Projects" / "Untouched.md").read_text(encoding="utf-8")
+    assert untouched_text == "---\nname: Untouched\ntype: project\n---\n# Untouched\n\nNo relation here.\n"
+
+    # The target file itself is untouched by strip_references (deletion is a
+    # separate, subsequent step performed by the caller).
+    assert (tmp_path / "People" / "Mo.md").exists()

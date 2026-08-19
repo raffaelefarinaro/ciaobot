@@ -235,6 +235,28 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     pathStart.value = null
     pathEnd.value = null
   }
+  /**
+   * Permanently delete a note. The backend strips dangling references from
+   * every note that linked to it before removing the file, so we only need
+   * to mirror that locally: drop the node, drop its edges, and repair the
+   * `degree` of whichever neighbors lose an edge — a full `loadGraph` reload
+   * would re-randomize every node's (x, y) and re-scatter the whole canvas
+   * just to remove one.
+   */
+  async function deleteNote(id: string) {
+    await api.del(`/api/vault/note?path=${encodeURIComponent(id)}`)
+    const removedEdges = edges.value.filter(e => e.source === id || e.target === id)
+    edges.value = edges.value.filter(e => e.source !== id && e.target !== id)
+    nodes.value = nodes.value.filter(n => n.id !== id)
+    for (const e of removedEdges) {
+      const neighbor = nodesById.value.get(e.source === id ? e.target : e.source)
+      if (neighbor) neighbor.degree = Math.max(0, neighbor.degree - 1)
+    }
+    if (selectedId.value === id) selectedId.value = null
+    if (pathStart.value === id) pathStart.value = null
+    if (pathEnd.value === id) pathEnd.value = null
+  }
+
   function handleNodeClick(id: string, shiftKey: boolean) {
     if (shiftKey) {
       if (!pathStart.value) pathStart.value = id
@@ -242,7 +264,10 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       else { pathStart.value = id; pathEnd.value = null }
       return
     }
-    selectNode(id)
+    // Clicking a node directly on the canvas should feel the same as
+    // clicking it from the sidebar or a linked-note link: it becomes
+    // selected AND the camera centers on it, not just a highlight in place.
+    requestFocus(id)
   }
 
   return {
@@ -250,6 +275,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode, pathIds, pathHint,
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
-    selectNode, requestFocus, resetPath, handleNodeClick,
+    selectNode, requestFocus, resetPath, handleNodeClick, deleteNote,
   }
 })

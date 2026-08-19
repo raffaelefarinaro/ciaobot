@@ -66,8 +66,15 @@ H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 #   [[Foo#Heading|Display]]  -> Foo
 #   [[#Heading]]             -> (no match: pure in-page anchor)
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
+# Same shape as WIKILINK_RE but also captures the display alias (group 2), so
+# a stripped link can be replaced by readable text instead of vanishing.
+FULL_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]")
 FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+# A `related:`/`relatedTo:` frontmatter key, optionally with an inline flow
+# value on the same line (`related: [A, B]` or `related: People/Mo`).
+_FM_RELATED_KEY_RE = re.compile(r"^(related|relatedTo):[ \t]*(.*)$")
+_FM_LIST_ITEM_RE = re.compile(r"^(\s+)-\s?(.*)$")
 
 
 @dataclass
@@ -303,6 +310,163 @@ def _build_graph(entries: list[Entry]) -> dict[str, set[str]]:
             graph[src].add(tgt)
             graph[tgt].add(src)
     return graph
+
+
+def _ref_matches(raw: str, filename_idx: dict[str, list[Path]], deleted_path: str) -> bool:
+    """True if a raw related/wikilink reference string resolves to deleted_path."""
+    target = _resolve_related(_normalize_related_value(raw), filename_idx)
+    return target is not None and str(target) == deleted_path
+
+
+def _strip_frontmatter_related(
+    fm_text: str, filename_idx: dict[str, list[Path]], deleted_path: str
+) -> tuple[str, bool]:
+    """Remove `related:`/`relatedTo:` entries pointing at deleted_path.
+
+    Edits surgically line-by-line instead of round-tripping through
+    yaml.safe_dump, so untouched keys keep their original formatting,
+    quoting, and order.
+    """
+    lines = fm_text.split("\n")
+    out: list[str] = []
+    changed = False
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        m = _FM_RELATED_KEY_RE.match(line)
+        if not m:
+            out.append(line)
+            i += 1
+            continue
+        key, inline_value = m.group(1), m.group(2).strip()
+        if inline_value.startswith("[") and inline_value.endswith("]"):
+            items = [it.strip().strip("\"'") for it in inline_value[1:-1].split(",") if it.strip()]
+            kept = [it for it in items if not _ref_matches(it, filename_idx, deleted_path)]
+            if len(kept) != len(items):
+                changed = True
+            if kept:
+                out.append(f"{key}: [{', '.join(kept)}]")
+            i += 1
+            continue
+        if inline_value:
+            if _ref_matches(inline_value, filename_idx, deleted_path):
+                changed = True
+            else:
+                out.append(line)
+            i += 1
+            continue
+        # Block list style: gather the indented "- item" lines that follow.
+        j = i + 1
+        kept_item_lines: list[str] = []
+        block_changed = False
+        while j < n:
+            item_m = _FM_LIST_ITEM_RE.match(lines[j])
+            if not item_m:
+                break
+            item_value = item_m.group(2).strip().strip("\"'")
+            if _ref_matches(item_value, filename_idx, deleted_path):
+                block_changed = True
+            else:
+                kept_item_lines.append(lines[j])
+            j += 1
+        if block_changed:
+            changed = True
+        if kept_item_lines:
+            out.append(line)
+            out.extend(kept_item_lines)
+        # else: every item under this key was stripped, so drop the key too.
+        i = j
+    return "\n".join(out), changed
+
+
+def _strip_body_wikilinks(
+    body: str, filename_idx: dict[str, list[Path]], deleted_path: str
+) -> tuple[str, bool]:
+    """Replace body `[[wikilinks]]` resolving to deleted_path with plain text.
+
+    A link becomes its alias (`[[X|Display]]` -> `Display`) or its bare last
+    path segment (`[[People/Mo]]` -> `Mo`), so the sentence still reads
+    naturally instead of leaving a dangling link. Matches inside fenced code
+    blocks or inline code spans are left untouched, mirroring
+    `_extract_body_wikilinks`.
+    """
+    excluded: list[tuple[int, int]] = []
+    for m in FENCED_CODE_RE.finditer(body):
+        excluded.append((m.start(), m.end()))
+    for m in INLINE_CODE_RE.finditer(body):
+        excluded.append((m.start(), m.end()))
+
+    def _is_excluded_pos(pos: int) -> bool:
+        return any(start <= pos < end for start, end in excluded)
+
+    changed = False
+    out: list[str] = []
+    last = 0
+    for m in FULL_WIKILINK_RE.finditer(body):
+        if _is_excluded_pos(m.start()):
+            continue
+        ref = m.group(1).strip()
+        if not _ref_matches(ref, filename_idx, deleted_path):
+            continue
+        alias = (m.group(2) or "").strip()
+        replacement = alias or ref.rsplit("/", 1)[-1]
+        out.append(body[last:m.start()])
+        out.append(replacement)
+        last = m.end()
+        changed = True
+    out.append(body[last:])
+    return ("".join(out), changed)
+
+
+def _strip_all_references(
+    text: str, filename_idx: dict[str, list[Path]], deleted_path: str
+) -> tuple[str, bool]:
+    m = FRONTMATTER_RE.match(text)
+    changed = False
+    if m:
+        new_fm_text, fm_changed = _strip_frontmatter_related(m.group(1), filename_idx, deleted_path)
+        if fm_changed:
+            changed = True
+            text = text[:m.start()] + f"---\n{new_fm_text}\n---\n" + text[m.end():]
+    m2 = FRONTMATTER_RE.match(text)
+    body_start = m2.end() if m2 else 0
+    new_body, body_changed = _strip_body_wikilinks(text[body_start:], filename_idx, deleted_path)
+    if body_changed:
+        changed = True
+        text = text[:body_start] + new_body
+    return text, changed
+
+
+def strip_references(vault_root: Path, deleted_path: str) -> list[str]:
+    """Remove literal references to `deleted_path` from every note linking to it.
+
+    Must run BEFORE the target file is deleted from disk: resolution depends
+    on the target still existing in the filename index built here, or refs to
+    it would already come back unresolved (and thus invisible to this
+    function) exactly as `scan_vault` treats any other broken link.
+
+    `deleted_path` is the `Entry.path` string form (e.g.
+    "memory-vault/work/People/Mo.md"). Returns the repo-relative paths of the
+    files actually edited on disk.
+    """
+    vault_root = vault_root.resolve()
+    entries = scan_vault(vault_root)
+    filename_idx = _build_filename_index(entries)
+    edited: list[str] = []
+    for e in entries:
+        if str(e.path) == deleted_path or deleted_path not in e.related:
+            continue
+        rel_from_vault = e.path.relative_to("memory-vault")
+        abs_path = vault_root / rel_from_vault
+        try:
+            text = abs_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        new_text, file_changed = _strip_all_references(text, filename_idx, deleted_path)
+        if file_changed:
+            abs_path.write_text(new_text, encoding="utf-8")
+            edited.append(str(e.path))
+    return edited
 
 
 def _normalize_path_arg(value: str) -> str:

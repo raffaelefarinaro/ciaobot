@@ -61,7 +61,7 @@
         <div class="mm-detail-type">{{ categoryLabelFor(mm.selectedNode) }}</div>
         <div class="mm-detail-title">{{ mm.selectedNode.title }}</div>
         <div v-if="mm.selectedNode.description" class="mm-detail-desc">{{ mm.selectedNode.description }}</div>
-        <div class="mm-detail-path">{{ mm.selectedNode.id }}</div>
+        <button type="button" class="mm-detail-path" @click="openNoteFile(mm.selectedNode.id)">{{ mm.selectedNode.id }}</button>
 
         <div v-if="mm.selectedNode.tags.length" class="mm-detail-section">
           <h4>Tags</h4>
@@ -91,6 +91,12 @@
             >⌖</button>
           </div>
         </div>
+
+        <div class="mm-detail-section">
+          <button type="button" class="mm-delete-btn" :disabled="deletingNote" @click="deleteNote(mm.selectedNode.id)">
+            {{ deletingNote ? 'Deleting…' : 'Delete note' }}
+          </button>
+        </div>
       </aside>
     </div>
   </div>
@@ -102,6 +108,7 @@ import PaneHeader from './PaneHeader.vue'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, type MemoryGraphNode } from '../stores/memoryMap'
+import { askConfirm } from '../lib/confirm'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -134,6 +141,23 @@ function openNoteFile(id: string) {
   mm.requestFocus(id)
   void fileViewer.open(id)
 }
+const deletingNote = ref(false)
+async function deleteNote(id: string) {
+  if (deletingNote.value) return
+  const title = mm.nodesById.get(id)?.title || id
+  if (!await askConfirm(`Delete "${title}"? This permanently removes the note file and cannot be undone.`, {
+    title: 'Delete note', confirmLabel: 'Delete note', destructive: true,
+  })) return
+  deletingNote.value = true
+  try {
+    await mm.deleteNote(id)
+  } catch (err) {
+    store.pushErrorToast('Could not delete note', err instanceof Error ? err.message : 'Could not delete note')
+  } finally {
+    deletingNote.value = false
+  }
+}
+
 watch(() => mm.focusSignal.seq, () => {
   const id = mm.focusSignal.id
   if (!id) return
@@ -659,8 +683,18 @@ onBeforeUnmount(() => {
 .mm-detail-type { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg3); }
 .mm-detail-title { font-size: var(--text-lg); font-weight: 600; margin: 4px 0 var(--space-2); }
 .mm-detail-desc { color: var(--fg2); font-size: var(--text-sm); margin-bottom: var(--space-3); }
-.mm-detail-path { font-size: var(--text-xs); color: var(--fg3); word-break: break-all; }
+.mm-detail-path {
+  display: block; width: 100%; text-align: left; background: none; border: none; padding: 0;
+  font-family: var(--font); font-size: var(--text-xs); color: var(--fg3); word-break: break-all; cursor: pointer;
+}
+.mm-detail-path:hover { color: var(--fg2); text-decoration: underline; }
 .mm-detail-section { margin: var(--space-3) 0; }
+.mm-delete-btn {
+  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--fg3); font-family: var(--font); font-size: var(--text-sm); padding: 6px 12px; cursor: pointer;
+}
+.mm-delete-btn:hover:not(:disabled) { color: #f7768e; border-color: #f7768e; }
+.mm-delete-btn:disabled { opacity: 0.6; cursor: default; }
 .pill { display: inline-block; background: var(--bg3); border-radius: var(--radius-pill); padding: 2px 9px; font-size: var(--text-xs); margin: 0 4px 4px 0; color: var(--fg2); }
 
 .mm-seg { display: flex; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
