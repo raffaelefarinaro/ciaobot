@@ -24,6 +24,7 @@ from ciao.memory_tool import (
     serialize_entries,
 )
 from ciao.observability.hooks import _runtime_lines
+from ciao.proposal_kinds import BULLET_RE
 from ciao.sync_skills import sync_workspace_skills
 from ciao.web.commands import _parse_frontmatter
 
@@ -31,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 _ASSET_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _IMPORT_RE = re.compile(r"(?<!\w)@([^\s\)\]>,]+\.md)")
-_PROPOSAL_BULLET_RE = re.compile(r"^\s*-\s*\[(?:memory|user)\]", re.I)
 
 
 @dataclass(slots=True)
@@ -387,7 +387,7 @@ def _count_proposal_bullets(path: Path) -> int:
     if not path.is_file():
         return 0
     return sum(
-        1 for line in _read_text(path).splitlines() if _PROPOSAL_BULLET_RE.match(line)
+        1 for line in _read_text(path).splitlines() if BULLET_RE.match(line)
     )
 
 

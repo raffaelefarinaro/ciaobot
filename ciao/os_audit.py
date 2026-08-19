@@ -29,6 +29,9 @@ from ciao.memory_tool import (
     region_usage,
     strip_region_blocks,
 )
+# Proposal kinds and bullet shape are owned by ciao.proposal_kinds; re-export
+# here so this counter stays in sync with the control plane and the web layer.
+from ciao.proposal_kinds import BULLET_RE
 from ciao.vault_lint import (
     _markdown_source_paths,
     run_validation as run_vault_validation,
@@ -38,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 SKILL_MAX_BYTES = 15 * 1024
 
-_PROPOSAL_BULLET_RE = re.compile(r"^\s*-\s*\[(?:memory|user|profile)\]\s+\S", re.IGNORECASE)
 _RULE_BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 _RULE_NEGATION_RE = re.compile(
     r"\b(?:never|(?:do|does|must|should|can|cannot)\s+not|don't|doesn't|mustn't|shouldn't|can't)\b",
@@ -589,7 +591,7 @@ def audit_memory(
                 )
                 continue
             pending = sum(
-                1 for line in content.splitlines() if _PROPOSAL_BULLET_RE.match(line)
+                1 for line in content.splitlines() if BULLET_RE.match(line)
             )
             proposals_count += pending
             proposal_files.append({"path": str(path), "pending": pending})

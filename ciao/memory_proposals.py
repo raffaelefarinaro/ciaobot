@@ -281,7 +281,14 @@ def append_proposals(
     out_path = workspace_vault_root / _PROPOSALS_RELATIVE
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    existing = out_path.read_text(encoding="utf-8") if out_path.exists() else _STUB_HEADER
+    if out_path.exists():
+        # An existing file's header may predate the bounded-region layout and
+        # still name `~/.ciao/memory.md` / `ciao memory add`. Refresh just that
+        # header so the corrected wording reaches installed queues; bullets and
+        # anything below them are left byte-identical.
+        existing = _refresh_header(out_path.read_text(encoding="utf-8"))
+    else:
+        existing = _STUB_HEADER
 
     already = _existing_proposal_texts(existing)
     fresh = [p for p in proposals if p.text.strip() not in already]
@@ -330,6 +337,42 @@ def _proposals_header_block(source_path: Path | None) -> str:
     if source_path is not None:
         return f"\n## {ts} — from `{source_path.name}`\n\n"
     return f"\n## {ts}\n\n"
+
+
+def _refresh_header(file_text: str) -> str:
+    """Replace a stale leading header with the current one, or return unchanged.
+
+    Only a file that begins with YAML frontmatter is touched: that is the
+    signal the leading block is the generated header rather than a section a
+    user wrote by hand. The scan for the first timestamped batch or proposal
+    bullet starts only after the frontmatter closes, so an indented YAML list
+    inside the frontmatter is never mistaken for a bullet. When the boundary
+    cannot be identified confidently the text is returned byte-identical rather
+    than guessed at, and no bullet and no user text is ever edited.
+    """
+    if not file_text.startswith("---\n"):
+        return file_text
+    lines = file_text.splitlines(keepends=True)
+    content_start = 0
+    for idx, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            content_start = idx + 1
+            break
+    if not content_start:
+        # Frontmatter opened and never closed. The boundary scan below would
+        # then start at line 0 and mistake an indented YAML list item for a
+        # proposal bullet, splicing the header into the middle of the
+        # frontmatter. An unparseable file is left byte-identical.
+        return file_text
+    boundary = len(file_text)
+    for idx in range(content_start, len(lines)):
+        stripped = lines[idx].lstrip()
+        if stripped.startswith("## ") or stripped.startswith("- "):
+            boundary = sum(len(item) for item in lines[:idx])
+            break
+    if boundary >= len(file_text):
+        return file_text
+    return _STUB_HEADER + file_text[boundary:]
 
 
 # ── Pipeline entry point ──────────────────────────────────────────────────

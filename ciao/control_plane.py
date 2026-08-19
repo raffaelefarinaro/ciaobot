@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from ciao import vault_index
+from ciao import proposal_kinds, vault_index
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
 from ciao.loops import publish_loops_changed
@@ -38,10 +38,29 @@ logger = logging.getLogger(__name__)
 _UNSET = object()
 
 # One grammar for a proposal bullet, shared by the list and dismiss paths. The
-# trailing `_(from: …)_` source tag is optional and captured when present.
-_PROPOSAL_BULLET_RE = re.compile(
-    r"^\s*-\s+\[(memory|user|profile)\]\s+(.+?)(?:\s+_\(from:\s*(.+?)\)_)?\s*$"
-)
+# kinds and the bullet shape are owned by ciao.proposal_kinds; this module
+# only re-exports the regex so it stays in sync with every other counter.
+_PROPOSAL_BULLET_RE = proposal_kinds.BULLET_RE
+
+
+def _proposal_row(match: re.Match[str]) -> dict[str, str]:
+    """One matched bullet as a row for the list/dismiss responses.
+
+    A rehome bullet is a file move, not a memory edit, so it has no region.
+    Resolving its kind to a region would raise on the shared registry's wider
+    kind set; the row carries the raw kind and only the region-edit kinds get
+    normalized. Callers that can only act on a region must branch on the kind.
+    """
+    kind = match.group(1)
+    if proposal_kinds.accept_for(kind).action == "edit_region":
+        target = resolve_region(kind)
+    else:
+        target = kind
+    return {
+        "target": target,
+        "text": match.group(2).strip(),
+        "source": (match.group(3) or "").strip(),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,11 +429,7 @@ class CiaoControlPlane:
         for raw in path.read_text(encoding="utf-8").splitlines():
             match = _PROPOSAL_BULLET_RE.match(raw)
             if match:
-                rows.append({
-                    "target": resolve_region(match.group(1)),
-                    "text": match.group(2).strip(),
-                    "source": (match.group(3) or "").strip(),
-                })
+                rows.append(_proposal_row(match))
         return _ok(rows)
 
     def memory_proposal_resolve(
@@ -453,14 +468,13 @@ class CiaoControlPlane:
         match = _PROPOSAL_BULLET_RE.match(line)
         if match is None:
             raise ControlPlaneError("proposal_invalid", "The matching proposal has an unsupported format.")
-        proposal_target = resolve_region(match.group(1))
-        proposal_text = match.group(2).strip()
+        proposal_row = _proposal_row(match)
         del lines[index]
         path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         return _ok({
             "action": action,
-            "target": proposal_target,
-            "text": proposal_text,
+            "target": proposal_row["target"],
+            "text": proposal_row["text"],
             "dismissed": True,
         })
 
