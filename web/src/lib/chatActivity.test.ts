@@ -81,6 +81,18 @@ describe('formatTokenUsage', () => {
     expect(formatTokenUsage(undefined))
       .toBe('')
   })
+
+  it('appends the context-window occupancy when present', () => {
+    expect(formatTokenUsage({ input_tokens: '2', output_tokens: '1079', context_pct: '42.3%' }))
+      .toBe('Tokens <span class="token-number">2</span> in · <span class="token-number">1,079</span> out · <span class="context-pct">42.3%</span> ctx')
+  })
+
+  it('renders context_pct alone when token sides are missing', () => {
+    expect(formatTokenUsage({ context_pct: '8.4%' }))
+      .toBe('Tokens <span class="context-pct">8.4%</span> ctx')
+    expect(formatTokenUsage({ context_pct: '' }))
+      .toBe('')
+  })
 })
 
 describe('isProgressCommentary', () => {

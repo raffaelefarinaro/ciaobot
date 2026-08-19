@@ -27,6 +27,7 @@ from ciao.providers.opencode import (
     OpencodeProvider,
     OpencodeSettings,
     _catalog_from_providers,
+    _context_window_for,
     _log_catalog_change,
     catalog_providers,
     compose_system,
@@ -386,7 +387,7 @@ def test_error_text_handles_a_missing_payload():
 
 def test_usage_payload_flattens_cache_counts():
     usage = usage_payload(
-        {"input": 120, "output": 40, "reasoning": 8, "cache": {"read": 900, "write": 30}}
+        {"input": 120, "output": 40, "reasoning": 8, "cache": {"read": 900, "write": 30}, "total": 1098}
     )
     assert usage == {
         "inputTokens": "120",
@@ -394,6 +395,7 @@ def test_usage_payload_flattens_cache_counts():
         "reasoningTokens": "8",
         "cacheReadTokens": "900",
         "cacheWriteTokens": "30",
+        "totalTokens": "1098",
     }
 
 
@@ -404,6 +406,34 @@ def test_usage_payload_omits_zero_counts():
 def test_usage_payload_tolerates_junk():
     assert usage_payload(None) == {}
     assert usage_payload({"input": "not-a-number"}) == {}
+
+
+def test_context_window_for_reads_the_model_limit():
+    payload = {
+        "all": [{
+            "id": "anthropic",
+            "models": {
+                "claude-sonnet-4-6": {"id": "claude-sonnet-4-6", "limit": {"context": 200000}},
+            },
+        }],
+    }
+    assert _context_window_for(payload, "anthropic", "claude-sonnet-4-6") == 200000
+
+
+def test_context_window_for_returns_none_when_unstated_or_unknown():
+    payload = {
+        "all": [{
+            "id": "anthropic",
+            "models": {
+                "m": {"id": "m"},
+                "no-limit": {"id": "no-limit", "limit": {"context": 0}},
+            },
+        }],
+    }
+    assert _context_window_for(payload, "anthropic", "m") is None
+    assert _context_window_for(payload, "anthropic", "no-limit") is None
+    assert _context_window_for(payload, "unknown", "m") is None
+    assert _context_window_for(None, "anthropic", "m") is None
 
 
 # ── model catalog ───────────────────────────────────────────────────────
@@ -1158,6 +1188,50 @@ def test_real_turn_records_the_model_opencode_actually_ran(tmp_path):
     assert provider._effective_model == "opencode/big-pickle"
 
 
+def test_augment_context_pct_attaches_window_occupancy(tmp_path):
+    """The turn's total over the model's context window becomes context_pct."""
+    provider = _provider(tmp_path)
+    provider._usage = {"inputTokens": "100", "outputTokens": "50", "totalTokens": "150"}
+
+    class _FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"all": [{"id": "opencode", "models": {"big-pickle": {"id": "big-pickle", "limit": {"context": 1000}}}}]}
+
+    class _FakeClient:
+        async def get(self, _path: str):
+            return _FakeResponse()
+
+    async def _run():
+        await provider._augment_context_pct(_FakeClient(), ("opencode", "big-pickle"))
+
+    asyncio.run(_run())
+    assert provider._usage["context_window"] == "1000"
+    assert provider._usage["context_pct"] == "15.0%"
+
+
+def test_augment_context_pct_is_silent_when_limit_is_missing(tmp_path):
+    provider = _provider(tmp_path)
+    provider._usage = {"inputTokens": "100", "outputTokens": "50", "totalTokens": "150"}
+
+    class _FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"all": [{"id": "opencode", "models": {"big-pickle": {"id": "big-pickle"}}}]}
+
+    class _FakeClient:
+        async def get(self, _path: str):
+            return _FakeResponse()
+
+    async def _run():
+        await provider._augment_context_pct(_FakeClient(), ("opencode", "big-pickle"))
+
+    asyncio.run(_run())
+    assert "context_pct" not in provider._usage
+
+
 def test_replaying_a_turn_twice_is_clean_after_reset(tmp_path):
     """Per-turn state must not leak between turns on a reused provider."""
     provider = _provider(tmp_path)
@@ -1206,6 +1280,16 @@ class _FakeServerClient:
 
     def stream(self, _method: str, _path: str) -> _FakeEventStream:
         return _FakeEventStream(self._lines)
+
+    async def get(self, _path: str):
+        class _Accepted:
+            status_code = 404
+            text = ""
+
+            def json(self):
+                return {}
+
+        return _Accepted()
 
     async def post(self, _path: str, json=None):
         class _Accepted:

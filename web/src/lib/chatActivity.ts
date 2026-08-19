@@ -27,7 +27,7 @@ export function formatTokenUsage(usage?: Record<string, unknown>): string {
   if (!usage) return ''
   const hasInput = usage.input_tokens !== undefined && usage.input_tokens !== null && usage.input_tokens !== ''
   const hasOutput = usage.output_tokens !== undefined && usage.output_tokens !== null && usage.output_tokens !== ''
-  if (!hasInput && !hasOutput) return ''
+  const hasContext = usage.context_pct !== undefined && usage.context_pct !== null && usage.context_pct !== ''
 
   const formatNum = (val: unknown) => {
     const num = typeof val === 'number' ? val : parseInt(String(val), 10)
@@ -41,6 +41,10 @@ export function formatTokenUsage(usage?: Record<string, unknown>): string {
   if (hasOutput) {
     parts.push(`<span class="token-number">${formatNum(usage.output_tokens)}</span> out`)
   }
+  if (hasContext) {
+    parts.push(`<span class="context-pct">${String(usage.context_pct)}</span> ctx`)
+  }
+  if (!parts.length) return ''
   return `Tokens ${parts.join(' · ')}`
 }
 

@@ -380,6 +380,37 @@ def _token_count(raw: object) -> int:
     return int(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else 0
 
 
+def _context_window_for(payload: object, provider_id: str, model_id: str) -> int | None:
+    """The model's ``limit.context`` from ``GET /provider``, or ``None``.
+
+    opencode's own UI computes context occupancy the same way: total turn
+    tokens over the model's declared context window. The window is a static
+    model property (``limit.context``), not a live number, so it is looked up
+    once per turn from the provider catalog rather than queried repeatedly.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    for provider in payload.get("all") or []:
+        if not isinstance(provider, Mapping):
+            continue
+        if str(provider.get("id") or "") != provider_id:
+            continue
+        models = provider.get("models")
+        if not isinstance(models, Mapping):
+            continue
+        model = models.get(model_id)
+        if not isinstance(model, Mapping):
+            continue
+        limit = model.get("limit")
+        if not isinstance(limit, Mapping):
+            continue
+        context = limit.get("context")
+        if isinstance(context, (int, float)) and not isinstance(context, bool) and context > 0:
+            return int(context)
+        return None
+    return None
+
+
 def usage_payload(tokens: Mapping[str, Any] | None) -> dict[str, str]:
     """Normalize opencode token counts into Ciaobot's usage fields."""
     if not isinstance(tokens, Mapping):
@@ -393,6 +424,11 @@ def usage_payload(tokens: Mapping[str, Any] | None) -> dict[str, str]:
         ("reasoningTokens", tokens.get("reasoning")),
         ("cacheReadTokens", cache.get("read")),
         ("cacheWriteTokens", cache.get("write")),
+        # The assistant message reports a cumulative total for the turn
+        # (input + output + reasoning + cache), matching opencode's own
+        # context-window denominator. Preserve it so a later context %
+        # computation does not have to re-sum the parts.
+        ("totalTokens", tokens.get("total")),
     ):
         count = _token_count(source)
         if count:
@@ -1680,6 +1716,8 @@ class OpencodeProvider(BaseSDKProvider):
         finally:
             register_handle(None)
 
+        await self._augment_context_pct(client, self._turn_model)
+
         yield ResultEvent(
             type="result",
             # A successful turn carries the accumulated answer (codex-style):
@@ -1695,6 +1733,52 @@ class OpencodeProvider(BaseSDKProvider):
             cost_usd=self._cost,
             fallback_final=bool(error) and saw_output,
         )
+
+    async def _augment_context_pct(
+        self, client: httpx.AsyncClient, model: tuple[str, str]
+    ) -> None:
+        """Attach the turn's context-window occupancy to ``self._usage``.
+
+        Mirrors opencode's own UI: total turn tokens over the model's declared
+        ``limit.context`` from ``GET /provider``. Silent on failure — the field
+        is simply left off the usage payload, matching Claude/Codex where the
+        CLI cannot answer.
+        """
+        if not self._usage:
+            return
+        total = self._usage.get("totalTokens")
+        if not total:
+            return
+        provider_id, model_id = model
+        if not provider_id or not model_id:
+            # A chat may let opencode choose the model; `_effective_model` then
+            # carries the resolved `providerID/modelID` from the assistant
+            # message.
+            provider_id, model_id = split_model(self._effective_model)
+        if not provider_id or not model_id:
+            return
+        context_window: int | None = None
+        try:
+            response = await client.get("/provider")
+            if response.status_code < 400:
+                context_window = _context_window_for(
+                    response.json(), provider_id, model_id
+                )
+        except (httpx.HTTPError, ValueError):
+            context_window = None
+        if not context_window:
+            return
+        try:
+            total_tokens = int(total)
+        except (TypeError, ValueError):
+            return
+        if total_tokens <= 0:
+            return
+        self._usage = {
+            **self._usage,
+            "context_window": str(context_window),
+            "context_pct": f"{min(100.0, total_tokens / context_window * 100):.1f}%",
+        }
 
     # ----------------------------------------------------------- provider API
 

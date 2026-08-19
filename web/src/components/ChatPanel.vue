@@ -6107,6 +6107,10 @@ details[open] > .activity-summary::before {
   color: var(--fg);
   font-weight: 500;
 }
+.tokens-group :deep(.context-pct) {
+  color: var(--fg-muted);
+  font-weight: 500;
+}
 
 .message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .message-image-link { display: inline-block; line-height: 0; text-decoration: none; }
