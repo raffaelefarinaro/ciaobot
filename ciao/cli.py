@@ -1682,13 +1682,22 @@ def _os_audit_command(args: argparse.Namespace) -> int:
 
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
+    # An explicit --workspace scopes the whole audit. Consulting the ambient
+    # environment for the runtime and vault roots then lets an absolute
+    # CIAO_RUNTIME_ROOT from the surrounding install escape the directory the
+    # caller named, so the audit silently reports on the wrong workspace: its
+    # registry, its job runs, its migration receipts. Auditing a second
+    # workspace from inside a running Ciaobot chat hits this every time, because
+    # the chat exports CIAO_RUNTIME_ROOT for its own install.
+    explicit_workspace = args.workspace is not None
 
     def resolve_under_workspace(
         explicit: Path | None,
         env_name: str,
         default: str,
     ) -> Path:
-        raw = explicit or os.environ.get(env_name) or default
+        env_raw = None if explicit_workspace else os.environ.get(env_name)
+        raw = explicit or env_raw or default
         path = Path(raw).expanduser()
         if not path.is_absolute():
             path = workspace / path

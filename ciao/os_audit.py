@@ -916,8 +916,8 @@ def audit_upgrade_notices(
     # The vault still speaks the retired link dialect. Surfaced, never applied:
     # rewriting a user's own notes is not a decision an upgrade makes on their
     # behalf, and this is the notice that makes the choice visible instead of
-    # leaving it in a release note nobody re-reads. Because notices count toward
-    # `actionable_count`, the weekly hygiene routine reports it too.
+    # leaving it in a release note nobody re-reads. Notices are pending actions
+    # the weekly hygiene routine surfaces without turning the audit red.
     if runtime_dir is not None:
         try:
             from ciao.vault_migrate_links import has_unmigrated_links, read_receipt
@@ -1057,7 +1057,12 @@ def run_os_audit(
         if key not in seen_errors:
             seen_errors.add(key)
             scan_errors.append(error)
-    actionable_count = (
+    # A defect is a state the operator must act on; a pending action is an
+    # optional one they may decline (an upgrade notice). Only defects raise the
+    # status: a notice that can never be cleared would otherwise hold the audit
+    # at needs_attention forever. This is the same split `memory_actionable_count`
+    # makes, and mirrors it at the top level.
+    defect_count = (
         len(setup_result["issues"])
         + len(vault_result.get("orphans", []))
         + len(vault_result.get("duplicates", []))
@@ -1067,10 +1072,11 @@ def run_os_audit(
         + rule_result["rule_clashes_found"]
         + memory_actionable_count(memory_result)
         + job_result["failed_runs"]
-        + upgrade_result["notices_found"]
     )
+    pending_action_count = upgrade_result["notices_found"]
+    has_pending_actions = pending_action_count > 0
     total_errors = len(scan_errors)
-    total_issues = actionable_count + total_errors
+    total_issues = defect_count + total_errors
     if total_errors:
         status = "error"
     elif total_issues:
@@ -1081,6 +1087,9 @@ def run_os_audit(
     return {
         "status": status,
         "total_issues": total_issues,
+        "defect_count": defect_count,
+        "pending_action_count": pending_action_count,
+        "has_pending_actions": has_pending_actions,
         "total_errors": total_errors,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "setup_audit": setup_result,
@@ -1109,6 +1118,15 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
             f"**Scan Errors**: {report['total_errors']}"
         ),
         f"**Timestamp**: {report['timestamp']}",
+    ]
+    # A pending action is optional and does not raise the status, so it must be
+    # visible on its own rather than folded into "Total Issues".
+    if report.get("has_pending_actions"):
+        lines.append(
+            f"**Pending actions**: {report['pending_action_count']} upgrade "
+            "action(s) you may decline; see Upgrade Actions below."
+        )
+    lines.extend([
         "",
         "## 1. Setup",
         f"- Workspace: `{report['setup_audit']['workspace_root']}`",
@@ -1126,7 +1144,7 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
         f"- Logical skills scanned: {report['skill_audit']['total_skills']}",
         f"- Skills over 15 KiB: {report['skill_audit']['over_budget_count']}",
         f"- Missing SKILL.md: {report['skill_audit']['missing_skill_md_count']}",
-    ]
+    ])
     for issue in report["skill_audit"]["issues"]:
         lines.append(f"  - ⚠️ {issue['message']}")
 
@@ -1217,17 +1235,19 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
 
     notices = report.get("upgrade_notices", {}).get("notices", [])
     if notices:
-        lines.extend(["", "## Upgrade Actions"])
+        # Not a finding: these are optional actions a user may decline, so they
+        # render as pending work with an information icon, not as a ⚠️ defect.
+        lines.extend(["", "## Upgrade Actions (optional)"])
         for notice in notices:
             # A vault-wide notice has no workspace, and rendering the label
             # unconditionally printed a bare `****:` in front of it.
             scope = str(notice.get("workspace") or "").strip()
             prefix = f"**{scope}**: " if scope else ""
-            lines.append(f"- ⚠️ {prefix}{notice['detail']}")
+            lines.append(f"- ℹ️ {prefix}{notice['detail']}")
             # The remedy is prose containing its own backticked commands, so
             # wrapping the whole sentence in backticks nested them and broke the
             # code spans it already had.
-            lines.append(f"  - Fix: {notice['remedy']}")
+            lines.append(f"  - Suggested: {notice['remedy']}")
 
     if report["scan_errors"]:
         lines.extend(["", "## Scan Errors"])

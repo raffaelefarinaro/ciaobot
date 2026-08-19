@@ -226,6 +226,73 @@ def test_cli_os_audit_exit_codes_distinguish_findings_and_errors(
     ]) == 2
 
 
+def test_cli_os_audit_pending_only_exits_zero_with_a_distinct_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A pending-only audit exits 0 and prints its own line, not the healthy one."""
+    workspace = tmp_path / "workspace"
+    _write_healthy_audit_workspace(workspace)
+    legacy = workspace / "research"
+    (legacy / "projects" / "active" / "general").mkdir(parents=True)
+    (workspace / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "research", "vault_root": "research"}]),
+        encoding="utf-8",
+    )
+    memory_dir = tmp_path / "bounded"
+    memory_dir.mkdir()
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
+
+    assert cli.main(["os-audit", "--workspace", str(workspace)]) == 0
+    out = capsys.readouterr().out
+    assert "Pending actions" in out
+    assert "Upgrade Actions (optional)" in out
+
+
+def test_cli_os_audit_explicit_workspace_beats_an_ambient_runtime_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An absolute CIAO_RUNTIME_ROOT must not escape an explicit --workspace.
+
+    A running Ciaobot chat exports CIAO_RUNTIME_ROOT for its own install. When
+    the env won, `--workspace` still selected the vault but the registry, job
+    runs and migration receipts came from the surrounding install, so the audit
+    reported on a different workspace than the one it was asked about, without
+    saying so.
+    """
+    workspace = tmp_path / "workspace"
+    _write_healthy_audit_workspace(workspace)
+    (workspace / "research" / "projects" / "active" / "general").mkdir(parents=True)
+    (workspace / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "research", "vault_root": "research"}]),
+        encoding="utf-8",
+    )
+    memory_dir = tmp_path / "bounded"
+    memory_dir.mkdir()
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
+
+    # Another install's runtime root, exactly as a Ciaobot chat exports it.
+    foreign = tmp_path / "other-install" / ".runtime"
+    foreign.mkdir(parents=True)
+    (foreign / "workspaces.json").write_text(
+        json.dumps([{"name": "personal", "vault_root": "memory-vault/personal"}]),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(foreign))
+
+    assert cli.main(["os-audit", "--workspace", str(workspace), "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["job_runs_audit"]["runtime_root"] == str(workspace / ".runtime")
+    # The named workspace's own registry was read, so its nonstandard vault is
+    # still detected rather than the foreign install's healthy one.
+    assert report["pending_action_count"] == 1
+    assert report["upgrade_notices"]["notices"][0]["workspace"] == "research"
+
+
 def test_cli_os_audit_passes_the_workspace_registry_to_upgrade_notices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -243,13 +310,28 @@ def test_cli_os_audit_passes_the_workspace_registry_to_upgrade_notices(
     memory_dir.mkdir()
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
 
+    # A pending upgrade notice is an optional action the operator may decline.
+    # Under D2 it must not raise the status: this exits 0, and the notice is
+    # surfaced on its own line instead of the healthy one.
+    assert cli.main([
+        "os-audit",
+        "--workspace",
+        str(workspace),
+    ]) == 0
+    out = capsys.readouterr().out
+    assert "Pending actions" in out
+    assert "Upgrade Actions (optional)" in out
+
     assert cli.main([
         "os-audit",
         "--workspace",
         str(workspace),
         "--json",
-    ]) == 1
+    ]) == 0
     report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "healthy"
+    assert report["defect_count"] == 0
+    assert report["pending_action_count"] == 1
     notices = report["upgrade_notices"]["notices"]
     assert notices[0]["workspace"] == "research"
     assert "Open a Ciaobot chat" in notices[0]["remedy"]

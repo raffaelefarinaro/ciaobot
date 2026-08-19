@@ -737,3 +737,82 @@ def test_run_os_audit_preserves_distinct_errors_for_the_same_file(
     assert report["status"] == "error"
     assert report["total_errors"] == 2
     assert len(report["scan_errors"]) == 2
+
+
+def _upgrade_config(workspace: Path):
+    """Config whose vault registry pins a legacy sibling vault.
+
+    The pinned vault is left outside the standard folder so
+    `audit_upgrade_notices` reports it as an optional migration.
+    """
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    legacy = workspace / "research"
+    (legacy / "Workspace").mkdir(parents=True)
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=workspace,
+        vault_root=workspace / "memory-vault",
+        state_path=workspace / ".runtime" / "state.json",
+        media_root=workspace / ".runtime" / "media",
+        workspaces={
+            "research": WorkspaceConfig(name="research", vault_root="research"),
+        },
+    )
+
+
+def test_run_os_audit_pending_only_is_healthy(tmp_path: Path) -> None:
+    """One upgrade notice and zero defects must not raise the status.
+
+    A migration a user may decline must not pin the audit at needs_attention,
+    mirroring how `memory_actionable_count` treats superseded-state candidates.
+    """
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_upgrade_config(workspace),
+    )
+
+    assert report["status"] == "healthy"
+    assert report["total_issues"] == 0
+    assert report["defect_count"] == 0
+    assert report["pending_action_count"] == 1
+    assert report["has_pending_actions"] is True
+    markdown = format_audit_markdown(report)
+    assert "Upgrade Actions (optional)" in markdown
+    assert "Pending actions" in markdown
+
+
+def test_run_os_audit_split_counts_keep_pending_actions_out_of_defects(
+    tmp_path: Path,
+) -> None:
+    """A pending action is reported separately and never raises defect_count."""
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    (workspace / "skills" / "missing-md").mkdir(parents=True)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_upgrade_config(workspace),
+    )
+
+    assert report["defect_count"] == 1
+    assert report["pending_action_count"] == 1
+    assert report["has_pending_actions"] is True
+    assert report["status"] == "needs_attention"
+
+
+def test_run_os_audit_clean_has_no_pending_actions(tmp_path: Path) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+    )
+    assert report["status"] == "healthy"
+    assert report["defect_count"] == 0
+    assert report["pending_action_count"] == 0
+    assert report["has_pending_actions"] is False
