@@ -567,6 +567,44 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handov
   -H 'content-type: application/json' -d '{"branch":"main"}'
 ```
 
+**Proposal queue**
+
+Routes: `GET /api/proposals`, `POST /api/proposals/{id}/{action}` (action is
+`accept` or `dismiss`), `POST /api/proposals/batch`,
+`POST /api/proposals/dismiss-older-than`.
+
+```bash
+# List every queued proposal across all workspaces, plus skill-proposal files.
+# Each row: {id, kind, text, source, workspace, path, line}. `id` is a stable,
+# content-derived hash (survives other rows being dismissed). Rehome rows carry
+# `rehome: {destination, candidates[], justified, reason}` so a UI never
+# pre-accepts a destination no tag backs; region rows carry `region` and
+# `leak_warning` (true when accepting would write a foreign workspace's fact
+# into the primary workspace's injected region).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
+
+# Accept one row. Dispatches through the kind's own accept descriptor: memory/
+# profile/user are region edits (returns {action: edit_region, region,
+# leak_warning}), rehome is a file move (returns {action: move_file,
+# destination, justified}). The row is dismissed from the queue; promotion is
+# a separate explicit step, matching the MCP resolve path.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept"
+
+# Dismiss one row from the queue. No region/file is touched.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/dismiss"
+
+# Accept or dismiss a set atomically. Body: {"action":"accept|dismiss","ids":[...]}.
+# Every id must resolve or the whole batch is rejected (404) with no file change.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/batch" \
+  -H 'content-type: application/json' \
+  -d '{"action":"accept","ids":["<id1>","<id2>"]}'
+
+# Dismiss every row dated strictly before a cutoff (YYYY-MM-DD), atomically.
+# A July proposal about a forgotten chat is not worth promoting.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/dismiss-older-than?date=2026-08-01"
+```
+
+
 When adding a new state-changing route (`POST/PATCH/DELETE /api/...`), add an entry here or add the path to `BROWSER_OR_INTERNAL_ROUTES` in `tests/test_pwa_api_docs.py` with a one-line reason. The doc-sync test enforces this.
 
 **WebSocket events**

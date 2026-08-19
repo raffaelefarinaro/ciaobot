@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import functools
+import hashlib
 import json
 import logging
 import mimetypes
@@ -26,9 +27,12 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao import proposal_kinds
 from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
+from ciao import vault_rehome
+from ciao.memory_tool import resolve_region
 from ciao.config import WorkspaceConfig
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
@@ -6577,3 +6581,359 @@ async def cli_stats(request: Request) -> JSONResponse:
     except (json.JSONDecodeError, OSError):
         return JSONResponse({"error": "failed to read stats"}, status_code=500)
     return JSONResponse(data)
+
+
+# ── Proposal queue ──────────────────────────────────────────────────────
+
+
+# A section header opens with a date (either a plain ``YYYY-MM-DD`` or the
+# timestamped ``YYYY-MM-DDThh:mm:ss+00:00`` form the curators append). The date
+# is what ``dismiss-older-than`` buckets rows against.
+_SECTION_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})")
+# The queue file lives at this relative path inside each workspace's vault.
+_PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
+# Skill-proposal files live under this folder, one dated file per candidate.
+_SKILL_PROPOSALS_REL = ("Workspace", "Skill-Proposals")
+
+
+def _proposals_file(config, workspace: str) -> Path:
+    """The proposal queue for one workspace, rooted at its vault folder."""
+    return config.workspace_vault_root(workspace).joinpath(*_PROPOSALS_REL)
+
+
+def _skill_proposals_dir(config, workspace: str) -> Path:
+    """The skill-proposal queue folder for one workspace."""
+    return config.workspace_vault_root(workspace).joinpath(*_SKILL_PROPOSALS_REL)
+
+
+def _stable_proposal_id(workspace: str, path: str, kind: str, text: str, source: str, dup: int) -> str:
+    """A content-derived, stable id for one queued proposal.
+
+    The id hashes the bullet's content plus the workspace and file it lives in,
+    so dismissing a neighbouring row never renumbers or renames a survivor.
+    ``dup`` is the occurrence index among identical bullets inside one file,
+    used only to keep two textually identical rows addressable; it is stable
+    because it counts only same-file duplicates, which are unaffected by rows
+    in other files (or non-duplicate rows in this one) being removed.
+    """
+    digest = hashlib.sha256(f"{workspace}\x00{path}\x00{kind}\x00{text}\x00{source}".encode("utf-8")).hexdigest()[:16]
+    return f"{digest}{f':{dup}' if dup else ''}"
+
+
+def _rehome_signal(config) -> dict[str, dict[str, Any]]:
+    """Live rehome evidence for every person note, keyed by its queue path.
+
+    Re-computed from the vault rather than trusted from the bullet text: the
+    bullet records the destination and reason at queue time, but the UI needs
+    to know whether that destination is backed by a tag signal *now*. Keys are
+    the vault-relative path forms the bullet names (``personal/People/Mo.md``).
+    """
+    try:
+        candidates = vault_rehome.detect_misfiled_people(
+            config.vault_root, workspaces=config.workspace_names()
+        )
+    except Exception:  # noqa: BLE001 — a broken scan must not fail the list route
+        logger.exception("proposal list: rehome signal scan failed")
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    roles = vault_rehome.resolve_role_workspaces(list(config.workspace_names()))
+    for candidate in candidates:
+        # Only a single clean signal makes a destination justified; every
+        # judgement case the queue holds is explicitly not that.
+        justified = candidate.bucket == "mechanical" and bool(candidate.destination)
+        # The candidate set is tag-derived, not the guess: a no-tag note names
+        # no workspace even though a default counterpart was computed, and a
+        # dual-tag note names both. A UI renders these as a picker.
+        signalled_roles = {
+            vault_rehome.TAG_WORKSPACE_ROLES[t]
+            for t in candidate.tags
+            if t in vault_rehome.TAG_WORKSPACE_ROLES
+        }
+        candidate_ws = sorted({roles[role] for role in signalled_roles if role in roles} - {""})
+        out[candidate.path] = {
+            "destination": candidate.destination,
+            "target_workspace": candidate.target_workspace,
+            "reason": candidate.reason,
+            "justified": justified,
+            # Every workspace the tags name is a candidate destination. A
+            # dual-tag row yields two, so a UI can render a picker instead of a
+            # single pre-filled accept.
+            "candidates": candidate_ws,
+        }
+    return out
+
+
+def _leak_warning(config, kind: str, workspace: str) -> bool:
+    """True when accepting this row would leak a region into the wrong session.
+
+    A ``[memory]`` / ``[profile]`` accept edits one CLAUDE.md region that is
+    injected into every session of the *primary* workspace. Until per-workspace
+    guides land, a proposal queued from another workspace, accepted here, writes
+    a fact into sessions that did not originate it. Region-edit kinds only: a
+    rehome is a file move, not a region write, so it never leaks.
+    """
+    try:
+        accept = proposal_kinds.accept_for(kind)
+    except proposal_kinds.UnknownKindError:
+        return False
+    if accept.action != "edit_region":
+        return False
+    return workspace != config.primary_workspace()
+
+
+def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Scan every workspace's proposal queue and skill-proposal folder.
+
+    Returns (rows, by_id) where ``by_id`` maps a stable id to the file context
+    needed to remove that row later (workspace, absolute path, line index). Each
+    row carries the queue fields plus kind-specific signal: a rehome exposes
+    candidate destinations and whether any is justified, and a region accept
+    from a foreign workspace carries the leak warning.
+    """
+    primary = config.primary_workspace()
+    rows: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    rehome = _rehome_signal(config)
+
+    for workspace in config.workspace_names():
+        queue = _proposals_file(config, workspace)
+        rel_path = Path(workspace).joinpath(*_PROPOSALS_REL).as_posix()
+        seen_dup: dict[tuple[str, str, str, str], int] = {}
+        if queue.is_file():
+            for line_index, raw in enumerate(queue.read_text(encoding="utf-8").splitlines()):
+                bullet = proposal_kinds.parse_bullet(raw)
+                if bullet is None:
+                    continue
+                key = (bullet.kind, bullet.text, bullet.source)
+                dup = seen_dup.get(key, 0)
+                seen_dup[key] = dup + 1
+                pid = _stable_proposal_id(workspace, rel_path, bullet.kind, bullet.text, bullet.source, dup)
+                row: dict[str, Any] = {
+                    "id": pid,
+                    "kind": bullet.kind,
+                    "text": bullet.text,
+                    "source": bullet.source,
+                    "workspace": workspace,
+                    "path": rel_path,
+                    "line": line_index,
+                }
+                accept = proposal_kinds.accept_for(bullet.kind)
+                if accept.action == "edit_region":
+                    row["region"] = resolve_region(bullet.kind)
+                    row["leak_warning"] = _leak_warning(config, bullet.kind, workspace)
+                else:
+                    # Rehome rows: expose the live signal. The destination named
+                    # in the bullet is a guess unless the tags justify it, and a
+                    # dual-tag note names more than one candidate.
+                    signal = _rehome_lookup(rehome, bullet.text)
+                    row["rehome"] = {
+                        "destination": signal["destination"],
+                        "candidates": signal["candidates"],
+                        "justified": signal["justified"],
+                        "reason": signal["reason"],
+                    }
+                rows.append(row)
+                by_id[pid] = {
+                    "workspace": workspace,
+                    "path": str(queue),
+                    "line": line_index,
+                    "row": row,
+                }
+        # Skill proposals are files, not bullets: no parse_bullet, no accept
+        # descriptor, and a whole file is the atomic unit. Surface them under
+        # their own key so the read surface exists without pretending a file is
+        # a bullet.
+        skill_dir = _skill_proposals_dir(config, workspace)
+        if skill_dir.is_dir():
+            for f in sorted(skill_dir.glob("*.md")):
+                rows.append({
+                    "id": _stable_proposal_id(workspace, rel_path, "skill", f.name, "", 0),
+                    "kind": "skill",
+                    "text": f.stem,
+                    "source": "",
+                    "workspace": workspace,
+                    "path": Path(workspace).joinpath(*_SKILL_PROPOSALS_REL, f.name).as_posix(),
+                    "line": -1,
+                })
+    return rows, by_id
+
+
+def _rehome_lookup(rehome: dict[str, dict[str, Any]], text: str) -> dict[str, Any]:
+    """Resolve a rehome bullet's live signal from its named path.
+
+    The bullet names the source path in backticks (``personal/People/Mo.md``);
+    pull that out and match it against the scan keyed by path.
+    """
+    m = re.search(r"`((?:personal|work)/[^`]+\.md)`", text)
+    path = m.group(1) if m else ""
+    return rehome.get(path, {
+        "destination": "",
+        "candidates": [],
+        "justified": False,
+        "reason": "no live rehome signal for this note",
+    })
+
+
+async def list_proposals(request: Request) -> JSONResponse:
+    """Return every queued proposal across workspaces, plus skill proposals.
+
+    Rows are keyed by a stable content-derived id so a UI can act on one without
+    a later dismiss renumbering it (see ``_stable_proposal_id``). Rehome rows
+    carry candidate destinations and a ``justified`` flag, so the UI never
+    pre-fills an accept for a destination no tag backs. Skill-proposal files are
+    surfaced under the same ``rows`` list with ``kind: "skill"``.
+    """
+    config = request.app.state.config
+    rows, _by_id = _scan_proposal_rows(config)
+    return JSONResponse({"rows": rows})
+
+
+def _resolve_batch(config, ids: list[str]) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Map ids to removable file contexts, or return an error.
+
+    Returns (None, error) on the first unknown id: the whole batch must resolve
+    before anything is written, so an unknown id aborts the batch without
+    touching any file.
+    """
+    _, by_id = _scan_proposal_rows(config)
+    resolved: list[dict[str, Any]] = []
+    for pid in ids:
+        ctx = by_id.get(pid)
+        if ctx is None:
+            return None, f"unknown proposal id: {pid}"
+        resolved.append(ctx)
+    return resolved, None
+
+
+async def dismiss_older_than(request: Request) -> JSONResponse:
+    """Atomically drop every queued row dated before a cutoff.
+
+    A July proposal about a forgotten chat is not worth promoting; this clears
+    whole dated sections at once. Atomic: all matching rows are removed in one
+    rewrite of each affected file, so a crash mid-batch leaves no file half
+    written.
+    """
+    config = request.app.state.config
+    raw = request.query_params.get("date", "").strip()
+    try:
+        cutoff = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return JSONResponse({"error": "date must be YYYY-MM-DD"}, status_code=400)
+    removed = 0
+    for workspace in config.workspace_names():
+        queue = _proposals_file(config, workspace)
+        if not queue.is_file():
+            continue
+        lines = queue.read_text(encoding="utf-8").splitlines()
+        keep = []
+        section_date = None
+        changed = False
+        for raw_line in lines:
+            m = _SECTION_DATE_RE.match(raw_line)
+            if m:
+                section_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+                keep.append(raw_line)
+                continue
+            if proposal_kinds.parse_bullet(raw_line) is not None and section_date is not None and section_date < cutoff:
+                removed += 1
+                changed = True
+                continue
+            keep.append(raw_line)
+        if changed:
+            queue.write_text("\n".join(keep).rstrip() + "\n", encoding="utf-8")
+    return JSONResponse({"ok": True, "removed": removed})
+
+
+async def proposals_batch(request: Request) -> JSONResponse:
+    """Accept or dismiss a set of proposals atomically.
+
+    Body: ``{"action": "accept"|"dismiss", "ids": [...]}``. Every id must
+    resolve or the batch is rejected with 404 and no file changes. ``accept``
+    routes through each row's own descriptor (region edit for memory/profile,
+    a file move for rehome) and returns per-row results; it never performs the
+    edit itself, matching the MCP resolve path where promotion is a separate
+    explicit step.
+    """
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    action = str(body.get("action", "")).strip()
+    raw_ids = body.get("ids")
+    if action not in {"accept", "dismiss"} or not isinstance(raw_ids, list) or not raw_ids:
+        return JSONResponse({"error": "action must be accept|dismiss and ids[] is required"}, status_code=400)
+    ids = [str(pid).strip() for pid in raw_ids]
+    resolved, error = _resolve_batch(config, ids)
+    if error:
+        return JSONResponse({"error": error}, status_code=404)
+
+    # Group by file so each affected file is rewritten exactly once.
+    by_file: dict[str, dict[str, Any]] = {}
+    for ctx in resolved:
+        entry = by_file.setdefault(ctx["path"], {"workspace": ctx["workspace"], "lines": set(), "rows": []})
+        entry["lines"].add(ctx["line"])
+        entry["rows"].append(ctx["row"])
+
+    results = []
+    for path, entry in by_file.items():
+        queue = Path(path)
+        lines = queue.read_text(encoding="utf-8").splitlines()
+        # Remove highest index first so lower indices stay valid.
+        for line_index in sorted(entry["lines"], reverse=True):
+            if 0 <= line_index < len(lines):
+                del lines[line_index]
+        queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        for row in entry["rows"]:
+            if action == "accept":
+                accept = proposal_kinds.accept_for(row["kind"])
+                result = {
+                    "id": row["id"],
+                    "action": accept.action,
+                    "dismissed": True,
+                }
+                if accept.action == "edit_region":
+                    result["region"] = accept.region
+                    result["leak_warning"] = row.get("leak_warning", False)
+                else:
+                    result["destination"] = row.get("rehome", {}).get("destination", "")
+                    result["justified"] = row.get("rehome", {}).get("justified", False)
+                results.append(result)
+            else:
+                results.append({"id": row["id"], "action": "dismiss", "dismissed": True})
+    return JSONResponse({"ok": True, "action": action, "results": results})
+
+
+async def proposal_action(request: Request) -> JSONResponse:
+    """Accept or dismiss exactly one proposal by its stable id.
+
+    ``accept`` dispatches through the kind's own descriptor: a memory/profile
+    accept is a region edit, a rehome accept is a file move. The endpoint
+    dismisses the queue row (promotion is a separate explicit step) and returns
+    the descriptor so a UI knows which action it should take. Unknown id is 404.
+    """
+    config = request.app.state.config
+    pid = request.path_params["id"]
+    _rows, by_id = _scan_proposal_rows(config)
+    ctx = by_id.get(pid)
+    if ctx is None:
+        return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
+    action = request.path_params.get("action", "").strip()
+    queue = Path(ctx["path"])
+    lines = queue.read_text(encoding="utf-8").splitlines()
+    line_index = ctx["line"]
+    if 0 <= line_index < len(lines):
+        del lines[line_index]
+    queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    row = ctx["row"]
+    if action == "accept":
+        accept = proposal_kinds.accept_for(row["kind"])
+        result = {"id": pid, "action": accept.action, "dismissed": True}
+        if accept.action == "edit_region":
+            result["region"] = accept.region
+            result["leak_warning"] = row.get("leak_warning", False)
+        else:
+            result["destination"] = row.get("rehome", {}).get("destination", "")
+            result["justified"] = row.get("rehome", {}).get("justified", False)
+        return JSONResponse({"ok": True, "result": result})
+    return JSONResponse({"ok": True, "result": {"id": pid, "action": "dismiss", "dismissed": True}})
