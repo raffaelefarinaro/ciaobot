@@ -208,3 +208,19 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   pre-existing failures and which delegate owns them, hands off the operator's `web/` work,
   never state a future layout in the present tense, and add the ARCHITECTURE.md module-index
   line when creating a `ciao/` module.
+- 2026-08-19 — **Wave 2 lost to stalled delegates.** All three (P2 chat-e9dc55ae, P7
+  chat-0ab3eaa0, P5-server chat-435c3120) sat at `running: true` for 4.5 hours with
+  `last_activity_at` still equal to `created_at`, no `.runtime/transcripts/<chat>/` directory
+  (every wave-1 chat has one), no opencode session storage on disk, and zero file writes.
+  Two `opencode serve` processes were alive but did not answer `/session` within 5s.
+  Ruled out: a server restart (the desktop app has been up since 15:17, before the 16:15
+  dispatch) and concurrency (wave 1 ran 4 delegates fine). Stopped all three via `chat_stop`
+  and re-dispatched P2 and P7. Verified first that HEAD matched the wave-1 commits, so nothing
+  half-written was left behind.
+- 2026-08-19 — The wave-1 P1 chat reported FAILED long after its work was committed. Read its
+  transcript: a new session at 18:48 ran `vault_search("bypass mode")` and `delegates_list`,
+  then `"response": "Aborted"`. Someone typed into the delegate chat rather than the delegate
+  resuming itself. Confirmed no repo impact: `git diff HEAD` over all six P1 files is empty.
+  Not a code failure.
+- 2026-08-19 — Holding P5-server until P2 or P7 shows real activity, rather than re-sending a
+  third large brief into a provider that just ate three of them.
