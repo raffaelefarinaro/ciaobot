@@ -34,14 +34,14 @@ Re-verified by symbol against the working tree before any dispatch:
 |---|---|---|---|
 | P1 Proposal-kind registry | delegate | DONE | commit 83000847 |
 | P2 Audit split (D2) | delegate | DONE | commit c121678b; pre-existing os-audit failure fixed too |
-| P3 unrehomed_people notice | delegate | RUNNING | chat-23268601 |
-| P4 Surfaced-actions strip | — | TODO | needs P2, P3 |
+| P3 unrehomed_people notice | delegate | DONE | commit 4cc0510f |
+| P4 Surfaced-actions strip | — | BLOCKED | needs `os_audit.py` (P9) and `routes_api.py` (P8); ALSO needs the operator's ChatLayout.vue work landed |
 | P5 Queue review UI | split | PARTIAL | server half DONE, commit b77f78b4; UI half still TODO |
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
-| P8 Session paths | — | TODO | needs P6; shares `project_chats.py` with P7 |
-| P9 Per-root memory + MCP allowlist | — | TODO | needs P2, P6 |
+| P8 Session paths | delegate | RUNNING | chat-5e5fee60 |
+| P9 Per-root memory + MCP allowlist | delegate | RUNNING | chat-1c687242 |
 | P10 The cut | — | TODO | gated on all of P1–P9 + V1–V3 |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | — | TODO | with P10 |
@@ -320,3 +320,35 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   detector must NOT reach this endpoint for a count, or the cheap-detection rule (P4.3) is broken
   through the back door. Once P3's survey receipt exists, this should read the receipt instead.
   P4's brief must say so.
+- 2026-08-19 — P3 verified and committed as `4cc0510f`. Aborted mid-verification after 125 tool
+  events (transcript `response: "Aborted"`), but the work was substantially complete and its 82
+  tests passed. Design is strong: `survey_vault_people` reuses `plan_rehome` with nothing applied,
+  `read_receipt` now gates on `status == "migrated"`, and the delegate added `peek_receipt` for the
+  detection side on its own initiative, correctly reasoning that `read_receipt` returning None for a
+  survey would hide the very damage the notice exists to surface. The survey also refuses to
+  overwrite a migrated receipt, protecting the reverse map.
+- 2026-08-19 — Coordinator found and fixed a false positive: the notice fired on EVERY install that
+  had never surveyed, including a fresh single-workspace one with an empty vault. Reproduced it
+  directly. Investigated rather than assuming: `detect_misfiled_people` DOES return a candidate with
+  one registered workspace, but with `target_workspace=''` and `destination=''`, so there is nowhere
+  to move the note and the tile offers no action. My first comment claimed no candidate is produced
+  at all, which is wrong; corrected to state the empty-destination reason. Gated on
+  `len(names) > 1`, mutation-checked.
+  Knock-on: P3 had raised two of P2's count expectations to absorb its always-firing notice, so both
+  were corrected back down, and the notice's own tests now register two workspaces, which is the
+  shape the damage actually needs. Full suite 2631 passed / 1 pre-existing failure.
+- 2026-08-19 — `vault_migration` and `vault_migrate_links` checked for the same receipt defect and
+  DELIBERATELY LEFT ALONE. Neither writes a `status` field, so presence is equivalent to migrated for
+  them, and D4's literal instruction (gate on `status == "migrated"`) would make every existing
+  receipt read as unfinished and re-run a completed migration. That is a destructive change with no
+  live bug to justify it. When P10 gives either module a survey mode, the gate must be added as
+  "absent status counts as migrated" so legacy receipts keep working.
+- 2026-08-19 — Wave 4 dispatched: P8 (`chat-5e5fee60`) and P9 (`chat-1c687242`), file-disjoint.
+  P9's brief flags that its MCP change must fail CLOSED on a malformed `.mcp.json`, must compose with
+  `_DEFAULT_HARNESS_DISALLOWED_TOOLS` rather than replace it, and must report over-cap per guide
+  rather than as one global number.
+- 2026-08-19 — **P4 is blocked on the operator, not on a delegate.** It owns
+  `web/src/components/ChatLayout.vue`, which carries uncommitted permission-shortcut work. It also
+  needs `os_audit.py` (held by P9) and `routes_api.py` (held by P8). Its brief must additionally
+  forbid the `review-queue-depth` detector from calling `GET /api/proposals`, because that endpoint
+  walks the vault via `_rehome_signal` and would break the cheap-detection rule through the back door.
