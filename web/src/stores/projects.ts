@@ -222,6 +222,15 @@ export const useProjectStore = defineStore('projects', () => {
   // Per-project "new chat is being created" flag so UI can disable buttons
   // and prevent double-clicks while the POST is in flight.
   const creatingChatProjectIds = ref<Record<string, boolean>>({})
+  // Not reactive UI state, just an in-flight guard: `creatingChatProjectIds`
+  // is a display flag consumers can ignore (a second click landing before
+  // Vue re-renders, a duplicated keyboard handler), so a second createChat()
+  // call for the same project could still fire before the first POST
+  // resolves. The server's create_chat sweeps other empty "New Chat" shells
+  // on every call, so two overlapping calls raced each other's chat out of
+  // existence right as the panel switched to it. Keying the pending promise
+  // by project makes a second call join the first instead of double-posting.
+  const pendingChatCreations: Record<string, Promise<ChatInfo>> = {}
   // the tool call with empty answers, so the PWA renders its own picker above
   // the composer. Cleared the next time the user sends a message (their reply
   // implicitly answers, regardless of whether they clicked an option).
@@ -1777,27 +1786,37 @@ export const useProjectStore = defineStore('projects', () => {
   // ── Chat actions ────────────────────────────────────────────────────
 
   async function createChat(projectId: string, title = DEFAULT_CHAT_TITLE, seedDraft?: string) {
-    creatingChatProjectIds.value[projectId] = true
-    try {
-      const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
-      // The server also broadcasts chat_created for this same chat. The
-      // broadcast can arrive before the POST response, so reconcile through
-      // the ID-aware helper instead of pushing a possible duplicate.
-      replaceChat(c)
-      messages.value[c.chat_id] = []
-      // Write before switching: ChatPanel reads the draft once at mount, so
-      // this must already be in storage before the new panel mounts below.
-      if (seedDraft) {
-        const seedWorkspace = projects.value.find(p => p.project_id === projectId)?.workspace
-          ?? activeWorkspace.value
-        writeChatDraft(c.chat_id, seedDraft, undefined, { projectId, workspace: seedWorkspace })
+    // Join an already-in-flight creation for this project instead of firing
+    // a second POST: see the comment on pendingChatCreations above.
+    const pending = pendingChatCreations[projectId]
+    if (pending) return pending
+
+    const promise = (async () => {
+      creatingChatProjectIds.value[projectId] = true
+      try {
+        const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
+        // The server also broadcasts chat_created for this same chat. The
+        // broadcast can arrive before the POST response, so reconcile through
+        // the ID-aware helper instead of pushing a possible duplicate.
+        replaceChat(c)
+        messages.value[c.chat_id] = []
+        // Write before switching: ChatPanel reads the draft once at mount, so
+        // this must already be in storage before the new panel mounts below.
+        if (seedDraft) {
+          const seedWorkspace = projects.value.find(p => p.project_id === projectId)?.workspace
+            ?? activeWorkspace.value
+          writeChatDraft(c.chat_id, seedDraft, undefined, { projectId, workspace: seedWorkspace })
+        }
+        // We just created it, so there is no history to fetch.
+        switchChat(c.chat_id, { skipHistory: true })
+        return c
+      } finally {
+        delete creatingChatProjectIds.value[projectId]
+        delete pendingChatCreations[projectId]
       }
-      // We just created it, so there is no history to fetch.
-      switchChat(c.chat_id, { skipHistory: true })
-      return c
-    } finally {
-      delete creatingChatProjectIds.value[projectId]
-    }
+    })()
+    pendingChatCreations[projectId] = promise
+    return promise
   }
 
   async function renameChat(chatId: string, title: string) {

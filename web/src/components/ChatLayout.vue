@@ -795,6 +795,13 @@ function onUnreservedKeydown(e: KeyboardEvent) {
 
 function onShortcutKeydown(e: KeyboardEvent) {
   if (!shortcutsActive.value) return
+  // Holding the chord repeats the keydown at OS speed. None of these actions
+  // are meant to fire more than once per press: New Chat created a fresh
+  // "New Chat" on every repeat (each POST racing the server's empty-chat
+  // sweep against the one before it, so the panel kept snapping to a newer
+  // chat instead of opening directly), and dictation/sidebar/model-picker
+  // would otherwise toggle back and forth for as long as the key was held.
+  if (e.repeat) return
 
   // Arrow keys and Esc are handled by onUnreservedKeydown, which is bound in
   // both the PWA and the desktop app. Handling them here too made the desktop
