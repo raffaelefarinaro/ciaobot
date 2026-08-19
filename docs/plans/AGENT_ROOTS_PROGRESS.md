@@ -35,7 +35,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P1 Proposal-kind registry | delegate | DONE | commit 83000847 |
 | P2 Audit split (D2) | delegate | DONE | commit c121678b; pre-existing os-audit failure fixed too |
 | P3 unrehomed_people notice | delegate | DONE | commit 4cc0510f |
-| P4 Surfaced-actions strip | — | BLOCKED | needs `os_audit.py` (P9) and `routes_api.py` (P8); ALSO needs the operator's ChatLayout.vue work landed |
+| P4 Surfaced-actions strip | delegate | RUNNING | chat-4710c68d, minus P4.2 (os_audit, held by P9) and P4.7 (ChatLayout.vue, still dirty) |
 | P5 Queue review UI | split | PARTIAL | server half DONE, commit b77f78b4; UI half still TODO |
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
@@ -373,3 +373,20 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   Rewritten to assert the slug differs per root and to document why the net stays until roots
   actually differ. Also fixed a shadowed `root` local in `_claude_session_exists`.
   Suite: 2548 passed / 1 pre-existing failure (P9's two files excluded, another delegate holds them).
+- 2026-08-19 — **Bypass mode: now settled empirically, not by inference.** Passed
+  `mode: "bypass"` explicitly to `delegate_spawn` for P4. The created chat came back
+  `"mode":"auto"`. So the `_child_mode` clamp applies to `delegate_spawn` as well as
+  `chat_update`, and a coordinating chat in `auto` cannot grant bypass by any tool argument.
+  The only lever is the operator setting the COORDINATING chat to Bypass; children then inherit it.
+  This is the third time it has come up, so it is now recorded with direct evidence.
+- 2026-08-19 — P4 dispatched (`chat-4710c68d`) with two deliberate deferrals, both file-contention:
+  P4.2 (rebuilding `audit_upgrade_notices` from the registry) waits for P9 to release
+  `ciao/os_audit.py`; P4.7 (mounting the strip in `ChatLayout.vue`) waits for the operator's
+  uncommitted permission-shortcut work. The brief tells the delegate to design for both as small
+  follow-ups and to report the exact insert points.
+  Its brief also carries the two lessons this release paid for: a route not registered in `app.py`
+  does not exist, and a new `ciao/*.py` module must be indexed in ARCHITECTURE.md. It owns both
+  files this time.
+- 2026-08-19 — `web/src/components/ChatLayout.vue` is still UNCOMMITTED (7 permission-shortcut lines
+  live in the working tree). Commit `7c7e21f9` touches that file but is an earlier, unrelated change
+  ("fix(home): show loading feedback...", 16:42) already in HEAD. P4.7 stays blocked.
