@@ -224,3 +224,22 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   Not a code failure.
 - 2026-08-19 — Holding P5-server until P2 or P7 shows real activity, rather than re-sending a
   third large brief into a provider that just ate three of them.
+- 2026-08-19 — **CORRECTION to the stall diagnosis above. It was wrong.** Ciaobot timestamps
+  are UTC (`...Z`); `date` and `ps` on this machine are CEST (UTC+2). I read the two as the
+  same clock. Consequences:
+  * Wave 2 had been running 2h36m, not 4.5 hours. Wave 1's slowest delegate took 1h48m, so
+    wave 2 was about 45 minutes past precedent, not four hours past it.
+  * "No `.runtime/transcripts/<chat>/` directory" is NOT evidence a delegate is dead. The
+    wave-2b retries are alive with a matching `opencode serve` process each and have no
+    transcript directory either. A transcript appears when output is written, not at start.
+  * The "server has been up since 15:17, before the 16:15 dispatch" inference was also wrong:
+    15:17 local is 13:17Z, so the server started BEFORE wave 1, not between the waves.
+  So the kill criterion was unsound and I probably stopped three slow-but-live delegates.
+  Cost: three re-sent briefs and roughly 2.5 hours.
+  Correct signals for "dead" in future: an `opencode serve` process with no matching pid, an
+  aborted run recorded in `.runtime/transcripts/<chat>/opencode.json`, or an error in
+  `.runtime/server_errors.log`. Compare UTC to UTC before concluding anything about elapsed time.
+- 2026-08-19 — Wave 2b status: `chat-038347fd` (P2) and `chat-0a09a22d` (P7) created 18:53Z,
+  each with a live `opencode serve` started at the matching local time. Running normally.
+  The `server_errors.log` holds nothing relevant: one 09:02Z schedule-classifier JSON error and
+  five `ClientDisconnect` traces from the MCP HTTP endpoint, all unrelated to delegate startup.
