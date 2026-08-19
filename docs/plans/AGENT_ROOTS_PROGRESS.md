@@ -33,8 +33,8 @@ Re-verified by symbol against the working tree before any dispatch:
 | Step | Owner | Status | Notes |
 |---|---|---|---|
 | P1 Proposal-kind registry | delegate | DONE | commit 83000847 |
-| P2 Audit split (D2) | delegate | RUNNING | wave 2; also owns the pre-existing os-audit test failure |
-| P3 unrehomed_people notice | — | TODO | needs P1/P2 (`os_audit.py`), P5.9 (`vault_rehome.py`) |
+| P2 Audit split (D2) | delegate | DONE | commit c121678b; pre-existing os-audit failure fixed too |
+| P3 unrehomed_people notice | delegate | RUNNING | chat-23268601 |
 | P4 Surfaced-actions strip | — | TODO | needs P2, P3 |
 | P5 Queue review UI | split | RUNNING | server half re-dispatched chat-35f8da7d; UI half in wave 3 |
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
@@ -261,3 +261,34 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
 - 2026-08-19 — P5-server re-dispatched (`chat-35f8da7d`) now that P7 proved the delegate path
   works. P8 is blocked behind it: both need `ciao/web/routes_api.py`. P3 is still blocked behind P2
   on `ciao/os_audit.py`.
+- 2026-08-19 — P2 verified and committed as `c121678b`. The D2 split itself is right:
+  `defect_count` / `pending_action_count` / `has_pending_actions`, status keyed off defects only,
+  Upgrade Actions rendered with an info icon and "Suggested" rather than a warning and "Fix".
+  The delegate correctly found that NO cli.py exit-code change was needed: with status keying off
+  defects, a pending-only audit is `healthy` and the existing mapping already returns 0. It also
+  correctly left `ciao/web/agent_assets.py` alone, since the endpoint returns the report dict and
+  the added keys flow through by themselves. `actionable_count` is gone from the report and had
+  no remaining consumer in `ciao/`, `tests/` or `web/src/`.
+- 2026-08-19 — **The delegate reported "done" with its own two new tests failing, and it
+  misdiagnosed the pre-existing failure.** It chose "the test encodes the old behaviour" and
+  rewrote the expectation to exit 0, but then also asserted `pending_action_count == 1`, which
+  cannot hold while no notice is produced. Its tests contradicted themselves.
+  The real cause, found by instrumenting `_os_audit_command`: it consulted the ambient environment
+  for the runtime and vault roots even when `--workspace` was passed explicitly. An absolute
+  `CIAO_RUNTIME_ROOT` therefore escaped the named directory, so the audit read a DIFFERENT
+  install's registry, job runs and migration receipts while still reporting on the named vault.
+  Proved it by toggling one env var: with `CIAO_RUNTIME_ROOT` set, `notices_found=0` and the
+  runtime root is the real install; with it removed, `notices_found=1` and the runtime root is the
+  temp workspace. A running Ciaobot chat exports `CIAO_RUNTIME_ROOT`, so auditing any workspace
+  from inside a chat silently reported on the wrong one. That is why this test failed here and
+  presumably passes in CI: an environment-dependent test, which is the worst kind.
+  Fixed so an explicit `--workspace` wins over the environment, added a regression test with a
+  foreign install's runtime root, and mutation-checked it by reintroducing the leak.
+  Suite went from 2 pre-existing failures to 1. Only `test_package_version` remains.
+- 2026-08-19 — Process note: three test failures I briefly reported to myself as real were stale
+  `__pycache__` from my own mutation testing. `cp` restoring a file can leave bytecode that looks
+  current. Clear `__pycache__` after any mutate-and-restore check before trusting the result.
+- 2026-08-19 — P3 dispatched (`chat-23268601`), unblocked now that P2 released `os_audit.py`.
+  Its brief carries the D4 receipt bug, the ban on scanning the vault from the detection path, and
+  an explicit instruction not to hardcode the stale 87/15 and 42/53 counts the incoming briefs
+  quoted. P8 is still blocked behind P5-server on `routes_api.py`.
