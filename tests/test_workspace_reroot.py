@@ -1279,3 +1279,104 @@ def test_a_dirty_guide_refuses_before_anything_moves(tmp_path: Path) -> None:
     assert result["status"] == "refused"
     assert result["dirty_tracked"] == ["CLAUDE.md"]
     assert (install / "memory-vault").is_dir()
+
+
+# -- P10.6, session half -----------------------------------------------------
+#
+# Every live chat's provider session is keyed by the cwd it started in, and the
+# migration changes that cwd. On the reference install that is 8 open chats, all
+# holding a session, none flagged — so before this, running the migration made
+# all 8 silently forget on their next turn.
+
+
+def _chat_store(runtime: Path, chats: dict) -> Path:
+    path = runtime / "web_projects.json"
+    path.write_text(
+        json.dumps({"version": 1, "revision": 3, "projects": {}, "chats": chats}, indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _stored(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))["chats"]
+
+
+def test_apply_flags_every_open_chat_that_holds_a_session(tmp_path: Path) -> None:
+    from ciao.workspace_reroot import flag_stranded_sessions
+
+    install, vault, runtime = _git_install(tmp_path)
+    store = _chat_store(
+        runtime,
+        {
+            "chat-live": {"session_id": "s1", "archived": False, "mode": "auto"},
+            "chat-archived": {"session_id": "s2", "archived": True},
+            "chat-fresh": {"session_id": "", "archived": False},
+            "chat-already": {
+                "session_id": "s3",
+                "archived": False,
+                "handover_context_pending": True,
+            },
+        },
+    )
+
+    result = flag_stranded_sessions(runtime)
+
+    assert result["flagged"] == ["chat-live"]
+    chats = _stored(store)
+    assert chats["chat-live"]["handover_context_pending"] is True
+    # An archived chat has no live session; one that never started a provider
+    # session has nothing to hand over; one already pending belongs to whatever
+    # set it.
+    assert "handover_context_pending" not in chats["chat-archived"]
+    assert "handover_context_pending" not in chats["chat-fresh"]
+    assert chats["chat-already"]["handover_context_pending"] is True
+    # An unknown key a future release adds must survive.
+    assert chats["chat-live"]["mode"] == "auto"
+
+
+def test_apply_reports_the_stranded_session_count(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    _chat_store(runtime, {"chat-live": {"session_id": "s1", "archived": False}})
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["stranded_sessions"]["flagged"] == ["chat-live"]
+
+
+def test_undo_clears_only_the_flags_this_migration_set(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = _chat_store(
+        runtime,
+        {
+            "chat-live": {"session_id": "s1", "archived": False},
+            "chat-already": {
+                "session_id": "s2",
+                "archived": False,
+                "handover_context_pending": True,
+            },
+        },
+    )
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    result = undo(install, runtime)
+
+    assert result["cleared_handover_flags"] == 1
+    chats = _stored(store)
+    assert chats["chat-live"]["handover_context_pending"] is False
+    assert chats["chat-already"]["handover_context_pending"] is True
+
+
+def test_a_missing_or_unreadable_chat_store_does_not_fail_the_migration(
+    tmp_path: Path,
+) -> None:
+    """A migration must not refuse because a derived state file is unreadable."""
+    from ciao.workspace_reroot import flag_stranded_sessions
+
+    install, vault, runtime = _git_install(tmp_path)
+    assert flag_stranded_sessions(runtime)["flagged"] == []
+    (runtime / "web_projects.json").write_text("{not json", encoding="utf-8")
+
+    assert flag_stranded_sessions(runtime)["flagged"] == []
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert result["status"] == "migrated", result.get("refusals")

@@ -1765,6 +1765,10 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
     stopping halfway, because a half-rooted install has no filter over a still
     prefixed index and would make every entity visible in every session. --undo
     stays CLI only: reverting the architecture is not a housekeeping button.
+
+    --apply must be run with the app stopped. It moves the vault and writes the
+    chat state file, so a live server would both read a path that no longer
+    exists and overwrite the handover flags from its in-memory copy.
     """
     from ciao import workspace_reroot
 
@@ -2790,7 +2794,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Prints the plan by default and changes nothing; --rehearse records a "
             "receipt without moving; --apply performs the migration, moves the "
             "skill catalog to the primary root with a blank triage sheet, and "
-            "rebuilds each root's index and search database; --repair reconciles "
+            "rebuilds each root's index and search database, and flags every open "
+            "chat for a context handover; --repair reconciles "
             "an already-migrated install back to the registry; --undo restores "
             "the layout exactly, leaving only the rebuilt per-root index and "
             "vocabulary behind for git status to report."

@@ -906,6 +906,21 @@ into `apply()` must land before the real migration runs.**
   removed whole rather than listed file by file.
 - The clean-tree gate now covers the guide too, since it moves.
 
+**P10.6's session half had also never landed**, and running the migration without it made every
+live chat forget. `handover_context_pending` existed on `ChatInfo` and was set by the fork and
+provider-switch paths, but nothing in the migration touched it: a provider session is keyed by the
+cwd it started in, the migration changes that cwd, so the next turn would have started a fresh
+session with no capsule and no explanation. `flag_stranded_sessions` now marks every open chat
+holding a session and reports the count; only the ids it set are recorded, so undo clears exactly
+those. Archived chats and chats that never started a session are skipped, and a flag another path
+already set is left to its owner. Verified against the live chat store copied into a clone: 4 chats
+were already flagged for their own reasons, the migration flagged the **8** open ones with live
+sessions, and undo cleared exactly those 8 and left the original 4. The symlink alternative stays
+rejected for the reasons the design record gives.
+  It writes the state file directly, so **the migration must be run with the app stopped** — a live
+  server would overwrite it from its in-memory copy on the next save. That is not a new constraint:
+  the migration moves the vault out from under a running server either way.
+
 **Verified on a second APFS clone of the live install, migrated from a genuinely clean tree:**
 9 moves; the 27377-byte guide landed at `personal/CLAUDE.md` byte-identical; `work/CLAUDE.md` is
 23749 bytes with **0 entries in both regions** while personal keeps all **20** (18 memory,

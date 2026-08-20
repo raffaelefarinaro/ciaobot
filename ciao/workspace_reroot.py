@@ -459,6 +459,11 @@ def apply(
     payload["created_files"] = created
     payload["created_dirs"] = created_dirs
 
+    # Sessions are keyed by cwd, and the cwd just changed. Flag rather than
+    # pretend, and report the count so a user whose long chat resets knows why.
+    sessions = flag_stranded_sessions(runtime_root)
+    payload["stranded_sessions"] = sessions
+
     payload["status"] = "migrated"
     payload["applied"] = applied
     payload["stashed_files"] = stashed
@@ -558,6 +563,10 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     if before is not None:
         _write_registry(runtime_root, before)
 
+    cleared = clear_stranded_sessions(
+        runtime_root, list((receipt.get("stranded_sessions") or {}).get("flagged") or [])
+    )
+
     remove_receipt(runtime_root)
     from ciao.config import reset_reroot_cache
 
@@ -567,6 +576,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         "reversed": reversed_moves,
         "restored_stashed": restored,
         "removed_created": removed,
+        "cleared_handover_flags": cleared,
     }
 
 
@@ -774,6 +784,92 @@ def read_region_text(text: str, region: str) -> tuple[list[str], list[Any]]:
     if match is None:
         return [], [f"missing markers for {canonical}"]
     return parse_entries(match.group(1)), []
+
+
+# -- P10.6, session half: say so rather than faking continuity ---------------
+
+
+def chat_store_file(runtime_root: Path) -> Path:
+    return Path(runtime_root) / "web_projects.json"
+
+
+def flag_stranded_sessions(runtime_root: Path) -> dict[str, Any]:
+    """Mark every open chat's provider session as needing a handover.
+
+    Every live chat's provider session is keyed by the cwd it was started in, and
+    the migration changes that cwd, so the session cannot be found again. The
+    honest response is to carry a context capsule into a fresh session rather
+    than let the next turn silently forget: ``handover_context_pending`` is
+    exactly the flag the fork and provider-switch paths already use for this.
+
+    Considered and rejected: symlinking the old ``~/.claude/projects/<slug>`` to
+    the new one. It is an undocumented SDK layout outside the workspace, it would
+    break session listing for both slugs, and one old slug maps to N new ones.
+
+    Rewrites the raw dict rather than round-tripping through ``ChatInfo``, so an
+    unknown key a future release adds survives a migration meant to set one
+    field. Records only the ids it changed, not the whole 2.6 MB store, so undo
+    clears exactly those flags and the receipt stays readable.
+
+    NOTE: this writes the state file directly. The migration moves the vault out
+    from under a running server anyway, so it must be run with the app stopped;
+    a live server would otherwise overwrite this from its in-memory copy on its
+    next save.
+    """
+    path = chat_store_file(runtime_root)
+    if not path.is_file():
+        return {"flagged": [], "reason": "no chat store"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        return {"flagged": [], "reason": f"could not read {path}: {exc}"}
+    chats = data.get("chats") if isinstance(data, dict) else None
+    if not isinstance(chats, dict):
+        return {"flagged": [], "reason": "chat store has no chats map"}
+
+    flagged: list[str] = []
+    for chat_id, chat in chats.items():
+        if not isinstance(chat, dict):
+            continue
+        # An archived chat has no live session to strand, and one that never
+        # started a provider session has nothing to hand over.
+        if chat.get("archived") or not str(chat.get("session_id") or "").strip():
+            continue
+        if chat.get("handover_context_pending"):
+            continue  # already pending for another reason; leave it to its owner
+        chat["handover_context_pending"] = True
+        flagged.append(str(chat_id))
+
+    if flagged:
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    return {"flagged": flagged}
+
+
+def clear_stranded_sessions(runtime_root: Path, chat_ids: list[str]) -> int:
+    """Undo half of :func:`flag_stranded_sessions`, by recorded id only."""
+    path = chat_store_file(runtime_root)
+    if not path.is_file() or not chat_ids:
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return 0
+    chats = data.get("chats") if isinstance(data, dict) else None
+    if not isinstance(chats, dict):
+        return 0
+    cleared = 0
+    for chat_id in chat_ids:
+        chat = chats.get(str(chat_id))
+        if isinstance(chat, dict) and chat.get("handover_context_pending"):
+            chat["handover_context_pending"] = False
+            cleared += 1
+    if cleared:
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    return cleared
 
 
 # -- P10.4 applied: give every root its own guide ----------------------------
