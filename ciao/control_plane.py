@@ -21,7 +21,13 @@ from typing import Any, Literal
 
 from ciao import proposal_kinds, vault_index
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
-from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
+from ciao.fts_search import (
+    get_db_path,
+    index_vault,
+    init_db,
+    search_vault,
+    vault_key_prefix,
+)
 from ciao.loops import publish_loops_changed
 from ciao.memory_tool import memory_status as memory_status_payload
 from ciao.memory_tool import MemoryCapExceeded, resolve_region, update_region
@@ -649,14 +655,43 @@ class CiaoControlPlane:
 
     # ---- vault ---------------------------------------------------------
 
+    def _search_key_base(self) -> Path:
+        """The install root, which every stored search key is relative to.
+
+        Falls back to the configured vault root's parent, which is the install
+        root in both layouts: before the re-rooting the vault sits directly under
+        it, and after it ``config.vault_root`` still names that same path even
+        though each root now owns its own vault. The fallback exists because
+        several call sites build a minimal config stub.
+        """
+        base = getattr(self.config, "workspace_root", None)
+        if base:
+            return Path(base)
+        return Path(self.config.vault_root).parent
+
     def vault_search(self, principal: McpPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
+        """Search this workspace's notes, and only this workspace's notes.
+
+        Keys are stored relative to the install root so two agent roots holding
+        a vault of the same name cannot overwrite each other's rows, and the
+        result set is filtered to this vault's prefix. Both halves are needed:
+        the isolation used to be a side effect of the index prune deleting every
+        other root's rows on each pass, which also meant switching workspace
+        re-indexed the whole vault.
+        """
         root = self._vault_root(principal)
+        base = self._search_key_base()
         db_path = get_db_path()
         conn = sqlite3.connect(db_path)
         try:
             init_db(conn)
-            index_vault(conn, root)
-            rows = search_vault(conn, query, limit=max(1, min(50, int(limit))))
+            index_vault(conn, root, path_base=base)
+            rows = search_vault(
+                conn,
+                query,
+                limit=max(1, min(50, int(limit))),
+                path_prefix=vault_key_prefix(root, base),
+            )
         finally:
             conn.close()
         return _ok(rows)
@@ -683,7 +718,9 @@ class CiaoControlPlane:
         conn = sqlite3.connect(db_path)
         try:
             init_db(conn)
-            indexed, removed = index_vault(conn, search_root)
+            indexed, removed = index_vault(
+                conn, search_root, path_base=self._search_key_base()
+            )
         finally:
             conn.close()
         return _ok({"notes": len(entries), "fts_indexed": indexed, "fts_removed": removed})

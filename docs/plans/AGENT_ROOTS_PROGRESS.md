@@ -42,7 +42,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | delegate | DONE | commit 001639e6 |
 | P9 Per-root memory + MCP allowlist | delegate | DONE | P9.1+P9.2 a0d55751; P9.3 beaeda6f |
-| P10 The cut | coordinator | IN PROGRESS | 970bd3d0, 59dda6b0, c70707f7, 2895f1bd, ee6f85e0; **P10.9/P10.10 BLOCKED, see below** |
+| P10 The cut | coordinator | IN PROGRESS | 970bd3d0, 59dda6b0, c70707f7, 2895f1bd, ee6f85e0, f9539770, b924e438, 0dda15a8; **P10.4's split is written and unwired, P10.9/P10.10 BLOCKED, see below** |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | coordinator | DONE | 14 tests, commit 970bd3d0 |
 | V3 Real-data rehearsal | coordinator | DONE | APFS clone, 2318 files, zero refusals |
@@ -724,3 +724,183 @@ before that order is complete would ship the fail-open state to a live install.
 
 ### Remaining, unblocked
 P10.5 skills triage · P10.8 routines · P10.11 `--repair` · V5 end-to-end drain.
+
+## P10.5 / P10.8 / P10.11 (coordinator, 2026-08-20 second session)
+
+- **Blocker 1 is CLEARED.** The live vault is committed: `git status --porcelain
+  --untracked-files=no` on `~/repos/ciao` is empty, and `d6f8412b` ("main session commit
+  2026-08-20 09:21:55Z") carries the 19 files the handover listed as dirty. The clean-tree gate
+  would no longer refuse. The only remaining precondition for `--apply` is the operator's
+  approval, which is theirs to give and was NOT taken here.
+- **P10.5 skills triage landed (`f9539770`).** The whole catalog moves to the primary root and
+  `Workspace/Skill-Triage.md` is written with every destination cell blank. `skills-lock.json`
+  moves with it, because `_refresh_upstream_skills` reads the lock from the root it is syncing, so
+  leaving it at the install root would strand seven upstream skills at a path no root reads. It is
+  also self-healing: the upstream copies live under the old `.claude/skills`, which is not moved,
+  so the primary's next sync sees them missing and refetches them.
+- The sheet enumerates the DIRECTORIES on disk and takes descriptions from
+  `skills_inventory.build_skill_inventory`. Reusing the inventory as the enumerator would have
+  been wrong: it globs `*/SKILL.md`, and the reference install has a catalog directory with no
+  SKILL.md at all (`skills/adversarial-review`, whose only content is an ignored `__pycache__`).
+  It moves, so it has to appear on the sheet, or the sheet is an incomplete account of what the
+  migration did. Same conservation rule the vault classification already follows, and the same
+  class of gap as the `.DS_Store` the census missed.
+- Verified on an APFS clone: 27 rows (20 catalog directories including the husk, 7 upstream), every
+  destination blank, every moved directory present on the sheet, conservation exact keyed on full
+  path (8107 → 8105 = −4 stashed +2 created), zero content change across every moved file, the live
+  install byte-identical throughout, and undo restoring the catalog, the lockfile, the registry and
+  the stashed notes.
+- Two P10.5 side effects worth naming: the clean-tree gate now covers every path the migration
+  moves rather than just the vault (a tracked skill carried across with uncommitted edits is
+  exactly where `git checkout` stops being a working undo), and `apply()` now REQUIRES `primary`
+  instead of deriving it. Which root inherits the guide's regions and the whole catalog is the most
+  consequential choice in the migration; a caller that has not decided must not be handed a default
+  that looks like a decision.
+- **`--undo` does not un-derive the rebuilds, and now says so.** After `--apply` plus the P10.6
+  index rebuild, undo leaves exactly two modified and two new files on the reference install
+  (`memory-vault/{personal,work}/INDEX.md` modified, `VOCABULARY.md` new). Those are regenerated
+  aggregates, `git status` names them, and carrying a copy of every replaced index in the receipt
+  would buy nothing. Documented on `undo` and in the CLI description rather than left as a surprise.
+- **`rebuild_search_index` resolved its database from the ambient environment.**
+  `fts_search.get_db_path` reads `CIAO_MEMORY_DIR` (default `~/.ciao`), so migrating an install
+  that is not the ambient one would have dropped the AMBIENT install's index — the same
+  environment leak P2 found in the os-audit command. Given an optional `db_path`, with the residual
+  limit stated honestly: there is no per-install search database to derive from an install root.
+
+### P10.8 routines (commit `b924e438`)
+- **Measured before writing anything, and the present bug is bigger than the work order says.**
+  With two workspaces registered, SIX of the seven audit sections came back byte-identical, and
+  hygiene is `per_workspace: true`, so it reported all of them once per workspace. Not just job
+  runs and upgrade notices: `vault_hygiene` was identical too, at 20 KB and 240 defects each,
+  because `_vault_audit` ran over the whole SHARED vault regardless of which workspace the run was
+  for. A personal hygiene chat was reporting every defect in the work notes as its own.
+- `run_os_audit` gains a `scope`. `workspace` drops the sections whose subject is the global
+  runtime dir; `global` drops the ones describing one workspace; `all` is unchanged, so the PWA
+  endpoint and a bare `ciao os-audit` report exactly what they did before. A section outside the
+  scope is REMOVED, not zeroed: an empty section reads as "checked and clean", which is a claim the
+  run never made. Both halves keep `setup_audit`, over the roots that half actually reads.
+- Naming a workspace now narrows the per-root sections through `workspace_vault_root` and
+  `agent_root`. After the change, on the same clone: personal 81 defects, work 241, and the
+  work-only broken links no longer appear in personal's report. `memory_hygiene` reports one guide
+  instead of all N. `skill_audit` and `rule_audit` are STILL identical between roots, correctly:
+  the catalog and the guide really are shared until the migration runs.
+- **`system-vault-index` is gone; its rebuild is back inside hygiene.** It was split out because it
+  wrote one shared INDEX.md while hygiene was per-workspace. After the re-rooting each root owns
+  its own pair, so there is no shared artifact left for a global routine to write. Before the flip
+  both hygiene runs rebuild the same shared index, which is idempotent; after it, each rebuilds its
+  own. The freed weekly slot becomes `system-install-health`, reporting the global half once.
+- The fold needed a way for a per-workspace routine to name its own vault, so each chat now exports
+  `CIAO_VAULT_ROOT` from a new `CiaoConfig.agent_vault_root`. There is one process-level value and,
+  after the migration, N vaults; a single inherited value cannot name the right one.
+  `agent_vault_root` is deliberately DISTINCT from `workspace_vault_root`, and the distinction is
+  the whole point: the latter is where a workspace's NOTES live (a subtree of one shared vault
+  today), the former is where the aggregate files ABOUT them live (one shared pair today, one per
+  root afterwards). Both resolve from the same receipt so they cannot disagree.
+  `CIAO_WORKSPACE` deliberately stays the install root: `.env`, `.runtime` and the registry are the
+  global layer and live there, not in a root.
+- `_resolve_skills_roots` takes a workspace name and resolves per call. **`system-skill-evolution`
+  deliberately stays a single routine**, against the design record's "fan-out-eligible": the
+  catalog is one directory until the migration has run AND the user has worked through
+  `Skill-Triage.md`, so fanning it out now would mean N identical passes over one catalog writing
+  DUPLICATE proposals into N queues. The distinction applied throughout this step: fold what is
+  idempotent, defer what duplicates writes. Same judgement P8 made when it restored the session
+  glob rather than shipping premature isolation.
+- **A claim in the design record does not hold against the tree.** §6 says the rule audit "reasons
+  about the global tool denylist"; `grep -n "denylist\|disallowed" ciao/os_audit.py` is empty. The
+  split was derived from what the code actually reads, not from that sentence.
+
+### A defect P10.6 shipped, found on real data (commit `0dda15a8`)
+`rebuild_search_index` reported "personal 158 indexed, work 426 indexed" and left **426** rows in
+the database. Every personal note was gone: 579 notes on disk, 426 searchable. Two causes.
+1. The stored key was relative to the indexed directory's own PARENT, so after the migration both
+   roots keyed as `memory-vault/People/User.md` and the second pass overwrote the first. Keys are
+   now relative to the INSTALL root, unique in both layouts, with the base recorded in a
+   `search_config` row so a change to it drops the index rather than mixing two key formats.
+2. The prune deleted every row not found under the directory just indexed. That is ALSO a live bug
+   before any migration: `vault_search` re-indexes the principal's vault on every search, so on a
+   two-workspace install each search deleted the other workspace's rows and the next search there
+   paid a full re-index. Now scoped to the subtree being indexed.
+Scoping the prune removed an isolation nobody designed — with both roots' rows coexisting, an
+unfiltered `search_vault` would hand a personal session work notes — so the filter is now explicit,
+with a LIKE `ESCAPE` because a workspace name is the user's and may contain `_`, which LIKE treats
+as a wildcard. Verified on the migrated clone: 584 rows, 158 + 426, zero removed, and a scoped
+search for each root returns nothing from the other.
+The receipt had been reporting the prune count under the key `"skipped"`, which is why the earlier
+P10.6 verification read "426 indexed, 155 skipped" as benign. Renamed to `removed`.
+
+### P10.11 `--repair` (commit pending in this session)
+- Idempotent reconciliation to the registry, implementing the design record's §11.1 table:
+  a missing root is created with its agent assets; an `AGENTS.md` that does not resolve to its
+  root's `CLAUDE.md` is re-linked; packaged, own and shared skills are re-mirrored; an `INDEX.md`
+  that is absent or still keys entries under a workspace name is rebuilt; a search index holding a
+  path that no longer resolves is dropped and rebuilt. A third report-only drift, `guide_unsplit`,
+  came out of what the repair itself exposed — see the blocking gap below.
+- **It refuses outright on an install that has not re-rooted**, and that is not caution. Before the
+  migration a workspace prefix in the shared `INDEX.md` is CORRECT, and it is what
+  `_entity_visible_in_workspace` filters on. "Repairing" it there would strip the prefixes and
+  leave no filter over the index — the same fail-open state the P10.9 deletions are gated on,
+  reached from the other direction.
+- **Two drifts are reported, never guessed**, deviating from the table's "Recompose":
+  a root with no vault (which notes belong to a workspace is a question about the user's own
+  material), and a `.mcp.json` absent against a shared one. The second is a deliberate refusal: an
+  MCP entry grants credentialed access, per-root composition does not exist yet, and the P9.3
+  incident is what happens when reachability is inferred instead of declared. Either makes the CLI
+  exit 1 so a script cannot read the result as clean.
+- The shared-source mirror DID have to be built, because there was nothing to "re-mirror" from:
+  `skills-src/` mirroring has never existed. `sync_skills.mirror_shared_skill_sources` is the one
+  definition, so the normal sync path can adopt it without a second implementation. Precedence is
+  a root's own `skills/<name>` > a shared source > a packaged stock copy, and it converges in one
+  run because `_install_stock_skills` already leaves an existing symlink alone.
+- One bug caught in review of my own first pass: the drift report was read AFTER the mirroring ran,
+  so it always came back empty and a real repair looked like a no-op. A second: a name-only check
+  missed a shared skill shadowing a packaged stock skill of the same name (`pr`, `web-research`),
+  so the repair silently replaced a stock copy while reporting nothing. Both fixed, both covered.
+- Verified on the migrated clone: first run fixed two unlinked `AGENTS.md` and mirrored 29 stock +
+  19 own skills, second run clean; breaking three things then repairing fixed exactly those three
+  and left the fourth run clean; a shared skill shadowing a stock name is reported and linked and
+  converges immediately.
+
+### NEW BLOCKING GAP: P10.4's split is written and never applied
+`split_guide` is a pure function with seven tests and **no caller**. Nothing writes each root's
+`CLAUDE.md`, nothing queues the primary's region entries into the other roots'
+`Memory-Proposals.md`, and nothing retires the shared `<install>/CLAUDE.md`. So `--apply` today
+produces roots whose cwd holds no guide at all: the operator's `CLAUDE.md` silently stops being
+loaded. Confirmed by running `--apply` on the clone — the roots have `memory-vault/` and `skills/`
+and nothing else.
+**Measured, not inferred, and worse than that.** After `--apply` then `--repair` on the clone, each
+root held the **2202-byte packaged stock guide** with EMPTY `ciao:memory` / `ciao:profile` regions,
+while the operator's real **27377-byte** guide (4 region markers, 20 entries) sat orphaned at
+`<install>/CLAUDE.md`. Every remembered fact would have disappeared from every session, and the
+repair would have reported success. `_ensure_linked_workspace_guides` copies the stock guide
+whenever one is missing, which is right on a fresh install and catastrophic here.
+So `--repair` now REFUSES to seed a guide while the install root still holds an unsplit one, and
+reports `guide_unsplit` instead. That converts silent loss into a visible finding, but it is a
+guard, not the fix: the fix is wiring the split.
+Related and from the same cause: after `--apply` a root has no `.claude/`, no `CLAUDE.md` and no
+`AGENTS.md` until something syncs it. `--repair` is currently the only thing that completes a root,
+which is P10.10 `_bootstrap_workspace` territory. **Wiring the guide split and the root bootstrap
+into `apply()` must land before the real migration runs.**
+
+### Remaining
+1. **Wire P10.4's `split_guide` and a root bootstrap into `apply()`** — blocking, see above.
+2. Operator decision: run `ciao workspace-reroot --apply` on the live install (vault now committed).
+3. P10.9 the eight deletions and P10.10 `_bootstrap_workspace` — still gated on (2).
+4. §11.2's five `operator_actions` detectors (`workspace-unmigrated`, `workspace-root-missing`,
+   `workspace-assets-stale`, `skill-triage-pending`, `legacy-env-ignored`), which give `--repair` a
+   run button. Deliberately after the repair rather than before it.
+5. V5 end-to-end drain — needs the migration to have run.
+
+### Follow-ups filed this session, none blocking
+1. `rebuild_indexes` and `rebuild_search_index` hardcode `"memory-vault"` rather than taking the
+   vault directory name, so an install with a non-default `CIAO_VAULT_ROOT` leaf would rebuild
+   nothing. `plan()` already derives the name correctly; these two should take it.
+2. The memory-curation prompt still says "one `CLAUDE.md` is shared by every workspace, so a
+   per-workspace run promoting into it would leak". True today, false after the cut. It must be
+   revised in the same release as the deletions, or curation stays needlessly forbidden from
+   promoting into a region it now owns.
+3. Unrelated in-flight work is sitting in the tree, not written here and not committed here:
+   `ciao/control_plane.py` accepting `dismiss` as a synonym for `reject` in
+   `memory_proposal_resolve`, plus its test in `tests/test_proposal_kinds.py`. Left for whoever
+   wrote it. All commits this session were path-scoped around it, and HEAD was verified green in a
+   detached worktree without it.
+4. `workspace_census.py` still misses a loose non-`.md` file at the vault root (carried over).

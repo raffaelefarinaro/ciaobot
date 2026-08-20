@@ -36,6 +36,7 @@ def plane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config = SimpleNamespace(
         workspace=lambda name: object() if name in {"personal", "work"} else None,
         vault_root=vault,
+        workspace_root=tmp_path,
     )
     pcm = SimpleNamespace(_workspace_vault_root=lambda ws: vault / ws)
     control_plane = CiaoControlPlane(

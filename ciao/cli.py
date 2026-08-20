@@ -1182,6 +1182,11 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     from ciao import fts_search
 
     vault_root = _resolve_vault_root(args.vault_root)
+    # Keys are relative to the install root, so one database can hold several
+    # agent roots each with a vault of the same name.
+    key_base = Path(
+        os.environ.get("CIAO_WORKSPACE", "").strip() or vault_root.parent
+    ).expanduser().resolve()
     db_path = fts_search.get_db_path()
 
     if args.rebuild and db_path.exists():
@@ -1195,8 +1200,8 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     try:
         fts_search.init_db(conn)
         if not args.query:
-            vault_indexed, vault_removed = fts_search.index_vault(conn, vault_root)
-            logs_indexed, logs_removed = fts_search.index_logs(conn, vault_root)
+            vault_indexed, vault_removed = fts_search.index_vault(conn, vault_root, path_base=key_base)
+            logs_indexed, logs_removed = fts_search.index_logs(conn, vault_root, path_base=key_base)
             if vault_indexed or vault_removed or logs_indexed or logs_removed:
                 print(
                     "FTS Index updated: "
@@ -1208,14 +1213,14 @@ def _vault_search_command(args: argparse.Namespace) -> int:
 
         try:
             if args.logs:
-                indexed, removed = fts_search.index_logs(conn, vault_root)
+                indexed, removed = fts_search.index_logs(conn, vault_root, path_base=key_base)
                 if indexed or removed:
                     print(
                         f"Transcripts index: {indexed} indexed, {removed} removed.",
                         file=sys.stderr,
                     )
             else:
-                indexed, removed = fts_search.index_vault(conn, vault_root)
+                indexed, removed = fts_search.index_vault(conn, vault_root, path_base=key_base)
                 if indexed or removed:
                     print(
                         f"Vault index: {indexed} indexed, {removed} removed.",
@@ -1779,6 +1784,16 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         result = workspace_reroot.undo(workspace, runtime)
         print(json.dumps(result, indent=2))
         return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
+
+    if args.repair:
+        result = workspace_reroot.repair(workspace, runtime, names)
+        print(json.dumps(result, indent=2))
+        # Exit 1 when something still needs a human: a root with no vault or a
+        # stale .mcp.json is reported rather than guessed, so a script gating on
+        # this must not read it as clean.
+        if result["status"] == "not_rerooted" or result["errors"]:
+            return 1
+        return 1 if result["reported"] else 0
 
     if args.apply:
         result = workspace_reroot.apply(
@@ -2775,8 +2790,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Prints the plan by default and changes nothing; --rehearse records a "
             "receipt without moving; --apply performs the migration, moves the "
             "skill catalog to the primary root with a blank triage sheet, and "
-            "rebuilds each root's index and search database; --undo restores the "
-            "layout exactly, leaving only the rebuilt per-root index and "
+            "rebuilds each root's index and search database; --repair reconciles "
+            "an already-migrated install back to the registry; --undo restores "
+            "the layout exactly, leaving only the rebuilt per-root index and "
             "vocabulary behind for git status to report."
         ),
     )
@@ -2785,6 +2801,17 @@ def build_parser() -> argparse.ArgumentParser:
     reroot_parser.add_argument("--rehearse", action="store_true", help="Record a survey receipt, move nothing.")
     reroot_parser.add_argument("--apply", action="store_true", help="Perform the migration.")
     reroot_parser.add_argument("--undo", action="store_true", help="Reverse a completed migration.")
+    reroot_parser.add_argument(
+        "--repair",
+        action="store_true",
+        help=(
+            "Reconcile the filesystem to the registry after a completed "
+            "migration: missing roots, an unlinked AGENTS.md, un-mirrored "
+            "skills, a prefixed INDEX.md, a search index at moved paths. "
+            "Idempotent. A root with no vault and a stale .mcp.json are reported, "
+            "never guessed, and make it exit 1."
+        ),
+    )
     reroot_parser.set_defaults(func=_workspace_reroot_command)
 
     census_parser = subparsers.add_parser(

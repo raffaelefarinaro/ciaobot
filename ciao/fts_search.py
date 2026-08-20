@@ -65,6 +65,38 @@ def init_db(conn: sqlite3.Connection) -> None:
             indexed_at TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS search_config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    conn.commit()
+
+
+def _ensure_path_base(conn: sqlite3.Connection, base: Path) -> None:
+    """Record which directory the stored paths are relative to, and wipe on change.
+
+    Every row's key is a path relative to one base. Two callers using different
+    bases would write two key formats into one table, so the same note would
+    appear twice under different names and neither prune would remove the other.
+    Rather than migrate keys, the index is dropped: it is derived state,
+    rebuilding it costs one pass, and a half-converted search index is worse
+    than an empty one because it answers queries with paths that resolve wrong.
+    """
+    resolved = str(Path(base).resolve())
+    row = conn.execute(
+        "SELECT value FROM search_config WHERE key = 'path_base'"
+    ).fetchone()
+    if row is not None and row[0] == resolved:
+        return
+    if row is not None:
+        for table in ("vault_fts", "vault_meta", "transcript_fts", "transcript_meta"):
+            conn.execute(f"DELETE FROM {table}")
+    conn.execute(
+        "INSERT OR REPLACE INTO search_config (key, value) VALUES ('path_base', ?)",
+        (resolved,),
+    )
     conn.commit()
 
 
@@ -105,6 +137,19 @@ def _public_snippet(raw: str) -> str:
     )
 
 
+def _key_base(root_dir: Path, path_base: Path | None) -> Path:
+    """The directory stored keys are relative to.
+
+    Defaults to the indexed directory's parent, which is what every caller
+    relied on when one install held one vault. Callers pass the install root
+    instead, so a key stays unique when several agent roots each hold a vault of
+    the same name — otherwise ``personal/memory-vault/People/User.md`` and
+    ``work/memory-vault/People/User.md`` both key as
+    ``memory-vault/People/User.md`` and the second pass overwrites the first.
+    """
+    return Path(path_base) if path_base is not None else root_dir.parent
+
+
 def _index_directory(
     conn: sqlite3.Connection,
     root_dir: Path,
@@ -113,23 +158,39 @@ def _index_directory(
     file_pattern: str = "*.md",
     exclude_dirs: set[str] | None = None,
     exclude_files: set[str] | None = None,
+    path_base: Path | None = None,
 ) -> tuple[int, int]:
     """Incrementally index markdown files. Returns (indexed_count, removed_count)."""
     exclude_dirs = exclude_dirs or set()
     exclude_files = exclude_files or set()
+    base = _key_base(root_dir, path_base)
+    if path_base is not None:
+        _ensure_path_base(conn, base)
 
     # Get existing indexed files and their mtimes
     cursor = conn.execute(f"SELECT path, mtime FROM {meta_table}")
     existing = {row[0]: row[1] for row in cursor.fetchall()}
+
+    # The prune below must only consider rows under the directory being indexed.
+    # Unscoped, indexing one agent root DELETED every row belonging to the
+    # others, so a two-workspace install kept exactly one workspace's notes
+    # searchable at a time and every switch paid a full re-index.
+    try:
+        scope_prefix = str(root_dir.relative_to(base))
+    except ValueError:
+        scope_prefix = ""
+    if scope_prefix in {"", "."}:
+        scope_prefix = ""
+    else:
+        scope_prefix += os.sep
 
     found_paths: set[str] = set()
     indexed_count = 0
 
     # Walk directory
     for md_path in root_dir.rglob(file_pattern):
-        # Resolve path relative to memory-vault's parent (so it starts with memory-vault/)
         try:
-            rel = md_path.relative_to(root_dir.parent)
+            rel = md_path.relative_to(base)
         except ValueError:
             rel = md_path.relative_to(root_dir)
         rel_str = str(rel)
@@ -176,9 +237,12 @@ def _index_directory(
         )
         indexed_count += 1
 
-    # Remove deleted files from the index
+    # Remove deleted files from the index, within this subtree only.
     removed_count = 0
-    deleted_paths = set(existing.keys()) - found_paths
+    in_scope = {
+        key for key in existing if not scope_prefix or key.startswith(scope_prefix)
+    }
+    deleted_paths = in_scope - found_paths
     for rel_str in deleted_paths:
         conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
         conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
@@ -190,7 +254,12 @@ def _index_directory(
     return indexed_count, removed_count
 
 
-def index_vault(conn: sqlite3.Connection, vault_root: Path) -> tuple[int, int]:
+def index_vault(
+    conn: sqlite3.Connection,
+    vault_root: Path,
+    *,
+    path_base: Path | None = None,
+) -> tuple[int, int]:
     """Incremental indexer for core vault files (excludes Logs, Templates)."""
     from ciao.vault_index import GENERATED_VAULT_FILES
 
@@ -201,10 +270,16 @@ def index_vault(conn: sqlite3.Connection, vault_root: Path) -> tuple[int, int]:
         fts_table="vault_fts",
         exclude_dirs=EXCLUDED_VAULT_DIRS,
         exclude_files=set(GENERATED_VAULT_FILES),
+        path_base=path_base,
     )
 
 
-def index_logs(conn: sqlite3.Connection, vault_root: Path) -> tuple[int, int]:
+def index_logs(
+    conn: sqlite3.Connection,
+    vault_root: Path,
+    *,
+    path_base: Path | None = None,
+) -> tuple[int, int]:
     """Incremental indexer for conversation transcripts and meeting logs."""
     logs_root = vault_root / "Logs"
     if not logs_root.exists():
@@ -214,15 +289,42 @@ def index_logs(conn: sqlite3.Connection, vault_root: Path) -> tuple[int, int]:
         root_dir=logs_root,
         meta_table="transcript_meta",
         fts_table="transcript_fts",
+        path_base=path_base,
     )
 
 
-def index_file(conn: sqlite3.Connection, vault_root: Path, file_path: Path) -> bool:
+def vault_key_prefix(vault_root: Path, path_base: Path | None) -> str:
+    """The stored-key prefix that identifies one vault's rows.
+
+    Callers pass this to :func:`search_vault` so a search cannot return a note
+    from another agent root. Until now that isolation was an accident of the
+    prune deleting every other root's rows on each index pass; with the prune
+    scoped, the filter has to be explicit or the rows of every root become
+    visible to every search.
+    """
+    base = _key_base(vault_root, path_base)
+    try:
+        relative = str(Path(vault_root).resolve().relative_to(Path(base).resolve()))
+    except ValueError:
+        return ""
+    return "" if relative in {"", "."} else relative + os.sep
+
+
+def index_file(
+    conn: sqlite3.Connection,
+    vault_root: Path,
+    file_path: Path,
+    *,
+    path_base: Path | None = None,
+) -> bool:
     """Force re-index a single file (e.g. immediately after archiving a chat)."""
     if not file_path.exists():
         return False
+    base = _key_base(vault_root, path_base)
+    if path_base is not None:
+        _ensure_path_base(conn, base)
     try:
-        rel = file_path.relative_to(vault_root.parent)
+        rel = file_path.relative_to(base)
     except ValueError:
         return False
     rel_str = str(rel)
@@ -259,8 +361,15 @@ def search(
     fts_table: str,
     query: str,
     limit: int = 10,
+    *,
+    path_prefix: str = "",
 ) -> list[dict[str, str]]:
-    """Search FTS5 table with Porter stemmer query. Returns ranked results with snippets."""
+    """Search FTS5 table with Porter stemmer query. Returns ranked results with snippets.
+
+    ``path_prefix`` restricts results to one subtree of the stored keys. It is
+    how a workspace-scoped search stays inside its own agent root now that the
+    prune no longer deletes every other root's rows on each pass.
+    """
     # Sanitize search term. If query is a simple string, escape double quotes
     # and wrap words. SQLite FTS5 MATCH syntax is powerful.
     # To support basic multi-word queries gracefully, we join words with AND.
@@ -270,29 +379,40 @@ def search(
 
     # Join words with AND for proximity/co-occurrence
     match_query = " AND ".join(words)
+    # LIKE with an explicit ESCAPE, because a workspace name is user-chosen and
+    # may contain `_`, which LIKE treats as a single-character wildcard: a
+    # prefix of `my_work/` would otherwise also match `my-work/`.
+    scope_sql = ""
+    scope_args: tuple[str, ...] = ()
+    if path_prefix:
+        scope_sql = " AND path LIKE ? ESCAPE '\\'"
+        escaped = (
+            path_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        scope_args = (escaped + "%",)
 
     sql = f"""
         SELECT path, title, snippet({fts_table}, 2, '<<<', '>>>', '...', 32) AS snippet, rank
         FROM {fts_table}
-        WHERE {fts_table} MATCH ?
+        WHERE {fts_table} MATCH ?{scope_sql}
         ORDER BY rank
         LIMIT ?
     """
     try:
-        cursor = conn.execute(sql, (match_query, limit))
+        cursor = conn.execute(sql, (match_query, *scope_args, limit))
         rows = cursor.fetchall()
     except sqlite3.OperationalError:
         # Fall back to literal match if complex match expression syntax is invalid
         sql = f"""
             SELECT path, title, snippet({fts_table}, 2, '<<<', '>>>', '...', 32) AS snippet, rank
             FROM {fts_table}
-            WHERE {fts_table} MATCH ?
+            WHERE {fts_table} MATCH ?{scope_sql}
             ORDER BY rank
             LIMIT ?
         """
         clean_query = query.replace('"', " ")
         escaped_query = f'"{clean_query}"'
-        cursor = conn.execute(sql, (escaped_query, limit))
+        cursor = conn.execute(sql, (escaped_query, *scope_args, limit))
         rows = cursor.fetchall()
 
     return [
@@ -306,8 +426,14 @@ def search(
     ]
 
 
-def search_vault(conn: sqlite3.Connection, query: str, limit: int = 10) -> list[dict[str, str]]:
-    return search(conn, "vault_fts", query, limit)
+def search_vault(
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int = 10,
+    *,
+    path_prefix: str = "",
+) -> list[dict[str, str]]:
+    return search(conn, "vault_fts", query, limit, path_prefix=path_prefix)
 
 
 def search_logs(conn: sqlite3.Connection, query: str, limit: int = 10) -> list[dict[str, str]]:

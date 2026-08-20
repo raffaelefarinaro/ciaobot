@@ -4335,7 +4335,12 @@ class ProjectChatManager:
             db_path = get_db_path()
             conn = sqlite3.connect(db_path)
             init_db(conn)
-            index_file(conn, config.vault_root, outcome.path)
+            index_file(
+                conn,
+                config.vault_root,
+                outcome.path,
+                path_base=Path(config.workspace_root),
+            )
             conn.close()
         except Exception:  # noqa: BLE001
             logger.exception(

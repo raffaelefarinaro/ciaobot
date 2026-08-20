@@ -443,6 +443,60 @@ def _rebuild_custom_skill_links(workspace: Path) -> tuple[int, int]:
     return installed, pruned
 
 
+def mirror_shared_skill_sources(workspace: Path, shared_root: Path) -> tuple[int, int]:
+    """Link every skill in a shared source directory into one root's catalog.
+
+    ``<install>/skills-src/`` is a mirror source, not a workspace: it has no
+    vault, no guide and no sessions of its own. A skill placed there applies in
+    every agent root, so each root gets a symlink rather than a copy — one edit,
+    N roots, and no divergence to reconcile later.
+
+    A root's own ``skills/<name>`` WINS. A workspace holding a local copy of a
+    shared skill has said something by doing that, and replacing it with the
+    shared one would discard the statement. Same precedence rule packaged stock
+    skills already follow.
+
+    Returns ``(linked, pruned)``. Pruning is limited to broken links that point
+    into the shared directory, so a link the user made by hand is left alone —
+    the same conservative rule as ``_rebuild_custom_skill_links``.
+    """
+    root = Path(workspace)
+    shared = Path(shared_root)
+    claude_skills = root / ".claude" / "skills"
+    claude_skills.mkdir(parents=True, exist_ok=True)
+    own = root / "skills"
+    marker = f"/{shared.name}/"
+
+    linked = 0
+    live: set[str] = set()
+    if shared.is_dir():
+        for entry in sorted(shared.iterdir(), key=lambda item: item.name):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            skill_md = entry / "SKILL.md"
+            if not skill_md.is_file() or skill_md.stat().st_size == 0:
+                continue
+            if (own / entry.name / "SKILL.md").is_file():
+                continue  # the root's own copy wins
+            live.add(entry.name)
+            _ensure_symlink(entry, claude_skills / entry.name, relative_to=claude_skills)
+            linked += 1
+
+    pruned = 0
+    for target in _iter_entries(claude_skills):
+        if target.name in live or not target.is_symlink() or target.exists():
+            continue
+        try:
+            current = os.readlink(target)
+        except OSError:
+            continue
+        if marker not in current:
+            continue
+        target.unlink(missing_ok=True)
+        pruned += 1
+    return linked, pruned
+
+
 def _stock_agent_marker(agent_path: Path) -> Path:
     return agent_path.with_name(agent_path.name + STOCK_AGENT_MARKER_SUFFIX)
 
