@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useProposalsStore } from '../stores/proposals'
+import { useProjectStore } from '../stores/projects'
 import type { ProposalRow } from '../lib/types'
 
 const store = useProposalsStore()
+const projectStore = useProjectStore()
+const chatBusy = ref(false)
 
 const kindFilter = ref('all')
 const workspaceFilter = ref('all')
@@ -91,6 +94,50 @@ function cancelLeakConfirm() {
 
 function doDismiss(row: ProposalRow) {
   void store.act(row.id, 'dismiss')
+}
+
+async function discuss(row: ProposalRow) {
+  // The row stays queued: this is "talk about it", not a decision. The chat is
+  // created in the row's OWN workspace, because a proposal from work discussed
+  // in a personal chat is read against the wrong vault, the wrong guide and the
+  // wrong people.
+  if (chatBusy.value) return
+  chatBusy.value = true
+  try {
+    const workspace = row.workspace || projectStore.activeWorkspace
+    if (projectStore.activeWorkspace !== workspace) {
+      await projectStore.switchWorkspace(workspace)
+    }
+    let project = projectStore.projects.find((p) => p.workspace === workspace && Boolean(p.is_auto))
+    if (!project) project = await projectStore.createProject('General')
+    if (!project) return
+    const chat = await projectStore.createChat(project.project_id, 'Proposal review')
+    if (!chat) return
+    projectStore.sendMessage(chat.chat_id, discussPrompt(row))
+    const { router } = await import('../router')
+    await router.push(`/chat/${chat.chat_id}`)
+  } finally {
+    chatBusy.value = false
+  }
+}
+
+function discussPrompt(row: ProposalRow): string {
+  const where = `queued in the ${row.workspace} workspace`
+  if (isRehome(row)) {
+    return (
+      `A person note may be filed in the wrong workspace (${where}): ${row.text}\n\n` +
+      'Check the note\'s tags and content, tell me which workspace it belongs to and why, ' +
+      'and move it with `ciao vault-rehome` only if the evidence is clear. ' +
+      'Leave the proposal queued either way; I will accept or dismiss it myself.'
+    )
+  }
+  return (
+    `A memory proposal is waiting for a decision (${where}), for the ` +
+    `\`ciao:${row.region || row.kind}\` region: ${row.text}\n\n` +
+    'Tell me whether this is durable and cross-session enough to belong in the ' +
+    'always-loaded region, or whether it belongs in a note instead. Do not edit ' +
+    'the region: leave the proposal queued and I will accept or dismiss it.'
+  )
 }
 
 function batchAccept() {
@@ -307,6 +354,14 @@ onMounted(() => { void store.fetch() })
               @click="doDismiss(row)"
             >
               dismiss
+            </button>
+            <button
+              type="button"
+              class="btn-small btn-chip"
+              :disabled="chatBusy"
+              @click="discuss(row)"
+            >
+              talk about it
             </button>
           </div>
         </div>

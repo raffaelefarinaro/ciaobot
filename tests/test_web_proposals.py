@@ -281,3 +281,110 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
     assert "/api/proposals" in documented
     for path in ("/api/proposals/batch", "/api/proposals/dismiss-older-than"):
         assert path in documented, f"{path} is registered but undocumented"
+
+
+# -- Accept has to actually write the fact -----------------------------------
+#
+# It used to remove the bullet and return a descriptor saying what SHOULD happen,
+# matching the MCP flow where the agent edits and then dismisses. In a UI where a
+# person clicks Accept, that meant the fact left the queue and landed nowhere:
+# one click from losing any of the 109 queued on the reference install.
+
+
+def _region_entries(config, workspace: str, region: str) -> list[str]:
+    from ciao.memory_tool import read_region
+
+    guide = Path(config.agent_root(workspace)) / "CLAUDE.md"
+    entries, _diags = read_region(guide, region)
+    return entries
+
+
+def test_accept_writes_the_fact_into_the_region(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert result["promoted"] is True
+    assert row["text"] in _region_entries(config, row["workspace"], "memory")
+    # And the bullet is gone, in that order.
+    assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
+
+
+def test_a_failed_write_keeps_the_bullet(tmp_path: Path) -> None:
+    """Write-then-dismiss, never the reverse: the reverse loses the fact.
+
+    An over-cap region is the realistic cause — the reference install's
+    `ciao:memory` sits at 139% of its cap, so `memory_update` already refuses new
+    entries there.
+    """
+    config = _default_vault(tmp_path)
+    object.__setattr__(config, "memory_char_limit", 1)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409
+    assert "id" in resp.json()
+    # Still queued, so the operator can fix the cap and retry.
+    assert row["id"] in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
+    assert row["text"] not in _region_entries(config, row["workspace"], "memory")
+
+
+def test_a_batch_accept_writes_every_fact_it_dismisses(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    rows = [
+        r for r in client.get("/api/proposals").json()["rows"]
+        if r["kind"] in {"memory", "profile", "user"}
+    ]
+    assert len(rows) >= 2
+
+    resp = client.post(
+        "/api/proposals/batch",
+        json={"action": "accept", "ids": [r["id"] for r in rows]},
+    )
+
+    assert resp.status_code == 200
+    assert all(r["promoted"] for r in resp.json()["results"])
+    for row in rows:
+        region = "memory" if row["kind"] == "memory" else "profile"
+        assert row["text"] in _region_entries(config, row["workspace"], region), row["text"]
+
+
+def test_a_batch_keeps_the_bullets_it_could_not_write(tmp_path: Path) -> None:
+    """A batch that removed the lines first would lose every over-cap fact at once."""
+    config = _default_vault(tmp_path)
+    object.__setattr__(config, "memory_char_limit", 1)
+    object.__setattr__(config, "user_char_limit", 1)
+    client = _client(config)
+    rows = [
+        r for r in client.get("/api/proposals").json()["rows"]
+        if r["kind"] in {"memory", "profile", "user"}
+    ]
+
+    resp = client.post(
+        "/api/proposals/batch",
+        json={"action": "accept", "ids": [r["id"] for r in rows]},
+    )
+
+    results = resp.json()["results"]
+    assert all(r["promoted"] is False and r["dismissed"] is False for r in results)
+    still = {r["id"] for r in client.get("/api/proposals").json()["rows"]}
+    for row in rows:
+        assert row["id"] in still, row["id"]
+
+
+def test_dismiss_still_writes_nothing(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert row["text"] not in _region_entries(config, row["workspace"], "memory")
+    assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}

@@ -7005,24 +7005,47 @@ async def proposals_batch(request: Request) -> JSONResponse:
     results = []
     for path, entry in by_file.items():
         queue = Path(path)
+        # Write every promotion BEFORE dropping any bullet, and only drop the
+        # ones that landed. A batch that removed the lines first would lose every
+        # fact whose region was over cap, silently and in bulk.
+        promoted: dict[str, dict[str, Any]] = {}
+        keep_lines: set[int] = set()
+        if action == "accept":
+            for row in entry["rows"]:
+                accept = proposal_kinds.accept_for(row["kind"])
+                if accept.action != "edit_region":
+                    continue
+                outcome = _promote_region_row(config, row)
+                promoted[row["id"]] = outcome
+                if not outcome.get("ok"):
+                    keep_lines.add(int(row["line"]))
+
         lines = queue.read_text(encoding="utf-8").splitlines()
         # Remove highest index first so lower indices stay valid.
         for line_index in sorted(entry["lines"], reverse=True):
+            if line_index in keep_lines:
+                continue
             if 0 <= line_index < len(lines):
                 del lines[line_index]
         queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         for row in entry["rows"]:
             if action == "accept":
                 accept = proposal_kinds.accept_for(row["kind"])
+                outcome = promoted.get(row["id"], {})
+                failed = accept.action == "edit_region" and not outcome.get("ok")
                 result = {
                     "id": row["id"],
                     "action": accept.action,
-                    "dismissed": True,
+                    "dismissed": not failed,
                 }
                 if accept.action == "edit_region":
-                    result["region"] = accept.region
+                    result["region"] = outcome.get("region", accept.region)
+                    result["promoted"] = bool(outcome.get("ok"))
                     result["leak_warning"] = row.get("leak_warning", False)
+                    if failed:
+                        result["error"] = outcome.get("error", "could not write the region")
                 else:
+                    result["promoted"] = False
                     result["destination"] = row.get("rehome", {}).get("destination", "")
                     result["justified"] = row.get("rehome", {}).get("justified", False)
                 results.append(result)
@@ -7031,13 +7054,56 @@ async def proposals_batch(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "action": action, "results": results})
 
 
+def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
+    """Write an accepted memory/profile fact into its workspace's region.
+
+    Accept used to remove the bullet and return a descriptor saying what SHOULD
+    happen, matching the MCP flow where the agent edits and then dismisses. In a
+    UI where a person clicks Accept that meant the fact left the queue and landed
+    nowhere — one click from losing it.
+
+    Order is write-then-dismiss, never the reverse, which is the same rule the
+    curation prompt states: the reverse loses the fact if anything fails between
+    the two steps. So this returns a failure and the caller keeps the bullet.
+
+    The guide is resolved through ``agent_root``, so before the re-rooting this
+    writes the shared guide (and the row's ``leak_warning`` is why the UI asks
+    for confirmation first) and afterwards that workspace's own.
+    """
+    from ciao.memory_tool import ensure_regions, resolve_region as _resolve, update_region
+
+    region = _resolve(row.get("region") or row["kind"])
+    limit = int(
+        getattr(config, "memory_char_limit", 2200)
+        if region == "memory"
+        else getattr(config, "user_char_limit", 1375)
+    )
+    guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
+    try:
+        # A guide with no region markers yet is not a reason to refuse a
+        # promotion — a workspace can be newer than its last skill sync. This is
+        # the same call sync makes, and it is a no-op once the markers are there.
+        ensure_regions(guide)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": f"could not prepare {guide}: {exc}", "region": region}
+    try:
+        result = update_region(
+            guide, region, action="add", entry=row["text"], char_limit=limit
+        )
+    except (ValueError, OSError) as exc:
+        return {"ok": False, "error": str(exc), "region": region}
+    return {"ok": True, "region": region, "usage": result.get("usage", {})}
+
+
 async def proposal_action(request: Request) -> JSONResponse:
     """Accept or dismiss exactly one proposal by its stable id.
 
-    ``accept`` dispatches through the kind's own descriptor: a memory/profile
-    accept is a region edit, a rehome accept is a file move. The endpoint
-    dismisses the queue row (promotion is a separate explicit step) and returns
-    the descriptor so a UI knows which action it should take. Unknown id is 404.
+    ``accept`` PERFORMS the promotion: a memory/profile row is written into that
+    workspace's bounded region, then the bullet is dropped. Write-then-dismiss,
+    never the reverse — if the write fails (over cap, unreadable guide) the bullet
+    stays and the error comes back, because the reverse order loses the fact.
+
+    ``dismiss`` drops the bullet without writing anything. Unknown id is 404.
     """
     config = request.app.state.config
     pid = request.path_params["id"]
@@ -7046,20 +7112,47 @@ async def proposal_action(request: Request) -> JSONResponse:
     if ctx is None:
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
     action = request.path_params.get("action", "").strip()
+    row = ctx["row"]
+
+    promoted: dict[str, Any] = {}
+    if action == "accept":
+        accept = proposal_kinds.accept_for(row["kind"])
+        if accept.action == "edit_region":
+            promoted = _promote_region_row(config, row)
+            if not promoted.get("ok"):
+                # The bullet is untouched, so the fact is still queued and the
+                # operator can fix the cause (usually an over-cap region) and
+                # retry. Losing it silently is the one outcome to avoid.
+                return JSONResponse(
+                    {
+                        "error": promoted.get("error", "could not write the region"),
+                        "id": pid,
+                        "region": promoted.get("region", ""),
+                    },
+                    status_code=409,
+                )
+
     queue = Path(ctx["path"])
     lines = queue.read_text(encoding="utf-8").splitlines()
     line_index = ctx["line"]
     if 0 <= line_index < len(lines):
         del lines[line_index]
     queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    row = ctx["row"]
+
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])
         result = {"id": pid, "action": accept.action, "dismissed": True}
         if accept.action == "edit_region":
-            result["region"] = accept.region
+            result["region"] = promoted.get("region", accept.region)
+            result["promoted"] = True
+            result["usage"] = promoted.get("usage", {})
             result["leak_warning"] = row.get("leak_warning", False)
         else:
+            # Rehome: the note itself is not moved here. Moving a file and
+            # rewriting every reference to it is `vault_rehome`'s job and it is
+            # reversible through its own receipt; doing half of it from a queue
+            # row would leave the links pointing at a path that moved.
+            result["promoted"] = False
             result["destination"] = row.get("rehome", {}).get("destination", "")
             result["justified"] = row.get("rehome", {}).get("justified", False)
         return JSONResponse({"ok": True, "result": result})

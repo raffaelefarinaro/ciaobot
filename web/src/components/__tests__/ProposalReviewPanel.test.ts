@@ -227,3 +227,36 @@ describe('ProposalReviewPanel', () => {
     wrapper.unmount()
   })
 })
+
+describe('talk about it', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  it('offers a third action beside accept and dismiss, and leaves the row queued', async () => {
+    // "Accept" writes the fact and "dismiss" drops it. Neither is right when the
+    // operator does not yet know which — so a third action hands the row to a
+    // chat in that row's workspace and changes nothing here.
+    apiGet.mockResolvedValue({ rows: [row({ workspace: 'work' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const labels = wrapper.findAll('.proposal-actions button').map((b) => b.text())
+    expect(labels).toEqual(['accept', 'dismiss', 'talk about it'])
+
+    const store = useProposalsStore()
+    const act = vi.spyOn(store, 'act')
+    await wrapper
+      .findAll('.proposal-actions button')
+      .find((b) => b.text() === 'talk about it')!
+      .trigger('click')
+    // It is not a decision: nothing resolves the row.
+    expect(act).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})

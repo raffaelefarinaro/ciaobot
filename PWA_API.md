@@ -593,6 +593,17 @@ Routes: `GET /api/proposals`, `POST /api/proposals/{id}/{action}` (action is
 `accept` or `dismiss`), `POST /api/proposals/batch`,
 `POST /api/proposals/dismiss-older-than`.
 
+`accept` PERFORMS the promotion for a `memory`/`profile` row: the entry is written
+into that workspace's bounded region (resolved through `agent_root`, so the right
+guide in either layout), and only then is the bullet dropped. Write-then-dismiss,
+never the reverse — a failed write returns **409** with the bullet still queued,
+so an over-cap region cannot silently swallow the fact. A `rehome` row is not
+moved here: relocating a note and rewriting every reference to it is
+`vault_rehome`'s job, reversible through its own receipt, and doing half of it
+from a queue row would leave links pointing at a path that moved. `dismiss` writes
+nothing. Batch accept applies the same rule per row and reports `promoted` and
+`dismissed` for each, keeping the bullets it could not write.
+
 ```bash
 # List every queued proposal across all workspaces, plus skill-proposal files.
 # Each row: {id, kind, text, source, workspace, path, line}. `id` is a stable,
