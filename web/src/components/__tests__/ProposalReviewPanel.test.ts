@@ -205,14 +205,16 @@ describe('ProposalReviewPanel', () => {
 
     const skillRow = wrapper.findAll('.pr-row').find(r => r.text().includes('proposal-2026-08-20'))!
     expect(skillRow.find('.pr-kind').text()).toBe('skill')
-    // The PATH, because the whole content of the decision is in that file and
-    // "a skill proposal file" told the operator nothing they could act on.
-    expect(skillRow.text()).toContain('personal/Workspace/Skill-Proposals/proposal-2026-08-20.md')
-    // Read it, build it, or drop it. `implement` is the primary because accepting
-    // a proposed skill means implementing it — which is a chat, not a write.
+    // The path IS the button — a separate "view" spent an action slot saying what
+    // the path already said. Only the leaf: every row in a group shares the folder.
+    const link = skillRow.find('.pr-path-link')
+    expect(link.text()).toBe('proposal-2026-08-20.md')
+    expect(link.attributes('title')).toBe('personal/Workspace/Skill-Proposals/proposal-2026-08-20.md')
+    // Build it or drop it. `implement` is the primary because accepting a
+    // proposed skill means implementing it — which is a chat, not a write.
     expect(skillRow.find('.btn-primary').text()).toBe('implement')
     expect(skillRow.findAll('.btn-chip').map(b => b.text()))
-      .toEqual(['view', 'dismiss', 'talk about it'])
+      .toEqual(['dismiss', 'talk about it'])
     wrapper.unmount()
   })
 
@@ -226,8 +228,7 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    const button = wrapper.findAll('.btn-chip').find(b => b.text() === 'view')!
-    await button.trigger('click')
+    await wrapper.find('.pr-path-link').trigger('click')
     await flushPromises()
 
     expect(open).toHaveBeenCalledWith(path)
@@ -264,6 +265,83 @@ describe('ProposalReviewPanel', () => {
     expect(sent).toContain('skills/')
     // A proposal is a suggestion: implementing it must not silently resolve it.
     expect(act).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('groups the same skill proposed on several dates', async () => {
+    // Curation re-proposes every run, so one skill arrives as N dated rows. They
+    // are one decision, and reading them as N is what made 45 rows look like 45
+    // things to think about.
+    apiGet.mockResolvedValue({
+      rows: [
+        row({ id: 's1', kind: 'skill', text: '2026-08-09-defuddle', path: 'p/Workspace/Skill-Proposals/2026-08-09-defuddle.md', line: -1 }),
+        row({ id: 's2', kind: 'skill', text: '2026-08-16-defuddle', path: 'p/Workspace/Skill-Proposals/2026-08-16-defuddle.md', line: -1 }),
+        row({ id: 's3', kind: 'skill', text: '2026-08-12-jira-tickets', path: 'p/Workspace/Skill-Proposals/2026-08-12-jira-tickets.md', line: -1 }),
+      ],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const labels = wrapper.findAll('.pr-group-label-name').map(l => l.text())
+    expect(labels).toEqual(['defuddle', 'jira-tickets'])
+    const counts = wrapper.findAll('.pr-group-label-count').map(c => c.text())
+    expect(counts).toEqual(['2', '1'])
+    // Newest first inside a group.
+    const firstGroupRows = wrapper.findAll('.pr-rows')[0].findAll('.pr-row')
+    expect(firstGroupRows[0].text()).toContain('2026-08-16')
+    wrapper.unmount()
+  })
+
+  it('does not group memory or re-home rows', async () => {
+    // One fact about one note: grouping those would invent a relationship.
+    apiGet.mockResolvedValue({
+      rows: [row({ id: 'a', kind: 'memory' }), row({ id: 'b', kind: 'memory' })],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.findAll('.pr-group-label')).toHaveLength(0)
+    expect(wrapper.findAll('.pr-row')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('the picker sends the workspace it was asked for', async () => {
+    // Every candidate button used to call accept with no destination, so the
+    // answer to "which workspace?" was thrown away and nothing could move.
+    apiGet.mockResolvedValue({
+      rows: [row({
+        id: 'r', kind: 'rehome',
+        rehome: {
+          note: 'personal/People/Oliver.md', destination: '', reason: '',
+          candidates: ['personal', 'work'], justified: false,
+        },
+      })],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const workButton = wrapper.findAll('.btn-primary').find(b => b.text() === 'work')!
+    await workButton.trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/r/accept?workspace=work')
+    wrapper.unmount()
+  })
+
+  it('a justified re-home says where the note is going', async () => {
+    apiGet.mockResolvedValue({
+      rows: [row({
+        id: 'j', kind: 'rehome',
+        rehome: {
+          note: 'personal/People/Mo.md', destination: 'work/People/Mo.md',
+          reason: '', candidates: ['work'], justified: true,
+        },
+      })],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.btn-primary').text()).toBe('move to work')
     wrapper.unmount()
   })
 

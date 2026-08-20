@@ -6834,6 +6834,90 @@ def _leak_warning(config, kind: str, workspace: str) -> bool:
     return workspace != config.primary_workspace()
 
 
+def _perform_rehome_move(config, row: dict[str, Any], target: str) -> dict[str, Any]:
+    """Move a queued person note into ``target``, links and all.
+
+    Until now a rehome accept dropped the bullet and moved nothing — the panel
+    said so in prose ("Re-home rows are not moved here") and `move_file` was a
+    declared accept descriptor that nothing handled. So the queue could ask the
+    question and never carry out the answer.
+
+    The row names the note in RENDERED identity form (``personal/People/Mo.md``);
+    the mover works install-relative (``personal/memory-vault/People/Mo.md``),
+    because that is the space in which a relative link's arithmetic is real. The
+    leaf comes from the workspace's own vault directory rather than a constant,
+    for the same reason the rebuilds take it.
+    """
+    from ciao.vault_rehome import move_note_between_roots
+
+    note = str((row.get("rehome") or {}).get("note") or "")
+    parts = Path(note).parts
+    if len(parts) < 2:
+        return {"ok": False, "error": f"the bullet does not name a note ({note!r})"}
+    workspace = parts[0]
+    try:
+        install_root = Path(config.workspace_root)
+        vault = Path(config.workspace_vault_root(workspace))
+        relative_vault = vault.relative_to(install_root)
+        targets = config.vault_scan_targets()
+        names = list(config.workspace_names())
+    except (AttributeError, ValueError) as exc:
+        return {"ok": False, "error": f"could not resolve the vault layout: {exc}"}
+    # Derived from the registry, never assumed: the vault sits at
+    # `<workspace>/<leaf>` per root and at `<leaf>/<workspace>` while shared. The
+    # mover moves a note BETWEEN roots, which only exist in the first shape, so
+    # the second is refused with the reason rather than silently building
+    # `personal/personal/People/Mo.md` and reporting the note missing.
+    vault_parts = relative_vault.parts
+    if len(vault_parts) != 2 or vault_parts[0] != workspace:
+        return {
+            "ok": False,
+            "error": (
+                f"'{workspace}' does not have its own workspace folder yet "
+                f"(its vault is {relative_vault.as_posix()}), so there is no other "
+                "root to move a note into"
+            ),
+        }
+    source = (relative_vault / Path(*parts[1:])).as_posix()
+    result = move_note_between_roots(
+        install_root, source, target, targets=targets, workspaces=names, apply=True
+    )
+    if result["refusals"]:
+        return {"ok": False, "error": result["refusals"][0], "move": result}
+    return {
+        "ok": True,
+        "destination": result["destination"],
+        "files_rewritten": result["files_rewritten"],
+        "move": result,
+    }
+
+
+def _rehome_target(row: dict[str, Any], requested: str) -> tuple[str, str]:
+    """The workspace a rehome accept should move into, or an error.
+
+    An explicit request wins, because a row whose tags name two workspaces is a
+    question only the operator can answer. Otherwise the destination has to be
+    backed by a single clean tag signal — accepting an unjustified guess would
+    move somebody's note on the strength of nothing.
+    """
+    signal = row.get("rehome") or {}
+    candidates = [str(c) for c in (signal.get("candidates") or [])]
+    if requested:
+        if candidates and requested not in candidates:
+            return "", (
+                f"'{requested}' is not one of the workspaces this note's tags name "
+                f"({', '.join(candidates) or 'none'})"
+            )
+        return requested, ""
+    if not signal.get("justified"):
+        return "", "no tag backs a destination for this note, so pick one explicitly"
+    destination = str(signal.get("destination") or "")
+    target = Path(destination).parts[0] if destination else ""
+    if not target:
+        return "", "the signal names no destination workspace"
+    return target, ""
+
+
 def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     """Scan every workspace's proposal queue and skill-proposal folder.
 
@@ -7253,7 +7337,20 @@ async def proposal_action(request: Request) -> JSONResponse:
     promoted: dict[str, Any] = {}
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])
-        if accept.action == "edit_region":
+        if accept.action == "move_file":
+            target, error = _rehome_target(row, request.query_params.get("workspace", "").strip())
+            if error:
+                return JSONResponse({"error": error, "id": pid}, status_code=400)
+            outcome = _perform_rehome_move(config, row, target)
+            if not outcome.get("ok"):
+                # Move-then-dismiss, the same order as a region write: the bullet
+                # survives a failed move so the note is not silently left where it
+                # was with nothing recording that it should not be.
+                return JSONResponse(
+                    {"error": outcome["error"], "id": pid}, status_code=409
+                )
+            promoted = outcome
+        elif accept.action == "edit_region":
             promoted = _promote_region_row(config, row)
             if not promoted.get("ok"):
                 # The bullet is untouched, so the fact is still queued and the

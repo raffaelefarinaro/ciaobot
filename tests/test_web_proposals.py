@@ -167,21 +167,112 @@ def test_accept_dispatches_the_kinds_own_action(tmp_path: Path) -> None:
         assert result["region"] == expected_region
 
 
-def test_rehome_accept_never_performs_a_region_edit(tmp_path: Path) -> None:
-    config = _default_vault(tmp_path)
-    _write_people_note(config, "personal/People/Mo.md", ["ex-colleague", "friend", "person"])
-    _write_people_note(config, "personal/People/Christian.md", [])
+def _rerooted_vault(config: CiaoConfig, tmp_path: Path) -> None:
+    """Give the fixture the per-root layout a real move needs."""
+    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
+    from ciao.config import reset_reroot_cache
+
+    reset_reroot_cache()
+
+
+def _per_root_config(tmp_path: Path) -> CiaoConfig:
+    """A migrated install: each workspace owns a folder holding its own vault."""
+    return CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        vault_root=tmp_path / "memory-vault",
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=f"{name}/memory-vault")
+            for name in ("personal", "work")
+        },
+    )
+
+
+def _rehome_fixture(tmp_path: Path, tags: list[str]) -> tuple[CiaoConfig, TestClient, dict]:
+    config = _per_root_config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "People").mkdir(parents=True, exist_ok=True)
+    _rerooted_vault(config, tmp_path)
+    note = config.workspace_vault_root("personal") / "People" / "Mo.md"
+    note.write_text(
+        "---\ntype: person\ntags:\n" + "".join(f"  - {t}\n" for t in tags) + "---\n# Mo\n",
+        encoding="utf-8",
+    )
     _write_queue(config, "personal", (
-        "## 2026-08-19 curation pass (this pass)\n\n"
-        "- [rehome] Re-home `personal/People/Mo.md` to `work/People/Mo.md`? Uncertain: tags name both personal and work (ex-colleague, friend). Move it and its links with `ciao vault-rehome --apply` only after tagging it.  _(from: vault-rehome)_\n"
+        "## curation pass\n\n"
+        "- [rehome] Re-home `personal/People/Mo.md` to `work/People/Mo.md`? "
+        "Uncertain.  _(from: vault-rehome)_\n"
     ))
     client = _client(config)
     row = _accept_kind_row(client, "rehome")
+    return config, client, row
+
+
+def test_an_ambiguous_rehome_accept_asks_instead_of_guessing(tmp_path: Path) -> None:
+    """Tags naming two workspaces is a question only the operator can answer, so
+    accepting without a choice must not move somebody's note on a guess."""
+    config, client, row = _rehome_fixture(tmp_path, ["person", "friend", "colleague"])
+
     resp = client.post(f"/api/proposals/{row['id']}/accept")
-    assert resp.status_code == 200
-    result = resp.json()["result"]
-    assert result["action"] == "move_file"
-    assert "region" not in result
+
+    assert resp.status_code == 400
+    assert "pick one explicitly" in resp.json()["error"]
+    assert (config.workspace_vault_root("personal") / "People" / "Mo.md").is_file()
+
+
+def test_an_explicit_choice_moves_the_note(tmp_path: Path) -> None:
+    """The whole point: the queue can now carry out the answer it asked for."""
+    config, client, row = _rehome_fixture(tmp_path, ["person", "friend", "colleague"])
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept?workspace=work")
+
+    assert resp.status_code == 200, resp.json()
+    assert not (config.workspace_vault_root("personal") / "People" / "Mo.md").exists()
+    assert (config.workspace_vault_root("work") / "People" / "Mo.md").is_file()
+    # And the row is gone from the queue.
+    assert not [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
+
+
+def test_a_choice_the_tags_do_not_name_is_refused(tmp_path: Path) -> None:
+    config, client, row = _rehome_fixture(tmp_path, ["person", "friend", "colleague"])
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept?workspace=nowhere")
+
+    assert resp.status_code == 400
+    assert (config.workspace_vault_root("personal") / "People" / "Mo.md").is_file()
+
+
+def test_a_justified_row_moves_without_a_choice(tmp_path: Path) -> None:
+    """A single clean tag signal already names the destination."""
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    assert row["rehome"]["justified"] is True, row["rehome"]
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 200, resp.json()
+    assert (config.workspace_vault_root("work") / "People" / "Mo.md").is_file()
+
+
+def test_a_failed_move_keeps_the_bullet(tmp_path: Path) -> None:
+    """Move-then-dismiss, the same order as a region write: a note silently left
+    where it was, with nothing recording that it should not be, is the outcome to
+    avoid."""
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    # Something is already there, so the move refuses rather than merging.
+    (config.workspace_vault_root("work") / "People" / "Mo.md").write_text(
+        "# A different Mo\n", encoding="utf-8"
+    )
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409
+    assert "already exists" in resp.json()["error"]
+    assert (config.workspace_vault_root("personal") / "People" / "Mo.md").is_file()
+    assert [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
 
 
 def test_dismiss_does_not_mutate_the_workspace_guide(tmp_path: Path) -> None:

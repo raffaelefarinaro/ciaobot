@@ -1810,3 +1810,78 @@ The write-then-dismiss guard tests used an over-cap region as their failure inje
 fails. They now corrupt a guide's region markers instead — and both regions, because a *missing*
 region is created rather than refused, so corrupting only `memory` let every profile row through and
 the batch half-succeeded.
+
+
+## The re-home mover, per root (2026-08-21)
+
+Built after being reverted once. The reverted attempt is worth recording because
+its two failures are the whole design:
+
+1. `rewrite_references` keyed its moved-note table with one fixed `VAULT_PREFIX`,
+   so on a per-root install NO ref matched. Refs *to* the moved note were left
+   pointing at a file that had gone — silently, with the function reporting
+   success and a non-empty change list from the other direction.
+2. Relative markdown links were re-spelled between rendered IDENTITIES
+   (`personal/People/Mo.md`), producing `../../personal/People/Alba.md` for a
+   path that is three levels up and inside another vault directory.
+
+Both dissolve by choosing the right namespace: **install-relative paths**, which
+after the re-rooting is exactly what `Entry.path` already is. In that space
+`resolve_vault_link` and `_relative_destination` are doing real directory
+arithmetic over real paths, so the relative-link case is correct for free.
+
+Three more bugs only real data found, none of which a synthetic fixture would
+have shown:
+
+- **The markdown table needs extension-less keys.** `resolve_vault_link` answers
+  without `.md` (the bulk planner keys it `candidate.path[:-3]`); keyed with the
+  extension it matched nothing and every markdown link to the moved note broke.
+- **Resolving and re-spelling happen in different roots.** A ref is resolved in
+  the root the text was WRITTEN in and re-spelled for the root it will be READ
+  from. They differ only for the note being moved, whose `related: People/Alba`
+  was written in personal and must come out as `personal/People/Alba`. Resolving
+  it as if it were already in work found nothing and left it dangling.
+- **Unresolvable links must be left alone.** The real note held links spelled in
+  the workspace-qualified dialect (`work/People/Florin-Dobre`), which
+  `resolve_vault_link` reads as a *relative* path. Re-spelling those from the new
+  location turned an already-broken link into a differently-broken one. Only
+  rewrite what can be proven to point at a note.
+- **`MEMORY.md` is swept, not rebuilt.** The scan skips a vault's generated root
+  notes, but only `INDEX.md` and `VOCABULARY.md` are actually regenerated —
+  `MEMORY.md` is written by hand and by curation, so nothing else fixes a link in
+  it. It was the single broken link left on the real-vault check.
+
+### Validated on a clone of the real vault
+Moving `personal/People/User.md` — the most-linked note, 11 inbound refs — to
+`work`: 13 files rewritten, 28 edits, **zero newly broken markdown links, and four
+pre-existing broken links repaired.** The check had to be made rename-aware first:
+the moved note's own broken links change string when its path changes, so every
+one it carried read as newly broken.
+
+Twelve tests, five mutations, each caught. One mutation appeared to survive and
+did not — the mutation script's `str.replace` had silently matched nothing, which
+is worth remembering: a mutation that "survives" should be confirmed applied
+before it is believed.
+
+### Wired to the queue
+`move_file` was a declared accept descriptor that **nothing handled**, which is
+why the panel said "re-home rows are not moved here" and the operator saw no
+button. A rehome accept now performs the move. An ambiguous row (tags naming two
+workspaces) is refused unless the request names a destination, because accepting a
+guess moves somebody's note on the strength of nothing; the picker now sends the
+candidate it was clicked on, which it previously threw away. A justified row's
+button reads "move to work" rather than "accept", since "accept" does not say
+that a file is about to move. Move-then-dismiss: a failed move keeps the bullet.
+
+The mover refuses on a shared-layout install and says why — there is no second
+root to move into — rather than building `personal/personal/People/Mo.md` and
+reporting the note missing.
+
+### Queue UI
+Skill proposals group by name: curation re-proposes every run, so one skill
+arrives as N dated rows and 45 rows looked like 45 decisions. Only skill rows
+group — a memory bullet or a re-home row is one fact about one note, and grouping
+those would invent a relationship. The path is now the button (the separate "view"
+spent an action slot saying what the path already said), showing only the leaf
+since every row in a group shares the folder. Actions stack vertically so the text
+column gets the width.

@@ -94,6 +94,7 @@ from ciao.vault_index import (
     _resolve_related,
     markdown_destination,
     resolve_vault_link,
+    scan_targets,
     scan_vault,
     vault_link_ref,
 )
@@ -865,6 +866,7 @@ def _markdown_edits(
     source_before: str,
     source_after: str,
     moved_by_ref: dict[str, str],
+    known: set[str] | None = None,
 ) -> list[_Edit]:
     """Recompute relative destinations that either end of the move invalidated.
 
@@ -900,6 +902,16 @@ def _markdown_edits(
             continue
         target = resolve_vault_link(source_before, ref)
         if not target:
+            continue
+        if known is not None and target not in known:
+            # Unresolvable, so there is nothing to recompute against. Measured on
+            # the real vault: the moved note held links spelled in the
+            # workspace-qualified dialect (`work/People/Florin-Dobre`), which
+            # `resolve_vault_link` reads as a RELATIVE path and turns into
+            # `personal/memory-vault/work/People/...`. Re-spelling that from the
+            # new location produced `../../../personal/work/People/...` — a link
+            # that was already broken, made differently broken. Only rewrite what
+            # can be proven to point at a note.
             continue
         new_target = moved_by_ref.get(target, target)
         if new_target == target and source_after == source_before:
@@ -1043,6 +1055,9 @@ def rewrite_references(
     source_after: str,
     moved_by_ref: dict[str, str],
     filename_index: dict[str, list[Path]],
+    *,
+    moved_by_resolved: dict[str, str] | None = None,
+    known_notes: set[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Repoint one note's references at the moved notes.
 
@@ -1058,9 +1073,20 @@ def rewrite_references(
     # `_resolve_related` answers with the repo-relative path *including* `.md`
     # (that is what `Entry.path` carries), so the lookup table has to be keyed the
     # same way — refs are extension-less, resolved targets are not.
-    moved_by_repo = {
-        posixpath.join(VAULT_PREFIX, f"{old}.md"): new for old, new in moved_by_ref.items()
-    }
+    #
+    # `moved_by_resolved` lets a caller supply that table itself. The construction
+    # below prefixes one fixed `VAULT_PREFIX`, which is only correct while every
+    # workspace shares one vault: after the re-rooting `Entry.path` is
+    # `<workspace>/<leaf>/...`, so a per-root caller's refs matched nothing and its
+    # rewrites silently did nothing at all.
+    moved_by_repo = (
+        dict(moved_by_resolved)
+        if moved_by_resolved is not None
+        else {
+            posixpath.join(VAULT_PREFIX, f"{old}.md"): new
+            for old, new in moved_by_ref.items()
+        }
+    )
     frontmatter = FRONTMATTER_RE.match(text)
     body_start = frontmatter.end() if frontmatter is not None else 0
     body = text[body_start:]
@@ -1069,7 +1095,9 @@ def rewrite_references(
     if frontmatter is not None:
         edits += _frontmatter_edits(frontmatter, moved_by_repo, filename_index)
     edits += _wikilink_edits(body, body_start, moved_by_repo, filename_index)
-    edits += _markdown_edits(body, body_start, source_before, source_after, moved_by_ref)
+    edits += _markdown_edits(
+        body, body_start, source_before, source_after, moved_by_ref, known_notes
+    )
     edits.sort(key=lambda edit: edit.start)
 
     parts: list[str] = []
@@ -1099,6 +1127,267 @@ def rewrite_references(
 
 
 # ---- planning and driver ---------------------------------------------------
+
+
+# ---- moving ONE note between roots -----------------------------------------
+#
+# Everything here works in ONE namespace: the path each note has relative to the
+# install root, which after the re-rooting is exactly `Entry.path`
+# (`personal/memory-vault/People/Mo.md`). Choosing that space is what makes the
+# rewrites correct, and the first attempt at this failed because it used the
+# rendered IDENTITY space (`personal/People/Mo.md`) instead:
+#
+# * `rewrite_references` keyed its table with one fixed `VAULT_PREFIX`, so no
+#   per-root ref ever matched and refs TO the moved note were left pointing at a
+#   file that was no longer there — silently, with the function reporting success;
+# * relative markdown links were re-spelled between identities, producing
+#   `../../personal/People/Alba.md` for a path that is really three levels up and
+#   inside another vault directory.
+#
+# In install-relative space both fall out for free: `resolve_vault_link` and
+# `_relative_destination` are then doing real directory arithmetic over real
+# paths.
+
+
+def _no_ext(path: str) -> str:
+    """Drop a trailing ``.md``, which is how link refs are spelled."""
+    return path[:-3] if path.endswith(".md") else path
+
+
+def _install_relative(entry: Entry) -> str:
+    """The note's path relative to the install root."""
+    return entry.path.as_posix()
+
+
+def _ref_dialect(target: str, referring_root: str) -> str:
+    """How a note under ``referring_root`` should spell a ref to ``target``.
+
+    Same root: relative to that root's vault, because that is what every other
+    ref in the file looks like and what the root's own index resolves. Another
+    root: prefixed with the workspace, the only spelling that can name it — and
+    the one the vault already uses (`related: work/People/Oliver-Akermann`).
+    """
+    parts = Path(target).parts
+    without_ext = target[:-3] if target.endswith(".md") else target
+    if referring_root and parts and parts[0] == referring_root:
+        # Drop `<workspace>/<leaf>/`, leaving `People/Mo`.
+        return Path(*Path(without_ext).parts[2:]).as_posix()
+    # `<workspace>/People/Mo`: workspace, then the path inside its vault.
+    trimmed = Path(without_ext).parts
+    return Path(trimmed[0], *trimmed[2:]).as_posix() if len(trimmed) > 2 else without_ext
+
+
+def _per_root_index(
+    entries: Sequence[Entry], referring_root: str
+) -> dict[str, list[Path]]:
+    """A filename index as seen from inside one root.
+
+    Refs are written root-relative in the per-root layout, so the same string
+    means a different note depending on who is asking. This keys the referring
+    root's notes root-relative (and by bare stem), and every note by its
+    workspace-qualified form. One global index instead would resolve
+    `People/Peter` to whichever root came first — and Peter exists in both on the
+    reference install.
+    """
+    idx: dict[str, list[Path]] = defaultdict(list)
+    for entry in entries:
+        full = entry.path
+        parts = full.parts
+        if len(parts) < 3:
+            continue
+        workspace = parts[0]
+        inside = Path(*parts[2:])                      # People/Mo.md
+        idx[str(full.with_suffix(""))].append(full)     # personal/memory-vault/People/Mo
+        idx[f"{workspace}/{inside.with_suffix('')}"].append(full)   # personal/People/Mo
+        if workspace == referring_root:
+            idx[str(inside.with_suffix(""))].append(full)            # People/Mo
+            idx[full.stem].append(full)                              # Mo
+    return idx
+
+
+def move_note_between_roots(
+    install_root: Path,
+    source: str,
+    target_workspace: str,
+    *,
+    targets: Sequence[tuple[Path, str, Path]],
+    workspaces: Sequence[str],
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Move ONE note to another workspace, taking its links with it.
+
+    ``source`` is install-relative (``personal/memory-vault/People/Mo.md``).
+
+    The bulk pass moves only tag-obvious notes; everything else reaches the review
+    queue as a judgement, and on the reference install EVERY queued row is a
+    judgement — so the bulk mover would move none of them. This is the per-row
+    counterpart: the operator picks the destination and one note moves.
+
+    Both directions of every edge are rewritten, which is the whole reason this is
+    not a ``git mv``:
+
+    * refs from other notes TO this one — root-relative for notes in the
+      destination root, since it becomes their neighbour, workspace-qualified for
+      everyone else;
+    * refs IN this note to notes that stay behind — root-relative today, and now
+      crossing a root, so they gain the workspace they were left in.
+
+    A cross-root ref is a real link the graph deliberately does not draw (see
+    ``Entry.related_external``), so a note that leaves takes its edges out of its
+    old root's rendered graph. That is a consequence of moving it, and it is why
+    the destination is the operator's choice rather than a guess.
+
+    ``apply=False`` computes every edit and writes nothing, which is what the
+    caller shows before asking.
+    """
+    install_root = Path(install_root).resolve()
+    names = [n for n in workspaces if n]
+    out: dict[str, Any] = {
+        "source": source,
+        "destination": "",
+        "target_workspace": target_workspace,
+        "applied": False,
+        "rewrites": [],
+        "files_rewritten": 0,
+        "refusals": [],
+    }
+
+    parts = Path(source).parts
+    if len(parts) < 3:
+        out["refusals"].append(f"'{source}' is not a note inside a workspace vault")
+        return out
+    source_workspace, leaf = parts[0], parts[1]
+    if source_workspace not in names:
+        out["refusals"].append(f"'{source_workspace}' is not a registered workspace")
+    if target_workspace not in names:
+        out["refusals"].append(f"'{target_workspace}' is not a registered workspace")
+    if source_workspace == target_workspace:
+        out["refusals"].append(f"'{source}' is already in {target_workspace}")
+    if out["refusals"]:
+        return out
+
+    destination = Path(target_workspace, leaf, *parts[2:]).as_posix()
+    out["destination"] = destination
+    source_file = install_root / source
+    dest_file = install_root / destination
+    if not source_file.is_file():
+        out["refusals"].append(f"no note at {source}")
+        return out
+    if dest_file.exists():
+        # Merging two people's notes is a content decision, never a move.
+        out["refusals"].append(f"a note already exists at {destination}")
+        return out
+
+    entries, _absolute = scan_targets(list(targets))
+    known = {_no_ext(_install_relative(e)) for e in entries}
+    stayed = {
+        _install_relative(e) for e in entries
+        if e.path.parts and e.path.parts[0] == source_workspace
+    }
+    stayed.discard(source)
+
+    # The scan skips a vault's generated root notes, but only INDEX.md and
+    # VOCABULARY.md are actually regenerated — MEMORY.md is written by hand and by
+    # the curation agent, so nothing else fixes a link in it. Measured on the real
+    # vault: moving a note left exactly one broken link, and it was there.
+    rebuilt_by_index = {"INDEX.md", "VOCABULARY.md"}
+    extra: list[tuple[str, str]] = []
+    for vault, workspace, prefix in targets:
+        for candidate in sorted(Path(vault).glob("*.md")):
+            if candidate.name in rebuilt_by_index:
+                continue
+            extra.append(((Path(prefix) / candidate.name).as_posix(), workspace))
+
+    sweep: list[tuple[str, str]] = [
+        (_install_relative(e), e.path.parts[0] if e.path.parts else "") for e in entries
+    ]
+    sweep.extend(extra)
+
+    for note, here in sweep:
+        note_file = install_root / note
+        if not note_file.is_file():
+            continue
+        try:
+            text = note_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        is_moved = note == source
+        # Two different roots, and conflating them was a bug: a ref is RESOLVED
+        # in the root the text was written in, and RE-SPELLED for the root the
+        # note will be read from. They differ only for the note being moved —
+        # whose `related: People/Alba` was written in personal and must come out
+        # as `personal/People/Alba` once it is read from work. Resolving it as if
+        # it were already in work found nothing and left the ref dangling.
+        reads_as = source_workspace if is_moved else here
+        writes_as = target_workspace if is_moved else here
+        # Frontmatter and wikilinks take a REF; a markdown link takes a PATH,
+        # because its destination is recomputed relative to the note. Same edges,
+        # two value spaces, which is why both tables are passed.
+        refs = {source: _ref_dialect(destination, writes_as)}
+        # Extension-less, because `resolve_vault_link` answers without one — the
+        # same keying the bulk planner uses (`candidate.path[:-3]`). Keyed with
+        # `.md` it matched nothing and every markdown link to the moved note was
+        # left pointing at a file that is no longer there.
+        paths = {_no_ext(source): _no_ext(destination)}
+        if is_moved:
+            # Its own outbound refs to notes left behind now cross a root.
+            for other in stayed:
+                refs[other] = _ref_dialect(other, writes_as)
+                paths[_no_ext(other)] = _no_ext(other)
+        new_text, changes = rewrite_references(
+            text,
+            note,
+            destination if is_moved else note,
+            paths,
+            _per_root_index(entries, reads_as),
+            moved_by_resolved=refs,
+            known_notes=known,
+        )
+        if not changes:
+            continue
+        out["files_rewritten"] += 1
+        for change in changes:
+            out["rewrites"].append({
+                "path": destination if is_moved else note,
+                "line": change["line"],
+                "from": change["from"],
+                "to": change["to"],
+            })
+        if apply:
+            try:
+                note_file.write_text(new_text, encoding="utf-8")
+            except OSError as exc:
+                out["refusals"].append(f"could not rewrite {note}: {exc}")
+                return out
+
+    if apply:
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        code, output = _run_git(install_root, "mv", source, destination)
+        if code != 0:
+            # Untracked, or no repository: still a move, just without history
+            # following it. Recorded so the caller can say which happened.
+            try:
+                source_file.replace(dest_file)
+            except OSError as exc:
+                out["refusals"].append(f"could not move the note: {exc}")
+                return out
+            out["git_mv"] = output.strip()[:200] or "not tracked"
+        else:
+            out["git_mv"] = "ok"
+        out["applied"] = True
+        # Both roots' generated files now name a note that is not where they say.
+        # INDEX.md and MEMORY.md are derived, so they are rebuilt rather than
+        # rewritten — leaving them stale is what made the real-vault check report
+        # `INDEX.md -> ./People/User.md` as newly broken.
+        # Imported here, not at module scope: `workspace_reroot` is the migration
+        # and this is one of the things it drives, so a top-level import would
+        # close the loop.
+        from ciao.workspace_reroot import rebuild_indexes
+
+        out["indexes"] = rebuild_indexes(
+            install_root, sorted({source_workspace, target_workspace}), vault_name=leaf
+        )
+    return out
 
 
 def plan_rehome(

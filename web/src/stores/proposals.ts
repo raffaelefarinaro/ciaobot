@@ -82,11 +82,18 @@ export const useProposalsStore = defineStore('proposals', () => {
     }
   }
 
-  async function act(id: string, action: 'accept' | 'dismiss') {
+  /** `workspace` names the destination for a re-home accept.
+   *
+   * A row whose tags name two workspaces is a question only the operator can
+   * answer, and the picker used to throw the answer away: every candidate button
+   * called accept with no destination, so the server had nothing to move into.
+   */
+  async function act(id: string, action: 'accept' | 'dismiss', workspace = '') {
     busy.value = true
     error.value = ''
     try {
-      await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}`)
+      const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+      await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`)
       await fetch()
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Action failed'

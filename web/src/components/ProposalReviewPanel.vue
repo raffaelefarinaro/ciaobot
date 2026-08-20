@@ -32,6 +32,48 @@ const selected = computed({
  */
 const filtered = computed(() => store.visibleRows(projectStore.activeWorkspace))
 
+/** A skill proposal's name without its date prefix.
+ *
+ * Curation re-proposes the same skill on every run, so the queue holds
+ * `2026-08-09-defuddle`, `2026-08-12-defuddle`, `2026-08-16-defuddle` as three
+ * separate rows. They are one decision, and reading them as three is what made
+ * 45 skill rows look like 45 things to think about.
+ */
+function skillBase(row: ProposalRow): string {
+  return row.text.replace(/^\d{4}-\d{2}-\d{2}-/, '') || row.text
+}
+
+/** The date a skill proposal was made, from its filename prefix. */
+function skillDate(row: ProposalRow): string {
+  return /^(\d{4}-\d{2}-\d{2})-/.exec(row.text)?.[1] ?? ''
+}
+
+/** Rows in display order, grouped when grouping means something.
+ *
+ * Only skill rows group: they repeat by design. A memory bullet or a re-home row
+ * is one fact about one note, so grouping those would invent a relationship.
+ */
+const groups = computed(() => {
+  const skills = filtered.value.filter(isSkill)
+  const rest = filtered.value.filter(r => !isSkill(r))
+  const byName = new Map<string, ProposalRow[]>()
+  for (const row of skills) {
+    const key = skillBase(row)
+    const bucket = byName.get(key)
+    if (bucket) bucket.push(row)
+    else byName.set(key, [row])
+  }
+  const skillGroups = [...byName.entries()]
+    .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+    .map(([label, rows]) => ({
+      key: `skill:${label}`,
+      label,
+      rows: [...rows].sort((a, b) => skillDate(b).localeCompare(skillDate(a))),
+    }))
+  const others = rest.length ? [{ key: 'other', label: '', rows: rest }] : []
+  return [...others, ...skillGroups]
+})
+
 
 const KIND_LABELS: Record<string, string> = {
   memory: 'memory',
@@ -171,9 +213,14 @@ function confirmAccept(row: ProposalRow) {
   void store.act(row.id, 'accept')
 }
 
-function doAccept(row: ProposalRow) {
+function doAccept(row: ProposalRow, workspace = '') {
   confirmLeakId.value = ''
-  void store.act(row.id, 'accept')
+  void store.act(row.id, 'accept', workspace)
+}
+
+/** The workspace a justified re-home row would move into. */
+function rehomeTarget(row: ProposalRow): string {
+  return (row.rehome?.destination ?? '').split('/')[0]
 }
 
 function cancelLeakConfirm() {
@@ -205,6 +252,11 @@ async function openWorkspaceChat(workspace: string, title: string) {
 async function view(row: ProposalRow) {
   if (!row.path) return
   await fileViewer.open(row.path)
+}
+
+/** The last path segment, which is the only part that differs between rows. */
+function pathLeaf(path: string): string {
+  return path.split('/').pop() || path
 }
 
 /** Accept a skill proposal by building it, in a chat, in its own workspace.
@@ -386,9 +438,16 @@ onMounted(() => { void store.fetch() })
         <span class="pr-group-count">{{ filtered.length }}</span>
       </header>
 
-      <ul class="pr-rows">
+      <template v-for="group in groups" :key="group.key">
+        <!-- Curation re-proposes the same skill every run, so one skill arrives
+             as N dated rows. They are one decision. -->
+        <header v-if="group.label" class="pr-group-label">
+          <span class="pr-group-label-name">{{ group.label }}</span>
+          <span class="pr-group-label-count">{{ group.rows.length }}</span>
+        </header>
+        <ul class="pr-rows">
         <li
-          v-for="row in filtered"
+          v-for="row in group.rows"
           :key="row.id"
           class="pr-row"
           :class="{ 'pr-row--leak': row.leak_warning }"
@@ -405,8 +464,18 @@ onMounted(() => { void store.fetch() })
               <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
               <span class="pr-row-title">{{ rowTitle(row) }}</span>
             </div>
+            <!-- For a skill row the subtitle IS the file, so it opens it. A
+                 separate "view" button spent a slot saying what the path already
+                 said. Only the leaf: every row in a group shares the folder. -->
             <p class="pr-row-sub">
-              {{ rowSubtitle(row) }}
+              <button
+                v-if="isSkill(row) && row.path"
+                type="button"
+                class="pr-path-link"
+                :title="row.path"
+                @click="view(row)"
+              >{{ pathLeaf(row.path) }}</button>
+              <template v-else>{{ rowSubtitle(row) }}</template>
               <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
             </p>
             <details v-if="rowDetail(row)" class="pr-row-detail">
@@ -432,7 +501,7 @@ onMounted(() => { void store.fetch() })
               type="button"
               class="btn-small btn-primary"
               :disabled="store.busy"
-              @click="doAccept(row)"
+              @click="doAccept(row, c)"
             >{{ c }}</button>
             <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="doDismiss(row)">dismiss</button>
             <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
@@ -445,12 +514,6 @@ onMounted(() => { void store.fetch() })
           <div v-else-if="isSkill(row)" class="pr-actions">
             <button
               type="button"
-              class="btn-small btn-chip"
-              :disabled="!row.path"
-              @click="view(row)"
-            >view</button>
-            <button
-              type="button"
               class="btn-small btn-primary"
               :disabled="chatBusy"
               @click="implementSkill(row)"
@@ -461,19 +524,22 @@ onMounted(() => { void store.fetch() })
 
           <div v-else class="pr-actions">
             <!-- No accept when nothing backs a destination: a button that cannot
-                 do what it says is worse than absent. -->
+                 do what it says is worse than absent. A justified re-home names
+                 the destination on the button, because "accept" does not say that
+                 a file is about to move. -->
             <button
               v-if="canAccept(row)"
               type="button"
               class="btn-small btn-primary"
               :disabled="store.busy"
               @click="confirmAccept(row)"
-            >accept</button>
+            >{{ isRehome(row) ? `move to ${rehomeTarget(row)}` : 'accept' }}</button>
             <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="doDismiss(row)">dismiss</button>
             <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
         </li>
-      </ul>
+        </ul>
+      </template>
     </section>
 
     <footer v-if="filtered.length" class="pr-foot">
@@ -580,6 +646,57 @@ onMounted(() => { void store.fetch() })
   border-radius: var(--radius-sm);
   background: var(--bg-elev);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
+}
+
+/* Stacked, so the text column gets the width. Four buttons in a row squeezed a
+   long skill name into six wrapped lines beside a mostly-empty action strip. */
+.pr-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  flex: none;
+  min-width: 8.5rem;
+}
+
+.pr-actions--confirm {
+  min-width: 12rem;
+}
+
+.pr-group-label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 var(--space-1);
+}
+
+.pr-group-label-name {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.pr-group-label-count {
+  font-size: 0.75rem;
+  color: var(--fg3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The path is the button: a skill row's whole content is the file it names. */
+.pr-path-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--accent);
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.pr-path-link:hover {
+  text-decoration: underline;
 }
 
 .pr-clear-filter {
