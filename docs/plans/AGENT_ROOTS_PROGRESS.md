@@ -1187,9 +1187,46 @@ perform the region edit for `[memory]`/`[profile]` and the move for `[rehome]` (
 **Promote** and have it hand the row to a chat in that row's workspace, which is where the operator's
 own "chat for a specific one, in the workspace it was created in" idea lands.
 
+### Accept now writes, and there is a third action (`20156f1a`)
+Operator's decision: accept must actually put the fact in memory. So the queue has three actions.
+
+- **accept** writes the entry into that workspace's bounded region through `update_region` (cap
+  enforced, guide resolved through `agent_root`), and only THEN drops the bullet. Write-then-dismiss,
+  never the reverse, which is the rule the curation prompt already states. A failed write returns
+  **409 with the bullet still queued**; the realistic cause is a full region, and this install's
+  `ciao:memory` sits at 139% of its cap.
+- **dismiss** writes nothing, as before.
+- **talk about it** hands the row to a chat in that row's OWN workspace and changes nothing. A work
+  proposal discussed in a personal chat is read against the wrong vault, guide and people, which is
+  why the workspace travels with the row.
+
+Batch accept attempts every promotion BEFORE removing any line and drops only what landed. A batch
+that deleted first would have lost every over-cap fact at once, silently and in bulk.
+
+Rehome rows still do not move the note. Relocating a file and rewriting every reference is
+`vault_rehome`'s job and reversible through its own receipt; half of that from a queue row leaves
+links pointing at a path that moved. The row reports `promoted: false` so the UI can say so.
+
+### Re-home detection, and the identity string that did NOT need migrating (`<pending>`)
+The detector returned zero candidates from every root, so the proposals UI lost every hint. Fixing
+the predicate was easy. The part worth recording is what NOT to change.
+
+`Candidate.path` is the identity written into the queue bullets and the key `_rehome_signal` joins
+on — 16 live bullets naming `personal/People/X.md`. I expected to have to migrate those strings.
+Instead the identity is now built as **workspace plus vault-relative path**, which is the same string
+in both layouts, so nothing needs migrating and no bullet can stop matching its note. Deriving it
+from the on-disk path would have broken all 16 silently, because a failed join renders as "no signal"
+rather than as an error.
+
+Correction to the previous entry, which called this "a decision, not a patch": the decision was real,
+but the right construction removes the problem rather than trading it for a migration.
+
 ### Remaining
-0. **Decide what Accept means** (above). Then re-home detection per-root. Then the trigger and the
-   blocking gate. Blocks release.
+0. The mandatory upgrade trigger and the blocking gate — the shape is agreed above. Then migrate this
+   install and exercise the routines and the Memory Map for real.
+1. `vault_rehome`'s APPLY path (the mover and link rewriter) is still shared-layout only. Detection is
+   per-root; moving a note between roots is not. It refuses rather than misfiring, but
+   `ciao vault-rehome --apply` on a migrated install needs its own pass.
 1. **Ship this work in a release, and let the upgrade run the migration.** Do NOT run `--apply` by
    hand from a dev checkout again — that is what broke the install today. Mechanics for whenever it
    does run: the app must be stopped, and `com.ciao.server` is a launchd agent with
