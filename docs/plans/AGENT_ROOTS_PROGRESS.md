@@ -41,7 +41,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | delegate | DONE | commit 001639e6 |
-| P9 Per-root memory + MCP allowlist | delegate | RUNNING | chat-1c687242 |
+| P9 Per-root memory + MCP allowlist | delegate | PARTIAL | P9.1+P9.2 DONE commit a0d55751; **P9.3 HELD, needs an operator decision** |
 | P10 The cut | — | TODO | gated on all of P1–P9 + V1–V3 |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | — | TODO | with P10 |
@@ -400,3 +400,32 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   only P9 (`chat-1c687242`) and P4 (`chat-4710c68d`) remain open, both running. Nothing was needed
   from the archived ones: their diffs are committed and the deferred P4.2 / P4.7 items are
   coordinator work, not theirs.
+- 2026-08-20 — P9.1 and P9.2 verified and committed as `a0d55751`. P9.1 is a clean four-line
+  change: `memory_status` / `memory_update` resolve the guide through `config.agent_root(workspace)`
+  instead of discarding the workspace. P9.2 reports one entry per registered guide with over-cap
+  attributable per workspace, and the delegate correctly verified that NOTHING in `web/src` reads
+  `memory_hygiene`, so it invented no frontend change.
+- 2026-08-20 — **P9.3 HELD, not committed.** Stashed (`stash@{0}`) with its test parked at
+  `docs/plans/held/test_mcp_allowlist.py.p9_3`. The implementation follows P9.3's wording literally
+  and is still not shippable. Measured on the live install:
+      personal  mcp denials -> ['mcp__n8n_mcp', 'mcp__notion']
+      work      mcp denials -> ['mcp__notion']
+  Four problems:
+  1. **It silently removes two working integrations.** `.mcp.json` declares `n8n_mcp` and `notion`.
+     `personal` has `disallowed_tools: None`, which the change reads as "opted into nothing", so both
+     servers become unreachable. `work` survives only by the accident of having an explicit deny list.
+  2. **There is no way to opt in.** `disallowed_tools` is a DENY list, and the change infers opt-in
+     from "explicitly listed and not named". So a workspace enables a server by writing a deny list
+     for a different one. That is not a usable model, and a NEW workspace can never reach any server.
+  3. **The fail-closed path rests on an unverified wildcard.** A malformed `.mcp.json` appends
+     `mcp__*`, which is passed straight to the Claude SDK's `disallowed_tools`. Nothing in this repo
+     expands that pattern. If the SDK matches exact names, the malformed case fails OPEN while the
+     docstring claims it fails closed.
+  4. **It only applies to Claude chats.** `project_chats.py:4667` returns `[]` for any provider that
+     is not `claude`, so the "credentialed authority" leak stays wide open for codex and opencode
+     chats. The docstring claims a posture the code cannot deliver, and every delegate in this
+     release runs on opencode.
+  A correct version needs an explicit allow field rather than an inverted deny list, plus a migration
+  that seeds each existing workspace from its current effective set so upgrading loses nothing, and
+  it must state the Claude-only limit honestly. That is a design decision with a real blast radius,
+  so it goes to the operator rather than being improvised.
