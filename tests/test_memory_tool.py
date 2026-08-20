@@ -166,6 +166,87 @@ def test_update_region_enforces_bound_and_reports_status(tmp_path: Path) -> None
         )
 
 
+def test_cap_refusal_carries_the_numbers_and_a_way_forward(tmp_path: Path) -> None:
+    """A full region must not read as a dead end.
+
+    The old message said only "would exceed its N-character limit": no overage,
+    no usage, no mention that remove is still available — so a caller at the cap
+    reported it as unresolvable instead of trimming and retrying.
+    """
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+    mt.update_region(
+        guide,
+        "memory",
+        action="add",
+        entry="a stale fact [expires: 2020-01-01]",
+        char_limit=200,
+    )
+
+    with pytest.raises(mt.MemoryCapExceeded) as excinfo:
+        mt.update_region(
+            guide, "memory", action="add", entry="x" * 300, char_limit=200
+        )
+
+    exc = excinfo.value
+    details = exc.details()
+    assert details["region"] == "memory"
+    assert details["char_limit"] == 200
+    assert details["used_chars"] > 200
+    assert details["overage_chars"] == details["used_chars"] - 200
+    # The expired entry is the uncontroversial eviction, so name it.
+    assert details["expired_entries"] == ["a stale fact [expires: 2020-01-01]"]
+    assert "remove is never blocked" in str(exc)
+    # Still a ValueError, so existing handlers keep working.
+    assert isinstance(exc, ValueError)
+
+
+def test_remove_is_never_blocked_by_the_cap(tmp_path: Path) -> None:
+    """The documented way out has to actually work while over the cap."""
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+    mt.update_region(
+        guide, "memory", action="add", entry="a" * 80, char_limit=200
+    )
+    mt.update_region(
+        guide, "memory", action="add", entry="b" * 80, char_limit=200
+    )
+
+    # Now over a tightened cap: removal must still succeed.
+    result = mt.update_region(
+        guide, "memory", action="remove", match="a" * 80, char_limit=50
+    )
+    assert result["changed"] is True
+    entries, _ = mt.read_region(guide, "memory")
+    assert entries == ["b" * 80]
+
+
+def test_a_shrinking_replace_is_allowed_while_over_the_cap(tmp_path: Path) -> None:
+    """Progress counts even when it does not finish the job.
+
+    The cap check applied to every action, so an over-cap region could not be
+    repaired through this tool at all: one edit per call, and any edit that left
+    the region still over the limit was refused. A region at 139% of its cap had
+    to be fixed by hand-editing CLAUDE.md.
+    """
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+    mt.update_region(guide, "memory", action="add", entry="a" * 90, char_limit=400)
+    mt.update_region(guide, "memory", action="add", entry="b" * 90, char_limit=400)
+
+    # Well over a tightened cap. Trading a long entry for a short one still
+    # leaves it over, and must still be accepted.
+    result = mt.update_region(
+        guide, "memory", action="replace", match="a" * 90, entry="short", char_limit=50
+    )
+    assert result["changed"] is True
+    entries, _ = mt.read_region(guide, "memory")
+    assert entries == ["short", "b" * 90]
+
+    # But growing it further is still refused.
+    with pytest.raises(mt.MemoryCapExceeded):
+        mt.update_region(
+            guide, "memory", action="add", entry="c" * 90, char_limit=50
+        )
+
+
 def test_migrate_legacy_files(tmp_path: Path) -> None:
     guide = _guide_with_regions(tmp_path / "CLAUDE.md")
     legacy = tmp_path / "legacy"

@@ -24,7 +24,7 @@ from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
 from ciao.loops import publish_loops_changed
 from ciao.memory_tool import memory_status as memory_status_payload
-from ciao.memory_tool import resolve_region, update_region
+from ciao.memory_tool import MemoryCapExceeded, resolve_region, update_region
 from ciao.models import ControlSurface
 from ciao.web.project_chats import UnknownModelError, _MAX_ACTIVE_DELEGATES
 from ciao.schedules import ScheduleEntry, compute_next_run
@@ -113,17 +113,31 @@ _MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
 class ControlPlaneError(ValueError):
     """Stable application error returned by MCP adapters."""
 
-    def __init__(self, code: str, message: str, *, retryable: bool = False):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        # Structured facts a caller can act on without parsing the message.
+        # Merged into `payload` under "details" so the top-level shape (code,
+        # message, retryable) stays fixed for existing handlers.
+        self.details = details
 
     def payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "code": self.code,
             "message": str(self),
             "retryable": self.retryable,
         }
+        if self.details:
+            payload["details"] = self.details
+        return payload
 
 
 def _ok(data: Any = None, **extra: Any) -> dict[str, Any]:
@@ -452,6 +466,14 @@ class CiaoControlPlane:
                 match=match,
                 char_limit=limit,
             )
+        except MemoryCapExceeded as exc:
+            # Distinct code and a structured payload: this is the one failure
+            # here that is not a malformed call, and a caller that knows how far
+            # over it is and which entries have expired can resolve it itself
+            # instead of reporting a dead end.
+            raise ControlPlaneError(
+                "memory_cap_exceeded", str(exc), details=exc.details()
+            ) from exc
         except ValueError as exc:
             raise ControlPlaneError("memory_update_invalid", str(exc)) from exc
         return _ok(result)

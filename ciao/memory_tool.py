@@ -39,13 +39,19 @@ SECTION_SEP = "§"
 
 
 DEFAULT_MEMORY_CHAR_LIMIT = 2200
-"""Advisory cap on the ``ciao:memory`` region (chars). Tunable via
-``CIAO_MEMORY_CHAR_LIMIT``."""
+"""Cap on the ``ciao:memory`` region (chars). Tunable via
+``CIAO_MEMORY_CHAR_LIMIT``.
+
+Enforced, not advisory: ``update_region`` refuses an ``add`` or ``replace``
+that would cross it. ``remove`` is always allowed, since it can only shrink the
+region — that is the way out of a full region, and callers over the cap should
+be told so rather than left with a bare refusal."""
 
 
 DEFAULT_USER_CHAR_LIMIT = 1375
-"""Advisory cap on the ``ciao:profile`` region (chars). Tunable via
-``CIAO_USER_CHAR_LIMIT``. Named ``user`` for env-var continuity."""
+"""Cap on the ``ciao:profile`` region (chars), enforced the same way as
+``DEFAULT_MEMORY_CHAR_LIMIT``. Tunable via ``CIAO_USER_CHAR_LIMIT``. Named
+``user`` for env-var continuity."""
 
 
 MAX_ENTRY_CHARS = 600
@@ -195,6 +201,49 @@ def is_entry_expired(entry: str, today: datetime.date | None = None) -> bool:
 def contains_invisible_unicode(text: str) -> bool:
     """True when *text* contains any character from ``_INVISIBLE_CHARS``."""
     return any(ch in text for ch in _INVISIBLE_CHARS)
+
+
+class MemoryCapExceeded(ValueError):
+    """An ``add``/``replace`` that would push a region past its char limit.
+
+    Carries the numbers and a starting point for what to evict. The bare
+    ``ValueError`` this replaces said only "would exceed its N-character
+    limit": no indication of how far over, of what is already in there, or
+    that ``remove`` is still available — so a caller at the cap read it as a
+    dead end and stopped, when trimming first and re-adding always worked.
+
+    Still a ``ValueError`` so existing handlers keep catching it.
+    """
+
+    def __init__(self, region: str, candidate: list[str], limit: int) -> None:
+        self.region = region
+        self.usage = region_usage(candidate, limit)
+        self.overage_chars = max(0, self.usage["used_chars"] - limit)
+        # Expired entries are the uncontroversial evictions: they were written
+        # with an explicit end date that has passed. Anything else is a
+        # judgement call and is left to the caller.
+        self.expired_entries = [
+            entry for entry in candidate if is_entry_expired(entry)
+        ]
+        super().__init__(
+            f"{region} region would exceed its {limit}-character limit by "
+            f"{self.overage_chars} chars "
+            f"({self.usage['used_chars']}/{limit}, "
+            f"{self.usage['entry_count']} entries). "
+            f"{len(self.expired_entries)} entry(s) are already expired. "
+            "Remove or replace an entry first — remove is never blocked by the "
+            "cap, since it can only shrink the region."
+        )
+
+    def details(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "used_chars": self.usage["used_chars"],
+            "char_limit": self.usage["char_limit"],
+            "overage_chars": self.overage_chars,
+            "entry_count": self.usage["entry_count"],
+            "expired_entries": list(self.expired_entries),
+        }
 
 
 def region_usage(entries: list[str], limit: int) -> dict[str, Any]:
@@ -533,10 +582,18 @@ def update_region(
                 del candidate[index]
             else:
                 candidate[index] = normalized_entry
-        if char_limit is not None and total_chars(candidate) > char_limit:
-            raise ValueError(
-                f"{canonical} region would exceed its {char_limit}-character limit"
-            )
+        # Refuse only edits that GROW an already-full region. The check used to
+        # apply to every action, which made an over-cap region unfixable through
+        # this tool: a `remove` that left the region still over the limit was
+        # refused, so was a `replace` with something shorter, and each call only
+        # makes one edit — there was no sequence of calls that got back under.
+        # A region at 139% of its cap could only be repaired by hand-editing
+        # CLAUDE.md. An edit that shrinks the region is always progress, even
+        # when it does not finish the job.
+        if char_limit is not None:
+            after = total_chars(candidate)
+            if after > char_limit and after > total_chars(entries):
+                raise MemoryCapExceeded(canonical, candidate, char_limit)
         write_region(guide, canonical, candidate)
         return {
             "ok": True,
