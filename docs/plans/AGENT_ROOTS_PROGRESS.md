@@ -35,8 +35,8 @@ Re-verified by symbol against the working tree before any dispatch:
 | P1 Proposal-kind registry | delegate | DONE | commit 83000847 |
 | P2 Audit split (D2) | delegate | DONE | commit c121678b; pre-existing os-audit failure fixed too |
 | P3 unrehomed_people notice | delegate | DONE | commit 4cc0510f |
-| P4 Surfaced-actions strip | delegate | PARTIAL | commit 481a31c9; P4.2 unblocked TODO, P4.7 blocked on the operator |
-| P5 Queue review UI | split | PARTIAL | server half DONE, commit b77f78b4; UI half still TODO |
+| P4 Surfaced-actions strip | delegate | RUNNING | P4.2 chat-893eb5df; P4.7 folded into chat-7ffb29f7 |
+| P5 Queue review UI | split | RUNNING | UI half chat-7ffb29f7 |
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
@@ -502,3 +502,18 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   genuinely broken by running it in a detached worktree: 3 failed. Rule: committing a subset of a
   green tree is only safe when the excluded files are provably unrelated, which needs checking the
   diff content, not just the filename.
+- 2026-08-20 — Operator committed the permission-shortcut work as `4542b56d`, unblocking
+  `ChatLayout.vue`. Verified against the code before dispatching downstream work rather than
+  trusting the report: `HomeRecentChats` mounts at exactly lines 84 and 177, each inside a
+  `--home-max` container, confirming the work order's "ChatLayout builds the home screen twice"
+  claim and giving the exact P4.7 insert points.
+- 2026-08-20 — Wave 7 dispatched, both in bypass, both file-disjoint:
+  P4.2 (`chat-893eb5df`) rebuilds `audit_upgrade_notices` from `operator_actions.detect_actions`
+  so the CLI and the strip can never drift, mapping only the two kinds that already have a notice
+  today (vault-location, unrehomed-people) plus `unmigrated_vault_links` which predates P4; explicitly
+  told to leave package-update, missed-schedules and review-queue-depth OUT of the CLI audit, since
+  adding them there is scope creep this step does not call for.
+  P4.7 + P5 UI (`chat-7ffb29f7`) mounts `HousekeepingStrip` at both confirmed locations and builds the
+  proposal review panel, briefed hard on the three real cases (no-signal question UI, dual-candidate
+  picker, the D7 leak warning) and on batch operations being required rather than optional, per the
+  measured one-item-per-session drain rate.
