@@ -17,7 +17,15 @@ import hashlib
 import json
 from pathlib import Path
 
-from ciao.workspace_reroot import plan, read_receipt, rehearse, write_receipt
+from ciao.workspace_reroot import (
+    apply,
+    dirty_tracked_paths,
+    plan,
+    read_receipt,
+    rehearse,
+    undo,
+    write_receipt,
+)
 
 
 def _vault(tmp_path: Path, *, workspaces: tuple[str, ...] = ("personal", "work")) -> Path:
@@ -58,12 +66,15 @@ def test_plan_classifies_every_path_and_does_not_refuse(tmp_path: Path) -> None:
 
     moves = {(m.source, m.destination) for m in result.moves}
     assert moves == {
+        ("memory-vault/.obsidian", ".obsidian"),
         ("memory-vault/Logs", "Logs"),
         ("memory-vault/Templates", "templates-src"),
         ("memory-vault/personal", "personal/memory-vault"),
         ("memory-vault/work", "work/memory-vault"),
     }
-    assert result.global_keeps == ["memory-vault/.obsidian"]
+    # .obsidian is promoted rather than kept in place, which is what lets the
+    # vault directory end up empty and be removed instead of lingering.
+    assert result.global_keeps == []
     assert sorted(result.regenerated) == [
         "memory-vault/INDEX.md",
         "memory-vault/MEMORY.md",
@@ -230,3 +241,148 @@ def test_write_receipt_keeps_the_earlier_one(tmp_path: Path) -> None:
     assert archived, "the earlier receipt was lost"
     kept = json.loads(archived[0].read_text(encoding="utf-8"))
     assert kept["marker"] == "first"
+
+
+# -- apply / undo round trip -------------------------------------------------
+
+
+def _git(root: Path, *args: str) -> str:
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args], capture_output=True, text=True, check=False
+    )
+    return (proc.stdout + proc.stderr).strip()
+
+
+def _git_install(tmp_path: Path, **kwargs) -> tuple[Path, Path, Path]:
+    """A committed git install holding a real-shaped vault."""
+    install = tmp_path / "install"
+    install.mkdir()
+    _git(install, "init", "-b", "main")
+    _git(install, "config", "user.email", "test@example.com")
+    _git(install, "config", "user.name", "Test")
+    vault = _vault(install, **kwargs)
+    runtime = install / ".runtime"
+    runtime.mkdir()
+    (install / ".gitignore").write_text(".runtime/\n", encoding="utf-8")
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "seed")
+    return install, vault, runtime
+
+
+def test_apply_then_undo_restores_a_byte_identical_tree(tmp_path: Path) -> None:
+    """The direct test that the automated part moves and never rewrites.
+
+    Every tracked file is hashed before and after the round trip. One changed
+    hash fails the release.
+    """
+    install, vault, runtime = _git_install(tmp_path)
+    before = _tree_hashes(install / "memory-vault")
+
+    applied = apply(install, vault, ["personal", "work"], runtime)
+    assert applied["status"] == "migrated", applied.get("refusals")
+    assert not (install / "memory-vault").exists()
+    assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
+    assert (install / "Logs" / "Chats" / "chat-1" / "session.md").is_file()
+    assert (install / "templates-src" / "person.md").is_file()
+
+    result = undo(install, runtime)
+    assert result["status"] == "undone", result
+
+    after = _tree_hashes(install / "memory-vault")
+    assert after == before
+
+
+def test_apply_preserves_history_so_git_log_follow_works(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+
+    apply(install, vault, ["personal", "work"], runtime)
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "reroot")
+
+    log = _git(install, "log", "--follow", "--oneline", "--", "personal/memory-vault/People/Peter.md")
+    assert "seed" in log, "history did not follow the move"
+
+
+def test_apply_refuses_on_modified_tracked_files(tmp_path: Path) -> None:
+    """A tracked modification blocks, because git checkout must stay a valid undo."""
+    install, vault, runtime = _git_install(tmp_path)
+    (vault / "personal" / "People" / "Peter.md").write_text("edited\n", encoding="utf-8")
+
+    applied = apply(install, vault, ["personal", "work"], runtime)
+
+    assert applied["status"] == "refused"
+    assert any("uncommitted" in r for r in applied["refusals"])
+    assert (install / "memory-vault").is_dir(), "it moved something despite refusing"
+    assert read_receipt(runtime) is None
+
+
+def test_apply_does_not_refuse_on_untracked_files(tmp_path: Path) -> None:
+    """Untracked files must NOT block.
+
+    The reference install carries roughly 700 untracked Logs/Chats/chat-* dirs at
+    any time, so a strict gate would refuse on every real install and nothing
+    would ever migrate.
+    """
+    install, vault, runtime = _git_install(tmp_path)
+    fresh = vault / "Logs" / "Chats" / "chat-untracked"
+    fresh.mkdir(parents=True)
+    (fresh / "session.md").write_text("new\n", encoding="utf-8")
+
+    applied = apply(install, vault, ["personal", "work"], runtime)
+
+    assert applied["status"] == "migrated", applied.get("refusals")
+    assert (install / "Logs" / "Chats" / "chat-untracked" / "session.md").is_file()
+
+
+def test_apply_is_all_or_nothing_when_a_workspace_has_no_vault(tmp_path: Path) -> None:
+    """Every registered workspace re-roots or none does."""
+    install, vault, runtime = _git_install(tmp_path, workspaces=("personal",))
+
+    applied = apply(install, vault, ["personal", "work"], runtime)
+
+    assert applied["status"] == "refused"
+    assert (install / "memory-vault" / "personal").is_dir()
+    assert not (install / "personal").exists()
+
+
+def test_a_migrated_receipt_records_the_reverse_map(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+
+    apply(install, vault, ["personal", "work"], runtime)
+    receipt = read_receipt(runtime)
+
+    assert receipt is not None
+    pairs = {(e["source"], e["destination"]) for e in receipt["applied"]}
+    assert ("memory-vault/personal", "personal/memory-vault") in pairs
+    assert receipt["git_head_before"]
+
+
+def test_undo_with_no_migrated_receipt_does_nothing(tmp_path: Path) -> None:
+    install, _vault_root, runtime = _git_install(tmp_path)
+
+    assert undo(install, runtime)["status"] == "nothing_to_undo"
+    assert (install / "memory-vault").is_dir()
+
+
+def test_dirty_tracked_paths_reports_the_first_path_intact(tmp_path: Path) -> None:
+    """The first porcelain line must not lose a character.
+
+    `git status --porcelain` puts the index and worktree status in columns 1 and
+    2, so a modified-in-worktree line begins with a space. Stripping the combined
+    output before splitting ate that space and truncated the first path to
+    "emory-vault/...", which would have made a refusal message name a file that
+    does not exist.
+    """
+    install, vault, runtime = _git_install(tmp_path)
+    (vault / "VOCABULARY.md").write_text("edited\n", encoding="utf-8")
+    (vault / "INDEX.md").write_text("edited\n", encoding="utf-8")
+
+    dirty = dirty_tracked_paths(install, "memory-vault")
+
+    assert dirty, "the gate saw nothing"
+    for path in dirty:
+        assert path.startswith("memory-vault/"), f"truncated path: {path!r}"
+        assert (install / path).exists(), f"reported a path that does not exist: {path!r}"
+
