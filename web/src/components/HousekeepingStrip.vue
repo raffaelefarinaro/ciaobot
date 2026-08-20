@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useProjectStore } from '../stores/projects'
 import type { OperatorAction } from '../lib/types'
@@ -8,6 +8,33 @@ const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
 
 const chatBusy = ref(false)
+
+/** Actions grouped by the workspace they concern, shared ones first.
+ *
+ * An action's workspace decides where acting on it writes, so a flat strip made
+ * the reader check each tile's prose to work out which one it was about.
+ * Anything with no workspace is install-wide, and goes at the top because it
+ * applies regardless of which workspace you are looking at.
+ */
+const groups = computed(() => {
+  const byWorkspace = new Map<string, OperatorAction[]>()
+  for (const action of housekeeping.actions) {
+    const key = action.workspace || ''
+    const bucket = byWorkspace.get(key)
+    if (bucket) bucket.push(action)
+    else byWorkspace.set(key, [action])
+  }
+  return [...byWorkspace.entries()]
+    .sort(([a], [b]) => (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b)))
+    .map(([workspace, actions]) => ({ workspace, actions }))
+})
+
+// A single group with no workspace is the common case (one install, nothing
+// workspace-specific); labelling it "shared" there is noise, so headings only
+// appear once there is something to distinguish.
+const showHeadings = computed(
+  () => groups.value.length > 1 || groups.value.some((g) => g.workspace),
+)
 
 onMounted(() => {
   housekeeping.init()
@@ -59,11 +86,15 @@ async function openChat(action: OperatorAction): Promise<void> {
 
 <template>
   <section v-if="hasActions()" class="housekeeping" aria-label="Housekeeping actions">
-    <article
-      v-for="action in housekeeping.actions"
-      :key="action.id"
-      class="housekeeping-tile"
-    >
+    <template v-for="group in groups" :key="group.workspace || '_shared'">
+      <p v-if="showHeadings" class="housekeeping-group">
+        {{ group.workspace || 'shared' }}
+      </p>
+      <article
+        v-for="action in group.actions"
+        :key="action.id"
+        class="housekeeping-tile"
+      >
       <span class="housekeeping-glyph" aria-hidden="true">{{ action.glyph }}</span>
       <div class="housekeeping-body">
         <p class="housekeeping-title">{{ action.title }}</p>
@@ -96,12 +127,25 @@ async function openChat(action: OperatorAction): Promise<void> {
         >
           {{ action.chat_label || 'Discuss in chat' }}
         </button>
-      </div>
-    </article>
+        </div>
+      </article>
+    </template>
   </section>
 </template>
 
 <style scoped>
+.housekeeping-group {
+  margin: var(--space-2) 0 0;
+  font-size: 0.72rem;
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.housekeeping-group:first-child {
+  margin-top: 0;
+}
+
 .housekeeping {
   display: flex;
   flex-direction: column;

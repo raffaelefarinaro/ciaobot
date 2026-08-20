@@ -1092,6 +1092,8 @@ export interface HousekeepingRunResponse {
 
 /** Live rehome signal for a `[rehome]` row, from `ciao/vault_rehome`. */
 export interface RehomeSignal {
+  /** The note this row is about (`personal/People/Mo.md`), for a clean label. */
+  note: string
   /** The destination named in the bullet. A guess unless `justified`. */
   destination: string
   /** Every workspace the note's tags name. Empty when no tag backs it. */

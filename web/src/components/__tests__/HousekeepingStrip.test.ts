@@ -133,3 +133,31 @@ describe('a tile that names an existing surface', () => {
     expect(wrapper.findAll('button').map((b) => b.text())).toEqual(['Discuss'])
   })
 })
+
+describe('grouping by workspace', () => {
+  it('groups tiles by workspace with shared ones first', async () => {
+    // An action's workspace decides where acting on it writes, so a flat strip
+    // made the reader parse each tile's prose to work out which one it was about.
+    const housekeeping = useHousekeepingStore()
+    housekeeping.actions = [
+      action({ id: 'w', workspace: 'work', title: 'Work thing' }),
+      action({ id: 'p', workspace: 'personal', title: 'Personal thing' }),
+      action({ id: 's', workspace: '', title: 'Install-wide thing' }),
+    ]
+    const wrapper = mount(HousekeepingStrip)
+    await nextTick()
+
+    expect(wrapper.findAll('.housekeeping-group').map((h) => h.text()))
+      .toEqual(['shared', 'personal', 'work'])
+  })
+
+  it('shows no heading when nothing distinguishes the tiles', async () => {
+    // One install, nothing workspace-specific: labelling it "shared" is noise.
+    const housekeeping = useHousekeepingStore()
+    housekeeping.actions = [action({ workspace: '' })]
+    const wrapper = mount(HousekeepingStrip)
+    await nextTick()
+
+    expect(wrapper.findAll('.housekeeping-group')).toHaveLength(0)
+  })
+})

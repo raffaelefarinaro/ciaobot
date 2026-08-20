@@ -15,12 +15,115 @@ const confirmLeakId = ref('')
 const olderThanDays = ref(30)
 
 const kinds = computed(() => ['all', ...new Set(store.rows.map(r => r.kind))])
-const workspaces = computed(() => ['all', ...new Set(store.rows.map(r => r.workspace))])
 
 const filtered = computed(() => store.rows.filter(r =>
   (kindFilter.value === 'all' || r.kind === kindFilter.value) &&
   (workspaceFilter.value === 'all' || r.workspace === workspaceFilter.value),
 ))
+
+const counts = computed(() => {
+  const tally = new Map<string, number>()
+  for (const row of filtered.value) tally.set(row.kind, (tally.get(row.kind) ?? 0) + 1)
+  return [...tally.entries()].sort((a, b) => b[1] - a[1]).map(([kind, n]) => ({ kind, n }))
+})
+
+/** Rows grouped by the workspace that owns them, shared ones first.
+ *
+ * A flat list of 109 rows from two workspaces reads as one undifferentiated
+ * pile, and the workspace is the single most important thing about a proposal:
+ * it decides which guide an accept writes to and which vault a re-home moves
+ * within. Anything with no workspace is shared, so it sorts to the top rather
+ * than into an arbitrary alphabetical position.
+ */
+const groups = computed(() => {
+  const byWorkspace = new Map<string, ProposalRow[]>()
+  for (const row of filtered.value) {
+    const key = row.workspace || ''
+    const bucket = byWorkspace.get(key)
+    if (bucket) bucket.push(row)
+    else byWorkspace.set(key, [row])
+  }
+  return [...byWorkspace.entries()]
+    .sort(([a], [b]) => (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b)))
+    .map(([workspace, rows]) => ({ workspace, rows }))
+})
+
+type Group = { workspace: string; rows: ProposalRow[] }
+
+function groupSelected(group: Group): boolean {
+  return group.rows.length > 0 && group.rows.every(r => selected.value.has(r.id))
+}
+
+function toggleGroup(group: Group) {
+  const next = new Set(selected.value)
+  if (groupSelected(group)) group.rows.forEach(r => next.delete(r.id))
+  else group.rows.forEach(r => next.add(r.id))
+  selected.value = next
+}
+
+const KIND_LABELS: Record<string, string> = {
+  memory: 'memory',
+  profile: 'profile',
+  user: 'profile',
+  rehome: 're-home',
+  skill: 'skill',
+}
+
+function kindLabel(kind: string): string {
+  return KIND_LABELS[kind] ?? kind
+}
+
+/** The one line that says what this row is about.
+ *
+ * A re-home bullet is a paragraph of prose that reprints both paths and a CLI
+ * incantation; showing it as the title made four rows fill the screen and buried
+ * the only thing that differs between them, which is the person's name.
+ */
+function rowTitle(row: ProposalRow): string {
+  if (isRehome(row)) {
+    const note = row.rehome?.note ?? ''
+    const leaf = note.split('/').pop() ?? ''
+    return leaf.replace(/\.md$/, '') || 'a person note'
+  }
+  return row.text
+}
+
+function rowSubtitle(row: ProposalRow): string {
+  if (isRehome(row)) {
+    const sig = row.rehome
+    const from = row.workspace
+    if (sig?.candidates?.length && sig.candidates.length > 1) {
+      return `${from} → ${sig.candidates.join(' or ')} · tags name more than one`
+    }
+    if (sig?.destination) {
+      const to = sig.destination.split('/')[0]
+      return sig.justified
+        ? `${from} → ${to} · tags back this`
+        : `${from} → ${to} · no tag backs it`
+    }
+    return `${from} · no destination, needs a decision`
+  }
+  if (isSkill(row)) return 'a skill proposal file'
+  return `ciao:${row.region ?? row.kind}`
+}
+
+/** The verbose original, kept behind a disclosure rather than on the surface. */
+function rowDetail(row: ProposalRow): string {
+  if (isRehome(row)) return row.text
+  return row.source ? `from ${row.source}` : ''
+}
+
+/** Whether an accept can do what it says.
+ *
+ * A skill row has no accept descriptor on the server, and a re-home row with no
+ * backed destination has nowhere to go — the old UI still rendered "Move to a
+ * destination?" beside a confirm button that could not name one.
+ */
+function canAccept(row: ProposalRow): boolean {
+  if (isSkill(row)) return false
+  if (isRehome(row)) return rehomeMode(row) === 'accept'
+  return true
+}
 
 const allSelected = computed(() =>
   filtered.value.length > 0 && filtered.value.every(r => selected.value.has(r.id)),
@@ -160,217 +263,148 @@ onMounted(() => { void store.fetch() })
 
 <template>
   <div class="proposal-review">
-    <div class="proposal-review-header">
-      <h2 class="proposal-review-title">Proposal review</h2>
-      <p class="proposal-review-subtitle">
-        {{ store.rows.length }} queued. Accepting a region row writes to a bounded
-        guide region; rehome rows move a file; skill rows are files, dismiss only.
+    <header class="pr-head">
+      <p class="pr-summary">
+        <strong>{{ filtered.length }}</strong> to review
+        <span v-if="counts.length" class="pr-counts">
+          <span v-for="c in counts" :key="c.kind" class="pr-count">{{ c.n }} {{ kindLabel(c.kind) }}</span>
+        </span>
       </p>
+      <div class="pr-seg" role="group" aria-label="Filter by kind">
+        <button
+          v-for="k in kinds"
+          :key="k"
+          type="button"
+          :class="{ active: kindFilter === k }"
+          @click="kindFilter = k"
+        >{{ k === 'all' ? 'all' : kindLabel(k) }}</button>
+      </div>
+    </header>
+
+    <p class="pr-hint">
+      Accepting a memory row writes it into that workspace’s bounded guide region.
+      Re-home rows are not moved here. Skill rows are files, so they can only be
+      dismissed or discussed.
+    </p>
+
+    <div v-if="store.error" class="pr-error">{{ store.error }}</div>
+
+    <div v-if="selected.size" class="pr-batch">
+      <span class="pr-batch-count">{{ selected.size }} selected</span>
+      <button
+        type="button"
+        class="btn-small btn-primary"
+        :disabled="!selectedNonSkill.length || store.busy"
+        @click="batchAccept"
+      >accept {{ selectedNonSkill.length }}</button>
+      <button
+        type="button"
+        class="btn-small btn-chip"
+        :disabled="store.busy"
+        @click="batchDismiss"
+      >dismiss {{ selected.size }}</button>
+      <button type="button" class="btn-small btn-chip" @click="selected = new Set()">clear</button>
     </div>
 
-    <div v-if="store.error" class="proposal-review-error">{{ store.error }}</div>
+    <p v-if="!filtered.length" class="pr-empty">Nothing queued here.</p>
 
-    <div class="proposal-review-toolbar">
-      <label class="proposal-filter">
-        <span class="proposal-filter-label">kind</span>
-        <select v-model="kindFilter" class="proposal-select">
-          <option v-for="k in kinds" :key="k" :value="k">{{ k }}</option>
-        </select>
-      </label>
-      <label class="proposal-filter">
-        <span class="proposal-filter-label">workspace</span>
-        <select v-model="workspaceFilter" class="proposal-select">
-          <option v-for="w in workspaces" :key="w" :value="w">{{ w }}</option>
-        </select>
-      </label>
-      <div class="proposal-batch">
-        <label class="proposal-select-all">
+    <section v-for="group in groups" :key="group.workspace || '_shared'" class="pr-group">
+      <header class="pr-group-head">
+        <label class="pr-group-select">
           <input
             type="checkbox"
-            :checked="allSelected"
-            :disabled="!filtered.length"
-            @change="toggleAll"
+            :checked="groupSelected(group)"
+            @change="toggleGroup(group)"
           />
-          <span>select all</span>
+          <span class="pr-group-name">{{ group.workspace || 'shared' }}</span>
         </label>
-        <button
-          type="button"
-          class="btn-small btn-primary"
-          :disabled="!selectedNonSkill.length || store.busy"
-          @click="batchAccept"
+        <span class="pr-group-count">{{ group.rows.length }}</span>
+      </header>
+
+      <ul class="pr-rows">
+        <li
+          v-for="row in group.rows"
+          :key="row.id"
+          class="pr-row"
+          :class="{ 'pr-row--leak': row.leak_warning }"
         >
-          accept selected ({{ selectedNonSkill.length }})
-        </button>
-        <button
-          type="button"
-          class="btn-small btn-chip"
-          :disabled="!selected.size || store.busy"
-          @click="batchDismiss"
-        >
-          dismiss selected ({{ selected.size }})
-        </button>
-      </div>
-      <div class="proposal-older">
-        <label class="proposal-filter">
-          <span class="proposal-filter-label">dismiss older than</span>
           <input
-            v-model.number="olderThanDays"
-            type="number"
-            min="1"
-            max="3650"
-            class="proposal-select proposal-days"
+            class="pr-row-check"
+            type="checkbox"
+            :checked="selected.has(row.id)"
+            @change="toggleRow(row.id)"
           />
-          <span class="proposal-days-unit">days</span>
-        </label>
-        <button
-          type="button"
-          class="btn-small btn-chip"
-          :disabled="store.busy"
-          @click="dismissOlder"
-        >
-          dismiss
-        </button>
-      </div>
-    </div>
 
-    <div v-if="store.loading" class="proposal-loading">Loading proposals…</div>
-
-    <div v-else-if="!filtered.length" class="proposal-empty">
-      No proposals match this filter.
-    </div>
-
-    <ul v-else class="proposal-list">
-      <li
-        v-for="row in filtered"
-        :key="row.id"
-        class="proposal-row"
-        :class="{
-          'proposal-row--skill': isSkill(row),
-          'proposal-row--leak': row.leak_warning,
-        }"
-      >
-        <input
-          type="checkbox"
-          class="proposal-check"
-          :checked="selected.has(row.id)"
-          @change="toggleRow(row.id)"
-        />
-        <div class="proposal-body">
-          <div class="proposal-meta">
-            <span class="badge" :class="isSkill(row) ? '--accent2' : '--accent'">{{ row.kind }}</span>
-            <span class="proposal-workspace">{{ row.workspace }}</span>
-            <span v-if="isSkill(row)" class="badge --muted">file</span>
-            <span v-if="row.leak_warning" class="badge --warn">leaks to every workspace</span>
-          </div>
-          <p class="proposal-text">{{ row.text }}</p>
-          <p class="proposal-path">{{ row.path }}</p>
-
-          <!-- Rehome: picker over multiple candidates -->
-          <div v-if="isRehome(row) && rehomeMode(row) === 'picker'" class="proposal-rehome">
-            <label class="proposal-filter">
-              <span class="proposal-filter-label">move to</span>
-              <select class="proposal-select">
-                <option v-for="c in row.rehome!.candidates" :key="c" :value="c">{{ c }}</option>
-              </select>
-            </label>
-            <button
-              type="button"
-              class="btn-small btn-primary"
-              :disabled="store.busy"
-              @click="doAccept(row)"
-            >
-              confirm
-            </button>
-            <button
-              type="button"
-              class="btn-small btn-chip"
-              :disabled="store.busy"
-              @click="doDismiss(row)"
-            >
-              dismiss
-            </button>
-          </div>
-
-          <!-- Rehome: no signal, destination is a question -->
-          <div v-else-if="isRehome(row) && rehomeMode(row) === 'question'" class="proposal-rehome">
-            <span class="proposal-question">
-              Move to {{ row.rehome?.destination || 'a destination' }}?
-            </span>
-            <button
-              type="button"
-              class="btn-small btn-primary"
-              :disabled="store.busy"
-              @click="doAccept(row)"
-            >
-              confirm
-            </button>
-            <button
-              type="button"
-              class="btn-small btn-chip"
-              :disabled="store.busy"
-              @click="doDismiss(row)"
-            >
-              dismiss
-            </button>
-          </div>
-
-          <!-- Leak warning: confirm before accept -->
-          <div v-else-if="row.leak_warning && confirmLeakId === row.id" class="proposal-leak-confirm">
-            <p class="proposal-leak-warning">
-              Accepting writes a region into the guide that is injected into every
-              workspace session, not just {{ row.workspace }}. Confirm?
+          <div class="pr-row-body">
+            <div class="pr-row-top">
+              <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
+              <span class="pr-row-title">{{ rowTitle(row) }}</span>
+            </div>
+            <p class="pr-row-sub">
+              {{ rowSubtitle(row) }}
+              <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
             </p>
+            <details v-if="rowDetail(row)" class="pr-row-detail">
+              <summary>details</summary>
+              <p class="pr-row-prose">{{ rowDetail(row) }}</p>
+              <p class="pr-row-source">{{ row.path }}</p>
+            </details>
+          </div>
+
+          <!-- Leak confirm replaces the actions until answered. -->
+          <div v-if="confirmLeakId === row.id" class="pr-actions pr-actions--confirm">
+            <span class="pr-confirm-text">Writes into a guide every workspace loads. Sure?</span>
+            <button type="button" class="btn-small btn-primary" :disabled="store.busy" @click="doAccept(row)">confirm</button>
+            <button type="button" class="btn-small btn-chip" @click="cancelLeakConfirm">cancel</button>
+          </div>
+
+          <!-- A rehome row with several candidates: pick one, never pre-filled. -->
+          <div v-else-if="isRehome(row) && rehomeMode(row) === 'picker'" class="pr-actions">
+            <span class="pr-confirm-text">Which workspace?</span>
             <button
+              v-for="c in row.rehome!.candidates"
+              :key="c"
               type="button"
               class="btn-small btn-primary"
               :disabled="store.busy"
               @click="doAccept(row)"
-            >
-              confirm accept
-            </button>
-            <button
-              type="button"
-              class="btn-small btn-chip"
-              @click="cancelLeakConfirm"
-            >
-              cancel
-            </button>
+            >{{ c }}</button>
+            <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="doDismiss(row)">dismiss</button>
+            <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
 
-          <div v-else class="proposal-actions">
+          <div v-else class="pr-actions">
+            <!-- No accept when nothing backs a destination, and none for a skill
+                 file: a button that cannot do what it says is worse than absent. -->
             <button
-              v-if="!isSkill(row)"
+              v-if="canAccept(row)"
               type="button"
               class="btn-small btn-primary"
               :disabled="store.busy"
               @click="confirmAccept(row)"
-            >
-              accept
-            </button>
-            <button
-              type="button"
-              class="btn-small btn-chip"
-              :disabled="store.busy"
-              @click="doDismiss(row)"
-            >
-              dismiss
-            </button>
-            <button
-              type="button"
-              class="btn-small btn-chip"
-              :disabled="chatBusy"
-              @click="discuss(row)"
-            >
-              talk about it
-            </button>
+            >accept</button>
+            <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="doDismiss(row)">dismiss</button>
+            <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
-        </div>
-      </li>
-    </ul>
+        </li>
+      </ul>
+    </section>
+
+    <footer v-if="filtered.length" class="pr-foot">
+      <label class="pr-older">
+        <span>dismiss anything older than</span>
+        <input v-model.number="olderThanDays" type="number" min="1" max="365" class="pr-older-input" />
+        <span>days</span>
+      </label>
+      <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="dismissOlder">dismiss old</button>
+    </footer>
   </div>
 </template>
 
 <style scoped>
+/* One column, generous vertical rhythm, and every row the same shape. The old
+   layout stacked three unrelated control rows above a list whose items were
+   paragraphs, so nothing had a predictable position. */
 .proposal-review {
   flex: 1;
   min-width: 0;
@@ -382,93 +416,125 @@ onMounted(() => { void store.fetch() })
   gap: var(--space-3);
 }
 
-.proposal-review-header {
+.pr-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.pr-summary {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.pr-counts {
+  display: inline-flex;
+  gap: var(--space-2);
+  margin-left: var(--space-2);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.pr-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  max-width: 68ch;
+}
+
+.pr-error {
+  color: var(--danger, #f87171);
+  font-size: 0.85rem;
+}
+
+.pr-empty {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  padding: var(--space-4) 0;
+}
+
+/* Segmented kind filter, matching the memory view's Graph/List control. */
+.pr-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.pr-seg button {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0.25rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.pr-seg button.active {
+  background: var(--surface-3, rgba(255, 255, 255, 0.08));
+  color: var(--text);
+}
+
+/* The batch bar appears only with a selection, so it never occupies space while
+   reading. */
+.pr-batch {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2, 8px);
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+}
+
+.pr-batch-count {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-right: auto;
+}
+
+/* Workspace groups: the workspace decides which guide an accept writes to, so
+   it is a heading rather than a badge repeated on every row. */
+.pr-group {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-}
-
-.proposal-review-title {
-  margin: 0;
-  font-size: var(--text-lg);
-  color: var(--fg);
-}
-
-.proposal-review-subtitle {
-  margin: 0;
-  font-size: var(--text-sm);
-  color: var(--fg2);
-}
-
-.proposal-review-error {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--error);
-  border-radius: var(--radius);
-  color: var(--error);
-  font-size: var(--text-sm);
-}
-
-.proposal-review-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
   gap: var(--space-2);
 }
 
-.proposal-filter {
-  display: inline-flex;
+.pr-group-head {
+  display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--border);
 }
 
-.proposal-filter-label {
-  font-size: var(--text-sm);
-  color: var(--fg2);
-}
-
-.proposal-select {
-  background: var(--bg2);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 4px 8px;
-  font-size: var(--text-sm);
-  min-height: 32px;
-}
-
-.proposal-days {
-  width: 64px;
-}
-
-.proposal-days-unit {
-  font-size: var(--text-sm);
-  color: var(--fg2);
-}
-
-.proposal-batch,
-.proposal-older {
-  display: inline-flex;
+.pr-group-select {
+  display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
+  cursor: pointer;
 }
 
-.proposal-select-all {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-sm);
-  color: var(--fg2);
+.pr-group-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  text-transform: lowercase;
 }
 
-.proposal-loading,
-.proposal-empty {
-  padding: var(--space-4);
-  text-align: center;
-  color: var(--fg2);
-  font-size: var(--text-sm);
+.pr-group-count {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 0.8rem;
 }
 
-.proposal-list {
+.pr-rows {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -477,80 +543,145 @@ onMounted(() => { void store.fetch() })
   gap: var(--space-2);
 }
 
-.proposal-row {
-  display: flex;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  background: var(--bg-elev);
+.pr-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: var(--space-3);
+  padding: var(--space-3);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-2, 8px);
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+}
+
+.pr-row--leak {
+  border-color: var(--warn, #d29922);
+}
+
+.pr-row-check {
+  margin-top: 0.2rem;
+}
+
+.pr-row-body {
   min-width: 0;
 }
 
-.proposal-row--skill {
-  border-left: 3px solid var(--accent2);
-}
-
-.proposal-row--leak {
-  border-left: 3px solid var(--warn);
-}
-
-.proposal-check {
-  flex-shrink: 0;
-  margin-top: 4px;
-}
-
-.proposal-body {
-  flex: 1 1 auto;
+.pr-row-top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
 }
 
-.proposal-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex-wrap: wrap;
-}
-
-.proposal-workspace {
-  font-size: var(--text-sm);
-  color: var(--fg2);
-}
-
-.proposal-text {
-  margin: 0;
-  font-size: var(--text-base);
-  color: var(--fg);
-}
-
-.proposal-path {
-  margin: 0;
-  font-size: var(--text-xs);
-  color: var(--fg3);
+.pr-row-title {
+  font-size: 0.95rem;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 
-.proposal-rehome,
-.proposal-leak-confirm,
-.proposal-actions {
+.pr-row-sub {
+  margin: 0.25rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.pr-kind {
+  flex: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: var(--surface-3, rgba(255, 255, 255, 0.08));
+  color: var(--text-muted);
+}
+
+.pr-badge {
+  margin-left: var(--space-2);
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+
+.pr-badge.--warn {
+  background: rgba(210, 153, 34, 0.18);
+  color: var(--warn, #d29922);
+}
+
+/* The original bullet is a paragraph of prose with a CLI incantation in it.
+   Useful, but not at the top of every row. */
+.pr-row-detail {
+  margin-top: var(--space-2);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.pr-row-detail summary {
+  cursor: pointer;
+}
+
+.pr-row-prose,
+.pr-row-source {
+  margin: var(--space-2) 0 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.pr-row-source {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+  opacity: 0.75;
+}
+
+.pr-actions {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
   flex-wrap: wrap;
-  margin-top: var(--space-1);
+  justify-content: flex-end;
 }
 
-.proposal-question {
-  font-size: var(--text-sm);
-  color: var(--warn);
+.pr-actions--confirm {
+  flex-basis: 100%;
 }
 
-.proposal-leak-warning {
-  margin: 0;
-  font-size: var(--text-sm);
-  color: var(--warn);
+.pr-confirm-text {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.pr-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.pr-older {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-right: auto;
+}
+
+.pr-older-input {
+  width: 4.5rem;
+}
+
+/* One column on a narrow window: a three-column grid puts the buttons in a
+   sliver otherwise. */
+@media (max-width: 640px) {
+  .pr-row {
+    grid-template-columns: auto 1fr;
+  }
+
+  .pr-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
 }
 </style>

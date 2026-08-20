@@ -19,7 +19,7 @@ import sys
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Any, Callable, Iterable, cast
+from typing import Any, Callable, Iterable, Sequence, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -6830,6 +6830,7 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
     rows: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
     rehome = _rehome_signal(config)
+    ws_names = list(config.workspace_names())
 
     for workspace in config.workspace_names():
         queue = _proposals_file(config, workspace)
@@ -6861,8 +6862,11 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     # Rehome rows: expose the live signal. The destination named
                     # in the bullet is a guess unless the tags justify it, and a
                     # dual-tag note names more than one candidate.
-                    signal = _rehome_lookup(rehome, bullet.text)
+                    signal = _rehome_lookup(rehome, bullet.text, ws_names)
                     row["rehome"] = {
+                        # The note this row is about, so a UI can show a name and
+                        # a direction instead of reprinting the whole bullet.
+                        "note": signal["note"],
                         "destination": signal["destination"],
                         "candidates": signal["candidates"],
                         "justified": signal["justified"],
@@ -6894,20 +6898,32 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
     return rows, by_id
 
 
-def _rehome_lookup(rehome: dict[str, dict[str, Any]], text: str) -> dict[str, Any]:
+def _rehome_lookup(
+    rehome: dict[str, dict[str, Any]], text: str, workspaces: Sequence[str] = ()
+) -> dict[str, Any]:
     """Resolve a rehome bullet's live signal from its named path.
 
     The bullet names the source path in backticks (``personal/People/Mo.md``);
     pull that out and match it against the scan keyed by path.
+
+    The alternation is built from the REGISTERED workspace names rather than
+    hardcoding ``personal|work``: a workspace named anything else never matched,
+    so its rows silently showed "no live rehome signal" forever. Escaped, because
+    a workspace name is the user's and may contain regex metacharacters.
     """
-    m = re.search(r"`((?:personal|work)/[^`]+\.md)`", text)
+    names = [re.escape(n) for n in workspaces if n] or [r"[^/`]+"]
+    m = re.search(rf"`((?:{'|'.join(names)})/[^`]+\.md)`", text)
     path = m.group(1) if m else ""
-    return rehome.get(path, {
-        "destination": "",
-        "candidates": [],
-        "justified": False,
-        "reason": "no live rehome signal for this note",
-    })
+    signal = rehome.get(path)
+    if signal is None:
+        return {
+            "note": path,
+            "destination": "",
+            "candidates": [],
+            "justified": False,
+            "reason": "no live rehome signal for this note",
+        }
+    return {"note": path, **signal}
 
 
 async def list_proposals(request: Request) -> JSONResponse:

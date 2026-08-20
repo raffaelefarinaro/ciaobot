@@ -3,13 +3,18 @@
     <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')">
       <template #actions>
         <div class="mm-seg">
-          <button type="button" :class="{ active: view === 'graph' }" @click="view = 'graph'">Graph</button>
-          <button type="button" :class="{ active: view === 'list' }" @click="view = 'list'">List</button>
+          <button type="button" :class="{ active: view === 'graph' }" @click="setView('graph')">Graph</button>
+          <button type="button" :class="{ active: view === 'list' }" @click="setView('list')">List</button>
+          <button type="button" :class="{ active: view === 'review' }" @click="setView('review')">
+            Review<span v-if="proposals.rows.length" class="mm-seg-count">{{ proposals.rows.length }}</span>
+          </button>
         </div>
       </template>
     </PaneHeader>
 
-    <div class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode }">
+    <ProposalReviewPanel v-if="view === 'review'" />
+
+    <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode }">
       <div v-if="mm.loading" class="mm-empty">Loading vault graph…</div>
       <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
       <div v-else-if="view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
@@ -177,6 +182,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
+import ProposalReviewPanel from './ProposalReviewPanel.vue'
+import { useProposalsStore } from '../stores/proposals'
+import { router } from '../router'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import {
@@ -932,7 +940,22 @@ function onWheel(e: WheelEvent) {
 }
 
 // ---------- list view ----------
-const view = ref<'graph' | 'list'>('graph')
+type MemoryView = 'graph' | 'list' | 'review'
+
+// Review is a segment of this view rather than its own rail entry: the proposal
+// queue IS the memory system's inbox, so it belongs where you go to think about
+// what Ciaobot knows. `/proposals` still routes here (the housekeeping tiles link
+// to it), it just selects this segment instead of a separate page.
+const proposals = useProposalsStore()
+const view = ref<MemoryView>(
+  router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph',
+)
+
+function setView(next: MemoryView) {
+  view.value = next
+  const target = next === 'review' ? '/proposals' : '/memory'
+  if (router.currentRoute.value.path !== target) void router.push(target)
+}
 const sortKey = ref<'title' | 'type' | 'degree'>('title')
 const sortDir = ref(1)
 function setSort(key: 'title' | 'type' | 'degree') {
@@ -1082,6 +1105,14 @@ onBeforeUnmount(() => {
 .mm-delete-btn:hover:not(:disabled) { color: #f7768e; border-color: #f7768e; }
 .mm-delete-btn:disabled { opacity: 0.6; cursor: default; }
 .pill { display: inline-block; background: var(--bg3); border-radius: var(--radius-pill); padding: 2px 9px; font-size: var(--text-xs); margin: 0 4px 4px 0; color: var(--fg2); }
+
+.mm-seg-count {
+  margin-left: 0.35rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: var(--surface-3, rgba(255, 255, 255, 0.12));
+  font-size: 0.7rem;
+}
 
 .mm-seg { display: flex; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
 .mm-seg button {

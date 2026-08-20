@@ -124,8 +124,10 @@
           @close="showNewSchedule = false"
           @open-sidebar="sidebarCollapsed = false"
         />
-        <MemoryMapView v-else-if="viewMode === 'memory'" @open-sidebar="sidebarCollapsed = false" />
-        <ProposalReviewPanel v-else-if="viewMode === 'proposals'" @open-sidebar="sidebarCollapsed = false" />
+        <MemoryMapView
+          v-else-if="viewMode === 'memory' || viewMode === 'proposals'"
+          @open-sidebar="sidebarCollapsed = false"
+        />
         <ProjectView
           v-else-if="projectIdParam"
           :project-id="projectIdParam"
@@ -208,7 +210,6 @@ import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
 import MemoryMapView from './MemoryMapView.vue'
-import ProposalReviewPanel from './ProposalReviewPanel.vue'
 import ProjectView from './ProjectView.vue'
 import SchedulePanel from './SchedulePanel.vue'
 import SettingsView from './SettingsView.vue'

@@ -68,37 +68,21 @@
           <router-link
             to="/memory"
             class="nav-item touch-hit"
-            :class="{ 'nav-item--active': mode === 'memory' }"
+            :class="{ 'nav-item--active': mode === 'memory' || mode === 'proposals' }"
             title="memory"
             aria-label="memory"
           >
-            <!-- Brain: the only rail icon built from organic curves rather than
-                 rectilinear primitives, so it uses round caps/joins like the
-                 voice icons elsewhere instead of the rail's usual square/miter. -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5h1a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Z" />
-              <path d="M15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5h-1a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" />
-              <line x1="12" y1="6" x2="12" y2="18" />
-            </svg>
-                      <span class="nav-item-label" aria-hidden="true">memory</span>
-          </router-link>
-          <router-link
-            to="/proposals"
-            class="nav-item touch-hit"
-            :class="{ 'nav-item--active': mode === 'proposals' }"
-            title="proposals"
-            aria-label="proposals"
-          >
-            <!-- Inbox / queue: a tray with a pending marker, distinct from the
-                 memory brain and the settings sliders. -->
+            <!-- Book/tray: rectilinear like the rest of the rail, which the
+                 organic-curve brain never was. It also now covers review, since
+                 the proposal queue is a segment of this view rather than its own
+                 rail entry. -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
               <path d="M4 4h16v12H4z" />
               <path d="M4 16h16v4H4z" />
               <line x1="8" y1="8" x2="16" y2="8" />
             </svg>
-                      <span class="nav-item-label" aria-hidden="true">proposals</span>
+                      <span class="nav-item-label" aria-hidden="true">memory</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/providers, /settings/models, ...) and none of them match
