@@ -108,6 +108,7 @@ class _Index:
         *,
         workspace: str | None = None,
         legacy_workspace: str = "",
+        index_owns_workspace: bool = False,
     ) -> list[VaultEntity]:
         """Return entities whose name/alias appears as a whole word in ``prompt``."""
         self._refresh_if_stale()
@@ -120,7 +121,10 @@ class _Index:
             if entity.path in seen:
                 continue
             if not _entity_visible_in_workspace(
-                entity, workspace, legacy_workspace=legacy_workspace
+                entity,
+                workspace,
+                legacy_workspace=legacy_workspace,
+                index_owns_workspace=index_owns_workspace,
             ):
                 continue
             if pattern.search(snippet):
@@ -203,6 +207,7 @@ def _entity_visible_in_workspace(
     workspace: str | None,
     *,
     legacy_workspace: str = "",
+    index_owns_workspace: bool = False,
 ) -> bool:
     """Return whether an indexed entity is visible to ``workspace``.
 
@@ -210,6 +215,18 @@ def _entity_visible_in_workspace(
     single-workspace indexes used unprefixed paths like ``People/Alba``; those
     belong to ``legacy_workspace``, which the caller reads off the workspace
     registry.
+
+    ``index_owns_workspace`` says the index being read covers exactly this one
+    workspace, which is true of every per-root ``INDEX.md`` after the
+    re-rooting. Then every entry belongs here by construction and there is
+    nothing to filter — the prefix rules below describe a shared index and
+    become actively wrong. Applying them anyway is what happened on the migrated
+    install: per-root indexes are unprefixed, so `People/...`, `Projects/...`
+    and the rest fell to the legacy rule, which only admits the ONE workspace
+    that owns unprefixed entries. Measured live: every one of the 423 entities in
+    the work root was invisible to work chats, while personal worked purely
+    because it happened to be the legacy owner. Silently, because entity
+    enrichment is fail-open.
 
     An unknown ``legacy_workspace`` fails closed. Showing an unprefixed entity
     in every workspace is a cross-workspace disclosure; the provider request
@@ -227,7 +244,7 @@ def _entity_visible_in_workspace(
     in.
     """
     workspace = (workspace or "").strip()
-    if not workspace:
+    if not workspace or index_owns_workspace:
         return True
     if entity.path.startswith(f"{workspace}/"):
         return True
@@ -238,16 +255,25 @@ def _entity_visible_in_workspace(
     return False
 
 
-_index_cache: _Index | None = None
+# One entry per agent root, not one entry total. A single slot was right when
+# every workspace shared one INDEX.md; with an index per root, chats alternating
+# between workspaces evicted each other's index and re-parsed it on every prompt.
+# Keyed by path and bounded by the number of roots an install has.
+_index_cache: dict[Path, _Index] = {}
+_INDEX_CACHE_LIMIT = 8
 
 
 def get_index(vault_root: Path) -> _Index:
     """Return the process-wide entity index for a given vault root."""
-    global _index_cache
     index_path = vault_root / "INDEX.md"
-    if _index_cache is None or _index_cache._path != index_path:
-        _index_cache = _Index(index_path)
-    return _index_cache
+    cached = _index_cache.get(index_path)
+    if cached is not None:
+        return cached
+    if len(_index_cache) >= _INDEX_CACHE_LIMIT:
+        _index_cache.clear()
+    index = _Index(index_path)
+    _index_cache[index_path] = index
+    return index
 
 
 def find_entities(
@@ -256,14 +282,22 @@ def find_entities(
     *,
     workspace: str | None = None,
     legacy_workspace: str = "",
+    index_owns_workspace: bool = False,
 ) -> list[VaultEntity]:
     """Scan ``prompt`` and return whole-word matches against INDEX.md.
 
     ``legacy_workspace`` is the workspace that owns unprefixed pre-migration
     vault entries — pass ``config.primary_workspace()``.
+
+    ``index_owns_workspace`` marks a per-root index, whose every entry belongs to
+    the workspace asking. Both callers resolve the root through the same seam
+    that knows which layout the install is in, so neither has to guess.
     """
     return get_index(vault_root).find(
-        prompt, workspace=workspace, legacy_workspace=legacy_workspace
+        prompt,
+        workspace=workspace,
+        legacy_workspace=legacy_workspace,
+        index_owns_workspace=index_owns_workspace,
     )
 
 

@@ -1433,12 +1433,38 @@ Settings button re-created `CLAUDE.md`, `subagents/` and `commands/` in the inst
 agent-shaped debris the migration exists to remove, restored by the button that claims to fix things.
 The same bug `ciao setup` had, in a second place. Now loops `agent_root_targets()`.
 
-All four are the same failure: post-migration code that still encodes the shared layout as *the*
-layout. The read sweep covered readers; these were a **standard-path definition**, a **health
-report**, and a **repair writer**. Worth asking of any surface that names a location.
+### 5. Entity hints were invisible to every workspace but one
+The worst of the set, and the one a green suite was least likely to catch. Per-root `INDEX.md` files
+are *unprefixed* — correctly, the migration strips the workspace prefix when the folder itself
+carries it. `_entity_visible_in_workspace` still applied the shared-index rules, under which an
+unprefixed `People/...` path belongs to `legacy_entity_workspace()` and nobody else. Measured on the
+live install: **all 423 entities in the work root were invisible to work chats**; personal worked
+only because it happens to be the legacy owner. Entity enrichment is fail-open, so the symptom was
+silence — chats simply stopped being told who anyone was.
 
-Tests: `tests/test_post_migration_standard_paths.py` (8), each mutation-tested — reverting any one of
-the three fixes fails its own test and nothing else.
+`find_entities` now takes `index_owns_workspace`: a per-root index covers exactly one workspace, so
+every entry belongs by construction and the prefix rules — which describe a *shared* index — do not
+apply. Both call sites derive it from the same `agent_root` receipt they already use to pick the
+index, so the root and the filter cannot disagree. The shared-layout path is untouched and still
+scopes by prefix.
+
+Alongside it, two smaller finds in the same call path:
+- `CodexProvider._runtime_context` read `config.vault_root` — the emptied vault — so Codex chats got
+  no entity hints at all. The Claude path had been fixed during the read sweep; this one was missed
+  because the sweep looked for vault *readers* and this reads an index. Now uses the same resolver.
+- `entity_tagger._index_cache` was a single slot keyed by path. One shared index made that right;
+  with an index per root, alternating workspaces evicted each other and re-parsed on every prompt.
+  Now a dict bounded at 8.
+
+All five are the same failure: post-migration code that still encodes the shared layout as *the*
+layout. The read sweep covered readers; these were a **standard-path definition**, a **health
+report**, a **repair writer**, and a **visibility filter**. Worth asking of any surface that names a
+location — or scopes by one.
+
+Tests: `tests/test_post_migration_standard_paths.py` (8) and `tests/test_entity_index_per_root.py`
+(10), each fix mutation-tested — reverting any one fails its own test and nothing else. The
+shared-layout behaviour has its own test in every case, because four of these five fixes are
+branches on the layout and a fix that just deletes the old branch would pass a one-sided test.
 
 ### Verified on the live install, post-fix
 - Trigger idempotent: `already_migrated`, 0 moves, twice in a row. Receipt `migrated`, 5 moves.
@@ -1450,5 +1476,28 @@ the three fixes fails its own test and nothing else.
 - Per-root `INDEX.md`: zero leftover workspace prefixes in either root.
 - Search: 158 + 426, scoped, 0 leaks; `path_base` = install root.
 - Handover: 8 chats carry `handover_context_pending`, matching the receipt's 8 ids exactly.
+- Entity hints: 4/4 People probes visible in both roots (0/4 for work before the fix).
 - Health: `ok`, 34 checks, zero warnings or errors.
 - Engine: serving 200, zero tracebacks since the swap, `ciao setup` re-render clean and no debris.
+
+### What is still agent-shaped at the install root (correction)
+An earlier note in this ledger described the post-migration install root as holding "`.env`,
+`.runtime/`, `Logs/`, `templates-src/`, `.obsidian/`, `skills-src/` and nothing agent-shaped". That
+was too generous. What is actually still there, all of it tracked:
+
+- `.claude/` (1393 files), `.opencode/` (3655), `.agents/` (41), `.codex/` (8) — generated discovery
+  trees. These are the **P10.9 deletions**, deliberately left until the release ships.
+- `INDEX.md` — a stale whole-vault index generated 2026-08-06 with **1242 entries**, superseded by
+  the two per-root indexes (158 + 426). Nothing reads it: `vault_scan_targets()` returns the two
+  per-root vaults and the entity index resolves through `agent_vault_root`.
+- `MEMORY.md` (47-byte stock placeholder), `CIAO_CUSTOMIZATION.md` (stale 6137-byte stock doc, now
+  seeded per root at 7340 bytes), `CLAUDE.md.lock` (empty), `.mcp.json`.
+
+`CLAUDE.md` and `AGENTS.md` are correctly gone from the install root. Checked and cleared: the
+registry cannot re-adopt `<install>/<name>` as a vault — that branch only fires for single-segment
+registry values, and the migration rewrote them to `<name>/memory-vault`; the live config resolves
+correctly across restarts. `<install>/INDEX.md` and `MEMORY.md` do make `_looks_like_vault(install
+root)` true, which is worth remembering before anything starts scoring the install root as a vault.
+
+Add these to the P10.9 list rather than deleting them piecemeal: they are the same "generated or
+superseded at the old root" category, and one reviewed deletion beats five.

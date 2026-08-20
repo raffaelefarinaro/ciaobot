@@ -1723,6 +1723,23 @@ class ProjectChatManager:
         except ValueError:
             return str(root)
 
+    def _entity_index_is_per_root(self, workspace: str = "") -> bool:
+        """Whether ``_entity_index_root`` resolved a per-root index.
+
+        A per-root index covers exactly one workspace, so its entries need no
+        prefix filtering; a shared one still does. Derived from the same
+        ``agent_root`` receipt the root itself comes from, so the two answers
+        cannot disagree.
+        """
+        if not workspace:
+            return False
+        try:
+            return Path(self._config.agent_root(workspace)) != Path(
+                self._config.workspace_root
+            )
+        except (AttributeError, ValueError):
+            return False
+
     def _entity_index_root(self, workspace: str = "") -> Path:
         """Return the root that owns the vault entity index.
 
@@ -4443,6 +4460,7 @@ class ProjectChatManager:
         vault_root = self._entity_index_root(workspace)
         capsule = build_context_capsule(
             prompt=prompt,
+            entity_index_owns_workspace=self._entity_index_is_per_root(workspace),
             workspace=workspace,
             gws_profile=gws_profile,
             project_name=project_name,
@@ -4490,6 +4508,7 @@ class ProjectChatManager:
         vault_root = self._entity_index_root(workspace)
         capsule = build_context_capsule(
             prompt="",
+            entity_index_owns_workspace=self._entity_index_is_per_root(workspace),
             workspace=workspace,
             gws_profile=gws_profile,
             project_name=project_name,

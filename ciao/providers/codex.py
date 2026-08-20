@@ -802,10 +802,42 @@ class CodexProvider(BaseSDKProvider):
         ) or {}
         return str(payload.get("append") or "")
 
+    def _entity_index_is_per_root(self, workspace: str) -> bool:
+        """Whether :meth:`_entity_index_root` resolved a per-root index, whose
+        entries all belong to ``workspace`` and so need no prefix filtering."""
+        if not workspace:
+            return False
+        try:
+            return Path(self.config.agent_root(workspace)) != Path(
+                self.config.workspace_root
+            )
+        except (AttributeError, ValueError):
+            return False
+
+    def _entity_index_root(self, workspace: str) -> Path:
+        """The vault whose ``INDEX.md`` covers this request's entities.
+
+        Mirrors ``ChatService._entity_index_root``: ``agent_vault_root`` is the
+        one shared index before the re-rooting and this root's own index after
+        it. Reading ``config.vault_root`` instead was right only in the shared
+        layout — after the migration that directory is the emptied one, so
+        ``find_entities`` found no ``INDEX.md``, returned nothing, and Codex
+        chats silently lost every entity hint. Fail-open enrichment hides this,
+        which is exactly why it needs the same resolver as the Claude path.
+        """
+        if workspace:
+            try:
+                return Path(self.config.agent_vault_root(workspace))
+            except (AttributeError, ValueError):
+                logger.debug("could not resolve the agent vault root for %r", workspace)
+        return Path(
+            getattr(self.config, "vault_root", self.workspace_root / "memory-vault")
+        )
+
     def _runtime_context(self, request: AgentRequest) -> str:
         lines = _runtime_lines(self.workspace_root, request.extra_env or {})
-        vault_root = Path(getattr(self.config, "vault_root", self.workspace_root / "memory-vault"))
         workspace = str((request.extra_env or {}).get("CIAO_ACTIVE_WORKSPACE") or "")
+        vault_root = self._entity_index_root(workspace)
         try:
             owner = str(
                 (request.extra_env or {}).get("CIAO_LEGACY_ENTITY_WORKSPACE")
@@ -820,6 +852,7 @@ class CodexProvider(BaseSDKProvider):
                     vault_root,
                     workspace=workspace,
                     legacy_workspace=owner,
+                    index_owns_workspace=self._entity_index_is_per_root(workspace),
                 )
             )
         except Exception:  # noqa: BLE001 - context enrichment is fail-open

@@ -42,6 +42,7 @@ def build_context_capsule(
     vault_root: Path | None = None,
     workspace_vault_root: str = "",
     legacy_entity_workspace: str = "",
+    entity_index_owns_workspace: bool = False,
     unattended: bool = False,
     handover: str = "",
     include_stable: bool = True,
@@ -83,6 +84,7 @@ def build_context_capsule(
                 vault_root,
                 workspace=workspace,
                 legacy_workspace=legacy_entity_workspace,
+                index_owns_workspace=entity_index_owns_workspace,
             )
         except Exception:  # noqa: BLE001 - context enrichment is fail-open
             entities = []
