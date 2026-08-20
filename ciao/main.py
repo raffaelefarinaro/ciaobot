@@ -407,6 +407,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         status = str(reroot.get("status", ""))
         if status == "migrated":
             tracker.done("reroot_workspaces", f"{len(reroot.get('applied') or [])} moves")
+            # This `config` was loaded before the move, so every per-workspace
+            # vault path it holds now points at a directory that has gone —
+            # `workspace_vault_root("personal")` still says `memory-vault/personal`.
+            # Patching the object in place would leave anything already derived
+            # from it stale, so restart into a process that reads the new
+            # registry from disk. Receipt-gated, so the next boot is a no-op and
+            # this happens exactly once in an install's life.
+            logger.info("re-root: restarting to pick up the new layout")
+            # Returned, not raised: the `except RestartRequested` handler wraps
+            # only `server.serve()`, and this happens long before that. The exit
+            # code is the same one that path returns, so the supervisor restarts
+            # us identically.
+            return config.restart_exit_code
         elif status == "refused":
             # Surfaced by the `workspace-unmigrated` action, which reads the
             # refusal back out of the receipt and offers the retry.
@@ -438,7 +451,14 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # Update skills in the background, startup should not wait on npm.
     def _skills_task():
         try:
-            update_skills(str(config.workspace_root))
+            # Every AGENT ROOT, not the install root. After the re-rooting the
+            # install root is not one: syncing it there seeded a stock CLAUDE.md
+            # beside the real per-root guides and pruned the install root's now
+            # stale `.agents/skills` links, reporting 17 tracked deletions for
+            # mirrors nothing reads any more.
+            targets = config.agent_root_targets()
+            for root, _name in targets:
+                update_skills(str(root))
             tracker.done("update_skills")
         except Exception:
             tracker.fail("update_skills", "skill install failed")

@@ -1735,3 +1735,42 @@ def test_startup_runs_the_trigger_between_the_sync_and_the_index(tmp_path: Path)
     reroot = source.index("migrate_if_needed, config")
     index = source.index("_refresh_vault_index,")
     assert sync < reroot < index, (sync, reroot, index)
+
+
+def test_startup_restarts_after_a_successful_migration(tmp_path: Path) -> None:
+    """The config that ran the migration cannot be trusted afterwards.
+
+    It was loaded before the move, so every per-workspace vault path it holds
+    points at a directory that has gone — `workspace_vault_root("personal")`
+    still says `memory-vault/personal`. On the reference install that wrote the
+    auto-project doc back into the emptied vault. Patching the object in place
+    would leave anything already derived from it stale, so the process restarts
+    into one that reads the new registry from disk.
+    """
+    import inspect
+
+    from ciao import main
+
+    source = "\n".join(
+        line.split("#", 1)[0] for line in inspect.getsource(main).splitlines()
+    )
+    reroot = source.index("migrate_if_needed, config")
+    restart = source.index("return config.restart_exit_code", reroot)
+    serve = source.index("await server.serve()")
+    assert reroot < restart < serve, "it must return before anything serves"
+
+
+def test_startup_syncs_every_agent_root_not_the_install_root(tmp_path: Path) -> None:
+    """After the re-rooting the install root is not an agent root.
+
+    Syncing it there seeded a stock CLAUDE.md beside the real per-root guides and
+    pruned the install root's stale `.agents/skills` links — 17 tracked deletions
+    for mirrors nothing reads any more.
+    """
+    import inspect
+
+    from ciao import main
+
+    source = inspect.getsource(main)
+    assert "config.agent_root_targets()" in source
+    assert "update_skills(str(config.workspace_root))" not in source
