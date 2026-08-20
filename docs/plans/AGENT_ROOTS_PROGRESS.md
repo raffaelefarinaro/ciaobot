@@ -35,7 +35,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P1 Proposal-kind registry | delegate | DONE | commit 83000847 |
 | P2 Audit split (D2) | delegate | DONE | commit c121678b; pre-existing os-audit failure fixed too |
 | P3 unrehomed_people notice | delegate | DONE | commit 4cc0510f |
-| P4 Surfaced-actions strip | delegate | RUNNING | chat-4710c68d, minus P4.2 (os_audit, held by P9) and P4.7 (ChatLayout.vue, still dirty) |
+| P4 Surfaced-actions strip | delegate | PARTIAL | commit 481a31c9; P4.2 unblocked TODO, P4.7 blocked on the operator |
 | P5 Queue review UI | split | PARTIAL | server half DONE, commit b77f78b4; UI half still TODO |
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
@@ -478,3 +478,27 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
 - 2026-08-20 — Follow-up recorded, not blocking: `disallowed_tools` is applied only for `claude`
   chats (`project_chats.py` guard), so the MCP allowlist does not constrain codex or opencode.
   Every delegate in this release runs on opencode. Closing it needs a per-provider mechanism.
+- 2026-08-20 — P4 verified and committed as `481a31c9`. Seven detectors, stable ids, a broken
+  detector logged and skipped, D6 implemented (once schedules no longer catch up, one collapsed tile,
+  both run and dismiss converging on `last_triggered_on`). Routes registered in `app.py`, so the
+  unreachable-routes lesson stuck. It left `ChatLayout.vue`, `ChatPanel.vue` and `static/index.html`
+  untouched as instructed. Suites: python 2681 passed / 1 pre-existing failure; web 699 passed
+  across 68 files on Node 22.
+- 2026-08-20 — **Best catch of the session.** `_review_queue_depth` called `len()` on the generator
+  `Path.glob` returns, which raises `TypeError`. `detect_actions` catches every exception a detector
+  throws, so the review-queue tile silently disappeared, and ONLY on an install that actually has a
+  `Workspace/Skill-Proposals/` folder, which is the sole case where it matters. The reference vault
+  has 49 files there. So the tile meant to surface the 417-item backlog, the central problem of this
+  whole work order, would never have rendered on the operator's own machine.
+  It passed review because the existing depth test wrote only `Memory-Proposals.md`, so the
+  `skill_dir.is_dir()` guard skipped the buggy line entirely. Proved the `TypeError` against the real
+  folder, fixed with `sum(1 for _ in ...)`, added a test that creates the folder, and
+  mutation-checked it by reintroducing the bug.
+- 2026-08-20 — **My own commit error, caught and fixed (`aa596fe4`).** `beaeda6f` (P9.3) was
+  committed as a path-scoped subset of a green working tree, but two of the excluded files
+  (`tests/test_workspace_settings_routes.py`, `tests/test_local_routes.py`) were P9.3's own work,
+  updating the payload assertions that `workspace_to_dict`'s new `allowed_mcp_servers` key changed.
+  I attributed them to P4 because both delegates were editing the tree at once. Verified HEAD was
+  genuinely broken by running it in a detached worktree: 3 failed. Rule: committing a subset of a
+  green tree is only safe when the excluded files are provably unrelated, which needs checking the
+  diff content, not just the filename.
