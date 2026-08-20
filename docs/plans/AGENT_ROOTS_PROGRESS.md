@@ -1268,8 +1268,50 @@ once, so a heading is the only thing that can distinguish them there.
 Batch **talk about it** added: one chat in the active workspace listing every selected row, rows left
 queued. One chat per row is unusable at 109, and rows selected together are usually related.
 
+### The upgrade trigger and the blocking gate (`138d117e`)
+The last feature. Until now the migration was CLI-only, so an upgrading user got nothing — the
+feature shipped and nobody reached it — and the only way to reach it was by hand, which is how it got
+run against an engine that did not understand the result.
+
+`migrate_if_needed(config)` runs at every start from `ciao/main.py`, positioned deliberately: after
+the git sync so the clean-tree gate judges the real tree, before the index refresh so the indexes are
+rebuilt for the layout that now exists, and before the server binds so no chat holds a session in a
+directory that moves. Receipt-gated, so every start after the first is a no-op. It never raises —
+that holds for an unpredicted exception as much as for a recorded refusal, because a migration that
+cannot run is a condition to surface, not a reason to fail an upgrade and leave the install
+half-started.
+
+`_detect_workspace_unmigrated` reads the refusal back out of the receipt through a new
+`peek_receipt` (`read_receipt` gates on `status == "migrated"` and must; a detector whose job is to
+surface the outstanding work needs to read it anyway — the same split `vault_rehome` already makes)
+and raises a **blocking** action whose run button retries through the same `migrate_if_needed`, so
+the button cannot drift from what startup does.
+
+**Blocking means unmissable and not dismissible, NOT an app-wide lock**, and that is a deliberate
+call: the one realistic refusal is an uncommitted vault, and locking the app would take away the
+assistant the operator needs to fix it, exactly when they need it.
+
+Silent on an install with one workspace — no second root to separate from. NOT silent on an install
+with an empty registry whose vault already holds the directories: `workspace_names` falls back to the
+bootstrap default there, and that fallback is load-bearing, so treating an empty registry as "nothing
+to do" would leave exactly those installs behind.
+
+Rehearsed on a clone of the live install, both paths:
+```
+dirty tree  -> refused    nothing moved, gate fires, blocking=True, reason names the file
+committed   -> migrated   10 moves, 8 sessions flagged, indexes 158/426, gate clears
+second run  -> already_migrated
+```
+Two tests had to be strengthened before their mutations would fail: the startup-ordering check
+matched a commented-out line (it strips comments now, trailing ones included), and the
+apply-failure path had no test at all.
+
+One message fix from reading the rehearsal output: the refusal listed every watched path
+(`memory-vault, skills, skills-lock.json, commands, CLAUDE.md, AGENTS.md`) in front of the one fact
+that matters. It names the dirty file now — and the detector stopped appending it a second time.
+
 ### Remaining
-0. The mandatory upgrade trigger and the blocking gate — the shape is agreed above. Then migrate this
+0. ~~The mandatory upgrade trigger and the blocking gate~~ — done. — the shape is agreed above. Then migrate this
    install and exercise the routines and the Memory Map for real.
 1. `vault_rehome`'s APPLY path (the mover and link rewriter) is still shared-layout only. Detection is
    per-root; moving a note between roots is not. It refuses rather than misfiring, but

@@ -786,6 +786,8 @@ def test_apply_refuses_on_a_dirty_tracked_skill(tmp_path: Path) -> None:
 
     assert result["status"] == "refused"
     assert result["dirty_tracked"] == ["skills/jira-tickets/SKILL.md"]
+    # The message names the file, not the list of watched roots.
+    assert "skills/jira-tickets/SKILL.md" in result["refusals"][0]
     assert (install / "skills").is_dir()
 
 

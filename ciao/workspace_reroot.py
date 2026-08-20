@@ -372,10 +372,14 @@ def apply(
     dirty = dirty_tracked_paths(install_root, *moved_relatives)
     if dirty:
         payload["status"] = "refused"
+        # Name the dirty FILE, not the list of paths being watched. Listing every
+        # watched root put six directory names in front of the one fact the
+        # operator needs, in the message the blocking gate shows them.
+        first = dirty[0]
+        others = f" (and {len(dirty) - 1} more)" if len(dirty) > 1 else ""
         payload["refusals"] = [
-            f"{len(dirty)} tracked file(s) in "
-            f"{', '.join(moved_relatives)} have uncommitted changes; commit or "
-            "stash them so git checkout stays a working undo"
+            f"{first}{others} has uncommitted changes; commit or stash it so "
+            "git checkout stays a working undo"
         ]
         payload["dirty_tracked"] = dirty[:20]
         payload["refused"] = True

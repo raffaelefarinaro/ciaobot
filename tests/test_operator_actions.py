@@ -584,14 +584,16 @@ def test_the_gate_names_what_blocked_it(tmp_path: Path) -> None:
     the only useful thing it can say."""
     _reroot_receipt(tmp_path, {
         "status": "refused",
-        "refusals": ["3 tracked file(s) in memory-vault have uncommitted changes"],
+        "refusals": ["memory-vault/work/People/Mo.md has uncommitted changes"],
         "dirty_tracked": ["memory-vault/work/People/Mo.md"],
     })
 
     detail = _reroot_actions(tmp_path)[0].detail
 
     assert "uncommitted changes" in detail
-    assert "memory-vault/work/People/Mo.md" in detail
+    assert detail.count("memory-vault/work/People/Mo.md") == 1, (
+        "the refusal already names the path; printing it twice was the first version"
+    )
 
 
 def test_the_gate_clears_once_the_move_succeeded(tmp_path: Path) -> None:

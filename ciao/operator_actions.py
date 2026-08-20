@@ -303,14 +303,13 @@ def _detect_workspace_unmigrated(context: DetectionContext) -> list[OperatorActi
         return []
 
     refusals = list((receipt or {}).get("refusals") or [])
-    dirty = list((receipt or {}).get("dirty_tracked") or [])
     if refusals:
+        # The refusal already names the offending path, so nothing is appended:
+        # printing it twice was the first version of this string.
         detail = (
             "Each workspace needs its own agent root, and the move refused: "
             + refusals[0]
         )
-        if dirty:
-            detail += f" First: {dirty[0]}"
     else:
         detail = (
             "Each workspace needs its own agent root so its notes, guide and "
