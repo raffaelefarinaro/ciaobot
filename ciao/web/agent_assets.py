@@ -533,8 +533,37 @@ def workspace_health(config: Any) -> dict:
 
     add("workspace-root", "Workspace root", "ok" if root.is_dir() else "error", "Workspace root exists." if root.is_dir() else "Workspace root is missing.", root)
     add("workspace-writable", "Workspace writable", "ok" if os.access(root, os.W_OK) else "error", "Workspace is writable." if os.access(root, os.W_OK) else "Workspace is not writable.", root)
-    add("vault-root", "Vault root", "ok" if vault.is_dir() else "error", "Vault root exists." if vault.is_dir() else "Vault root is missing.", vault)
-    add("vault-writable", "Vault writable", "ok" if os.access(vault, os.W_OK) else "error", "Vault is writable." if os.access(vault, os.W_OK) else "Vault is not writable.", vault)
+    # One vault before the re-rooting, one per agent root after it. Checking
+    # `config.vault_root` alone reported "Vault root is missing" and "Vault is
+    # not writable" on a CORRECTLY migrated install, because that path is exactly
+    # what the migration empties.
+    vault_targets: list[tuple[Path, str]] = []
+    getter = getattr(config, "vault_scan_targets", None)
+    if callable(getter):
+        try:
+            vault_targets = [(Path(root), name) for root, name, _prefix in getter()]
+        except Exception:  # noqa: BLE001 — fall back to the single-vault check
+            vault_targets = []
+    if not vault_targets:
+        vault_targets = [(vault, "")]
+    for target, name in vault_targets:
+        label = f"Vault root ({name})" if name else "Vault root"
+        suffix = f" for {name}" if name else ""
+        add(
+            f"vault-root{'-' + name if name else ''}",
+            label,
+            "ok" if target.is_dir() else "error",
+            f"Vault root{suffix} exists." if target.is_dir() else f"Vault root{suffix} is missing.",
+            target,
+        )
+        writable = target.is_dir() and os.access(target, os.W_OK)
+        add(
+            f"vault-writable{'-' + name if name else ''}",
+            f"Vault writable ({name})" if name else "Vault writable",
+            "ok" if writable else "error",
+            f"Vault{suffix} is writable." if writable else f"Vault{suffix} is not writable.",
+            target,
+        )
 
     memory_paths = _workspace_memory_paths(config, root, vault)
 

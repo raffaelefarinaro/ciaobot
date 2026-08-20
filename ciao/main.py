@@ -100,10 +100,38 @@ class StartupTracker:
         }
 
 
-def _refresh_vault_index(workspace: Path, vault_root: Path | None = None) -> bool:
-    """Regenerate memory-vault/INDEX.md from frontmatter. Non-fatal on failure."""
+def _refresh_vault_index(
+    workspace: Path,
+    vault_root: Path | None = None,
+    targets: list[tuple[Path, str, Path]] | None = None,
+) -> bool:
+    """Regenerate each vault's INDEX.md from frontmatter. Non-fatal on failure.
+
+    ``targets`` comes from ``CiaoConfig.vault_scan_targets()``: one shared vault
+    before the re-rooting and one per agent root after it. Without it this wrote
+    a single index at ``config.vault_root``, which on a migrated install is a
+    directory that no longer exists — so every root's index went stale and the
+    startup log said only "does not exist yet; skipping".
+    """
     try:
         from ciao import vault_index
+
+        if targets:
+            written = 0
+            for root, workspace_name, _prefix in targets:
+                if not Path(root).is_dir():
+                    logger.info("Vault root %s does not exist yet; skipping", root)
+                    continue
+                # Each root owns exactly one vault, so its index carries no
+                # workspace prefix; the stamp keeps `Entry.workspace` correct for
+                # anything reading the index back.
+                entries = vault_index.scan_vault(root, workspace=workspace_name)
+                vault_index.write_index_file(entries, Path(root) / "INDEX.md")
+                written += 1
+            if not written:
+                return False
+            logger.info("Vault index refreshed for %d root(s).", written)
+            return True
 
         root = vault_root or (workspace / "memory-vault")
         if not root.is_dir():
@@ -371,7 +399,12 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     if config.auto_vault_index:
         tracker.start("refresh_vault_index")
         try:
-            await asyncio.to_thread(_refresh_vault_index, config.workspace_root, config.vault_root)
+            await asyncio.to_thread(
+                _refresh_vault_index,
+                config.workspace_root,
+                config.vault_root,
+                config.vault_scan_targets(),
+            )
             tracker.done("refresh_vault_index")
         except Exception:
             tracker.fail("refresh_vault_index", "index refresh failed")

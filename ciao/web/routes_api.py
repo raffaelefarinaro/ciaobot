@@ -4276,17 +4276,32 @@ async def vault_delete_note(request: Request) -> JSONResponse:
     raw = request.query_params.get("path", "").strip()
     if not raw:
         return JSONResponse({"error": "missing path"}, status_code=400)
-    if not raw.startswith("memory-vault/"):
-        return JSONResponse({"error": "not a vault note"}, status_code=400)
     if Path(raw).suffix.lower() not in {".md", ".markdown"}:
         return JSONResponse({"error": "unsupported type"}, status_code=415)
 
-    try:
-        vault_root = Path(config.vault_root).expanduser().resolve()
-        resolved = (vault_root / Path(raw[len("memory-vault/"):])).resolve()
-        resolved.relative_to(vault_root)
-    except (OSError, ValueError):
-        return JSONResponse({"error": "bad path"}, status_code=400)
+    # The id is a path rendered by the scan, which is `memory-vault/...` on a
+    # shared vault and `<root>/memory-vault/...` per agent root. Matching a fixed
+    # `memory-vault/` prefix rejected every id on a migrated install, so the
+    # Memory Map could not delete anything, and a matching prefix joined to
+    # `config.vault_root` would have resolved outside any real vault. Resolving
+    # against the scan's own targets keeps the containment check meaningful:
+    # exactly one vault can own the note, and it must be under that one.
+    vault_root = None
+    resolved = None
+    for target, _name, prefix in config.vault_scan_targets():
+        marker = f"{prefix.as_posix()}/"
+        if not raw.startswith(marker):
+            continue
+        try:
+            candidate_root = Path(target).expanduser().resolve()
+            candidate = (candidate_root / Path(raw[len(marker):])).resolve()
+            candidate.relative_to(candidate_root)
+        except (OSError, ValueError):
+            continue
+        vault_root, resolved = candidate_root, candidate
+        break
+    if resolved is None or vault_root is None:
+        return JSONResponse({"error": "not a vault note"}, status_code=400)
     if not resolved.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
 

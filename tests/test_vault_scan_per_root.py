@@ -168,3 +168,107 @@ def test_the_memory_map_no_longer_reads_the_shared_vault_root(tmp_path: Path) ->
         if "config.vault_root" in line and not line.strip().startswith("#")
     ]
     assert code == [], code
+
+
+# -- the surfaces that read a vault, in both layouts -------------------------
+
+
+def test_the_startup_index_refresh_writes_one_index_per_root(tmp_path: Path) -> None:
+    """It wrote a single index at `config.vault_root`, which the migration
+    empties — so every root's index went stale and the log said only
+    "does not exist yet; skipping"."""
+    from ciao.main import _refresh_vault_index
+
+    config = _install(tmp_path, migrated=True)
+
+    assert _refresh_vault_index(tmp_path, config.vault_root, config.vault_scan_targets())
+
+    for name in ("personal", "work"):
+        index = tmp_path / name / "memory-vault" / "INDEX.md"
+        assert index.is_file(), name
+        # Per root there is nothing to disambiguate, so no workspace prefix.
+        assert "memory-vault/" not in index.read_text(encoding="utf-8")
+
+
+def test_the_startup_refresh_still_writes_one_shared_index_before_migrating(
+    tmp_path: Path,
+) -> None:
+    from ciao.main import _refresh_vault_index
+
+    config = _install(tmp_path, migrated=False)
+
+    assert _refresh_vault_index(tmp_path, config.vault_root, config.vault_scan_targets())
+
+    assert (tmp_path / "memory-vault" / "INDEX.md").is_file()
+    assert not (tmp_path / "personal" / "memory-vault" / "INDEX.md").exists()
+
+
+def test_workspace_health_checks_the_vaults_that_exist(tmp_path: Path) -> None:
+    """It reported "Vault root is missing" and "Vault is not writable" on a
+    CORRECTLY migrated install, because it checked the path the migration
+    empties."""
+    from ciao.web.agent_assets import workspace_health
+
+    config = _install(tmp_path, migrated=True)
+
+    checks = workspace_health(config)["checks"]
+    vault_checks = [c for c in checks if c["id"].startswith("vault-")]
+
+    assert vault_checks, checks
+    assert [c for c in vault_checks if c["status"] == "error"] == []
+    assert {c["id"] for c in vault_checks} == {
+        "vault-root-personal",
+        "vault-writable-personal",
+        "vault-root-work",
+        "vault-writable-work",
+    }
+
+
+def test_workspace_health_is_unchanged_before_migrating(tmp_path: Path) -> None:
+    from ciao.web.agent_assets import workspace_health
+
+    config = _install(tmp_path, migrated=False)
+
+    ids = {c["id"] for c in workspace_health(config)["checks"]}
+
+    assert "vault-root" in ids and "vault-writable" in ids
+
+
+def test_a_migrated_node_id_is_still_deletable(tmp_path: Path) -> None:
+    """`raw.startswith("memory-vault/")` rejected every id on a migrated
+    install, so the Memory Map could delete nothing at all."""
+    config = _install(tmp_path, migrated=True)
+    entries, _ = scan_targets(config.vault_scan_targets())
+    node_id = str(entries[0].path)
+    assert node_id.startswith("personal/memory-vault/")
+
+    # The resolution the handler performs, exercised directly.
+    resolved = None
+    for target, _name, prefix in config.vault_scan_targets():
+        marker = f"{prefix.as_posix()}/"
+        if node_id.startswith(marker):
+            root = Path(target).resolve()
+            resolved = (root / Path(node_id[len(marker):])).resolve()
+            resolved.relative_to(root)
+            break
+    assert resolved is not None and resolved.is_file(), node_id
+
+
+def test_a_node_id_outside_every_vault_is_refused(tmp_path: Path) -> None:
+    """The containment check has to stay meaningful: this is a permanent delete."""
+    config = _install(tmp_path, migrated=True)
+
+    for hostile in ("../../etc/passwd.md", "work/memory-vault/../../escape.md", "nope/x.md"):
+        matched = []
+        for target, _name, prefix in config.vault_scan_targets():
+            marker = f"{prefix.as_posix()}/"
+            if not hostile.startswith(marker):
+                continue
+            root = Path(target).resolve()
+            try:
+                candidate = (root / Path(hostile[len(marker):])).resolve()
+                candidate.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            matched.append(candidate)
+        assert matched == [], (hostile, matched)
