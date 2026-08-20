@@ -409,14 +409,30 @@ def apply(
     # rewriting a user's layout at all.
     backup_dir = runtime_root / _REGENERATED_BACKUP
     backup_dir.mkdir(parents=True, exist_ok=True)
-    stashed: list[dict[str, str]] = []
+    stashed: list[dict[str, Any]] = []
     for relative in [*result.regenerated, *result.ignored]:
         source = install_root / relative
         if not source.is_file():
             continue
+        # Two of these are TRACKED on the reference install (the vault root's
+        # MEMORY.md and VOCABULARY.md), so moving them out of the worktree
+        # without telling git leaves the index claiming files that are gone.
+        # Stage the removal so the migration's git state is self-consistent and
+        # whoever commits it does not carry two ghost entries.
+        tracked = (
+            _run_git(install_root, "ls-files", "--error-unmatch", "--", relative)[0] == 0
+        )
         target = backup_dir / Path(relative).name
         source.replace(target)
-        stashed.append({"source": relative, "backup": str(target.relative_to(runtime_root))})
+        if tracked:
+            _run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
+        stashed.append(
+            {
+                "source": relative,
+                "backup": str(target.relative_to(runtime_root)),
+                "tracked": tracked,
+            }
+        )
 
     # The vault directory is empty now. Remove it so the layout has exactly one
     # home per workspace, and record that undo recreates it.
@@ -510,6 +526,10 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         if backup.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
             backup.replace(target)
+            # Re-stage only what WAS tracked. `git add` on a file that was
+            # untracked before would newly track it, which is not a restoration.
+            if entry.get("tracked"):
+                _run_git(install_root, "add", "--", entry["source"])
             restored.append(entry["source"])
 
     # Files the migration CREATED are removed before the moves are reversed,

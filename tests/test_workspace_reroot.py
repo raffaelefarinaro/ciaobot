@@ -1456,3 +1456,48 @@ def test_the_dry_run_shows_every_move_the_apply_would_make(
     )
     assert "skills" in sources and "skills-lock.json" in sources
     assert "CLAUDE.md" in sources and "AGENTS.md" in sources
+
+
+def test_stashing_a_tracked_aggregate_stages_its_removal(tmp_path: Path) -> None:
+    """Moving a tracked file out of the worktree has to tell git.
+
+    On the reference install two of the stashed aggregates are tracked (the vault
+    root's MEMORY.md and VOCABULARY.md), so without this the index still claimed
+    files that were gone: `git status` showed two unstaged deletions and whoever
+    committed the migration would have carried two ghost entries.
+    """
+    install, vault, runtime = _git_install(tmp_path)
+
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert applied["status"] == "migrated", applied.get("refusals")
+    tracked = [e for e in applied["stashed_files"] if e.get("tracked")]
+    assert tracked, "the fixture's generated notes are tracked"
+    status = _git(install, "-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=no")
+    unstaged_deletions = [line for line in status.splitlines() if line.startswith(" D")]
+    assert unstaged_deletions == [], unstaged_deletions
+
+
+def test_undo_restages_only_what_was_tracked(tmp_path: Path) -> None:
+    """`git add` on a previously untracked file would newly track it, which is
+    not a restoration."""
+    install, vault, runtime = _git_install(tmp_path)
+    # Make .DS_Store genuinely untracked, which is how the reference install has
+    # it: gitignored, so it is stashed for undo but must not be staged.
+    _git(install, "rm", "--cached", "--quiet", "--", "memory-vault/.DS_Store")
+    (install / ".gitignore").write_text(".runtime/\n.DS_Store\n", encoding="utf-8")
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "ignore .DS_Store")
+
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    flags = {e["source"]: e["tracked"] for e in applied["stashed_files"]}
+    assert flags["memory-vault/INDEX.md"] is True
+    assert flags["memory-vault/.DS_Store"] is False
+
+    undo(install, runtime)
+
+    cached = _git(install, "ls-files", "--cached")
+    assert "memory-vault/INDEX.md" in cached
+    # Restoring an untracked file must not newly track it.
+    assert "memory-vault/.DS_Store" not in cached
+    assert (install / "memory-vault" / ".DS_Store").is_file()
