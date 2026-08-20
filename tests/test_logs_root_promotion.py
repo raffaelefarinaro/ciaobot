@@ -155,3 +155,76 @@ def test_a_dry_run_backfill_log_line_cannot_raise(tmp_path: Path) -> None:
         pass
     else:  # pragma: no cover - guards the premise of this test
         raise AssertionError("expected the archive to sit outside the vault root")
+
+
+def test_setup_does_not_invent_a_shared_vault_after_the_re_rooting(tmp_path: Path) -> None:
+    """`ciao setup` died on a migrated install.
+
+    `ensure_vault_git` probed `<install>/memory-vault`, which the migration
+    removes, and fell through to writing a `.gitignore` inside it —
+    FileNotFoundError, out of `setup --load-launchd`, which is the command the
+    installer runs to re-render the launchd plist. Each root's vault lives inside
+    the install repo already, so there is nothing to initialise and nothing to
+    invent.
+    """
+    from ciao.cli import ensure_vault_git
+
+    missing = tmp_path / "memory-vault"
+    assert not missing.exists()
+
+    ensure_vault_git(missing)
+
+    assert not missing.exists(), "it must not scaffold the directory the migration removed"
+
+
+def test_setup_scaffolds_agent_roots_not_the_install_root(tmp_path: Path) -> None:
+    """`ciao setup --load-launchd` is what the installer runs, so scaffolding the
+    install root unconditionally put a stock CLAUDE.md, stock commands and a
+    subagents/ directory beside the real per-root ones on every reinstall of a
+    migrated install."""
+    import json
+
+    from ciao.config import agent_roots_for
+
+    install = tmp_path / "install"
+    runtime = install / ".runtime"
+    runtime.mkdir(parents=True)
+
+    # Before the re-rooting: the install root IS the agent root.
+    assert agent_roots_for(install, runtime) == [(install, "")]
+
+    (runtime / "migration").mkdir()
+    (runtime / "migration" / "workspace-rooting.json").write_text(
+        json.dumps({"status": "migrated"}), encoding="utf-8"
+    )
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{"name": "work"}, {"name": "personal"}]), encoding="utf-8"
+    )
+    from ciao.config import reset_reroot_cache
+
+    reset_reroot_cache()
+
+    assert agent_roots_for(install, runtime) == [
+        (install / "personal", "personal"),
+        (install / "work", "work"),
+    ]
+
+
+def test_the_standalone_helper_never_manufactures_workspace_names(tmp_path: Path) -> None:
+    """Setup runs on installs with no registry yet, and the bootstrap fallback
+    would scaffold two roots for an install that has none."""
+    import json
+
+    from ciao.config import agent_roots_for, reset_reroot_cache
+
+    install = tmp_path / "install"
+    runtime = install / ".runtime" / "migration"
+    runtime.mkdir(parents=True)
+    (runtime / "workspace-rooting.json").write_text(
+        json.dumps({"status": "migrated"}), encoding="utf-8"
+    )
+    reset_reroot_cache()
+
+    # Migrated receipt but no registry: fall back to the install root, not to
+    # invented `personal` and `work` directories.
+    assert agent_roots_for(install, install / ".runtime") == [(install, "")]

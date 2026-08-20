@@ -522,6 +522,14 @@ def ensure_vault_git(root: Path) -> None:
     touched at all. Missing git binary is a non-fatal skip.
     """
     root = Path(root).expanduser().resolve()
+    if not root.is_dir():
+        # Nothing to initialise, and nothing to invent. After the re-rooting the
+        # shared vault path is gone and each root holds its own inside the same
+        # install repo, so scaffolding one here would recreate exactly the
+        # directory the migration removed. `_ensure_vault_gitignore` used to try,
+        # and `ciao setup` died on the FileNotFoundError.
+        print(f"vault {root} does not exist; skipping vault git init", file=sys.stderr)
+        return
     if shutil.which("git") is None:
         print("git not found; skipping vault git init", file=sys.stderr)
         return
@@ -765,16 +773,25 @@ def setup_workspace(
     # Canonical user-authored asset sources (mirrored into .claude/ by
     # sync-skills). App plumbing, not vault content: pre-creating them keeps
     # the Workspace Health checks warning-free on a fresh or adopted setup.
-    for asset_dir in ("subagents", "commands"):
-        (root / asset_dir).mkdir(parents=True, exist_ok=True)
+    from ciao.config import agent_roots_for
     from ciao.sync_skills import _ensure_linked_workspace_guides, _install_stock_agents
 
-    _install_stock_agents(root)
-    written.append(root / ".claude" / "agents")
-    written.extend(_copy_tree_if_missing(stock_commands, root / "commands"))
-    written.append(root / "commands")
-    written.extend(_copy_tree_if_missing(stock_workspace, root))
-    _ensure_linked_workspace_guides(root)
+    # Agent assets go to the AGENT ROOTS, which is the install root before the
+    # re-rooting and one directory per workspace after it. Scaffolding the
+    # install root unconditionally put a stock CLAUDE.md, stock commands and a
+    # subagents/ directory beside the real per-root ones on every migrated
+    # install — `ciao setup --load-launchd` is what the installer runs, so it
+    # happened on every reinstall.
+    for asset_root, _name in agent_roots_for(root, runtime_root):
+        asset_root.mkdir(parents=True, exist_ok=True)
+        for asset_dir in ("subagents", "commands"):
+            (asset_root / asset_dir).mkdir(parents=True, exist_ok=True)
+        _install_stock_agents(asset_root)
+        written.append(asset_root / ".claude" / "agents")
+        written.extend(_copy_tree_if_missing(stock_commands, asset_root / "commands"))
+        written.append(asset_root / "commands")
+        written.extend(_copy_tree_if_missing(stock_workspace, asset_root))
+        _ensure_linked_workspace_guides(asset_root)
 
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(

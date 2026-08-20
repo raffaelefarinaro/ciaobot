@@ -74,6 +74,34 @@ def reset_reroot_cache() -> None:
     _REROOTED_CACHE.clear()
 
 
+def agent_roots_for(workspace_root: Path, runtime_root: Path) -> list[tuple[Path, str]]:
+    """Every agent root, from explicit paths. See ``CiaoConfig.agent_root_targets``.
+
+    The standalone form, for `ciao setup`, which builds paths before any config
+    exists. Reads the registry off disk rather than through ``CiaoConfig``, and
+    deliberately does NOT apply the bootstrap fallback: setup runs on installs
+    that have no registry yet, and manufacturing two workspace names there would
+    scaffold two roots for an install that has none.
+    """
+    from ciao.workspace_reroot import read_receipt, registry_file  # noqa: PLC0415
+
+    workspace_root = Path(workspace_root)
+    if read_receipt(Path(runtime_root)) is None:
+        return [(workspace_root, "")]
+    try:
+        entries = json.loads(registry_file(Path(runtime_root)).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return [(workspace_root, "")]
+    names = [
+        str(e.get("name", "")).strip()
+        for e in entries
+        if isinstance(e, dict) and str(e.get("name", "")).strip()
+    ]
+    if not names:
+        return [(workspace_root, "")]
+    return [(workspace_root / name, name) for name in sorted(names)]
+
+
 def logs_root_for(workspace_root: Path, vault_root: Path, runtime_root: Path) -> Path:
     """Where the derived transcript archive lives, from explicit paths.
 
