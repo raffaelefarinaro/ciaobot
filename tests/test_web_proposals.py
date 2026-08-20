@@ -89,6 +89,29 @@ def _default_vault(tmp_path: Path) -> CiaoConfig:
     return config
 
 
+# BOTH regions, because a missing region is CREATED rather than refused — only a
+# duplicated one is unwritable. Corrupting `memory` alone let every profile row
+# through and the batch half-succeeded.
+_DUPLICATED_REGION_GUIDE = (
+    "# Guide\n"
+    "<!-- ciao:memory:start cap=2200 -->\n- a fact\n<!-- ciao:memory:end -->\n"
+    "<!-- ciao:memory:start cap=2200 -->\n- another\n<!-- ciao:memory:end -->\n"
+    "<!-- ciao:profile:start cap=1375 -->\n- a trait\n<!-- ciao:profile:end -->\n"
+    "<!-- ciao:profile:start cap=1375 -->\n- another\n<!-- ciao:profile:end -->\n"
+)
+
+
+def _corrupt_guide(config: CiaoConfig, workspace: str) -> None:
+    """Make one workspace's guide unwritable by duplicating a region's markers.
+
+    A realistic cause — a bad hand edit — and the failure the write-then-dismiss
+    order exists for. It replaced an over-cap region as the injection here: the
+    cap is advisory now, so an over-cap write succeeds and no longer fails a batch.
+    """
+    guide = config.agent_root(workspace) / "CLAUDE.md"
+    guide.parent.mkdir(parents=True, exist_ok=True)
+    guide.write_text(_DUPLICATED_REGION_GUIDE, encoding="utf-8")
+
 def test_list_returns_rows_with_workspace_path_and_kind(tmp_path: Path) -> None:
     config = _default_vault(tmp_path)
     resp = _client(config).get("/api/proposals")
@@ -322,12 +345,11 @@ def test_accept_writes_the_fact_into_the_region(tmp_path: Path) -> None:
 def test_a_failed_write_keeps_the_bullet(tmp_path: Path) -> None:
     """Write-then-dismiss, never the reverse: the reverse loses the fact.
 
-    An over-cap region is the realistic cause — the reference install's
-    `ciao:memory` sits at 139% of its cap, so `memory_update` already refuses new
-    entries there.
+    A guide whose region markers are duplicated is the realistic cause: the write
+    cannot tell which copy to edit, so it refuses and the bullet has to survive.
     """
     config = _default_vault(tmp_path)
-    object.__setattr__(config, "memory_char_limit", 1)
+    _corrupt_guide(config, "personal")
     client = _client(config)
     row = _accept_kind_row(client, "memory")
 
@@ -362,10 +384,9 @@ def test_a_batch_accept_writes_every_fact_it_dismisses(tmp_path: Path) -> None:
 
 
 def test_a_batch_keeps_the_bullets_it_could_not_write(tmp_path: Path) -> None:
-    """A batch that removed the lines first would lose every over-cap fact at once."""
+    """A batch that removed the lines first would lose every unwritable fact at once."""
     config = _default_vault(tmp_path)
-    object.__setattr__(config, "memory_char_limit", 1)
-    object.__setattr__(config, "user_char_limit", 1)
+    _corrupt_guide(config, "personal")
     client = _client(config)
     rows = [
         r for r in client.get("/api/proposals").json()["rows"]

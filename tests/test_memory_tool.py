@@ -156,14 +156,23 @@ def test_update_region_enforces_bound_and_reports_status(tmp_path: Path) -> None
     assert result["changed"] is True
     status = mt.memory_status(guide, memory_char_limit=100)
     assert status["regions"]["memory"]["entry_count"] == 1
-    with pytest.raises(ValueError, match="character limit"):
-        mt.update_region(
-            guide,
-            "memory",
-            action="add",
-            entry="x" * 100,
-            char_limit=100,
-        )
+    # The cap is ADVISORY, which is what it was always documented to be. Refusing
+    # here turned a budget into a wall — and refusing does not shrink the region
+    # either: the fact just stays queued and the region stays exactly as full.
+    # Bounding it is consolidation's job, during memory curation.
+    over = mt.update_region(
+        guide,
+        "memory",
+        action="add",
+        entry="x" * 100,
+        char_limit=100,
+    )
+    assert over["changed"] is True
+    assert over["over_cap"] is True
+    assert over["char_limit"] == 100
+    assert over["used_chars"] > 100
+    # And the entry really is in the guide, not merely reported as written.
+    assert "x" * 100 in guide.read_text(encoding="utf-8")
 
 
 def test_migrate_legacy_files(tmp_path: Path) -> None:
@@ -187,3 +196,47 @@ def test_user_char_limit_defaults_agree() -> None:
 
     assert mt.DEFAULT_USER_CHAR_LIMIT == 1375
     assert CiaoConfig.__dataclass_fields__["user_char_limit"].default == 1375
+
+
+def test_the_advisory_cap_never_blocks_a_write(tmp_path: Path) -> None:
+    """The cap is a budget, not a gate.
+
+    Enforcing it as a refusal made the accept button dead for 67 of 130 queued
+    proposals on a real vault — and refusing does not reclaim a single character:
+    the fact stays queued and the region stays exactly as full. Only consolidation
+    shrinks it, which is memory curation's job.
+    """
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+
+    for i in range(6):
+        result = mt.update_region(
+            guide, "memory", action="add", entry=f"fact {i} " + "y" * 40, char_limit=50
+        )
+        assert result["changed"] is True, i
+
+    status = mt.memory_status(guide, memory_char_limit=50)
+    assert status["regions"]["memory"]["entry_count"] == 6
+    assert mt.update_region(
+        guide, "memory", action="add", entry="one more", char_limit=50
+    )["over_cap"] is True
+
+
+def test_a_write_inside_the_cap_is_not_flagged(tmp_path: Path) -> None:
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+
+    result = mt.update_region(
+        guide, "memory", action="add", entry="short", char_limit=1000
+    )
+
+    assert result["over_cap"] is False
+    assert result["char_limit"] == 1000
+
+
+def test_no_cap_means_no_over_cap_reporting(tmp_path: Path) -> None:
+    """A caller that passes no limit gets no opinion about one."""
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+
+    result = mt.update_region(guide, "memory", action="add", entry="short")
+
+    assert "over_cap" not in result
+    assert "char_limit" not in result

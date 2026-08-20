@@ -1775,3 +1775,38 @@ Underneath that is a question that is the operator's, not mine: when a note move
 `work`, every link to it from its old root becomes a cross-workspace ref, and those are deliberately
 **not** graph edges (see `related_external`). So a mechanical re-home silently drops the moved note
 out of its old root's graph. That needs deciding before it is built, not after.
+
+
+## The memory cap was a wall, not a budget — V5 now passes (2026-08-20)
+
+Asked: can we remove the cap, since curation summarizes? Two things turned out to disagree with the
+one documented sentence about it, and neither was the cap itself.
+
+`INTEGRATIONS.md` has always said: "advisory cap … **Nothing refuses a write at edit time**;
+`os_audit` and nightly memory curation report/consolidate when over cap." Both halves were false:
+
+1. `memory_tool.update_region` **raised** over the cap. That is what made accept a dead button for 67
+   of 130 queued proposals. And refusing reclaims nothing — the fact stays queued and the region
+   stays exactly as full — so the wall bought no space, it just hid the queue behind it.
+2. The curation prompt **never said to consolidate**. It said "use `memory_status` to inspect usage".
+   So the thing the docs credited with reclaiming space was not asked to.
+
+So the cap stays and the refusal goes, which is what "advisory" meant all along. The write succeeds
+and the result carries `over_cap`, `used_chars` and `char_limit` for anything that wants to surface
+it; bounding the region belongs to the only step that can actually shrink it. Curation is now told to
+consolidate an over-cap region — merge duplicates, fold narrow facts into the general one, drop what a
+note already records — and to report before/after counts.
+
+**V5 end-to-end drain now passes.** On a stripped clone of the real install: 130 rows → **0**, 67
+accepted and 63 dismissed, zero failures, and `run_os_audit(scope="workspace")` reports **0 errors and
+0 notices for both roots**. Before today's two fixes the same drain left 114 rows, 49 of them
+unactionable by any endpoint.
+
+Note for the next person: `audit_setup` alone takes one vault root and reports `missing_vault_root` on
+a migrated install. That is not a bug — `run_os_audit` resolves per-root through `_audit_roots` and
+passes the right pair. Calling `audit_setup` directly is what looks broken.
+
+The write-then-dismiss guard tests used an over-cap region as their failure injection, which no longer
+fails. They now corrupt a guide's region markers instead — and both regions, because a *missing*
+region is created rather than refused, so corrupting only `memory` let every profile row through and
+the batch half-succeeded.
