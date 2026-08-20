@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 
 RECEIPT_VERSION = 1
 
+# The vault directory's leaf name when nothing says otherwise. It is
+# configurable (`CIAO_VAULT_ROOT`), so anything deriving a per-root vault path
+# must take it as an argument rather than assume it; `plan()` reads it off the
+# real vault, and the rebuild helpers now accept it for the same reason.
+VAULT_DIR_NAME = "memory-vault"
+
 # D5. Logs/ holds roughly 71% of all notes, is derived output rather than
 # curated content, and 1454 chat ids cannot each be resolved back to one
 # workspace. Promoted to <install>/Logs/ unmoved, which removes the bulk of the
@@ -540,7 +546,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     if receipt is None:
         return {"status": "nothing_to_undo", "reason": "no migrated receipt"}
 
-    vault_name = Path(receipt.get("vault_root", "")).name or "memory-vault"
+    vault_name = Path(receipt.get("vault_root", "")).name or VAULT_DIR_NAME
     if receipt.get("removed_vault_dir"):
         (install_root / vault_name).mkdir(parents=True, exist_ok=True)
 
@@ -1136,8 +1142,18 @@ def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
 # -- P10.6: rebuild the derived artefacts per root ---------------------------
 
 
-def rebuild_indexes(install_root: Path, workspaces: list[str]) -> dict[str, Any]:
+def rebuild_indexes(
+    install_root: Path, workspaces: list[str], *, vault_name: str = VAULT_DIR_NAME
+) -> dict[str, Any]:
     """Rebuild each root's INDEX.md and VOCABULARY.md, with no path prefix.
+
+    ``vault_name`` is the vault directory's leaf, which is configurable
+    (``CIAO_VAULT_ROOT``) and is NOT always ``memory-vault``. Hardcoding it meant
+    that on such an install every root's vault looked absent, so nothing was
+    rebuilt — while ``plan()``, which derives the name correctly, had already
+    moved the vaults and the receipt reported the migration as complete. The
+    result was an install whose per-root ``INDEX.md`` simply did not exist, which
+    reads to every consumer as "this workspace has no notes".
 
     Every index written before the migration describes the old layout: entries
     keyed under ``personal/...`` inside one shared vault. After the move each
@@ -1152,8 +1168,9 @@ def rebuild_indexes(install_root: Path, workspaces: list[str]) -> dict[str, Any]
     from ciao.vault_index import format_vocabulary, scan_vault, write_index_file
 
     out: dict[str, Any] = {"rebuilt": [], "errors": []}
+    leaf = vault_name or VAULT_DIR_NAME
     for name in workspaces:
-        vault = Path(install_root) / name / "memory-vault"
+        vault = Path(install_root) / name / leaf
         if not vault.is_dir():
             out["errors"].append({"workspace": name, "error": f"no vault at {vault}"})
             continue
@@ -1175,6 +1192,7 @@ def rebuild_search_index(
     workspaces: list[str],
     *,
     db_path: Path | None = None,
+    vault_name: str = VAULT_DIR_NAME,
 ) -> dict[str, Any]:
     """Drop and rebuild the full-text index against the new paths.
 
@@ -1208,9 +1226,16 @@ def rebuild_search_index(
         return result
     try:
         init_db(conn)
+        leaf = vault_name or VAULT_DIR_NAME
         for name in workspaces:
-            vault = Path(install_root) / name / "memory-vault"
+            vault = Path(install_root) / name / leaf
             if not vault.is_dir():
+                # Reported, not skipped silently. A vault that is not where this
+                # expects it is the whole failure mode the `vault_name` parameter
+                # exists for, and `continue` alone made it look like a clean run.
+                result["errors"].append(
+                    {"workspace": name, "error": f"no vault at {vault}"}
+                )
                 continue
             try:
                 # Keyed against the install root, so `personal/memory-vault/...`
@@ -1615,9 +1640,14 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
     # Derived state, rebuilt for the layout that now exists. Reported per root
     # and never fatal: a failed index rebuild is a stale index, not a lost vault,
     # and the migration itself has already succeeded and been recorded.
+    # The leaf comes from the vault that was actually moved, not from a constant:
+    # `plan()` moves `<vault>` to `<root>/<name>/<leaf>`, so the rebuilds have to
+    # look for the same leaf or they find nothing on any install whose
+    # CIAO_VAULT_ROOT does not end in `memory-vault`.
+    leaf = vault_root.name or VAULT_DIR_NAME
     try:
-        outcome["indexes"] = rebuild_indexes(install_root, names)
-        outcome["search"] = rebuild_search_index(install_root, names)
+        outcome["indexes"] = rebuild_indexes(install_root, names, vault_name=leaf)
+        outcome["search"] = rebuild_search_index(install_root, names, vault_name=leaf)
     except Exception as exc:  # noqa: BLE001
         logger.exception("re-root: rebuilding derived state failed")
         outcome["derived_error"] = str(exc)
@@ -1685,7 +1715,13 @@ def repair(
     """
     install_root = Path(install_root).resolve()
     runtime_root = Path(runtime_root)
-    if read_receipt(runtime_root) is None:
+    receipt = read_receipt(runtime_root)
+    # The leaf the migration actually used, recorded in its own receipt. Assuming
+    # `memory-vault` made repair report `vault_missing` for every root of an
+    # install with a different CIAO_VAULT_ROOT leaf — a false alarm about the one
+    # thing repair exists to detect.
+    leaf = Path(str((receipt or {}).get("vault_root", ""))).name or VAULT_DIR_NAME
+    if receipt is None:
         return {
             "status": "not_rerooted",
             "reason": (
@@ -1708,7 +1744,7 @@ def repair(
     for name in sorted(workspaces):
         root = install_root / name
         try:
-            _repair_one_root(root, name, shared, record)
+            _repair_one_root(root, name, shared, record, vault_name=leaf)
         except Exception as exc:  # noqa: BLE001 — one bad root must not stop the rest
             errors.append({"workspace": name, "error": str(exc)})
 
@@ -1721,7 +1757,9 @@ def repair(
         stale = []
         errors.append({"workspace": "", "error": f"could not inspect the search index: {exc}"})
     if stale:
-        rebuilt = rebuild_search_index(install_root, sorted(workspaces), db_path=db_path)
+        rebuilt = rebuild_search_index(
+            install_root, sorted(workspaces), db_path=db_path, vault_name=leaf
+        )
         errors.extend(
             {"workspace": e.get("workspace", ""), "error": e.get("error", "")}
             for e in rebuilt.get("errors", [])
@@ -1743,7 +1781,14 @@ def repair(
     }
 
 
-def _repair_one_root(root: Path, name: str, shared: Path, record: Any) -> None:
+def _repair_one_root(
+    root: Path,
+    name: str,
+    shared: Path,
+    record: Any,
+    *,
+    vault_name: str = VAULT_DIR_NAME,
+) -> None:
     """Reconcile one agent root. Every branch is safe to run twice."""
     from ciao.sync_skills import _ensure_linked_workspace_guides  # noqa: PLC0415
 
@@ -1759,7 +1804,7 @@ def _repair_one_root(root: Path, name: str, shared: Path, record: Any) -> None:
             )
         )
 
-    vault = root / "memory-vault"
+    vault = root / (vault_name or VAULT_DIR_NAME)
     if not vault.is_dir():
         record(
             RepairItem(
@@ -1842,7 +1887,7 @@ def _repair_one_root(root: Path, name: str, shared: Path, record: Any) -> None:
     index = vault / "INDEX.md"
     prefixed = index_workspace_prefixes(index, [name])
     if vault.is_dir() and (not index.is_file() or prefixed):
-        rebuild_indexes(root.parent, [name])
+        rebuild_indexes(root.parent, [name], vault_name=vault.name)
         record(
             RepairItem(
                 workspace=name,

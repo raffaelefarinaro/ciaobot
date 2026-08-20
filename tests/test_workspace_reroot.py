@@ -26,6 +26,7 @@ from ciao.workspace_reroot import (
     plan_skills_triage,
     read_receipt,
     rebuild_indexes,
+    rebuild_search_index,
     rehearse,
     split_guide,
     undo,
@@ -1774,3 +1775,89 @@ def test_startup_syncs_every_agent_root_not_the_install_root(tmp_path: Path) -> 
     source = inspect.getsource(main)
     assert "config.agent_root_targets()" in source
     assert "update_skills(str(config.workspace_root))" not in source
+
+
+# -- the vault directory's leaf is configurable -------------------------------
+
+
+def _custom_leaf_install(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A committed install whose vault is `vault/`, not `memory-vault/`.
+
+    `CIAO_VAULT_ROOT` sets this, so it is an ordinary install, not an exotic one.
+    """
+    install = tmp_path / "install"
+    install.mkdir()
+    _git(install, "init", "-b", "main")
+    _git(install, "config", "user.email", "test@example.com")
+    _git(install, "config", "user.name", "Test")
+    default = _vault(install)
+    vault = install / "vault"
+    default.rename(vault)
+    runtime = install / ".runtime"
+    runtime.mkdir()
+    (install / ".gitignore").write_text(".runtime/\n", encoding="utf-8")
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "seed")
+    return install, vault, runtime
+
+
+def test_the_rebuilds_follow_the_vault_leaf_they_were_given(tmp_path: Path) -> None:
+    """The migration reported success while rebuilding nothing.
+
+    `plan()` derives the leaf and moves `vault/` to `<name>/vault/`; the rebuild
+    helpers assumed `memory-vault`, found no vault under any root, and produced
+    an install with no per-root INDEX.md at all — which reads to every consumer
+    as "this workspace has no notes". The receipt still said `migrated`.
+    """
+    install, vault, runtime = _custom_leaf_install(tmp_path)
+
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    out = rebuild_indexes(install, ["personal", "work"], vault_name="vault")
+
+    assert out["errors"] == []
+    assert {row["workspace"] for row in out["rebuilt"]} == {"personal", "work"}
+    for name in ("personal", "work"):
+        assert (install / name / "vault" / "INDEX.md").is_file()
+        assert (install / name / "vault" / "VOCABULARY.md").is_file()
+
+
+def test_the_trigger_passes_the_real_leaf_to_the_rebuilds(tmp_path: Path) -> None:
+    """End to end through `migrate_if_needed`, which is what an upgrade runs."""
+    from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+    from ciao.workspace_reroot import migrate_if_needed
+
+    install, vault, runtime = _custom_leaf_install(tmp_path)
+    reset_reroot_cache()
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=install,
+        vault_root=vault,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=f"vault/{name}")
+            for name in ("personal", "work")
+        },
+    )
+
+    result = migrate_if_needed(config)
+
+    assert result["status"] == "migrated", result
+    assert result["indexes"]["errors"] == []
+    assert result["search"]["errors"] == []
+    for name in ("personal", "work"):
+        assert (install / name / "vault" / "INDEX.md").is_file()
+
+
+def test_a_missing_per_root_vault_is_reported_not_skipped(tmp_path: Path) -> None:
+    """`continue` alone made a wrong leaf look like a clean run."""
+    install, vault, runtime = _git_install(tmp_path)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    out = rebuild_search_index(
+        install, ["personal", "work"], db_path=tmp_path / "fts.db", vault_name="not-a-vault"
+    )
+
+    assert out["indexed"] == []
+    assert {row["workspace"] for row in out["errors"]} == {"personal", "work"}

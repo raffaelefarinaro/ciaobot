@@ -1590,3 +1590,57 @@ Four of those named a token with **no fallback at all**, which makes the declara
 dropped outright rather than merely wrong: Settings cards had square corners and two colours silently
 inherited. This is the same class of defect as the review panel's translucent batch bar, and the
 reason the guard exists is that nothing about it ever failed — it only looked wrong.
+
+
+## Release readiness: probed, not assumed (2026-08-20)
+
+Asked directly: is the migration ready to give other people? The honest answer needed evidence, so
+the migration was run on synthetic installs covering the shapes that are NOT this operator's.
+Sandboxes only — never the live install.
+
+| install shape | result |
+| --- | --- |
+| two workspaces, git, `memory-vault` (the operator's) | migrated, 4 moves |
+| single workspace | migrated, 3 moves |
+| workspace with no role binding (`clientA`) | migrated, 4 moves |
+| non-default vault leaf (`vault/`) | migrated, 4 moves — **and silently rebuilt nothing** |
+| vault is not a git repo | refused, stays on the shared layout |
+| three workspaces | migrated, 5 moves |
+
+### The probe found a release blocker
+On an install whose `CIAO_VAULT_ROOT` does not end in `memory-vault`, the migration reported
+`migrated`, the receipt claimed it had regenerated `vault/INDEX.md` — naming the OLD shared path —
+and **neither per-root `INDEX.md` existed**. `plan()` derives the leaf correctly and moved the vaults;
+`rebuild_indexes`, `rebuild_search_index` and `_repair_one_root` assumed `memory-vault`, found no
+vault under any root, and did nothing. That install's memory index simply disappears, which reads to
+every consumer as "this workspace has no notes" — and to the entity tagger as silence, the exact
+failure mode fixed earlier today, this time caused by the migration itself.
+
+This had been filed as non-blocking follow-up #1 ("would rebuild nothing"). It is worse than that: it
+reports success. Fixed — all three take the leaf, `migrate_if_needed` and the CLI pass the leaf of the
+vault they actually moved, `repair` reads it from the receipt, and a missing per-root vault is now
+reported instead of skipped, because `continue` alone was what made a wrong leaf look like a clean
+run. Three tests, all mutation-tested.
+
+### Not a blocker, but it needs a decision before release
+A vault that is not a git repo **refuses** and stays on the shared layout, permanently. That is the
+correct refusal — every move is a `git mv` and the rollback depends on it — but the operator-facing
+story ends there: the blocking tile will keep telling them to migrate, and nothing tells them the
+reason is that their vault has no git history. `ciao setup` runs `ensure_vault_git`, so a normal
+install has one; a user who deleted `.git`, or whose vault lives somewhere git init failed, is stuck.
+
+### Still open before this is safe to give to other people
+1. **The vault-rehome APPLY path is shared-layout only.** Detection is per-root; moving a note between
+   roots is not. It refuses rather than misfiring, so a migrated user gets a dead command.
+2. **P10.9 deletions.** Every migrated install keeps stale `.claude/`, `.opencode/`, `.agents/`,
+   `.codex/` and superseded root notes at the install root (1393 + 3655 files here). Harmless, but the
+   legacy prefix filters cannot be removed until they go, and until then the guide and index carry
+   dead compatibility paths.
+3. **The memory-curation prompt is now wrong.** It still says one `CLAUDE.md` is shared, so a
+   per-workspace run promoting into it would leak. False after the cut — curation stays needlessly
+   forbidden from promoting into a region the workspace now owns. Ship in the same release as (2).
+4. **V5 end-to-end drain** has not been run.
+5. **n=1 for real data.** Conservation was exact on this install (8130 files, zero lost), but every
+   other shape above was validated on synthetic three-note vaults, not on somebody's real vault with
+   its own history. The rehearsal path (`--rehearse` against an APFS clone) exists and should be the
+   documented first step for anyone else.

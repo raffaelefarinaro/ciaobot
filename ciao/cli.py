@@ -1847,8 +1847,16 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
             workspace, vault, names, runtime, primary=config.primary_workspace()
         )
         if result["status"] == "migrated":
-            result["indexes"] = workspace_reroot.rebuild_indexes(workspace, names)
-            result["search"] = workspace_reroot.rebuild_search_index(workspace, names)
+            # The leaf of the vault that was just moved, not a constant: an
+            # install whose CIAO_VAULT_ROOT does not end in `memory-vault` would
+            # otherwise rebuild nothing and report success.
+            leaf = vault.name
+            result["indexes"] = workspace_reroot.rebuild_indexes(
+                workspace, names, vault_name=leaf
+            )
+            result["search"] = workspace_reroot.rebuild_search_index(
+                workspace, names, vault_name=leaf
+            )
         print(json.dumps(result, indent=2))
         return 0 if result["status"] == "migrated" else 1
 
