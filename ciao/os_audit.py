@@ -476,6 +476,23 @@ def _proposal_paths(
     )
 
 
+def _memory_guide_specs(config: Any, workspace_dir: Path | None) -> list[tuple[str, Path]]:
+    """(workspace name, guide path) pairs the audit must cover.
+
+    One entry per registered workspace, resolved through ``agent_root`` so a
+    future re-rooting install reports each guide separately. Over-cap and rot
+    findings are then attributable to the workspace that owns them. Without a
+    registry (``config`` is None) the caller's own workspace root is the one
+    guide; its name is empty, meaning "the operating workspace".
+    """
+    if config is not None and getattr(config, "workspaces", None):
+        return [
+            (name, Path(config.agent_root(name)) / "CLAUDE.md")
+            for name in config.workspaces
+        ]
+    return [("", (workspace_dir or Path.cwd()) / "CLAUDE.md")]
+
+
 def audit_memory(
     *,
     guide_path: Path | None = None,
@@ -502,6 +519,104 @@ def audit_memory(
     current = today or datetime.date.today()
     region_limits = {"memory": memory_char_limit, "profile": user_char_limit}
 
+    scan = _scan_memory_guide(
+        guide,
+        workspace="",
+        workspace_dir=workspace,
+        current=current,
+        region_limits=region_limits,
+    )
+
+    proposals_count, proposal_files, proposal_errors = _scan_proposals(
+        vault_root, proposal_paths, workspace_name
+    )
+
+    return {
+        "memory_entries": len(scan["memory_entries"]),
+        "profile_entries": len(scan["profile_entries"]),
+        "expired_memory_entries": len(scan["expired_memory"]),
+        "expired_profile_entries": len(scan["expired_profile"]),
+        "invalid_expiration_entries": len(scan["invalid_expirations"]),
+        "invalid_expirations": scan["invalid_expirations"],
+        "over_cap": scan["over_cap"],
+        "oversize_entries": scan["oversize_entries"],
+        "duplicate_entries": scan["duplicate_entries"],
+        "invisible_unicode": scan["invisible_unicode"],
+        "marker_errors": scan["marker_errors"],
+        "pending_memory_proposals": proposals_count,
+        "proposal_files": proposal_files,
+        **scan["rot"],
+        "errors": proposal_errors,
+    }
+
+
+def _scan_proposals(
+    vault_root: Path | None,
+    proposal_paths: list[Path] | None,
+    workspace_name: str,
+) -> tuple[int, list[dict[str, Any]], list[dict[str, str]]]:
+    """Count pending proposal bullets and surface queue discovery errors.
+
+    Proposal queues are workspace-scoped, not per guide, so the scan is shared
+    by the single-guide ``audit_memory`` and the per-guide aggregate. Returns
+    ``(pending_count, proposal_files, errors)``.
+    """
+    proposals_count = 0
+    proposal_files: list[dict[str, Any]] = []
+    proposal_errors: list[dict[str, str]] = []
+    if vault_root is not None:
+        if proposal_paths is None:
+            paths, discovery_errors = _proposal_paths(vault_root, workspace_name)
+            proposal_errors.extend(discovery_errors)
+        else:
+            paths = proposal_paths
+        for path in dict.fromkeys(paths):
+            if not path.exists():
+                continue
+            if not path.is_file():
+                proposal_errors.append(
+                    _diagnostic(
+                        "invalid_proposal_file",
+                        path,
+                        "memory proposal path is not a file",
+                    )
+                )
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                proposal_errors.append(
+                    _diagnostic(
+                        "unreadable_proposal_file",
+                        path,
+                        f"failed to read memory proposals: {exc}",
+                    )
+                )
+                continue
+            pending = sum(
+                1 for line in content.splitlines() if BULLET_RE.match(line)
+            )
+            proposals_count += pending
+            proposal_files.append({"path": str(path), "pending": pending})
+    return proposals_count, proposal_files, proposal_errors
+
+
+def _scan_memory_guide(
+    guide: Path,
+    *,
+    workspace: str,
+    workspace_dir: Path | None,
+    current: datetime.date,
+    region_limits: dict[str, int],
+) -> dict[str, Any]:
+    """Scan one guide's fenced regions into a raw per-guide result.
+
+    Kept separate from :func:`audit_memory` so :func:`run_os_audit` can run it
+    once per registered workspace guide and aggregate, while the standalone
+    ``ciao memory-audit`` keeps the flat single-guide shape. The workspace name
+    (empty for the operating workspace) is carried on the guide so findings can
+    be attributed to the workspace that owns them.
+    """
     region_entries: dict[str, list[str]] = {}
     expired_by_region: dict[str, list[str]] = {}
     marker_errors: list[dict[str, str]] = []
@@ -553,56 +668,67 @@ def audit_memory(
                     }
                 )
 
-    mem_entries = region_entries["memory"]
-    profile_entries = region_entries["profile"]
-    expired_mem = expired_by_region["memory"]
-    expired_profile = expired_by_region["profile"]
-
-    proposals_count = 0
-    proposal_files: list[dict[str, Any]] = []
-    proposal_errors: list[dict[str, str]] = []
-    if vault_root is not None:
-        if proposal_paths is None:
-            paths, discovery_errors = _proposal_paths(vault_root, workspace_name)
-            proposal_errors.extend(discovery_errors)
-        else:
-            paths = proposal_paths
-        for path in dict.fromkeys(paths):
-            if not path.exists():
-                continue
-            if not path.is_file():
-                proposal_errors.append(
-                    _diagnostic(
-                        "invalid_proposal_file",
-                        path,
-                        "memory proposal path is not a file",
-                    )
-                )
-                continue
-            try:
-                content = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                proposal_errors.append(
-                    _diagnostic(
-                        "unreadable_proposal_file",
-                        path,
-                        f"failed to read memory proposals: {exc}",
-                    )
-                )
-                continue
-            pending = sum(
-                1 for line in content.splitlines() if BULLET_RE.match(line)
-            )
-            proposals_count += pending
-            proposal_files.append({"path": str(path), "pending": pending})
-
-    rot = audit_entries(region_entries, workspace_dir=workspace)
+    rot = audit_entries(region_entries, workspace_dir=workspace_dir or guide.parent)
 
     return {
-        "memory_entries": len(mem_entries),
-        "profile_entries": len(profile_entries),
-        "expired_memory_entries": len(expired_mem),
-        "expired_profile_entries": len(expired_profile),
+        "workspace": workspace,
+        "memory_entries": region_entries["memory"],
+        "profile_entries": region_entries["profile"],
+        "expired_memory": expired_by_region["memory"],
+        "expired_profile": expired_by_region["profile"],
+        "invalid_expirations": invalid_expirations,
+        "over_cap": over_cap,
+        "oversize_entries": oversize_entries,
+        "duplicate_entries": duplicate_entries,
+        "invisible_unicode": invisible_unicode,
+        "marker_errors": marker_errors,
+        "rot": rot,
+    }
+
+
+def _aggregate_memory_guides(
+    guides: list[dict[str, Any]],
+    *,
+    pending_memory_proposals: int,
+    proposal_files: list[dict[str, Any]],
+    errors: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Fold per-guide scans and the workspace proposal queue into one report.
+
+    Each guide keeps its own workspace name and over-cap findings, so the
+    operator is told which workspace is over budget rather than a single global
+    figure (a 139% ciao:memory in one workspace is invisible behind a "you are
+    over budget" total). The top-level keys keep the historical flat shape so
+    count readers (``memory_actionable_count``) still work, while ``guides``
+    carries the per-workspace detail including the region rot lists.
+    """
+    over_cap: list[dict[str, Any]] = []
+    oversize_entries: list[dict[str, Any]] = []
+    duplicate_entries: list[dict[str, Any]] = []
+    invisible_unicode: list[dict[str, Any]] = []
+    marker_errors: list[dict[str, str]] = []
+    invalid_expirations: list[dict[str, str]] = []
+    event_shaped: list[dict[str, Any]] = []
+    stale_paths: list[dict[str, Any]] = []
+    superseded: list[dict[str, Any]] = []
+    for guide in guides:
+        workspace = guide["workspace"]
+        over_cap.extend(_tag_workspace(entry, workspace) for entry in guide["over_cap"])
+        oversize_entries.extend(guide["oversize_entries"])
+        duplicate_entries.extend(guide["duplicate_entries"])
+        invisible_unicode.extend(guide["invisible_unicode"])
+        marker_errors.extend(guide["marker_errors"])
+        invalid_expirations.extend(guide["invalid_expirations"])
+        event_shaped.extend(guide["rot"]["event_shaped_entries"])
+        stale_paths.extend(guide["rot"]["stale_path_entries"])
+        superseded.extend(guide["rot"]["superseded_state_candidates"])
+
+    return {
+        "guides": guides,
+        "memory_entries": sum(len(g["memory_entries"]) for g in guides),
+        "profile_entries": sum(len(g["profile_entries"]) for g in guides),
+        "expired_memory_entries": sum(len(g["expired_memory"]) for g in guides),
+        "expired_profile_entries": sum(len(g["expired_profile"]) for g in guides),
         "invalid_expiration_entries": len(invalid_expirations),
         "invalid_expirations": invalid_expirations,
         "over_cap": over_cap,
@@ -610,11 +736,22 @@ def audit_memory(
         "duplicate_entries": duplicate_entries,
         "invisible_unicode": invisible_unicode,
         "marker_errors": marker_errors,
-        "pending_memory_proposals": proposals_count,
+        "event_shaped_entries": event_shaped,
+        "stale_path_entries": stale_paths,
+        "superseded_state_candidates": superseded,
+        "paths_checked": sum(g["rot"]["paths_checked"] for g in guides),
+        "paths_unverifiable": sum(g["rot"]["paths_unverifiable"] for g in guides),
+        "pending_memory_proposals": pending_memory_proposals,
         "proposal_files": proposal_files,
-        **rot,
-        "errors": proposal_errors,
+        "errors": errors,
     }
+
+
+def _tag_workspace(finding: dict[str, Any], workspace: str) -> dict[str, Any]:
+    """Stamp a finding dict with the workspace that owns it, if not already."""
+    if workspace:
+        finding.setdefault("workspace", workspace)
+    return finding
 
 
 def _record_timestamp(record: dict[str, Any]) -> str:
@@ -1054,7 +1191,6 @@ def run_os_audit(
     workspace = (workspace_dir or Path.cwd()).expanduser().resolve()
     vault = (vault_root or (workspace / "memory-vault")).expanduser().resolve()
     runtime = (runtime_dir or (workspace / ".runtime")).expanduser().resolve()
-    guide_path = workspace / "CLAUDE.md"
     memory_char_limit = getattr(config, "memory_char_limit", DEFAULT_MEMORY_CHAR_LIMIT)
     user_char_limit = getattr(config, "user_char_limit", DEFAULT_USER_CHAR_LIMIT)
 
@@ -1064,15 +1200,26 @@ def run_os_audit(
     rule_result = audit_rules(
         workspace, vault_root=vault, config=config, workspace_name=workspace_name
     )
-    memory_result = audit_memory(
-        guide_path=guide_path,
-        vault_root=vault,
-        proposal_paths=proposal_paths,
-        today=today,
-        memory_char_limit=memory_char_limit,
-        user_char_limit=user_char_limit,
-        workspace_dir=workspace,
-        workspace_name=workspace_name,
+    pending_memory_proposals, proposal_files, proposal_errors = _scan_proposals(
+        vault, proposal_paths, workspace_name
+    )
+    current = today or datetime.date.today()
+    region_limits = {"memory": memory_char_limit, "profile": user_char_limit}
+    guides = [
+        _scan_memory_guide(
+            guide,
+            workspace=name,
+            workspace_dir=workspace,
+            current=current,
+            region_limits=region_limits,
+        )
+        for name, guide in _memory_guide_specs(config, workspace)
+    ]
+    memory_result = _aggregate_memory_guides(
+        guides,
+        pending_memory_proposals=pending_memory_proposals,
+        proposal_files=proposal_files,
+        errors=proposal_errors,
     )
     job_result = audit_job_runs(workspace, runtime_dir=runtime)
     upgrade_result = audit_upgrade_notices(config, runtime_dir=runtime)
@@ -1250,6 +1397,15 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
             ),
         ]
     )
+    # Over-cap is actionable only when the workspace is named: a global total
+    # hides which guide is over budget. `over_cap` entries carry the owning
+    # workspace (empty = the operating workspace).
+    for finding in memory.get("over_cap", [])[:10]:
+        where = f"[{finding['workspace']}] " if finding.get("workspace") else ""
+        lines.append(
+            f"  - ⚠️ {where}{finding['region']} over cap: "
+            f"{finding['used']}/{finding['limit']} chars"
+        )
     for finding in memory.get("event_shaped_entries", [])[:5]:
         lines.append(
             f"  - ⚠️ [{finding['region']}] reads as a chat event "

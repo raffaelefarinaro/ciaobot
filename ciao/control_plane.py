@@ -374,8 +374,8 @@ class CiaoControlPlane:
 
     def memory_status(self, principal: McpPrincipal) -> dict[str, Any]:
         """Report native guide memory usage without copying its contents."""
-        self._workspace(principal)
-        guide = Path(self.config.workspace_root) / "CLAUDE.md"
+        workspace = self._workspace(principal)
+        guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
         return _ok(memory_status_payload(
             guide,
             memory_char_limit=int(getattr(self.config, "memory_char_limit", 2200)),
@@ -392,7 +392,7 @@ class CiaoControlPlane:
         match: str = "",
     ) -> dict[str, Any]:
         """Apply one bounded edit to the native ``CLAUDE.md`` memory region."""
-        self._workspace(principal)
+        workspace = self._workspace(principal)
         if action not in {"add", "replace", "remove"}:
             raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
         canonical = resolve_region(region)
@@ -401,7 +401,7 @@ class CiaoControlPlane:
             if canonical == "memory"
             else int(getattr(self.config, "user_char_limit", 1375))
         )
-        guide = Path(self.config.workspace_root) / "CLAUDE.md"
+        guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
         try:
             result = update_region(
                 guide,

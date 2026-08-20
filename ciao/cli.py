@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import html
 import http.cookiejar
 import json
@@ -1774,9 +1775,18 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
     """Audit only the bounded-memory regions.
 
     ``os-audit`` covers this too, but it also lints the whole vault, which is
-    far too slow to run from a daily routine. This entry point reads one file.
+    far too slow to run from a daily routine. This entry point reads one guide
+    per registered workspace and reports over-cap per guide, not as one global
+    number that hides which workspace is over budget.
     """
-    from ciao.os_audit import audit_memory, memory_actionable_count
+    from ciao.config import CiaoConfig
+    from ciao.os_audit import (
+        _aggregate_memory_guides,
+        _memory_guide_specs,
+        _scan_memory_guide,
+        _scan_proposals,
+        memory_actionable_count,
+    )
 
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
@@ -1786,10 +1796,35 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         vault = workspace / vault
     vault = vault.resolve()
 
-    report = audit_memory(
-        guide_path=workspace / "CLAUDE.md",
-        vault_root=vault if vault.exists() else None,
-        workspace_dir=workspace,
+    config_source = dict(os.environ)
+    config_source.update({
+        "CIAO_WORKSPACE": str(workspace),
+        "CIAO_VAULT_ROOT": str(vault),
+        # Loading config for a read-only audit must not create a session
+        # secret merely because the CLI was invoked outside the server env.
+        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "memory-audit",
+    })
+    config = CiaoConfig.from_env(config_source)
+
+    specs = _memory_guide_specs(config, workspace)
+    guides = [
+        _scan_memory_guide(
+            guide,
+            workspace=name,
+            workspace_dir=workspace,
+            current=datetime.date.today(),
+            region_limits={"memory": config.memory_char_limit, "profile": config.user_char_limit},
+        )
+        for name, guide in specs
+    ]
+    proposals_count, proposal_files, proposal_errors = _scan_proposals(
+        vault if vault.exists() else None, None, ""
+    )
+    report = _aggregate_memory_guides(
+        guides,
+        pending_memory_proposals=proposals_count,
+        proposal_files=proposal_files,
+        errors=proposal_errors,
     )
     # Same definition os-audit exits on, so the two commands cannot disagree
     # about whether these regions are clean.
@@ -1799,7 +1834,14 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         print(json.dumps(report, indent=2))
     else:
         print(f"Bounded memory: {report['memory_entries']} memory / "
-              f"{report['profile_entries']} profile entries")
+              f"{report['profile_entries']} profile entries across "
+              f"{len(guides)} guide(s)")
+        for finding in report["over_cap"]:
+            where = f"[{finding['workspace']}] " if finding.get("workspace") else ""
+            print(
+                f"  {where}{finding['region']} over cap: "
+                f"{finding['used']}/{finding['limit']} chars"
+            )
         print(f"Event-shaped entries: {len(report['event_shaped_entries'])}")
         for finding in report["event_shaped_entries"]:
             print(f"  [{finding['region']}] {finding['entry']}")
