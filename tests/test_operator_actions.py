@@ -815,3 +815,46 @@ def test_no_legacy_env_vars_means_no_tile(tmp_path: Path) -> None:
     config.env_source = {"CIAO_VAULT_ROOT": "x"}
 
     assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))
+
+
+def test_a_shared_mcp_config_no_root_inherited_is_reported(tmp_path: Path) -> None:
+    """A chat runs from its agent root, so an install-root `.mcp.json` is nobody's
+    cwd: every server in it went unreachable with the file still sitting there."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"command": "x"}, "n8n": {"url": "y"}}}),
+        encoding="utf-8",
+    )
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "workspace-mcp-uncomposed"]
+
+    assert len(actions) == 1
+    assert "n8n" in actions[0].detail and "notion" in actions[0].detail
+    # Never a copy button: .mcp.json grants credentialed access, so which root
+    # may reach which server is a decision, not a mechanical fix.
+    assert not actions[0].run_label
+    assert actions[0].chat_prompt
+
+
+def test_roots_that_already_have_their_own_mcp_config_are_silent(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+        (tmp_path / name / ".mcp.json").write_text('{"mcpServers": {}}', encoding="utf-8")
+    (tmp_path / ".mcp.json").write_text('{"mcpServers": {"notion": {}}}', encoding="utf-8")
+
+    assert "workspace-mcp-uncomposed" not in _kinds(_context(tmp_path, config=config))
+
+
+def test_no_shared_mcp_config_means_no_tile(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+
+    assert "workspace-mcp-uncomposed" not in _kinds(_context(tmp_path, config=config))

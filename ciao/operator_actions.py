@@ -851,6 +851,70 @@ def _detect_skill_triage_pending(context: DetectionContext) -> list[OperatorActi
     ]
 
 
+def _detect_mcp_uncomposed(context: DetectionContext) -> list[OperatorAction]:
+    """A shared ``.mcp.json`` that no root inherited, so no chat can reach it.
+
+    A chat runs with its agent root as cwd, and a project-scoped ``.mcp.json`` is
+    read from that cwd. After the re-rooting the only copy sits at the install
+    root, which is nobody's cwd — so every server configured there became
+    unreachable, silently, with the file still sitting right there.
+
+    Chat-only, and deliberately not a copy button. ``.mcp.json`` grants
+    credentialed access: duplicating it into every root would hand a work chat a
+    personal server and the reverse. Which root may reach which server is the
+    operator's decision, which is why the migration reported this rather than
+    composing it.
+    """
+    config = context.config
+    install = getattr(config, "workspace_root", None)
+    if install is None:
+        return []
+    shared = Path(install) / ".mcp.json"
+    if not shared.is_file():
+        return []
+    targets = _rerooted_targets(context)
+    if not targets:
+        return []
+    without = [name for name, root in targets if not (root / ".mcp.json").is_file()]
+    if not without:
+        return []
+    try:
+        import json
+
+        data = json.loads(shared.read_text(encoding="utf-8"))
+        servers = sorted(data.get("mcpServers") or data.get("servers") or {})
+    except (OSError, ValueError):
+        servers = []
+    named = ", ".join(servers) if servers else "the configured servers"
+    return [
+        OperatorAction(
+            id="workspace-mcp-uncomposed",
+            kind="workspace-mcp-uncomposed",
+            severity=_DRIFT_SEVERITY,
+            title=f"{len(servers) or ''} MCP server(s) are unreachable from chats".strip(),
+            detail=(
+                f"{named} are configured in {shared}, but a chat runs from its own "
+                f"workspace folder and {', '.join(without)} has no .mcp.json — so "
+                "nothing can reach them."
+            ),
+            glyph="⊘",
+            workspace="",
+            chat_label="Split them with me",
+            chat_prompt=(
+                f"My MCP servers ({named}) are configured in `{shared}`, which no "
+                "chat reads any more: each workspace now runs from its own folder. "
+                "For each server, tell me what it connects to and ask me which "
+                "workspaces should be allowed to reach it — do not assume all of "
+                "them, because these grant credentialed access and a work chat "
+                "reaching a personal server (or the reverse) is the thing to avoid. "
+                "Then write a `.mcp.json` into each approved workspace folder "
+                "containing only that workspace's servers, and tell me when to "
+                "delete the shared one. Never copy the whole file into every root."
+            ),
+        )
+    ]
+
+
 _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
     ("CLAUDE_DEFAULT_MODEL_PERSONAL", "set a workspace's default_model in workspaces.json"),
     ("CLAUDE_DEFAULT_MODEL_WORK", "set a workspace's default_model in workspaces.json"),
@@ -912,6 +976,7 @@ _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_workspace_assets_stale,
     _detect_skill_triage_pending,
     _detect_legacy_env_ignored,
+    _detect_mcp_uncomposed,
 ]
 
 
