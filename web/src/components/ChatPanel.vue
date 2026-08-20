@@ -946,12 +946,14 @@
         <div class="permission-actions">
           <button
             class="btn-deny"
+            :aria-keyshortcuts="permissionShortcut('deny') || undefined"
             @click="store.respondPermission(chat.chat_id, p.request_id, false, 'User denied')"
-          >Deny</button>
+          ><span v-if="permissionShortcut('deny')" class="permission-key" aria-hidden="true">{{ permissionShortcut('deny') }}</span>Deny</button>
           <button
             class="btn-approve"
+            :aria-keyshortcuts="permissionShortcut('approve') || undefined"
             @click="store.respondPermission(chat.chat_id, p.request_id, true)"
-          >Approve</button>
+          ><span v-if="permissionShortcut('approve')" class="permission-key" aria-hidden="true">{{ permissionShortcut('approve') }}</span>Approve</button>
         </div>
       </div>
     </div>
@@ -2371,6 +2373,33 @@ const MAX_QUESTION_SHORTCUTS = 9
 function questionOptionShortcut(qi: number, oi: number): string {
   if (qi !== 0 || oi >= MAX_QUESTION_SHORTCUTS) return ''
   return String(oi + 1)
+}
+
+// 1 and 2 approve/deny the first pending permission card, matching the
+// question-picker digits. Keys are shown on the buttons so the hint can never
+// claim a key that does nothing; the badge is drawn from the same function.
+function permissionShortcut(action: 'approve' | 'deny'): string {
+  if (!pendingApprovals.value.length) return ''
+  return action === 'approve' ? '2' : '1'
+}
+
+// Digit handling for the pending permission card. ChatLayout offers digits to
+// the question card first (handleQuestionShortcut), so when a permission and a
+// question are both up, the question wins the keys; otherwise the permission
+// card gets 1 (deny) / 2 (approve) on the first card. Returning true means
+// "eaten" and the layout preventDefaults.
+function handlePermissionShortcut(e: KeyboardEvent): boolean {
+  if (!pendingApprovals.value.length) return false
+  const first = pendingApprovals.value[0]
+  if (e.key === '1') {
+    store.respondPermission(chat.value.chat_id, first.request_id, false, 'User denied')
+    return true
+  }
+  if (e.key === '2') {
+    store.respondPermission(chat.value.chat_id, first.request_id, true)
+    return true
+  }
+  return false
 }
 
 // Keyboard handling for the open question card. ChatLayout owns the single
@@ -4489,7 +4518,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut })
+defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut })
 </script>
 
 <style scoped>
@@ -7009,6 +7038,25 @@ details[open] > .activity-summary::before {
   font-weight: 600;
   transition: background 120ms var(--ease), transform 120ms var(--ease);
 }
+/* Keyboard chip on the permission buttons, mirroring the question-option key
+   hint. Low-emphasis so it reads as a shortcut, not as part of the label. */
+.permission-key {
+  display: inline-block;
+  min-width: 16px;
+  margin-right: 6px;
+  padding: 0 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--fg2);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  opacity: 0.75;
+}
+.btn-approve .permission-key { color: rgba(255, 255, 255, 0.85); }
 .btn-approve {
   background: var(--accent);
   color: white;

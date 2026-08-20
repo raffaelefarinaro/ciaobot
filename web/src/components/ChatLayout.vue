@@ -712,6 +712,14 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       e.preventDefault()
       return
     }
+    // A pending permission card takes the 1/2 keys over the workspace
+    // switcher while it is up, mirroring the question card's first-refusal:
+    // the model is blocked on the approval and the digits are printed on the
+    // buttons. Only the first card is keyed (1 deny / 2 approve).
+    if (chatPanelRef.value?.handlePermissionShortcut?.(e)) {
+      e.preventDefault()
+      return
+    }
     const workspace = store.workspaceOptions[Number(e.key) - 1]
     if (workspace) {
       e.preventDefault()
