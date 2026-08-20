@@ -609,6 +609,28 @@ class CiaoConfig:
             return self.workspace_root / name
         return self.workspace_root
 
+    def agent_vault_root(self, name: str) -> Path:
+        """The vault whose ``INDEX.md`` this workspace's agent root owns.
+
+        Distinct from :meth:`workspace_vault_root`, and the difference matters:
+
+        ``workspace_vault_root`` is where a workspace's NOTES live. Before the
+        re-rooting that is a subtree of one shared vault
+        (``memory-vault/<name>``); after it, the whole vault of that root.
+
+        This is where the aggregate FILES about those notes live — ``INDEX.md``
+        and ``VOCABULARY.md``. Before the re-rooting there is exactly one such
+        pair for the whole install, so every workspace resolves to the shared
+        vault root; after it, each root owns its own pair. Derived from
+        :meth:`agent_root`, so it flips on the same receipt and cannot disagree
+        with it.
+
+        Written as ``agent_root / <vault dir name>`` because that is literally
+        what the migration produces: ``workspace_reroot.plan`` moves each vault
+        to ``<name>/<vault dir name>``.
+        """
+        return self.agent_root(name) / self.vault_root.name
+
     def _rerooted(self) -> bool:
         """Whether this install has completed the per-workspace re-rooting.
 

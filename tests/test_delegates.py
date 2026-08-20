@@ -110,6 +110,48 @@ def test_delegate_gets_supervisor_env_marker_and_parent_does_not(
     assert "CIAO_DELEGATE_OF" not in manager._build_extra_env(parent)
 
 
+def test_chat_env_names_its_own_agent_vault_root(tmp_path: Path) -> None:
+    """P10.8. The vault a chat's CLI commands read and write, named explicitly.
+
+    There is one process-level ``CIAO_VAULT_ROOT`` and, after the re-rooting, N
+    vaults, so a single inherited value cannot name the right one. Today
+    ``agent_vault_root`` returns the shared vault for every workspace, so this
+    changes nothing yet; the point is that the per-workspace hygiene routine
+    running ``ciao vault-index --write`` writes its own root's index once
+    ``agent_root`` differs, rather than a shared path that no longer exists.
+
+    ``CIAO_WORKSPACE`` deliberately stays the install root: ``.env``,
+    ``.runtime`` and the registry are the global layer and live there.
+    """
+    manager = _make_manager(
+        tmp_path,
+        vault_root=tmp_path / "memory-vault",
+        workspaces={
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+    project = manager.create_project("Roots", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Hygiene")
+
+    env = manager._build_extra_env(chat)
+
+    assert env["CIAO_VAULT_ROOT"] == str(manager._config.agent_vault_root("work"))
+    assert env["CIAO_WORKSPACE"] == str(tmp_path)
+
+
+def test_a_chat_with_no_workspace_inherits_the_ambient_vault(tmp_path: Path) -> None:
+    """No workspace means no root to name, so the variable must not be invented.
+
+    Exporting a guessed vault here would point a project that has never chosen a
+    workspace at whichever root sorted first.
+    """
+    manager = _make_manager(tmp_path, vault_root=tmp_path / "memory-vault")
+    project = manager.create_project("No workspace", workspace="")
+    chat = manager.create_chat(project.project_id, title="Chat")
+
+    assert "CIAO_VAULT_ROOT" not in manager._build_extra_env(chat)
+
+
 # ── wake prompt content ──────────────────────────────────────────────────
 
 

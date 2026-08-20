@@ -4883,6 +4883,22 @@ class ProjectChatManager:
         project = self._projects.get(chat.project_id)
         env["CIAO_WORKSPACE"] = str(self._config.workspace_root)
         workspace = project.workspace if project else ""
+        # The vault this chat's CLI commands should read and write. Exported
+        # explicitly rather than inherited, because there is one process-level
+        # CIAO_VAULT_ROOT and after the re-rooting there are N vaults, so a
+        # single inherited value cannot name the right one. `agent_vault_root`
+        # returns today's shared vault until this install has re-rooted, so this
+        # changes nothing yet; afterwards a per-workspace routine running
+        # `ciao vault-index --write` rebuilds its own root's index instead of a
+        # shared path that no longer exists.
+        #
+        # CIAO_WORKSPACE deliberately stays the install root: `.env`, `.runtime`
+        # and the registry are the global layer and live there, not in a root.
+        try:
+            if workspace:
+                env["CIAO_VAULT_ROOT"] = str(self._config.agent_vault_root(workspace))
+        except (AttributeError, ValueError, OSError):
+            logger.debug("could not resolve the agent vault root for %r", workspace)
         env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or self._config.gws_default_profile
         env["CIAO_LEGACY_ENTITY_WORKSPACE"] = (

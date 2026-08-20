@@ -6,9 +6,9 @@ one vault was ever curated and every work contact was filed under
 `personal/People/`.
 
 A routine is fanned out only when its inputs *and* write targets are partitioned
-per workspace (curation). Routines whose subject is a shared artifact — one
-`INDEX.md`, one global skill catalog — stay single, because N runs would rebuild
-the same thing N times.
+per workspace (curation, hygiene). Routines whose subject is shared — the global
+runtime directory, one skill catalog — stay single, because N runs would redo the
+same work and report one problem N times.
 
 The set is derived on every read, not persisted: `list_entries` drops runtime
 rows with `scope == "system"`, so it cannot be extended by writing to
@@ -71,17 +71,21 @@ def test_curation_becomes_one_entry_per_workspace(tmp_path: Path) -> None:
 
 
 def test_global_routines_stay_single(tmp_path: Path) -> None:
-    """Only routines whose subject is a shared artifact stay single.
+    """Only routines whose subject is shared stay single.
 
-    `system-vault-index` regenerates one INDEX.md + VOCABULARY.md for the whole
-    vault; `system-skill-evolution` reasons about one global skill catalog. N runs
-    of either would redo identical work.
+    `system-install-health` reports the audit sections whose subject is the
+    global runtime directory — job failures and pending upgrade actions — which
+    are identical in every workspace; `system-skill-evolution` reasons about one
+    skill catalog, which stays one until the re-rooting has run and the user has
+    triaged it. N runs of either would redo identical work, and for
+    install-health it would also report one problem as N.
     """
     ids = _ids(_store(tmp_path, "personal", "work"))
 
-    assert ids.count("system-vault-index") == 1
+    assert ids.count("system-install-health") == 1
     assert ids.count("system-skill-evolution") == 1
-    assert not any(item.startswith("system-vault-index@") for item in ids)
+    assert not any(item.startswith("system-install-health@") for item in ids)
+    assert not any(item.startswith("system-skill-evolution@") for item in ids)
 
 
 def test_hygiene_is_fanned_out_per_workspace(tmp_path: Path) -> None:

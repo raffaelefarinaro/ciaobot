@@ -129,3 +129,151 @@ def test_audit_over_cap_is_attributed_per_workspace(tmp_path: Path) -> None:
     # Every over-cap finding carries the workspace that owns it.
     assert over_cap, "expected at least one over-cap region"
     assert all("workspace" in finding for finding in over_cap)
+
+
+# -- P10.8: the global / per-root audit split --------------------------------
+#
+# Measured on the reference install before writing any of this: with two
+# workspaces registered, SIX of the seven audit sections came back
+# byte-identical, because today one vault, one skill catalog and one CLAUDE.md
+# are shared. The hygiene routine is `per_workspace: true`, so it reported all
+# of that once per workspace. Two of those sections never become per-root — their
+# subject is the global runtime directory — so they need a scope, not a
+# migration.
+
+
+def _seeded(tmp_path: Path) -> CiaoConfig:
+    """A registry with two workspaces, each holding one note and one guide."""
+    config = _config(tmp_path)
+    for name in ("personal", "work"):
+        notes = config.workspace_vault_root(name)
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / f"{name}-note.md").write_text(
+            f"---\ntype: note\ntitle: {name}\n---\n# {name}\n", encoding="utf-8"
+        )
+    (tmp_path / ".runtime").mkdir(parents=True, exist_ok=True)
+    _write_guide(config.workspace_root, memory=["one lesson"], profile=["terse"])
+    return config
+
+
+def _audit(config: CiaoConfig, **kwargs) -> dict:
+    return run_os_audit(
+        workspace_dir=config.workspace_root,
+        vault_root=config.vault_root,
+        runtime_dir=config.state_path.parent,
+        config=config,
+        **kwargs,
+    )
+
+
+def test_workspace_scope_drops_the_sections_that_are_the_same_for_every_root(
+    tmp_path: Path,
+) -> None:
+    report = _audit(_seeded(tmp_path), workspace_name="personal", scope="workspace")
+
+    assert "job_runs_audit" not in report
+    assert "upgrade_notices" not in report
+    # Setup stays: it is a precondition on the roots this scope read, not a
+    # finding, and a report that cannot say whether its roots were readable is
+    # not a report.
+    assert "setup_audit" in report
+    assert "vault_hygiene" in report
+    assert report["scope"] == "workspace"
+
+
+def test_global_scope_drops_the_sections_that_describe_one_workspace(
+    tmp_path: Path,
+) -> None:
+    report = _audit(_seeded(tmp_path), scope="global")
+
+    for key in ("vault_hygiene", "skill_audit", "rule_audit", "memory_hygiene"):
+        assert key not in report
+    assert "job_runs_audit" in report
+    assert "upgrade_notices" in report
+
+
+def test_a_section_outside_the_scope_is_absent_rather_than_zeroed(
+    tmp_path: Path,
+) -> None:
+    """An empty section reads as "checked and clean", which is a false claim."""
+    report = _audit(_seeded(tmp_path), workspace_name="personal", scope="workspace")
+
+    assert report.get("job_runs_audit") is None
+    assert "job_runs_audit" not in report
+
+
+def test_the_default_scope_is_unchanged(tmp_path: Path) -> None:
+    """Every existing caller passes no scope, and must see the same report."""
+    config = _seeded(tmp_path)
+
+    report = _audit(config)
+
+    for key in (
+        "setup_audit",
+        "vault_hygiene",
+        "skill_audit",
+        "rule_audit",
+        "memory_hygiene",
+        "job_runs_audit",
+        "upgrade_notices",
+    ):
+        assert key in report, key
+    assert report["scope"] == "all"
+
+
+def test_a_named_workspace_audits_its_own_notes_and_not_the_others(
+    tmp_path: Path,
+) -> None:
+    """The present leak: a personal hygiene chat reported the work notes' defects.
+
+    Before this, ``_vault_audit`` ran over the whole shared vault regardless of
+    which workspace the run was for, so both workspaces' reports came back
+    byte-identical and each claimed the other's findings as its own.
+    """
+    config = _seeded(tmp_path)
+    # A defect that exists only in the work notes.
+    (config.workspace_vault_root("work") / "broken.md").write_text(
+        "---\ntype: note\ntitle: broken\n---\n[gone](./missing-target.md)\n",
+        encoding="utf-8",
+    )
+
+    personal = _audit(config, workspace_name="personal", scope="workspace")
+    work = _audit(config, workspace_name="work", scope="workspace")
+
+    assert personal["setup_audit"]["vault_root"].endswith("memory-vault/personal")
+    assert work["setup_audit"]["vault_root"].endswith("memory-vault/work")
+    assert work["vault_hygiene"]["broken_markdown_links"], "the defect must be found"
+    assert personal["vault_hygiene"]["broken_markdown_links"] == [], (
+        "a personal run must not report a defect that only exists in work"
+    )
+
+
+def test_a_named_workspace_reports_only_its_own_guide(tmp_path: Path) -> None:
+    """One guide, not N. Reporting every guide inside a per-workspace run is the
+    same N-times duplication as the global sections, one level down."""
+    config = _seeded(tmp_path)
+
+    report = _audit(config, workspace_name="work", scope="workspace")
+
+    assert [g["workspace"] for g in report["memory_hygiene"]["guides"]] == ["work"]
+
+
+def test_an_unregistered_scope_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="scope must be one of"):
+        _audit(_seeded(tmp_path), scope="everything")
+
+
+def test_agent_vault_root_is_the_shared_vault_until_the_install_re_roots(
+    tmp_path: Path,
+) -> None:
+    """The aggregate files, not the notes — and the distinction is the point.
+
+    ``workspace_vault_root`` is where a workspace's NOTES live, a subtree of one
+    shared vault today. ``agent_vault_root`` is where the INDEX.md ABOUT them
+    lives, which is one shared pair today and one pair per root afterwards.
+    """
+    config = _seeded(tmp_path)
+
+    assert config.agent_vault_root("personal") == config.vault_root
+    assert config.agent_vault_root("work") == config.vault_root
+    assert config.workspace_vault_root("personal") != config.agent_vault_root("personal")

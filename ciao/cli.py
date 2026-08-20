@@ -1738,6 +1738,7 @@ def _os_audit_command(args: argparse.Namespace) -> int:
         runtime_dir=runtime,
         config=audit_config,
         workspace_name=workspace_name,
+        scope=args.scope,
     )
 
     if args.json:
@@ -2744,6 +2745,19 @@ def build_parser() -> argparse.ArgumentParser:
             "Logical workspace to scope per-workspace evidence to (its MEMORY.md "
             "and proposal queue). Defaults to CIAO_ACTIVE_WORKSPACE; empty audits "
             "every workspace. Note --workspace is a filesystem path, not this."
+        ),
+    )
+    os_audit_parser.add_argument(
+        "--scope",
+        choices=["all", "workspace", "global"],
+        default="all",
+        help=(
+            "Which half of the report to compute. 'workspace' drops the sections "
+            "whose subject is the global runtime directory (background "
+            "automation, upgrade actions); 'global' drops the ones describing a "
+            "single workspace. The per-workspace hygiene routine passes "
+            "'workspace' so N runs stop reporting the same global findings N "
+            "times."
         ),
     )
     os_audit_parser.add_argument(

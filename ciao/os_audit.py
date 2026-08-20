@@ -1168,6 +1168,55 @@ def memory_actionable_count(memory_result: dict[str, Any]) -> int:
     )
 
 
+# D2/P10.8. Which sections describe ONE workspace and which describe the whole
+# install. Measured on the reference install rather than assumed: with two
+# workspaces registered, six of the seven sections come back byte-identical,
+# because today one vault, one skill catalog and one CLAUDE.md are shared. The
+# re-rooting makes the first four genuinely per-root; these two never become
+# per-root, because their subject is the global runtime directory.
+GLOBAL_SECTIONS: tuple[str, ...] = ("job_runs_audit", "upgrade_notices")
+WORKSPACE_SECTIONS: tuple[str, ...] = (
+    "vault_hygiene",
+    "skill_audit",
+    "rule_audit",
+    "memory_hygiene",
+)
+AUDIT_SCOPES: tuple[str, ...] = ("all", "workspace", "global")
+
+
+def _audit_roots(
+    config: Any | None,
+    workspace_name: str,
+    workspace: Path,
+    vault: Path,
+) -> tuple[Path, Path]:
+    """The (agent root, notes vault) the per-workspace sections must read.
+
+    Falls back to the caller's own paths whenever there is no registry or no
+    named workspace, which is every programmatic and whole-install caller. So
+    the unscoped report is byte-for-byte what it was before this split; only a
+    run that names a workspace narrows.
+
+    ``workspace_vault_root`` is deliberate over ``agent_vault_root``: this is the
+    workspace's NOTES, which are a subtree of the shared vault before the
+    re-rooting and a whole vault after it. Before this change a named run still
+    audited the entire shared vault, so a personal hygiene chat reported every
+    defect in the work notes as its own.
+    """
+    if config is None or not workspace_name:
+        return workspace, vault
+    root, notes = workspace, vault
+    try:
+        root = Path(config.agent_root(workspace_name)).expanduser().resolve()
+    except (AttributeError, ValueError, OSError):
+        root = workspace
+    try:
+        notes = Path(config.workspace_vault_root(workspace_name)).expanduser().resolve()
+    except (AttributeError, ValueError, OSError, KeyError):
+        notes = vault
+    return root, notes
+
+
 def run_os_audit(
     workspace_dir: Path | None = None,
     vault_root: Path | None = None,
@@ -1177,52 +1226,102 @@ def run_os_audit(
     today: datetime.date | None = None,
     config: Any | None = None,
     workspace_name: str = "",
+    scope: str = "all",
 ) -> dict[str, Any]:
-    """Execute a complete AI OS audit pass.
+    """Execute an AI OS audit pass over one scope.
 
     ``workspace_name`` scopes the per-workspace evidence (that workspace's
-    ``MEMORY.md`` and proposal queue) to one logical workspace. The hygiene
-    routine runs once per workspace and reports into that workspace's chat, so
-    an unscoped audit would surface another workspace's findings there.
+    notes, skills, guide and proposal queue) to one logical workspace. The
+    hygiene routine runs once per workspace and reports into that workspace's
+    chat, so an unscoped audit would surface another workspace's findings there.
+
+    ``scope`` selects which half of the report to compute. ``"workspace"`` drops
+    the sections whose subject is the global runtime directory, and ``"global"``
+    drops the ones that describe a single workspace. Both halves keep
+    ``setup_audit``: it is a precondition check on the roots that half reads, not
+    a finding, and a report that cannot say whether its roots were readable is
+    not a report.
+
+    The split exists because the hygiene routine is ``per_workspace: true``, so
+    on the reference install it reports the same global job-run and upgrade
+    findings once per workspace. N identical findings read as N problems.
 
     ``config`` is optional for programmatic callers. The CLI and PWA both pass
     the live registry so upgrade notices are consistent across surfaces.
     """
+    if scope not in AUDIT_SCOPES:
+        raise ValueError(f"scope must be one of {AUDIT_SCOPES}, got {scope!r}")
     workspace = (workspace_dir or Path.cwd()).expanduser().resolve()
     vault = (vault_root or (workspace / "memory-vault")).expanduser().resolve()
     runtime = (runtime_dir or (workspace / ".runtime")).expanduser().resolve()
     memory_char_limit = getattr(config, "memory_char_limit", DEFAULT_MEMORY_CHAR_LIMIT)
     user_char_limit = getattr(config, "user_char_limit", DEFAULT_USER_CHAR_LIMIT)
+    want_workspace = scope in {"all", "workspace"}
+    want_global = scope in {"all", "global"}
+    root, notes = _audit_roots(config, workspace_name, workspace, vault)
 
-    setup_result = audit_setup(workspace, vault, runtime)
-    vault_result = _vault_audit(vault)
-    skill_result = audit_skills(workspace)
-    rule_result = audit_rules(
-        workspace, vault_root=vault, config=config, workspace_name=workspace_name
+    # The precondition check covers the roots this scope actually reads, so a
+    # workspace-scoped run reports an unreadable agent root rather than
+    # vouching for the install root it never touched.
+    setup_result = audit_setup(
+        root if want_workspace else workspace,
+        notes if want_workspace else vault,
+        runtime,
     )
-    pending_memory_proposals, proposal_files, proposal_errors = _scan_proposals(
-        vault, proposal_paths, workspace_name
+    empty_errors: dict[str, Any] = {"errors": []}
+    vault_result = _vault_audit(notes) if want_workspace else {**empty_errors}
+    skill_result = (
+        audit_skills(root) if want_workspace else {**empty_errors, "issues": []}
     )
-    current = today or datetime.date.today()
-    region_limits = {"memory": memory_char_limit, "profile": user_char_limit}
-    guides = [
-        _scan_memory_guide(
-            guide,
-            workspace=name,
-            workspace_dir=workspace,
-            current=current,
-            region_limits=region_limits,
+    rule_result = (
+        audit_rules(root, vault_root=notes, config=config, workspace_name=workspace_name)
+        if want_workspace
+        else {**empty_errors, "rule_clashes_found": 0}
+    )
+    if want_workspace:
+        pending_memory_proposals, proposal_files, proposal_errors = _scan_proposals(
+            notes, proposal_paths, workspace_name
         )
-        for name, guide in _memory_guide_specs(config, workspace)
-    ]
-    memory_result = _aggregate_memory_guides(
-        guides,
-        pending_memory_proposals=pending_memory_proposals,
-        proposal_files=proposal_files,
-        errors=proposal_errors,
+        current = today or datetime.date.today()
+        region_limits = {"memory": memory_char_limit, "profile": user_char_limit}
+        # One guide when a workspace is named, every registered guide otherwise.
+        # Reporting all N guides inside a per-workspace run is the same N-times
+        # duplication as the global sections, one level down.
+        specs = [
+            (name, guide)
+            for name, guide in _memory_guide_specs(config, root)
+            if not workspace_name or name == workspace_name
+        ] or [(workspace_name, root / "CLAUDE.md")]
+        guides = [
+            _scan_memory_guide(
+                guide,
+                workspace=name,
+                workspace_dir=root,
+                current=current,
+                region_limits=region_limits,
+            )
+            for name, guide in specs
+        ]
+        memory_result = _aggregate_memory_guides(
+            guides,
+            pending_memory_proposals=pending_memory_proposals,
+            proposal_files=proposal_files,
+            errors=proposal_errors,
+        )
+    else:
+        memory_result = _aggregate_memory_guides(
+            [], pending_memory_proposals=0, proposal_files=[], errors=[]
+        )
+    job_result = (
+        audit_job_runs(workspace, runtime_dir=runtime)
+        if want_global
+        else {**empty_errors, "failed_runs": 0}
     )
-    job_result = audit_job_runs(workspace, runtime_dir=runtime)
-    upgrade_result = audit_upgrade_notices(config, runtime_dir=runtime)
+    upgrade_result = (
+        audit_upgrade_notices(config, runtime_dir=runtime)
+        if want_global
+        else {**empty_errors, "notices_found": 0, "notices": []}
+    )
 
     collected_errors = [
         *setup_result["errors"],
@@ -1281,8 +1380,9 @@ def run_os_audit(
     else:
         status = "healthy"
 
-    return {
+    report = {
         "status": status,
+        "scope": scope,
         "total_issues": total_issues,
         "defect_count": defect_count,
         "pending_action_count": pending_action_count,
@@ -1298,6 +1398,15 @@ def run_os_audit(
         "upgrade_notices": upgrade_result,
         "scan_errors": scan_errors,
     }
+    # A section outside this scope is REMOVED, not zeroed. An empty section
+    # reads as "checked and clean", which is a claim this run never made.
+    if not want_workspace:
+        for key in WORKSPACE_SECTIONS:
+            report.pop(key, None)
+    if not want_global:
+        for key in GLOBAL_SECTIONS:
+            report.pop(key, None)
+    return report
 
 
 def format_audit_markdown(report: dict[str, Any]) -> str:
@@ -1316,6 +1425,16 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
         ),
         f"**Timestamp**: {report['timestamp']}",
     ]
+    # Section numbers are stable identifiers, so a narrowed report has gaps in
+    # them. Naming the scope is what makes a gap read as "not in scope" rather
+    # than "missing".
+    report_scope = str(report.get("scope") or "all")
+    if report_scope != "all":
+        lines.append(
+            f"**Scope**: {report_scope} — only the sections describing "
+            + ("this workspace" if report_scope == "workspace" else "the whole install")
+            + " are included."
+        )
     # A pending action is optional and does not raise the status, so it must be
     # visible on its own rather than folded into "Total Issues".
     if report.get("has_pending_actions"):
@@ -1330,114 +1449,123 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
         f"- Vault: `{report['setup_audit']['vault_root']}`",
         f"- Runtime: `{report['setup_audit']['runtime_root']}`",
         f"- Setup findings: {len(report['setup_audit']['issues'])}",
-        "",
-        "## 2. Vault & Knowledge Hygiene",
-        f"- Frontmatter errors: {len(report['vault_hygiene'].get('frontmatter_errors', []))}",
-        f"- Broken Markdown links: {len(report['vault_hygiene'].get('broken_markdown_links', []))}",
-        f"- Orphaned notes: {len(report['vault_hygiene'].get('orphans', []))}",
-        f"- Duplicate stems: {len(report['vault_hygiene'].get('duplicates', []))}",
-        "",
-        "## 3. Skill Budget & Quality",
-        f"- Logical skills scanned: {report['skill_audit']['total_skills']}",
-        f"- Skills over 15 KiB: {report['skill_audit']['over_budget_count']}",
-        f"- Missing SKILL.md: {report['skill_audit']['missing_skill_md_count']}",
     ])
-    for issue in report["skill_audit"]["issues"]:
-        lines.append(f"  - ⚠️ {issue['message']}")
-
-    lines.extend(
-        [
+    if "vault_hygiene" in report:
+        lines.extend([
             "",
-            "## 4. Rule Conflicts & Overlaps",
-            f"- Potential conflicts: {report['rule_audit']['rule_clashes_found']}",
-            (
-                "- Informational exact overlaps: "
-                f"{report['rule_audit']['rule_overlaps_found']}"
-            ),
-        ]
-    )
-    for clash in report["rule_audit"]["clashes"][:5]:
-        lines.append(f"  - ⚠️ Opposite rules for `{clash['signature']}`:")
-        for source in clash["sources"]:
-            lines.append(f"    - {source}")
-
-    memory = report["memory_hygiene"]
-    lines.extend(
-        [
+            "## 2. Vault & Knowledge Hygiene",
+            f"- Frontmatter errors: {len(report['vault_hygiene'].get('frontmatter_errors', []))}",
+            f"- Broken Markdown links: {len(report['vault_hygiene'].get('broken_markdown_links', []))}",
+            f"- Orphaned notes: {len(report['vault_hygiene'].get('orphans', []))}",
+            f"- Duplicate stems: {len(report['vault_hygiene'].get('duplicates', []))}",
+        ])
+    if "skill_audit" in report:
+        lines.extend([
             "",
-            "## 5. Memory & Context Hygiene",
-            (
-                f"- Memory entries: {memory['memory_entries']} "
-                f"(expired: {memory['expired_memory_entries']})"
-            ),
-            (
-                f"- User profile entries: {memory['profile_entries']} "
-                f"(expired: {memory['expired_profile_entries']})"
-            ),
-            f"- Invalid expiration tags: {memory['invalid_expiration_entries']}",
-            f"- Regions over cap: {len(memory['over_cap'])}",
-            f"- Oversize entries: {len(memory['oversize_entries'])}",
-            f"- Duplicate entries: {len(memory['duplicate_entries'])}",
-            f"- Invisible Unicode entries: {len(memory['invisible_unicode'])}",
-            f"- Region marker errors: {len(memory['marker_errors'])}",
-            f"- Pending memory proposals: {memory['pending_memory_proposals']}",
-            (
-                "- Event-shaped entries (belong in a log): "
-                f"{len(memory.get('event_shaped_entries', []))}"
-            ),
-            (
-                f"- Entries citing a missing path: "
-                f"{len(memory.get('stale_path_entries', []))} "
-                f"({memory.get('paths_checked', 0)} paths checked, "
-                f"{memory.get('paths_unverifiable', 0)} not verifiable here)"
-            ),
-            (
-                "- Informational superseded-state candidates: "
-                f"{len(memory.get('superseded_state_candidates', []))}"
-            ),
-        ]
-    )
-    # Over-cap is actionable only when the workspace is named: a global total
-    # hides which guide is over budget. `over_cap` entries carry the owning
-    # workspace (empty = the operating workspace).
-    for finding in memory.get("over_cap", [])[:10]:
-        where = f"[{finding['workspace']}] " if finding.get("workspace") else ""
-        lines.append(
-            f"  - ⚠️ {where}{finding['region']} over cap: "
-            f"{finding['used']}/{finding['limit']} chars"
-        )
-    for finding in memory.get("event_shaped_entries", [])[:5]:
-        lines.append(
-            f"  - ⚠️ [{finding['region']}] reads as a chat event "
-            f"({', '.join(finding['markers'])}): {finding['entry']}"
-        )
-    for finding in memory.get("stale_path_entries", [])[:5]:
-        lines.append(
-            f"  - ⚠️ [{finding['region']}] missing `{finding['path']}`: "
-            f"{finding['entry']}"
-        )
-    for finding in memory.get("superseded_state_candidates", [])[:5]:
-        lines.append(
-            f"  - ℹ️ [{finding['region']}] {len(finding['entries'])} entries about "
-            f"`{finding['subject']}`; check whether one supersedes the other"
-        )
+            "## 3. Skill Budget & Quality",
+            f"- Logical skills scanned: {report['skill_audit']['total_skills']}",
+            f"- Skills over 15 KiB: {report['skill_audit']['over_budget_count']}",
+            f"- Missing SKILL.md: {report['skill_audit']['missing_skill_md_count']}",
+        ])
+        for issue in report["skill_audit"]["issues"]:
+            lines.append(f"  - ⚠️ {issue['message']}")
 
-    lines.extend(
-        [
-            "",
-            "## 6. Background Automation",
-            (
-                "- Unresolved latest job failures: "
-                f"{report['job_runs_audit']['failed_runs']}/"
-                f"{report['job_runs_audit']['latest_jobs']}"
-            ),
-        ]
-    )
-    for failure in report["job_runs_audit"]["recent_failures"]:
-        lines.append(
-            f"  - 🔴 [{failure.get('job')} at {failure.get('ts')}]: "
-            f"{failure.get('error')}"
+    if "rule_audit" in report:
+        lines.extend(
+            [
+                "",
+                "## 4. Rule Conflicts & Overlaps",
+                f"- Potential conflicts: {report['rule_audit']['rule_clashes_found']}",
+                (
+                    "- Informational exact overlaps: "
+                    f"{report['rule_audit']['rule_overlaps_found']}"
+                ),
+            ]
         )
+        for clash in report["rule_audit"]["clashes"][:5]:
+            lines.append(f"  - ⚠️ Opposite rules for `{clash['signature']}`:")
+            for source in clash["sources"]:
+                lines.append(f"    - {source}")
+
+    memory = report.get("memory_hygiene") or {}
+    if "memory_hygiene" in report:
+        lines.extend(
+            [
+                "",
+                "## 5. Memory & Context Hygiene",
+                (
+                    f"- Memory entries: {memory['memory_entries']} "
+                    f"(expired: {memory['expired_memory_entries']})"
+                ),
+                (
+                    f"- User profile entries: {memory['profile_entries']} "
+                    f"(expired: {memory['expired_profile_entries']})"
+                ),
+                f"- Invalid expiration tags: {memory['invalid_expiration_entries']}",
+                f"- Regions over cap: {len(memory['over_cap'])}",
+                f"- Oversize entries: {len(memory['oversize_entries'])}",
+                f"- Duplicate entries: {len(memory['duplicate_entries'])}",
+                f"- Invisible Unicode entries: {len(memory['invisible_unicode'])}",
+                f"- Region marker errors: {len(memory['marker_errors'])}",
+                f"- Pending memory proposals: {memory['pending_memory_proposals']}",
+                (
+                    "- Event-shaped entries (belong in a log): "
+                    f"{len(memory.get('event_shaped_entries', []))}"
+                ),
+                (
+                    f"- Entries citing a missing path: "
+                    f"{len(memory.get('stale_path_entries', []))} "
+                    f"({memory.get('paths_checked', 0)} paths checked, "
+                    f"{memory.get('paths_unverifiable', 0)} not verifiable here)"
+                ),
+                (
+                    "- Informational superseded-state candidates: "
+                    f"{len(memory.get('superseded_state_candidates', []))}"
+                ),
+            ]
+        )
+        # Over-cap is actionable only when the workspace is named: a global total
+        # hides which guide is over budget. `over_cap` entries carry the owning
+        # workspace (empty = the operating workspace).
+        for finding in memory.get("over_cap", [])[:10]:
+            where = f"[{finding['workspace']}] " if finding.get("workspace") else ""
+            lines.append(
+                f"  - ⚠️ {where}{finding['region']} over cap: "
+                f"{finding['used']}/{finding['limit']} chars"
+            )
+        for finding in memory.get("event_shaped_entries", [])[:5]:
+            lines.append(
+                f"  - ⚠️ [{finding['region']}] reads as a chat event "
+                f"({', '.join(finding['markers'])}): {finding['entry']}"
+            )
+        for finding in memory.get("stale_path_entries", [])[:5]:
+            lines.append(
+                f"  - ⚠️ [{finding['region']}] missing `{finding['path']}`: "
+                f"{finding['entry']}"
+            )
+        for finding in memory.get("superseded_state_candidates", [])[:5]:
+            lines.append(
+                f"  - ℹ️ [{finding['region']}] {len(finding['entries'])} entries about "
+                f"`{finding['subject']}`; check whether one supersedes the other"
+            )
+
+    if "job_runs_audit" in report:
+        lines.extend(
+            [
+                "",
+                "## 6. Background Automation",
+                (
+                    "- Unresolved latest job failures: "
+                    f"{report['job_runs_audit']['failed_runs']}/"
+                    f"{report['job_runs_audit']['latest_jobs']}"
+                ),
+            ]
+        )
+        for failure in report["job_runs_audit"]["recent_failures"]:
+            lines.append(
+                f"  - 🔴 [{failure.get('job')} at {failure.get('ts')}]: "
+                f"{failure.get('error')}"
+            )
 
     notices = report.get("upgrade_notices", {}).get("notices", [])
     if notices:

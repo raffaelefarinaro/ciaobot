@@ -24,9 +24,9 @@
       "per_workspace": true
     },
     {
-      "schedule_id": "system-vault-index",
-      "title": "Vault index rebuild",
-      "description": "Weekly rebuild of the vault index and vocabulary from note frontmatter. One shared pair of files covers every workspace, so this runs once rather than per workspace.",
+      "schedule_id": "system-install-health",
+      "title": "Install health",
+      "description": "Weekly check of the parts of this install that are shared by every workspace: unresolved background job failures and pending upgrade actions. Reported once rather than once per workspace, because the findings are the same in each.",
       "scope": "system",
       "editable": false,
       "removable": false,
@@ -45,7 +45,7 @@
       "workspace": "",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Run `ciao vault-index --write` to regenerate memory-vault/INDEX.md and memory-vault/VOCABULARY.md. The `--write` flag is required. Report the entry count and the number of non-canonical `type:` values it found. If it fails, report the failure plainly and do not claim the vault is healthy \u2014 the per-workspace hygiene audits that follow depend on a fresh index."
+      "prompt": "Run `ciao os-audit --json --scope global`. That scope covers only what every workspace shares: unresolved background job failures and pending upgrade actions. Exit code 1 means it found items needing attention; continue. Exit code 2 means it could not inspect required evidence reliably; report its scan errors and do not claim the install is healthy. Summarize command output instead of pasting raw JSON. Fix nothing: an upgrade action is optional and a job failure needs its own diagnosis. Report the failing jobs with their errors, the pending upgrade actions with what each suggests, and any scan errors. If the audit is reliable and clean, reply with a one-line no-op and stop."
     },
     {
       "schedule_id": "system-workspace-hygiene",
@@ -69,7 +69,7 @@
       "workspace": "",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Run a hygiene pass for THIS workspace only. Summarize command output instead of pasting raw JSON. Steps: 1) Run `ciao os-audit --json`. It scopes its per-workspace evidence to the active workspace automatically; do not pass another workspace's name. Exit code 1 means the audit ran and found items needing attention; continue. Exit code 2 means it could not inspect required evidence reliably; report its scan errors and do not claim the workspace is healthy. 2) When the audit is reliable, apply only low-risk, unambiguous fixes in this workspace's vault: repair or remove dead links, fix obvious MEMORY.md drift where entries point at files that moved or no longer exist, and rename a non-canonical `type:` whose target VOCABULARY.md already names. Do not rewrite instruction conflicts, skills, orphaned notes, duplicates, invalid expiration tags, or schedule prompts. 3) Re-run `ciao os-audit --json` to verify what remains. 4) Report initial and final issue counts, what was fixed, unresolved findings, and scan errors. If the first reliable audit is healthy, reply with a one-line no-op and stop.",
+      "prompt": "Run a hygiene pass for THIS workspace only. Summarize command output instead of pasting raw JSON. Steps: 1) Run `ciao vault-index --write` to regenerate this root's INDEX.md and VOCABULARY.md from note frontmatter. The `--write` flag is required. The audit below reads what this writes, so it must run first; if it fails, report the failure plainly and do not claim the workspace is healthy. 2) Run `ciao os-audit --json --scope workspace`. It scopes its evidence to the active workspace automatically; do not pass another workspace's name. The `workspace` scope omits background job failures and upgrade actions on purpose: those are the same for every workspace and the install-health routine reports them once. Exit code 1 means the audit ran and found items needing attention; continue. Exit code 2 means it could not inspect required evidence reliably; report its scan errors and do not claim the workspace is healthy. 3) When the audit is reliable, apply only low-risk, unambiguous fixes in this workspace's vault: repair or remove dead links, fix obvious MEMORY.md drift where entries point at files that moved or no longer exist, and rename a non-canonical `type:` whose target VOCABULARY.md already names. Do not rewrite instruction conflicts, skills, orphaned notes, duplicates, invalid expiration tags, or schedule prompts. 4) Re-run `ciao os-audit --json --scope workspace` to verify what remains. 5) Report initial and final issue counts, what was fixed, unresolved findings, and scan errors. If the first reliable audit is healthy and the index rebuild changed nothing, reply with a one-line no-op and stop.",
       "per_workspace": true
     },
     {

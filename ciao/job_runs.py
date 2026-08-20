@@ -216,10 +216,13 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Commits and pulls the workspace on server startup.", False, False,
             trigger="On server startup."),
     JobSpec("vault_index", "Vault index refresh", "system",
-            "Regenerates memory-vault/INDEX.md and VOCABULARY.md from frontmatter.",
+            "Regenerates each agent root's INDEX.md and VOCABULARY.md from frontmatter.",
             False, False,
-            trigger="On server startup, and weekly via system-vault-index.",
-            schedule_id="system-vault-index"),
+            # The dedicated weekly routine is gone: the index is a per-root
+            # artifact after the re-rooting, so rebuilding it belongs inside the
+            # per-workspace hygiene pass rather than in one global run.
+            trigger="On server startup, and weekly inside system-workspace-hygiene.",
+            schedule_id="system-workspace-hygiene"),
     JobSpec("skills_update", "Skills update", "system",
             "Updates installed agent skills.", False, False,
             trigger="On server startup."),
