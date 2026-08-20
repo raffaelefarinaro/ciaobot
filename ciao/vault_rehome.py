@@ -453,23 +453,188 @@ def _scanned_people(
     root: Path,
     entries: list[Entry] | None,
     targets: Sequence[tuple[Path, str, Path]] | None,
-) -> list[tuple[Entry, str, Path]]:
-    """(entry, workspace stamp, rendered prefix) for every note to consider.
+) -> list[tuple[Entry, str, Path, Path]]:
+    """(entry, workspace stamp, rendered prefix, path on disk) per note.
 
     ``targets`` comes from ``CiaoConfig.vault_scan_targets()``: one shared vault
     before the re-rooting and one per agent root after. Without it, today's
     single-vault behaviour, so every existing caller is unchanged.
+
+    The path on disk is carried because ``Entry.path`` is the rendered identity,
+    not a location: under per-root targets it is prefixed with the workspace name
+    and no such directory exists. A caller that needs to re-read the note — the
+    linked-counterpart check does, since the scan drops cross-workspace refs —
+    cannot reconstruct it from the entry alone.
     """
     if targets:
-        out: list[tuple[Entry, str, Path]] = []
+        out: list[tuple[Entry, str, Path, Path]] = []
         for vault, stamp, prefix in targets:
             if not Path(vault).is_dir():
                 continue
             for entry in scan_vault(Path(vault), workspace=stamp, path_prefix=Path(prefix)):
-                out.append((entry, stamp, Path(prefix)))
+                try:
+                    source = Path(vault) / entry.path.relative_to(prefix)
+                except ValueError:
+                    continue
+                out.append((entry, stamp, Path(prefix), source))
         return out
     scanned = entries if entries is not None else scan_vault(root)
-    return [(entry, "", Path(VAULT_PREFIX)) for entry in scanned]
+    out = []
+    for entry in scanned:
+        try:
+            source = Path(root) / entry.path.relative_to(VAULT_PREFIX)
+        except ValueError:
+            source = Path(root) / entry.path
+        out.append((entry, "", Path(VAULT_PREFIX), source))
+    return out
+
+
+def _slug(value: str) -> str:
+    """A name reduced to how it would appear in a filename stem."""
+    return re.sub(r"[^a-z0-9]+", "-", value.strip().casefold()).strip("-")
+
+
+def _names_same_person(stem: str, aliases: Sequence[str], target_stem: str) -> bool:
+    """Whether ``target_stem`` is the same person as this note.
+
+    Deliberately narrow, and narrower than it first looks like it should be.
+    A note links to plenty of things in another workspace that are not itself —
+    Oliver's own note links to David Blazevic — so a bare "links into the other
+    workspace" test would silence real candidates.
+
+    Only two matches count: an exact stem, or an alias that slugifies to the
+    target (`Oliver`, aliased "Oliver Akermann", matches `Oliver-Akermann`).
+    Both are explicit identity claims made in the note itself.
+
+    A "longer stem extending this one at a name boundary" rule was written here
+    first, to catch `Ipek` -> `Ipek-Kahraman-Scandit`, and it was wrong: those
+    are two different people who share a name, and the work note says so in
+    prose ("the name collision in the vault is intentional — do not merge").
+    Name shape is not identity. Requiring an alias means the vault has to *say*
+    two notes are the same person before this suppresses a queue row.
+    """
+    a, b = _slug(stem), _slug(target_stem)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return any(_slug(alias) == b for alias in aliases if alias)
+
+
+def _counterpart_file(source: Path, workspace: str, other: str, tail: Sequence[str]) -> Path | None:
+    """Where ``other``'s copy of ``tail`` would live, in this vault's layout.
+
+    Derived from the note's own path rather than from a layout constant, because
+    the workspace segment sits at a different depth in each: ``<vault>/<ws>/People``
+    before the re-rooting and ``<root>/<ws>/memory-vault/People`` after it.
+    Whatever lies between the workspace segment and ``People/`` is reused as-is,
+    so this needs no knowledge of which layout it is in.
+    """
+    parts = list(source.parts)
+    if len(parts) < 3:
+        return None
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i] == workspace:
+            interior = parts[i + 1 : len(parts) - 2]
+            return Path(*parts[:i], other, *interior, *tail)
+    return None
+
+
+def _links_back(target: Path, workspace: str, stem: str) -> bool:
+    """Whether ``target`` names this note in its own ``related``.
+
+    A mutual link is the strongest identity claim the vault can make, and unlike
+    any name test it cannot be produced by coincidence: both notes had to be
+    edited to say it. It is what lets two notes be recognised as one person when
+    the filenames cannot say so — `Ipek` and `Ipek-Kahraman-Scandit`, where the
+    work note carries a disambiguating suffix no real alias would contain.
+    """
+    if not target.is_file():
+        return False
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for ref in _frontmatter_related_refs(text):
+        parts = Path(_new_ref(ref)).parts
+        if not parts:
+            continue
+        # Prefixed (`personal/People/Ipek`) or the legacy unprefixed form
+        # (`People/Ipek`), which can only mean the other root once split.
+        if parts[0] == workspace and len(parts) >= 3:
+            candidate = parts[-1]
+        elif parts[0] in PEOPLE_DIRS and len(parts) >= 2:
+            candidate = parts[-1]
+        else:
+            continue
+        if _slug(Path(candidate).stem) == _slug(stem):
+            return True
+    return False
+
+
+def _linked_counterpart(
+    source: Path,
+    workspace: str,
+    aliases: Sequence[str],
+    registered: Iterable[str],
+) -> str:
+    """The other workspace holding this person's other note, or "".
+
+    Reads the note's own ``related`` refs rather than the scanned entry's,
+    because the per-root scan resolves refs against ONE root's filename index
+    and therefore drops every ref naming another workspace — which is precisely
+    the ref this asks about. (14 such refs exist on the operator's vault; see
+    the progress ledger.)
+    """
+    others = {name for name in registered if name and name != workspace}
+    if not others or not source.is_file():
+        return ""
+    try:
+        text = source.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    stem = source.stem
+    for ref in _frontmatter_related_refs(text):
+        parts = Path(_new_ref(ref)).parts
+        if len(parts) < 3 or parts[0] not in others or parts[1] not in PEOPLE_DIRS:
+            continue
+        target_stem = Path(parts[-1]).stem
+        if _names_same_person(stem, aliases, target_stem):
+            return parts[0]
+        # Names that cannot match still describe one person when both notes say
+        # so. Read the far side only when the cheap test failed.
+        tail = [*parts[1:-1], f"{target_stem}.md"]
+        target = _counterpart_file(source, workspace, parts[0], tail)
+        if target is not None and _links_back(target, workspace, stem):
+            return parts[0]
+    return ""
+
+
+def _frontmatter_related_refs(text: str) -> list[str]:
+    """``related`` values from a note's frontmatter, block or inline form."""
+    if not text.startswith("---"):
+        return []
+    chunks = text.split("---", 2)
+    if len(chunks) < 3:
+        return []
+    refs: list[str] = []
+    in_block = False
+    for line in chunks[1].splitlines():
+        inline = re.match(r"^related:\s*\[(.*)\]\s*$", line)
+        if inline:
+            refs += [part.strip() for part in inline.group(1).split(",") if part.strip()]
+            continue
+        if re.match(r"^related:\s*$", line):
+            in_block = True
+            continue
+        if in_block:
+            item = re.match(r"^\s+-\s*(.+?)\s*$", line)
+            if item:
+                refs.append(item.group(1))
+                continue
+            if line.strip():
+                in_block = False
+    return [ref.strip().strip('"').strip("'") for ref in refs if ref.strip()]
 
 
 def detect_misfiled_people(
@@ -496,7 +661,7 @@ def detect_misfiled_people(
     registered = set(names)
 
     out: list[Candidate] = []
-    for entry, stamp, prefix in _scanned_people(root, entries, targets):
+    for entry, stamp, prefix, source in _scanned_people(root, entries, targets):
         try:
             within = entry.path.relative_to(prefix)
         except ValueError:
@@ -531,6 +696,17 @@ def detect_misfiled_people(
             {roles[role] for role in signalled_roles if role in roles and roles[role] != workspace}
         )
         own_role = role_of.get(workspace, "")
+
+        # An existing, linked note for the same person in another workspace means
+        # the split has already been made on purpose: this note is one half of
+        # it, and the answer to "should it move?" is no. Without this, a person
+        # who is genuinely both — tagged `friend` AND `colleague`, with the work
+        # half already filed and cross-linked — sat in the queue permanently,
+        # because tags naming two workspaces is the one case the tag rules refuse
+        # to decide. Checked before the buckets so it covers the untagged case
+        # too, where the proposal was to move the note on top of its counterpart.
+        if _linked_counterpart(source, workspace, entry.aliases, registered):
+            continue
 
         if not signalled_roles:
             destination = _counterpart(workspace, names, roles)

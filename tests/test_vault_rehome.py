@@ -769,3 +769,255 @@ def test_survey_is_silent_when_the_migration_is_done(tmp_path: Path) -> None:
     survey_vault_people(vault, runtime)
 
     assert receipt_path(runtime).read_text(encoding="utf-8") == migrated
+
+
+# -- an existing linked counterpart settles the question ----------------------
+#
+# A person can genuinely be both — a friend who is also a colleague — and the
+# vault's answer for that is two notes, one per workspace, cross-linked. Tags
+# naming two workspaces is the one case the tag rules refuse to decide, so
+# without this the second half of a deliberate split sat in the review queue
+# permanently, offering to move a note on top of its own counterpart.
+
+
+def _counterpart_vault(tmp_path: Path) -> Path:
+    vault = tmp_path / "memory-vault"
+    # Friend AND colleague, with the work half already filed and cross-linked.
+    _note(
+        vault,
+        "personal/People/Oliver.md",
+        "---\n"
+        "type: person\n"
+        "aliases:\n"
+        "  - Oliver Akermann\n"
+        "tags: [person, friend, colleague]\n"
+        "related:\n"
+        '  - "work/People/Oliver-Akermann"\n'
+        '  - "People/Sara"\n'
+        "---\n"
+        "# Oliver Akermann\n",
+    )
+    _note(vault, "work/People/Oliver-Akermann.md", _person("[person, colleague]"))
+    _note(vault, "personal/People/Sara.md", _person("[person, friend]"))
+    return vault
+
+
+def test_a_linked_counterpart_takes_the_note_out_of_the_queue(tmp_path: Path) -> None:
+    vault = _counterpart_vault(tmp_path)
+
+    paths = [c.path for c in detect_misfiled_people(vault)]
+
+    assert "personal/People/Oliver.md" not in paths
+
+
+def test_the_counterpart_must_be_named_by_an_alias_not_by_name_shape(tmp_path: Path) -> None:
+    """Two people who share a name are not one person.
+
+    Measured on a real vault: `personal/People/Ipek.md` (Raffa's partner) and
+    `work/People/Ipek-Kahraman-Scandit.md` (a Scandit colleague), whose note says
+    "the name collision in the vault is intentional — do not merge". A rule that
+    matched a longer stem extending a shorter one would have silently dropped a
+    genuine queue row on the strength of a shared first name.
+    """
+    vault = tmp_path / "memory-vault"
+    _note(
+        vault,
+        "personal/People/Ipek.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person, friend, colleague]\n"
+        "related:\n"
+        '  - "work/People/Ipek-Kahraman-Scandit"\n'
+        "---\n"
+        "# Ipek\n",
+    )
+    _note(vault, "work/People/Ipek-Kahraman-Scandit.md", _person("[person, colleague]"))
+
+    paths = [c.path for c in detect_misfiled_people(vault)]
+
+    assert "personal/People/Ipek.md" in paths
+
+
+def test_a_link_to_someone_else_over_there_is_not_a_counterpart(tmp_path: Path) -> None:
+    """Oliver's own note links to David Blazevic. Linking *into* the other
+    workspace is not the same as having a note *of yourself* there."""
+    vault = tmp_path / "memory-vault"
+    _note(
+        vault,
+        "personal/People/Nadia.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person, friend, colleague]\n"
+        "related:\n"
+        '  - "work/People/David-Blazevic"\n'
+        "---\n"
+        "# Nadia\n",
+    )
+    _note(vault, "work/People/David-Blazevic.md", _person("[person, colleague]"))
+
+    paths = [c.path for c in detect_misfiled_people(vault)]
+
+    assert "personal/People/Nadia.md" in paths
+
+
+def test_the_counterpart_rule_also_covers_an_untagged_note(tmp_path: Path) -> None:
+    """The untagged bucket proposed moving the note to its counterpart's
+    workspace — i.e. on top of the note it is already linked to."""
+    vault = tmp_path / "memory-vault"
+    _note(
+        vault,
+        "personal/People/Rui.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person]\n"
+        "related:\n"
+        '  - "work/People/Rui"\n'
+        "---\n"
+        "# Rui\n",
+    )
+    _note(vault, "work/People/Rui.md", _person("[person, colleague]"))
+
+    paths = [c.path for c in detect_misfiled_people(vault)]
+
+    assert "personal/People/Rui.md" not in paths
+
+
+def test_an_inline_related_list_is_read_too(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    _note(
+        vault,
+        "personal/People/Bea.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person, friend, colleague]\n"
+        'related: ["work/People/Bea", "People/Sara"]\n'
+        "---\n"
+        "# Bea\n",
+    )
+    _note(vault, "work/People/Bea.md", _person("[person, colleague]"))
+
+    paths = [c.path for c in detect_misfiled_people(vault)]
+
+    assert "personal/People/Bea.md" not in paths
+
+
+def test_a_mutual_link_identifies_one_person_when_the_names_cannot(tmp_path: Path) -> None:
+    """`Ipek` and `Ipek-Kahraman-Scandit` are one person — she joined the company
+    — but the work note carries a disambiguating suffix no real alias contains.
+    Both notes naming each other is an identity claim coincidence cannot produce.
+    """
+    vault = tmp_path / "memory-vault"
+    _note(
+        vault,
+        "personal/People/Ipek.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person]\n"
+        "related:\n"
+        '  - "work/People/Ipek-Kahraman-Scandit"\n'
+        "---\n"
+        "# Ipek\n",
+    )
+    _note(
+        vault,
+        "work/People/Ipek-Kahraman-Scandit.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person, scandit]\n"
+        "related:\n"
+        '  - "personal/People/Ipek"\n'
+        "---\n"
+        "# Ipek Kahraman\n",
+    )
+
+    paths = [c.path for c in detect_misfiled_people(vault)]
+
+    assert "personal/People/Ipek.md" not in paths
+    assert "work/People/Ipek-Kahraman-Scandit.md" not in paths
+
+
+def test_one_sided_link_between_different_people_is_still_queued(tmp_path: Path) -> None:
+    """The disambiguation case: a note may point at a same-named stranger to say
+    "not this one". Only a link BACK makes it an identity claim."""
+    vault = tmp_path / "memory-vault"
+    _note(
+        vault,
+        "personal/People/Ipek.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person]\n"
+        "related:\n"
+        '  - "work/People/Ipek-Kahraman-Scandit"\n'
+        "---\n"
+        "# Ipek\n",
+    )
+    _note(vault, "work/People/Ipek-Kahraman-Scandit.md", _person("[person, scandit]"))
+
+    paths = [c.path for c in detect_misfiled_people(vault)]
+
+    assert "personal/People/Ipek.md" in paths
+
+
+def test_the_legacy_unprefixed_form_counts_as_a_link_back(tmp_path: Path) -> None:
+    """Pre-migration notes name the other half unprefixed (`People/Oliver`), and
+    after the split that can only mean the other root."""
+    vault = tmp_path / "memory-vault"
+    _note(
+        vault,
+        "personal/People/Vik.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person]\n"
+        "related:\n"
+        '  - "work/People/Vik-Long-Suffix"\n'
+        "---\n"
+        "# Vik\n",
+    )
+    _note(
+        vault,
+        "work/People/Vik-Long-Suffix.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person, colleague]\n"
+        "related:\n"
+        '  - "People/Vik"\n'
+        "---\n"
+        "# Vik\n",
+    )
+
+    paths = [c.path for c in detect_misfiled_people(vault)]
+
+    assert "personal/People/Vik.md" not in paths
+
+
+def test_a_link_back_to_a_different_person_is_not_a_link_back(tmp_path: Path) -> None:
+    """The far note has plenty of `related` refs into this workspace that are not
+    this note. "Points back at me" has to mean me."""
+    vault = tmp_path / "memory-vault"
+    _note(
+        vault,
+        "personal/People/Ada.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person]\n"
+        "related:\n"
+        '  - "work/People/Ada-Long-Suffix"\n'
+        "---\n"
+        "# Ada\n",
+    )
+    _note(
+        vault,
+        "work/People/Ada-Long-Suffix.md",
+        "---\n"
+        "type: person\n"
+        "tags: [person, colleague]\n"
+        "related:\n"
+        '  - "personal/People/Someone-Else"\n'
+        "---\n"
+        "# Ada Long\n",
+    )
+    _note(vault, "personal/People/Someone-Else.md", _person("[person, friend]"))
+
+    paths = [c.path for c in detect_misfiled_people(vault)]
+
+    assert "personal/People/Ada.md" in paths

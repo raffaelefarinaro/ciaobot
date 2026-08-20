@@ -1501,3 +1501,55 @@ root)` true, which is worth remembering before anything starts scoring the insta
 
 Add these to the P10.9 list rather than deleting them piecemeal: they are the same "generated or
 superseded at the old root" category, and one reviewed deletion beats five.
+
+## The re-home queue: a linked counterpart settles the question (2026-08-20)
+
+Raised by the operator looking at the queue: "Oliver is both a friend and a colleague — and it's also
+linked — why does it appear?"
+
+Because his tags say so. `personal/People/Oliver.md` carries `friend` (→ personal) and
+`colleague`/`scandit` (→ work), which is the one branch the tag rules refuse to decide, so it queued a
+picker. Nothing was misfiled — the work half already existed as
+`work/People/Oliver-Akermann.md` and the two notes cross-linked. The detector simply never looked.
+
+`detect_misfiled_people` now drops a note from the queue when another workspace already holds a
+linked note for the same person. Checked before the buckets, so it covers the untagged case too,
+where the proposal was to move a note on top of its own counterpart. Live: 14 candidates → 12.
+
+**Identity has to be claimed, not inferred.** The first version matched a longer stem extending a
+shorter one, to catch `Ipek` → `Ipek-Kahraman-Scandit`. That was wrong for the reason the vault
+itself recorded: the work note said "the name collision in the vault is intentional — do not merge".
+Name shape is not identity, and a substring test had already produced `Mo` → `Moeller`, `Moskwa`,
+`Moritz`. Two signals are accepted now, both explicit:
+
+1. An exact stem, or an **alias** that slugifies to the target (`Oliver`, aliased "Oliver Akermann",
+   matches `Oliver-Akermann`).
+2. A **mutual link** — both notes name each other in `related`. Coincidence cannot produce it; two
+   people had to be edited to say it. This is what lets `Ipek` and `Ipek-Kahraman-Scandit` be
+   recognised as one person when no real alias could contain the `-Scandit` disambiguator.
+
+A one-sided link is deliberately not enough: a note may point at a same-named stranger precisely to
+say "not this one".
+
+On the two Ipeks the operator overruled the note — she is one person, who joined Scandit on
+2026-04-09, which is what created the second note. Both halves are now linked in `related` and the
+stale "do not merge" annotation is corrected to describe the personal/work split. Asking was right:
+the alternative reading (two people) would have made the fix suppress a genuine row.
+
+Tests: 5 for the rule and its limits, 3 for the mutual-link path, in `tests/test_vault_rehome.py`.
+Mutation-tested — removing the rule, restoring name-shape matching, accepting any link into the other
+workspace, and ignoring the stem on the way back each fail their own test. The third and fourth
+mutations survived the first round and are the reason the "links to someone else over there" and
+"links back to a different person" cases exist.
+
+### Filed, not fixed: the per-root scan drops cross-workspace links
+`Entry.related` holds *resolved* paths, and the per-root scan resolves each root's refs against that
+root's own filename index. Any ref naming another workspace resolves to nothing and is dropped
+silently — including `personal/People/Oliver.md` → `work/People/Oliver-Akermann`, which is why this
+rule reads the note's raw frontmatter instead of the scanned entry. Measured on the live vault: **14
+of 293 `related` refs name another workspace and vanish from the index.** The legacy unprefixed form
+(`People/Oliver` inside the work root) is dropped the same way.
+
+Consumers today are workspace-scoped, so no rendered graph is missing an edge it would have drawn,
+which is why this is filed rather than fixed. It should not stay filed: the index quietly disagrees
+with the notes, and the next thing to read `related` across roots will inherit the gap.
