@@ -1110,7 +1110,7 @@ onBeforeUnmount(() => {
   margin-left: 0.35rem;
   padding: 0 0.3rem;
   border-radius: 999px;
-  background: var(--surface-3, rgba(255, 255, 255, 0.12));
+  background: var(--bg3);
   font-size: 0.7rem;
 }
 

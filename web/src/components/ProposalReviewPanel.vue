@@ -8,35 +8,27 @@ const store = useProposalsStore()
 const projectStore = useProjectStore()
 const chatBusy = ref(false)
 
-const kindFilter = ref('all')
-const selected = ref<Set<string>>(new Set())
 const confirmLeakId = ref('')
 const olderThanDays = ref(30)
 
-const kinds = computed(() => ['all', ...new Set(store.rows.map(r => r.kind))])
+// Filter and selection live in the store: the sidebar renders the controls, the
+// way it does for the memory map's categories, and this panel renders the list
+// they act on. See `stores/proposals.ts`.
+const selected = computed({
+  get: () => store.selected,
+  set: (value: Set<string>) => { store.selected = value },
+})
 
-/** Rows for the workspace the sidebar has selected.
+/** Rows for the workspace the sidebar has selected, then its kind and search
+ * filters.
  *
  * Scoped rather than grouped: the workspace switcher on the left is where every
  * other page keeps this choice, and grouping in the list meant the workspace —
  * which decides where an accept writes — lived in a heading you had to scroll
- * back to. A row with no workspace is install-wide and shows under whichever is
- * active, because it applies to all of them.
+ * back to. The scope rule itself is in the store, so the sidebar's chip counts
+ * and this list cannot disagree about what is in scope.
  */
-const filtered = computed(() => store.rows.filter(r =>
-  (kindFilter.value === 'all' || r.kind === kindFilter.value) &&
-  // No active workspace yet (a single-workspace install, or the store still
-  // loading) shows everything. Hiding every row until a switcher reports a
-  // selection would read as an empty queue.
-  (!projectStore.activeWorkspace || !r.workspace
-    || r.workspace === projectStore.activeWorkspace),
-))
-
-const counts = computed(() => {
-  const tally = new Map<string, number>()
-  for (const row of filtered.value) tally.set(row.kind, (tally.get(row.kind) ?? 0) + 1)
-  return [...tally.entries()].sort((a, b) => b[1] - a[1]).map(([kind, n]) => ({ kind, n }))
-})
+const filtered = computed(() => store.visibleRows(projectStore.activeWorkspace))
 
 
 const KIND_LABELS: Record<string, string> = {
@@ -283,19 +275,13 @@ onMounted(() => { void store.fetch() })
     <header class="pr-head">
       <p class="pr-summary">
         <strong>{{ filtered.length }}</strong> to review in {{ projectStore.activeWorkspace }}
-        <span v-if="counts.length" class="pr-counts">
-          <span v-for="c in counts" :key="c.kind" class="pr-count">{{ c.n }} {{ kindLabel(c.kind) }}</span>
-        </span>
-      </p>
-      <div class="pr-seg" role="group" aria-label="Filter by kind">
         <button
-          v-for="k in kinds"
-          :key="k"
+          v-if="store.kindFilter !== 'all' || store.search"
           type="button"
-          :class="{ active: kindFilter === k }"
-          @click="kindFilter = k"
-        >{{ k === 'all' ? 'all' : kindLabel(k) }}</button>
-      </div>
+          class="pr-clear-filter"
+          @click="store.resetFilters()"
+        >clear filter</button>
+      </p>
     </header>
 
     <p class="pr-hint">
@@ -456,25 +442,25 @@ onMounted(() => { void store.fetch() })
   display: inline-flex;
   gap: var(--space-2);
   margin-left: var(--space-2);
-  color: var(--text-muted);
+  color: var(--fg2);
   font-size: 0.8rem;
 }
 
 .pr-hint {
   margin: 0;
-  color: var(--text-muted);
+  color: var(--fg2);
   font-size: 0.8rem;
   line-height: 1.5;
   max-width: 68ch;
 }
 
 .pr-error {
-  color: var(--danger, #f87171);
+  color: var(--error);
   font-size: 0.85rem;
 }
 
 .pr-empty {
-  color: var(--text-muted);
+  color: var(--fg2);
   font-size: 0.9rem;
   padding: var(--space-4) 0;
 }
@@ -490,35 +476,48 @@ onMounted(() => { void store.fetch() })
 .pr-seg button {
   border: 0;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--fg2);
   padding: 0.25rem 0.7rem;
   font-size: 0.8rem;
   cursor: pointer;
 }
 
 .pr-seg button.active {
-  background: var(--surface-3, rgba(255, 255, 255, 0.08));
-  color: var(--text);
+  background: var(--bg3);
+  color: var(--fg);
 }
 
 /* The batch bar appears only with a selection, so it never occupies space while
-   reading. */
+   reading. It is sticky, so it must be OPAQUE and above the rows: it used to
+   name a token this app does not define and fall back to a 4%-white wash, which
+   the row it covered stayed legible through and looked like a rendering fault. */
 .pr-batch {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 3;
   display: flex;
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-2, 8px);
-  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
+}
+
+.pr-clear-filter {
+  margin-left: var(--space-2);
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 0.78rem;
+  cursor: pointer;
 }
 
 .pr-batch-count {
   font-size: 0.8rem;
-  color: var(--text-muted);
+  color: var(--fg2);
   margin-right: auto;
 }
 
@@ -554,7 +553,7 @@ onMounted(() => { void store.fetch() })
 
 .pr-group-count {
   margin-left: auto;
-  color: var(--text-muted);
+  color: var(--fg2);
   font-size: 0.8rem;
 }
 
@@ -574,12 +573,12 @@ onMounted(() => { void store.fetch() })
   gap: var(--space-3);
   padding: var(--space-3);
   border: 1px solid var(--border);
-  border-radius: var(--radius-2, 8px);
-  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
 }
 
 .pr-row--leak {
-  border-color: var(--warn, #d29922);
+  border-color: var(--warning);
 }
 
 .pr-row-check {
@@ -605,7 +604,7 @@ onMounted(() => { void store.fetch() })
 
 .pr-row-sub {
   margin: 0.25rem 0 0;
-  color: var(--text-muted);
+  color: var(--fg2);
   font-size: 0.8rem;
 }
 
@@ -617,8 +616,8 @@ onMounted(() => { void store.fetch() })
   letter-spacing: 0.04em;
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
-  background: var(--surface-3, rgba(255, 255, 255, 0.08));
-  color: var(--text-muted);
+  background: var(--bg3);
+  color: var(--fg2);
 }
 
 .pr-badge {
@@ -630,7 +629,7 @@ onMounted(() => { void store.fetch() })
 
 .pr-badge.--warn {
   background: rgba(210, 153, 34, 0.18);
-  color: var(--warn, #d29922);
+  color: var(--warning);
 }
 
 /* The original bullet is a paragraph of prose with a CLI incantation in it.
@@ -638,7 +637,7 @@ onMounted(() => { void store.fetch() })
 .pr-row-detail {
   margin-top: var(--space-2);
   font-size: 0.8rem;
-  color: var(--text-muted);
+  color: var(--fg2);
 }
 
 .pr-row-detail summary {
@@ -672,7 +671,7 @@ onMounted(() => { void store.fetch() })
 
 .pr-confirm-text {
   font-size: 0.8rem;
-  color: var(--text-muted);
+  color: var(--fg2);
 }
 
 .pr-foot {
@@ -681,7 +680,7 @@ onMounted(() => { void store.fetch() })
   gap: var(--space-2);
   padding-top: var(--space-2);
   border-top: 1px solid var(--border);
-  color: var(--text-muted);
+  color: var(--fg2);
   font-size: 0.8rem;
 }
 

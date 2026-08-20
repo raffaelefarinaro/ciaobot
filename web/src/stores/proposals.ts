@@ -21,6 +21,54 @@ export const useProposalsStore = defineStore('proposals', () => {
   const busy = ref(false)
   const error = ref('')
 
+  // Review-view filter and selection state. It lives here, not in the panel,
+  // because the sidebar owns the filter controls the way it does on the memory
+  // map, and the panel owns the list they filter. Two copies of "which kind is
+  // showing" would let the chip row and the list disagree.
+  const kindFilter = ref('all')
+  const search = ref('')
+  const selected = ref<Set<string>>(new Set())
+
+  /** Rows belonging to one workspace.
+   *
+   * A row with no workspace is install-wide and shows under whichever is
+   * active, because it applies to all of them. No active workspace yet — a
+   * single-workspace install, or the store still loading — shows everything;
+   * hiding every row until a switcher reports a selection would read as an
+   * empty queue.
+   */
+  function scopedRows(workspace: string): ProposalRow[] {
+    return rows.value.filter(r => !workspace || !r.workspace || r.workspace === workspace)
+  }
+
+  /** Rows the list should render: workspace scope, then kind, then search. */
+  function visibleRows(workspace: string): ProposalRow[] {
+    const needle = search.value.trim().toLowerCase()
+    return scopedRows(workspace).filter(r =>
+      (kindFilter.value === 'all' || r.kind === kindFilter.value)
+      && (!needle
+        || (r.text ?? '').toLowerCase().includes(needle)
+        || (r.path ?? '').toLowerCase().includes(needle)),
+    )
+  }
+
+  /** Kind tallies for the sidebar chips, over the workspace scope only — so a
+   * chip's count does not change when you click another chip. */
+  function kindCounts(workspace: string): { kind: string; count: number }[] {
+    const tally = new Map<string, number>()
+    for (const row of scopedRows(workspace)) {
+      tally.set(row.kind, (tally.get(row.kind) ?? 0) + 1)
+    }
+    return [...tally.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([kind, count]) => ({ kind, count }))
+  }
+
+  function resetFilters() {
+    kindFilter.value = 'all'
+    search.value = ''
+  }
+
   async function fetch() {
     loading.value = true
     error.value = ''
@@ -76,5 +124,9 @@ export const useProposalsStore = defineStore('proposals', () => {
     }
   }
 
-  return { rows, loading, busy, error, fetch, act, batch, dismissOlderThan }
+  return {
+    rows, loading, busy, error, fetch, act, batch, dismissOlderThan,
+    kindFilter, search, selected,
+    scopedRows, visibleRows, kindCounts, resetFilters,
+  }
 })

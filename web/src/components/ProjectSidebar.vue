@@ -374,6 +374,64 @@
         </button>
       </div>
 
+      <!-- Review: the same shape as the memory map's sidebar — stats, a search,
+           then chips that both report and filter. The kind filter used to be a
+           segmented control in the panel header while this column sat empty,
+           which put the queue's controls somewhere different from every other
+           memory view's. -->
+      <div v-if="mode === 'proposals'" class="mm-sidebar-scroll">
+        <h3>Queue</h3>
+        <div class="mm-stat-grid mm-stat-grid--3">
+          <div class="mm-stat">
+            <div class="n">{{ reviewVisible }}</div>
+            <div class="l">of {{ reviewScoped }} shown</div>
+          </div>
+          <div class="mm-stat">
+            <div class="n">{{ proposals.selected.size }}</div>
+            <div class="l">selected</div>
+          </div>
+          <div class="mm-stat">
+            <div class="n">{{ reviewElsewhere }}</div>
+            <div class="l">other workspaces</div>
+          </div>
+        </div>
+
+        <div class="mm-search">
+          <input
+            v-model="proposals.search"
+            type="text"
+            placeholder="Search proposals…"
+            autocomplete="off"
+          />
+        </div>
+
+        <div class="mm-row-between">
+          <h3>Kinds</h3>
+          <button type="button" class="mm-link" @click="proposals.resetFilters()">reset</button>
+        </div>
+        <div class="mm-link-list">
+          <div
+            class="mm-link-item"
+            :class="{ off: proposals.kindFilter !== 'all' }"
+            @click="proposals.kindFilter = 'all'"
+          >
+            <span class="label">all</span>
+            <span class="cnt">{{ reviewScoped }}</span>
+          </div>
+          <div
+            v-for="k in reviewKinds"
+            :key="k.kind"
+            class="mm-link-item"
+            :class="{ off: proposals.kindFilter !== k.kind }"
+            :title="`Show only ${reviewKindLabel(k.kind)} proposals`"
+            @click="proposals.kindFilter = k.kind"
+          >
+            <span class="label">{{ reviewKindLabel(k.kind) }}</span>
+            <span class="cnt">{{ k.count }}</span>
+          </div>
+        </div>
+      </div>
+
       <div v-if="mode === 'memory'" class="mm-sidebar-scroll">
         <h3>Vault</h3>
         <!-- Three tiles, not four: "notes shown" and "total" were separate
@@ -894,6 +952,7 @@ import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, categoryColorFor, catKeyFor, clusterColorFor } from '../stores/memoryMap'
+import { useProposalsStore } from '../stores/proposals'
 import { isLightTheme } from '../lib/theme'
 import NotificationBell from './NotificationBell.vue'
 import ChatSignals from './ChatSignals.vue'
@@ -911,6 +970,27 @@ const store = useProjectStore()
 const taskStore = useTaskStore()
 const fileViewer = useFileViewerStore()
 const mm = useMemoryMapStore()
+const proposals = useProposalsStore()
+
+// Review-queue figures for the sidebar. Scoped counts come from the store so
+// they use the same workspace rule as the list — a chip that disagreed with the
+// rows under it would be worse than no chip.
+const reviewScoped = computed(() => proposals.scopedRows(store.activeWorkspace).length)
+const reviewVisible = computed(() => proposals.visibleRows(store.activeWorkspace).length)
+const reviewElsewhere = computed(() => proposals.rows.length - reviewScoped.value)
+const reviewKinds = computed(() => proposals.kindCounts(store.activeWorkspace))
+
+const REVIEW_KIND_LABELS: Record<string, string> = {
+  memory: 'memory',
+  profile: 'profile',
+  user: 'profile',
+  rehome: 're-home',
+  skill: 'skill',
+}
+
+function reviewKindLabel(kind: string): string {
+  return REVIEW_KIND_LABELS[kind] ?? kind
+}
 // The unlinked list is the one section that can run to hundreds of entries on a
 // real vault, so it grows on demand rather than pushing every other section off
 // the bottom of the sidebar.
@@ -2737,6 +2817,11 @@ async function confirmDeleteChat(chatId: string) {
 /* Marks which note the local view is currently centred on, so the recent list
    doubles as a "you are here" indicator rather than just a jump list. */
 .mm-link-item.current { background: var(--bg3); color: var(--fg); }
+/* The review queue's kind rows are a filter, so the SELECTED one is the solid
+   one and the rest recede — the inverse of the memory chips, where every chip is
+   on until you switch it off. */
+.mm-link-item.off { opacity: 0.55; }
+.mm-link-item:not(.off) { background: var(--bg3); color: var(--fg); }
 .mm-link-item.current .label { font-weight: 600; }
 </style>
 
