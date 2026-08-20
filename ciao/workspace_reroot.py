@@ -1052,13 +1052,21 @@ def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
         _ensure_linked_workspace_guides,
         _install_stock_agents,
         _install_stock_skills,
+        _mirror_dir_symlinks,
         _rebuild_custom_skill_links,
+        _seed_stock_commands,
         mirror_shared_skill_sources,
     )
 
     root = Path(root)
     before = {name: (root / name).exists() for name in _GUIDE_NAMES}
-    claude_existed = (root / ".claude").is_dir()
+    # Directories the bootstrap may create. `.claude/` holds the generated
+    # mirrors; `commands/` is seeded with the packaged stock commands, and
+    # `subagents/` may be created by the mirror step. Undo removes whichever of
+    # them were not there beforehand, or a round trip leaves the seeded stock
+    # commands behind in roots that no longer exist.
+    _BOOTSTRAP_DIRS = (".claude", "commands", "subagents")
+    dirs_existed = {name: (root / name).is_dir() for name in _BOOTSTRAP_DIRS}
 
     # Skills and agents are always safe to install; a guide is not. See
     # `guide_split_pending`.
@@ -1067,6 +1075,22 @@ def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
     _install_stock_skills(root)
     _rebuild_custom_skill_links(root)
     mirror_shared_skill_sources(root, shared)
+    # The provider-facing mirrors, which is what makes a moved `commands/` or
+    # `subagents/` discoverable from the root that now holds it. Without them a
+    # migrated root had a catalog on disk and nothing pointing at it.
+    _seed_stock_commands(root)
+    _mirror_dir_symlinks(
+        root / "commands",
+        root / ".claude" / "commands",
+        glob_pattern="*.md",
+        prune_regular=False,
+    )
+    _mirror_dir_symlinks(
+        root / "subagents",
+        root / ".claude" / "agents",
+        glob_pattern="*.md",
+        prune_regular=False,
+    )
     # No guard here: like _install_stock_skills, this handles its own missing
     # package resources. A bare except would only hide a real failure.
     _install_stock_agents(root)
@@ -1076,7 +1100,12 @@ def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
         for name in _GUIDE_NAMES
         if not before[name] and ((root / name).is_symlink() or (root / name).exists())
     ]
-    return created_files, ([] if claude_existed else [".claude"])
+    created_dirs = [
+        name
+        for name in _BOOTSTRAP_DIRS
+        if not dirs_existed[name] and (root / name).is_dir()
+    ]
+    return created_files, created_dirs
 
 
 # -- P10.6: rebuild the derived artefacts per root ---------------------------
@@ -1186,6 +1215,19 @@ def rebuild_search_index(
 #
 # Nothing packaged needs migrating: `sync_workspace_skills` reinstalls stock
 # skills into each root's `.claude/skills` from package resources on every sync.
+# Everything at the install root that is a user-authored agent asset, and so
+# cannot be attributed to a workspace by anything but a human. `subagents/` and
+# `commands/` are the same class as `skills/`: `sync_workspace_skills` mirrors
+# each of them from the root it is syncing into that root's `.claude/`, so an
+# asset left at the install root after the migration is mirrored into no root at
+# all. Measured on the reference install: 21 skill entries and 3 commands.
+_CATALOG_PATHS: tuple[str, ...] = (
+    "skills",
+    "skills-lock.json",
+    "commands",
+    "subagents",
+)
+
 _SKILL_TRIAGE_RELATIVE = "Workspace/Skill-Triage.md"
 _SKILLS_SRC = "skills-src"
 
@@ -1272,9 +1314,15 @@ def plan_skills_triage(install_root: Path, primary: str) -> SkillsTriage:
         )
         return triage
 
-    for relative in ("skills", "skills-lock.json"):
+    for relative in _CATALOG_PATHS:
         source = install_root / relative
         if not source.exists():
+            continue
+        # `git mv` refuses an empty directory ("fatal: source directory is
+        # empty"), which would fail the whole run and roll it back. The reference
+        # install has an empty `subagents/`, and an empty directory has nothing to
+        # move anyway — the bootstrap creates one per root when it needs to.
+        if source.is_dir() and not any(source.iterdir()):
             continue
         destination = install_root / primary / relative
         if destination.exists():

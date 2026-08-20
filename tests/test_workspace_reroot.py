@@ -1540,3 +1540,29 @@ def test_undo_stages_the_created_files_it_removes(tmp_path: Path) -> None:
     assert not (install / "personal").exists()
     status = _git(install, "-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=no")
     assert " D " not in status, status
+
+
+def test_an_empty_catalog_directory_is_not_moved(tmp_path: Path) -> None:
+    """`git mv` refuses an empty directory, failing and rolling back the whole run.
+
+    Hit on the reference install, which has an empty `subagents/`. An empty
+    directory has nothing to move; the bootstrap creates one per root when it
+    needs to.
+    """
+    install, vault, runtime = _git_install(tmp_path)
+    _catalog(install)
+    (install / "subagents").mkdir()
+    (install / "commands").mkdir()
+    (install / "commands" / "thing.md").write_text("# thing\n", encoding="utf-8")
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "catalog")
+
+    triage = plan_skills_triage(install, "personal")
+    sources = [m.source for m in triage.moves]
+
+    assert "subagents" not in sources, "an empty directory has nothing to move"
+    assert "commands" in sources, "a populated one does"
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert result["status"] == "migrated", result.get("refusals")
+    assert (install / "personal" / "commands" / "thing.md").is_file()

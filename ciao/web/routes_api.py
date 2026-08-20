@@ -6408,9 +6408,39 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
 
 async def admin_skills(request: Request) -> JSONResponse:
-    """List skills known to Ciaobot, labelled as custom or GitHub/package."""
+    """List skills known to Ciaobot, labelled as custom or GitHub/package.
+
+    Merged across every agent root. Reading `workspace_root` alone showed
+    `{custom: 0, github: 0, stock: 29}` on a migrated install — measured — while
+    19 custom and 7 upstream skills sat in the primary root's catalog. The page
+    looked empty.
+
+    A skill of the same name in two roots is reported once, with the workspaces
+    that hold it, because the page is a catalog rather than a per-root listing
+    and two rows for one name reads as a duplicate rather than as sharing.
+    """
     config = request.app.state.config
-    return JSONResponse(build_skill_inventory(config.workspace_root))
+    targets = getattr(config, "agent_root_targets", None)
+    roots = list(targets()) if callable(targets) else [(config.workspace_root, "")]
+
+    merged: dict[str, dict] = {}
+    counts: dict[str, int] = {}
+    for root, name in roots:
+        inventory = build_skill_inventory(root)
+        for skill in inventory.get("skills", []):
+            key = str(skill.get("name") or "")
+            existing = merged.get(key)
+            if existing is None:
+                skill["workspaces"] = [name] if name else []
+                merged[key] = skill
+                counts[str(skill.get("label") or "")] = (
+                    counts.get(str(skill.get("label") or ""), 0) + 1
+                )
+            elif name and name not in existing.get("workspaces", []):
+                existing.setdefault("workspaces", []).append(name)
+    return JSONResponse(
+        {"counts": counts, "skills": [merged[k] for k in sorted(merged)]}
+    )
 
 
 async def admin_add_skill(request: Request) -> JSONResponse:

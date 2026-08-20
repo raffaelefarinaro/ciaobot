@@ -1489,6 +1489,78 @@ async def test_database_lock_during_startup_retries_after_contention(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
+    """A live-but-wedged server must be treated like the SQLite lock it is.
+
+    ``opencode serve`` staying up but never answering 200 means it is blocked
+    on startup (shared database migration). That is the same recoverable
+    contention as ``database is locked``, so ``_ensure_server`` must retry
+    rather than failing the classifier run outright.
+    """
+    provider = _provider(tmp_path)
+    attempts: list[int] = []
+    delays: list[float] = []
+
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = None
+            self.stderr = None
+
+        def terminate(self):
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*_args, **_kwargs):
+        attempts.append(len(attempts) + 1)
+        return FakeProcess()
+
+    async def fake_health():
+        if len(attempts) == 1:
+            raise TimeoutError("opencode serve did not become healthy: server stayed alive but never answered /global/health")
+
+    async def fake_sleep(delay: float):
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
+    )
+    monkeypatch.setattr("ciao.providers.opencode._free_port", lambda: 43123)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("ciao.providers.opencode.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(provider, "_await_health", fake_health)
+
+    async def noop(*_args):
+        return None
+
+    monkeypatch.setattr(provider, "_verify_contract", noop)
+    monkeypatch.setattr(provider, "_register_control_plane", noop)
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+
+    await provider._ensure_server(Request())  # type: ignore[arg-type]
+
+    assert attempts == [1, 2]
+    assert delays == [0.25]
+    await provider.disconnect()
+
+
+def test_health_failure_reason_says_what_the_poll_saw():
+    """A wedged server must not trail a bare empty ``: `` in the error."""
+    from ciao.providers.opencode import _health_failure_reason
+
+    assert _health_failure_reason(503, None) == "health returned HTTP 503"
+    assert _health_failure_reason(None, ConnectionRefusedError("refused")) == "refused"
+    assert (
+        _health_failure_reason(None, None)
+        == "server stayed alive but never answered /global/health"
+    )
+
+
+@pytest.mark.asyncio
 async def test_missing_binary_names_the_override_env_var(tmp_path, monkeypatch):
     provider = _provider(tmp_path)
     monkeypatch.setattr(

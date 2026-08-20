@@ -151,8 +151,28 @@ def _iter_markdown_files(root: Path) -> Iterable[Path]:
     return sorted(path for path in root.glob("*.md") if path.is_file() or path.is_symlink())
 
 
+def _mirror_vault_root(config: Any) -> Path:
+    """The vault that receives a Settings-written mirror doc.
+
+    Settings has no workspace context — it edits install-wide assets — so after
+    the re-rooting the mirror goes to the PRIMARY root's vault, the same choice
+    P10.4 and P10.5 made for the shared guide and the skill catalog. Before the
+    re-rooting `agent_vault_root` returns the shared vault, so nothing changes.
+    """
+    primary = getattr(config, "primary_workspace", None)
+    resolver = getattr(config, "agent_vault_root", None)
+    if callable(primary) and callable(resolver):
+        try:
+            name = primary()
+            if name:
+                return Path(resolver(name))
+        except (ValueError, OSError):
+            pass
+    return Path(config.vault_root)
+
+
 def _vault_mirror_path(config: Any, category: str, name: str) -> Path:
-    return Path(config.vault_root) / "Workspace" / category / f"{name}.md"
+    return _mirror_vault_root(config) / "Workspace" / category / f"{name}.md"
 
 
 def _write_vault_mirror(

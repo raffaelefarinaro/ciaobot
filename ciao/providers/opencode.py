@@ -235,10 +235,36 @@ def _server_start_lock(workspace_root: Path) -> asyncio.Lock:
     return lock
 
 
+def _health_failure_reason(
+    last_status: int | None, last_error: Exception | None
+) -> str:
+    """A human-readable cause for a server that never became healthy.
+
+    A server that stays alive (returncode None) but never answers 200 wedges
+    on startup — most commonly opencode's shared SQLite migration — and the
+    poll loop leaves both the last HTTP status and the last transport error
+    empty. Say which it was rather than trailing a bare ``: ``.
+    """
+    if last_status is not None:
+        return f"health returned HTTP {last_status}"
+    if last_error is not None:
+        return str(last_error)
+    return "server stayed alive but never answered /global/health"
+
+
 def _is_transient_startup_error(exc: BaseException) -> bool:
-    """Whether a failed server launch is likely to recover on retry."""
+    """Whether a failed server launch is likely to recover on retry.
+
+    A server that wedges on startup (exits, or never becomes healthy) can
+    clear once the shared database contention it hit settles, so both the
+    database-lock exit and the never-healthy timeout are treated as
+    retriable. Everything else — a missing binary, a contract mismatch — is
+    terminal.
+    """
     text = str(exc).lower()
-    return "database is locked" in text or "database is busy" in text
+    if "database is locked" in text or "database is busy" in text:
+        return True
+    return "did not become healthy" in text
 
 
 def missing_required_paths(spec: Mapping[str, Any]) -> tuple[str, ...]:
@@ -945,6 +971,11 @@ class OpencodeProvider(BaseSDKProvider):
         assert self._client is not None
         deadline = asyncio.get_running_loop().time() + _SERVER_START_TIMEOUT
         last_error: Exception | None = None
+        # A server that never reaches 200 but stays alive (wedged on shared
+        # SQLite migration) leaves an empty last_error today, which hides the
+        # cause. Track the last HTTP status so the timeout message says what
+        # the poll actually saw instead of trailing an empty ``: ``.
+        last_status: int | None = None
         while asyncio.get_running_loop().time() < deadline:
             if self._process is not None and self._process.returncode is not None:
                 detail = await self._stderr_detail()
@@ -954,12 +985,15 @@ class OpencodeProvider(BaseSDKProvider):
                 )
             try:
                 response = await self._client.get("/global/health", timeout=2.0)
+                last_status = response.status_code
                 if response.status_code == 200:
                     return
             except httpx.HTTPError as exc:  # not up yet
                 last_error = exc
+                last_status = None
             await asyncio.sleep(0.2)
-        raise TimeoutError(f"opencode serve did not become healthy: {last_error}")
+        reason = _health_failure_reason(last_status, last_error)
+        raise TimeoutError(f"opencode serve did not become healthy: {reason}")
 
     async def _verify_contract(self) -> None:
         """Fail closed when the installed build is missing required operations."""
