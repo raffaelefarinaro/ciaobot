@@ -430,3 +430,121 @@ def remove_receipt(runtime_root: Path) -> bool:
         path.unlink()
         return True
     return False
+
+
+# -- P10.4: splitting the shared guide --------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class GuideSplit:
+    """What each root's ``CLAUDE.md`` gets, and what gets queued for review."""
+
+    primary: str
+    per_root: dict[str, str]
+    queued: dict[str, list[str]]
+
+
+def split_guide(guide_text: str, workspaces: list[str], primary: str) -> GuideSplit:
+    """Give every root the same body, and the bounded regions to the primary only.
+
+    There is exactly one ``CLAUDE.md`` today, so its bounded regions mix facts
+    from every workspace: accepting a work proposal has been writing a region
+    that every personal session then loads. The split cannot be automated past
+    this point. Deciding which of those entries belongs to which workspace is a
+    judgement about the user's own prose, and a heuristic that guesses would
+    reproduce exactly the misfiling this release exists to repair, in a place
+    that is read before the user has said a word.
+
+    So: the unbounded body is copied verbatim to every root, because standing
+    directives apply everywhere. The regions stay with the primary root, whose
+    sessions already behave as they do today. Every other root gets the same
+    body with EMPTY regions, and the primary's entries are handed to that root's
+    proposal queue, where a human accepts the ones that belong. Nothing is lost
+    and nothing is guessed.
+    """
+    from ciao.memory_tool import REGIONS, _REGION_META, parse_entries, read_region  # noqa: PLC0415
+
+    body = strip_region_blocks_text(guide_text)
+    region_entries: dict[str, list[str]] = {}
+    for region in REGIONS:
+        entries, _diagnostics = read_region_text(guide_text, region)
+        region_entries[region] = entries
+
+    empty_blocks: list[str] = []
+    for region in REGIONS:
+        meta = _REGION_META[region]
+        empty_blocks.append(f"{meta['start']}\n{meta['end']}")
+    empty_regions = "\n\n".join(empty_blocks)
+
+    secondary_text = body.rstrip() + "\n\n" + empty_regions + "\n"
+    per_root: dict[str, str] = {}
+    queued: dict[str, list[str]] = {}
+    for name in workspaces:
+        if name == primary:
+            per_root[name] = guide_text
+            continue
+        per_root[name] = secondary_text
+        bullets: list[str] = []
+        for region in REGIONS:
+            for entry in region_entries[region]:
+                bullet = _queue_bullet(region, entry)
+                if bullet:
+                    bullets.append(bullet)
+        queued[name] = bullets
+    return GuideSplit(primary=primary, per_root=per_root, queued=queued)
+
+
+_QUEUE_SOURCE = "shared CLAUDE.md before re-rooting"
+
+
+def _queue_bullet(region: str, entry: str) -> str:
+    """One region entry as a single-line proposal bullet, or "" if it is scaffolding.
+
+    Two things have to be normalised, and both were found in the real guide.
+
+    A region body opens with its own markdown heading (``## Agent memory``),
+    which `parse_entries` keeps attached to the first entry because entries are
+    separated by `§` and a heading is not one. That heading is region scaffolding
+    rather than a remembered fact, so it is dropped.
+
+    Entries may span multiple lines. The queue's invariant is one bullet per
+    line: `proposal_kinds.BULLET_RE` matches line by line, so a multi-line bullet
+    would leave its continuation lines as loose prose in Memory-Proposals.md,
+    uncountable by every counter and invisible to the dedupe check. Newlines are
+    collapsed to single spaces.
+    """
+    lines = [line for line in entry.splitlines()]
+    while lines and (not lines[0].strip() or lines[0].lstrip().startswith("#")):
+        lines.pop(0)
+    flattened = " ".join(" ".join(lines).split())
+    if not flattened:
+        return ""
+    return f"- [{region}] {flattened}  _(from: {_QUEUE_SOURCE})_"
+
+
+def strip_region_blocks_text(text: str) -> str:
+    """The guide with both fenced region blocks removed, markers included."""
+    from ciao.memory_tool import strip_region_blocks  # noqa: PLC0415
+
+    return strip_region_blocks(text)
+
+
+def read_region_text(text: str, region: str) -> tuple[list[str], list[Any]]:
+    """Parse one region's entries out of guide TEXT rather than a file.
+
+    ``memory_tool.read_region`` takes a path, and the split works on text it has
+    already read, so this reuses the same marker regexes instead of a second
+    parser. One definition of where a region starts and ends is the whole point.
+    """
+    import re  # noqa: PLC0415
+
+    from ciao.memory_tool import _REGION_META, parse_entries, resolve_region  # noqa: PLC0415
+
+    canonical = resolve_region(region)
+    meta = _REGION_META[canonical]
+    match = re.search(
+        f"{meta['start_re']}(.*?){meta['end_re']}", text, re.DOTALL
+    )
+    if match is None:
+        return [], [f"missing markers for {canonical}"]
+    return parse_entries(match.group(1)), []

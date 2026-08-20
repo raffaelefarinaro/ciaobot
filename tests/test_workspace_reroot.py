@@ -23,6 +23,7 @@ from ciao.workspace_reroot import (
     plan,
     read_receipt,
     rehearse,
+    split_guide,
     undo,
     write_receipt,
 )
@@ -386,3 +387,103 @@ def test_dirty_tracked_paths_reports_the_first_path_intact(tmp_path: Path) -> No
         assert path.startswith("memory-vault/"), f"truncated path: {path!r}"
         assert (install / path).exists(), f"reported a path that does not exist: {path!r}"
 
+
+
+# -- P10.4: the guide split -------------------------------------------------
+
+
+_GUIDE = """# Ciaobot
+
+Standing directive: always check first, then claim.
+
+<!-- ciao:memory:start cap=2200 -->
+## Agent memory
+
+A fact about the engine.
+§
+A second fact
+that spans two lines.
+<!-- ciao:memory:end -->
+
+<!-- ciao:profile:start cap=1375 -->
+## User profile
+
+Raffa prefers direct implementation.
+<!-- ciao:profile:end -->
+"""
+
+
+def test_primary_root_keeps_the_guide_verbatim() -> None:
+    split = split_guide(_GUIDE, ["personal", "work"], "personal")
+
+    assert split.per_root["personal"] == _GUIDE
+    assert split.queued.get("personal") is None
+
+
+def test_every_root_gets_the_unbounded_body_verbatim() -> None:
+    """Standing directives apply everywhere, so the body is copied, not split."""
+    split = split_guide(_GUIDE, ["personal", "work"], "personal")
+
+    assert "Standing directive: always check first" in split.per_root["work"]
+    assert "# Ciaobot" in split.per_root["work"]
+
+
+def test_a_secondary_root_gets_empty_regions() -> None:
+    """No heuristic classification: the regions arrive empty, not guessed at."""
+    split = split_guide(_GUIDE, ["personal", "work"], "personal")
+    work = split.per_root["work"]
+
+    assert "ciao:memory:start" in work and "ciao:memory:end" in work
+    assert "ciao:profile:start" in work and "ciao:profile:end" in work
+    assert "A fact about the engine" not in work
+    assert "Raffa prefers direct implementation" not in work
+
+
+def test_the_primary_regions_are_queued_for_every_other_root() -> None:
+    """Nothing is lost: a human accepts what belongs in that workspace."""
+    split = split_guide(_GUIDE, ["personal", "work"], "personal")
+    queued = split.queued["work"]
+
+    texts = " ".join(queued)
+    assert "A fact about the engine" in texts
+    assert "Raffa prefers direct implementation" in texts
+    assert any(b.startswith("- [memory]") for b in queued)
+    assert any(b.startswith("- [profile]") for b in queued)
+
+
+def test_queued_bullets_hold_the_one_bullet_per_line_invariant() -> None:
+    """The queue is parsed line by line, so a multi-line bullet corrupts it.
+
+    proposal_kinds.BULLET_RE matches per line, so a bullet spanning lines leaves
+    its continuation as loose prose in Memory-Proposals.md: uncountable by every
+    counter and invisible to the dedupe check. The real guide contains exactly
+    such a multi-line entry, which is how this was found.
+    """
+    from ciao import proposal_kinds
+
+    split = split_guide(_GUIDE, ["personal", "work"], "personal")
+
+    for bullet in split.queued["work"]:
+        assert "\n" not in bullet, f"multi-line bullet: {bullet!r}"
+        assert proposal_kinds.parse_bullet(bullet) is not None, f"unparseable: {bullet!r}"
+
+
+def test_a_region_heading_is_not_queued_as_a_fact() -> None:
+    """`## Agent memory` is region scaffolding, not something to remember."""
+    from ciao import proposal_kinds
+
+    split = split_guide(_GUIDE, ["personal", "work"], "personal")
+
+    for bullet in split.queued["work"]:
+        parsed = proposal_kinds.parse_bullet(bullet)
+        assert parsed is not None
+        assert not parsed.text.lstrip().startswith("#")
+        assert "Agent memory" not in parsed.text
+        assert "User profile" not in parsed.text
+
+
+def test_a_single_workspace_install_queues_nothing() -> None:
+    split = split_guide(_GUIDE, ["personal"], "personal")
+
+    assert split.per_root == {"personal": _GUIDE}
+    assert split.queued == {}
