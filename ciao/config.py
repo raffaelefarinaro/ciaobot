@@ -604,10 +604,27 @@ class CiaoConfig:
         return self._resolve_vault_root(raw_root)
 
     def canonical_workspace_vault_root(self, workspace: str) -> Path:
-        """Standard location for a user-named workspace under the vault."""
+        """Standard location for a user-named workspace's notes, in the layout
+        this install is actually in.
+
+        Two layouts, one question. Shared: a folder per workspace under the one
+        vault (``memory-vault/<name>``). Per-root, after the re-rooting: the
+        whole vault of that workspace's agent root — which is what
+        :meth:`agent_vault_root` already derives from the same receipt.
+
+        Answering "shared" unconditionally made this a claim about the past.
+        ``_detect_vault_location`` compares the resolved vault against this and
+        raised "The personal vault is not in its standard folder" on a correctly
+        migrated install, for every workspace, permanently — with a chat prompt
+        telling the operator to move the vault back to where the migration had
+        just moved it from. A standard location that disagrees with the layout
+        is worse than no check at all.
+        """
         name = _clean_relative_path(workspace)
         if not name or len(Path(name).parts) != 1:
             raise ValueError("workspace name must identify one vault folder")
+        if self.agent_root(name) != self.workspace_root:
+            return self.agent_vault_root(name)
         candidate = self.vault_root / name
         if candidate.is_symlink():
             raise ValueError("workspace vault folder must not be a symlink")

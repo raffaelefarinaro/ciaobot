@@ -518,13 +518,31 @@ def _insert_after_system_prompt(prompts: list[PromptAsset], items: list[PromptAs
     prompts.extend(items)
 
 
-def _workspace_memory_paths(config: Any, root: Path, vault: Path) -> list[tuple[Path, str]]:
+def _workspace_memory_paths(
+    config: Any, root: Path, vault: Path, *, workspace: str = ""
+) -> list[tuple[Path, str]]:
     """MEMORY.md locations per configured workspace (shared by the health
-    check and the fix endpoint so they cannot drift)."""
+    check and the fix endpoint so they cannot drift).
+
+    ``workspace`` narrows the answer to that one workspace, for a caller already
+    iterating agent roots. Without it the health check ran every workspace's
+    MEMORY.md under every agent root: two workspaces produced four rows, half of
+    them foreign to the root being checked, rendered with an absolute path and a
+    doubled label ("Workspace MEMORY.md (work) (personal)"). One shared vault
+    made the cross product correct; one vault per root does not.
+    """
     memory_paths: list[tuple[Path, str]] = []
     ws_names = []
     if hasattr(config, "workspace_names") and callable(config.workspace_names):
         ws_names = config.workspace_names()
+    if workspace:
+        # An unregistered name gets no row rather than the shared vault's, which
+        # under a per-root path would name a file that root does not own.
+        return (
+            [(config.workspace_vault_root(workspace) / "MEMORY.md", "Workspace MEMORY.md")]
+            if workspace in ws_names
+            else []
+        )
 
     if not ws_names:
         memory_paths.append((vault / "MEMORY.md", "Workspace MEMORY.md"))
@@ -604,7 +622,7 @@ def workspace_health(config: Any) -> dict:
         root = agent_root
         suffix = f" ({ws_name})" if ws_name else ""
         id_suffix = f"-{ws_name}" if ws_name else ""
-        memory_paths = _workspace_memory_paths(config, root, vault)
+        memory_paths = _workspace_memory_paths(config, root, vault, workspace=ws_name)
 
         check_paths = [
             (root / "CLAUDE.md", "Project CLAUDE.md"),
@@ -1282,22 +1300,40 @@ def repair_workspace_health(config: Any) -> dict:
     """
     from ciao.cli import _copy_tree_if_missing, _write_if_missing
 
-    root = Path(config.workspace_root)
+    install_root = Path(config.workspace_root)
     vault = Path(config.vault_root)
+
+    # Every agent root the health check reports on, so the remedy covers what
+    # the check found. Repairing `workspace_root` alone re-created CLAUDE.md,
+    # subagents/ and commands/ in the install root of a migrated install — the
+    # agent-shaped debris the migration exists to remove, put back by the
+    # button that claims to fix things (the same bug `ciao setup` had).
+    root_targets: list[tuple[Path, str]] = []
+    targets_getter = getattr(config, "agent_root_targets", None)
+    if callable(targets_getter):
+        try:
+            root_targets = [(Path(r), str(n)) for r, n in targets_getter()]
+        except Exception:  # noqa: BLE001 — fall back to the single-root repair
+            root_targets = []
+    if not root_targets:
+        root_targets = [(install_root, "")]
 
     # Workspace docs (CLAUDE.md and friends) come from the packaged stock
     # seeds — the same source `ciao setup` uses.
     stock_workspace = resources.files("ciao.stock").joinpath("workspace")
-    _copy_tree_if_missing(stock_workspace, root)
-    for memory_path, _title in _workspace_memory_paths(config, root, vault):
-        _write_if_missing(
-            memory_path, "# Memory\n\nDurable workspace memory lives here.\n"
-        )
-    for asset_dir in ("subagents", "commands"):
-        (root / asset_dir).mkdir(parents=True, exist_ok=True)
-
-    merged_agents_guide = _merge_agents_into_claude(root)
-    sync_workspace_skills(root, refresh_upstream=False)
+    merged_agents_guide = False
+    for root, ws_name in root_targets:
+        _copy_tree_if_missing(stock_workspace, root)
+        for memory_path, _title in _workspace_memory_paths(
+            config, root, vault, workspace=ws_name
+        ):
+            _write_if_missing(
+                memory_path, "# Memory\n\nDurable workspace memory lives here.\n"
+            )
+        for asset_dir in ("subagents", "commands"):
+            (root / asset_dir).mkdir(parents=True, exist_ok=True)
+        merged_agents_guide = _merge_agents_into_claude(root) or merged_agents_guide
+        sync_workspace_skills(root, refresh_upstream=False)
     health = workspace_health(config)
     if merged_agents_guide:
         health["merged_agents_guide"] = True

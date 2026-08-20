@@ -1389,3 +1389,66 @@ cleanups were done as check-then-act.
    wrote it. All commits this session were path-scoped around it, and HEAD was verified green in a
    detached worktree without it.
 4. `workspace_census.py` still misses a loose non-`.md` file at the vault root (carried over).
+
+## Post-migration verification on the live install (2026-08-20)
+
+The migration had already run and the suites were green. Every defect below was found by
+*inspecting the migrated install*, not by a test — which is the point worth keeping: a green suite
+told us nothing about whether the surfaces built on top of the new layout still meant what they said.
+
+### 1. A test wiped the operator's real search index
+`fts_search.get_db_path()` falls back to `~/.ciao/vault-fts.db` when `CIAO_MEMORY_DIR` is unset, and
+`migrate_if_needed` → `rebuild_search_index` passes no `db_path`. The new trigger test migrated a
+fixture install, so it rebuilt *the operator's own* database: wiped it, wrote `path_base` pointing at
+a pytest tmp dir, and left four fixture notes (`Peter.md`, `Memory-Proposals.md` × 2 roots) as the
+whole index. Vault search on this machine returned almost nothing until it was rebuilt.
+
+The `db_path` seam existed precisely for this hazard and was documented earlier in this work order;
+the test simply did not use it. So the fix is not "remember next time" — remembering is what failed.
+`tests/conftest.py` now points `CIAO_MEMORY_DIR` at `tmp_path` in an **autouse, unconditional**
+fixture, and `test_no_test_can_reach_the_real_search_database` asserts no test can resolve to the
+real path. Rebuilt live: 158 personal + 426 work, `path_base` back to the install root, scoped
+search verified with zero cross-root leaks in either direction.
+
+### 2. The standard vault location still described the shared layout
+`canonical_workspace_vault_root` returned `<vault_root>/<name>` unconditionally. Post-migration the
+standard is `agent_root(name)/<vault dir name>` — which `agent_vault_root` already derives from the
+same receipt. Consequence: `_detect_vault_location` compared the new, correct vault against the old
+standard and raised **"The personal vault is not in its standard folder"** for every workspace,
+permanently, with a chat prompt instructing the operator to move the vault back where the migration
+had just moved it from. `os_audit`'s `vault_outside_vault_root` notice shares the standardizer and
+was wrong the same way. Now layout-aware; the live install went from 4 operator tiles to the 2 real
+ones, and a vault genuinely moved out of its root still raises the tile.
+
+### 3. Health checked every workspace's MEMORY.md under every agent root
+`_workspace_memory_paths` returns one entry per workspace and was called inside the per-agent-root
+loop: N roots × N workspaces. Two workspaces produced four rows, half foreign to the root being
+checked, rendered with an absolute path and a doubled label ("Workspace MEMORY.md (work)
+(personal)"). One shared vault made the cross product correct; one vault per root does not. Now
+scoped by `workspace=`; 36 checks → 34, paths relative again.
+
+### 4. "Fix issues" put the debris back
+`repair_workspace_health` scaffolded `config.workspace_root` only — so on a migrated install the
+Settings button re-created `CLAUDE.md`, `subagents/` and `commands/` in the install root: exactly the
+agent-shaped debris the migration exists to remove, restored by the button that claims to fix things.
+The same bug `ciao setup` had, in a second place. Now loops `agent_root_targets()`.
+
+All four are the same failure: post-migration code that still encodes the shared layout as *the*
+layout. The read sweep covered readers; these were a **standard-path definition**, a **health
+report**, and a **repair writer**. Worth asking of any surface that names a location.
+
+Tests: `tests/test_post_migration_standard_paths.py` (8), each mutation-tested — reverting any one of
+the three fixes fails its own test and nothing else.
+
+### Verified on the live install, post-fix
+- Trigger idempotent: `already_migrated`, 0 moves, twice in a row. Receipt `migrated`, 5 moves.
+- `workspace_reroot.repair`: `clean` — nothing repaired, nothing reported, no errors.
+- Resolution: `agent_root` per workspace, vaults at `<ws>/memory-vault`, `logs_root = Logs` (1384 chats).
+- Guides: personal 27606 bytes (20 memory + 2 profile entries), work 23749 (empty regions); both
+  `AGENTS.md` symlinks intact.
+- Memory map: 584 notes (158 personal + 426 work), unique ids, every one resolving on disk.
+- Per-root `INDEX.md`: zero leftover workspace prefixes in either root.
+- Search: 158 + 426, scoped, 0 leaks; `path_base` = install root.
+- Handover: 8 chats carry `handover_context_pending`, matching the receipt's 8 ids exactly.
+- Health: `ok`, 34 checks, zero warnings or errors.
+- Engine: serving 200, zero tracebacks since the swap, `ciao setup` re-render clean and no debris.

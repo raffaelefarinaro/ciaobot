@@ -337,3 +337,18 @@ def test_changing_the_key_base_wipes_the_index_rather_than_mixing_formats(
 
     paths = {row[0] for row in db_conn.execute("SELECT path FROM vault_meta")}
     assert paths == {os.path.join("memory-vault", "People", "User.md")}
+
+
+def test_no_test_can_reach_the_real_search_database(tmp_path: Path) -> None:
+    """The guard that stops a test wiping the developer's own vault index.
+
+    `get_db_path()` falls back to `~/.ciao/vault-fts.db`, and a test that
+    migrated a fixture install rebuilt the index without an explicit `db_path` —
+    wiping the real database and refilling it with four fixture notes. The
+    conftest fixture is autouse and unconditional because remembering per test is
+    what failed.
+    """
+    resolved = fts_search.get_db_path()
+
+    assert Path.home() not in resolved.parents or "pytest" in str(resolved), resolved
+    assert resolved != Path.home() / ".ciao" / "vault-fts.db"
