@@ -321,6 +321,7 @@ def apply(
 
     result = plan(install_root, vault_root, workspaces)
     triage = plan_skills_triage(install_root, primary)
+    guides = guide_moves(install_root, primary)
     payload = result.as_dict()
     payload["primary"] = primary
     payload["skills_triage"] = triage.as_dict()
@@ -342,7 +343,11 @@ def apply(
         payload["receipt_path"] = str(write_receipt(runtime_root, payload))
         return payload
 
-    moved_relatives = [vault_root.name, *(m.source for m in triage.moves)]
+    moved_relatives = [
+        vault_root.name,
+        *(m.source for m in triage.moves),
+        *(m.source for m in guides),
+    ]
     dirty = dirty_tracked_paths(install_root, *moved_relatives)
     if dirty:
         payload["status"] = "refused"
@@ -359,12 +364,28 @@ def apply(
     code, head = _run_git(install_root, "rev-parse", "HEAD")
     payload["git_head_before"] = head if code == 0 else ""
 
+    # Read the shared guide before it moves. The split is computed here so a
+    # failure to parse it refuses the run rather than leaving roots half-guided.
+    shared_guide = install_root / "CLAUDE.md"
+    split: GuideSplit | None = None
+    if shared_guide.is_file():
+        try:
+            split = split_guide(
+                shared_guide.read_text(encoding="utf-8"), result.workspaces, primary
+            )
+        except Exception as exc:  # noqa: BLE001
+            payload["status"] = "refused"
+            payload["refused"] = True
+            payload["refusals"] = [f"could not split {shared_guide}: {exc}"]
+            payload["receipt_path"] = str(write_receipt(runtime_root, payload))
+            return payload
+
     applied: list[dict[str, str]] = []
     # The skill catalog moves through the same loop as the vaults, so one failure
     # rolls back the whole run and one receipt reverses it. A catalog left behind
     # by a successful vault migration would be a half-rooted install by another
     # name: the primary root would load no custom skill at all.
-    for move in [*result.moves, *triage.moves]:
+    for move in [*result.moves, *triage.moves, *guides]:
         source = install_root / move.source
         destination = install_root / move.destination
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -412,12 +433,31 @@ def apply(
     payload["registry_before"] = registry_before
     payload["registry_after"] = registry_after
 
-    primary_vault = next(
-        (m.destination for m in result.moves if m.workspace == primary), ""
-    )
-    payload["created_files"] = write_skills_triage(
-        install_root, triage, result.workspaces, primary_vault
-    )
+    vault_destinations = {m.workspace: m.destination for m in result.moves if m.workspace}
+    primary_vault = vault_destinations.get(primary, "")
+    created = write_skills_triage(install_root, triage, result.workspaces, primary_vault)
+
+    if split is not None:
+        guide_created, guide_stashed = write_guide_split(
+            install_root, split, vault_destinations, backup_dir, runtime_root
+        )
+        created.extend(guide_created)
+        stashed.extend(guide_stashed)
+        payload["guide_split"] = {
+            "primary": split.primary,
+            "queued": {name: len(items) for name, items in split.queued.items()},
+        }
+
+    # Every root gets its agent assets, through the same code --repair uses, so
+    # "after a migration, --repair is a no-op" is an invariant and not a hope.
+    created_dirs: list[str] = []
+    shared_sources = install_root / _SKILLS_SRC
+    for name in result.workspaces:
+        files, dirs = bootstrap_root(install_root / name, shared_sources)
+        created.extend(f"{name}/{relative}" for relative in files)
+        created_dirs.extend(f"{name}/{relative}" for relative in dirs)
+    payload["created_files"] = created
+    payload["created_dirs"] = created_dirs
 
     payload["status"] = "migrated"
     payload["applied"] = applied
@@ -474,13 +514,28 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     removed: list[str] = []
     for relative in receipt.get("created_files", []):
         target = install_root / relative
-        if target.is_file():
+        # is_symlink first: AGENTS.md is a symlink, and `is_file()` follows it,
+        # so a link whose target already moved back would be left dangling.
+        if target.is_symlink() or target.is_file():
             target.unlink()
             removed.append(relative)
             _prune_empty_parents(install_root, target.parent)
     source_dir = install_root / _SKILLS_SRC
     if source_dir.is_dir() and not any(source_dir.iterdir()):
         source_dir.rmdir()
+
+    # The bootstrap's `.claude/` holds hundreds of packaged files, so it is
+    # recorded as a directory and removed whole rather than listed file by file.
+    # Only directories this migration CREATED are listed, so a root that already
+    # had one keeps it.
+    import shutil  # noqa: PLC0415
+
+    for relative in receipt.get("created_dirs", []):
+        target = install_root / relative
+        if target.is_dir():
+            shutil.rmtree(target)
+            removed.append(relative)
+            _prune_empty_parents(install_root, target.parent)
 
     reversed_moves: list[str] = []
     for entry in reversed(receipt.get("applied", [])):
@@ -591,11 +646,19 @@ def _rewrite_registry(
 
 @dataclass(frozen=True, slots=True)
 class GuideSplit:
-    """What each root's ``CLAUDE.md`` gets, and what gets queued for review."""
+    """What each root's ``CLAUDE.md`` gets, and what gets queued for review.
+
+    ``queued`` is the rendered bullet per root, kept because the one-bullet-per-
+    line invariant is asserted against it. ``queued_proposals`` is the same thing
+    typed, which is what actually reaches the queue: rendering here and parsing
+    it back at the write site would be a second definition of the bullet format,
+    and three copies of one bullet regex drifting apart is what P1 existed to fix.
+    """
 
     primary: str
     per_root: dict[str, str]
     queued: dict[str, list[str]]
+    queued_proposals: dict[str, list[Any]] = field(default_factory=dict)
 
 
 def split_guide(guide_text: str, workspaces: list[str], primary: str) -> GuideSplit:
@@ -633,26 +696,33 @@ def split_guide(guide_text: str, workspaces: list[str], primary: str) -> GuideSp
     secondary_text = body.rstrip() + "\n\n" + empty_regions + "\n"
     per_root: dict[str, str] = {}
     queued: dict[str, list[str]] = {}
+    queued_proposals: dict[str, list[Any]] = {}
     for name in workspaces:
         if name == primary:
             per_root[name] = guide_text
             continue
         per_root[name] = secondary_text
-        bullets: list[str] = []
+        proposals: list[Any] = []
         for region in REGIONS:
             for entry in region_entries[region]:
-                bullet = _queue_bullet(region, entry)
-                if bullet:
-                    bullets.append(bullet)
-        queued[name] = bullets
-    return GuideSplit(primary=primary, per_root=per_root, queued=queued)
+                proposal = _queue_proposal(region, entry)
+                if proposal is not None:
+                    proposals.append(proposal)
+        queued_proposals[name] = proposals
+        queued[name] = [proposal.as_bullet() for proposal in proposals]
+    return GuideSplit(
+        primary=primary,
+        per_root=per_root,
+        queued=queued,
+        queued_proposals=queued_proposals,
+    )
 
 
 _QUEUE_SOURCE = "shared CLAUDE.md before re-rooting"
 
 
-def _queue_bullet(region: str, entry: str) -> str:
-    """One region entry as a single-line proposal bullet, or "" if it is scaffolding.
+def _queue_proposal(region: str, entry: str) -> Any:
+    """One region entry as a queue proposal, or None if it is scaffolding.
 
     Two things have to be normalised, and both were found in the real guide.
 
@@ -667,13 +737,15 @@ def _queue_bullet(region: str, entry: str) -> str:
     uncountable by every counter and invisible to the dedupe check. Newlines are
     collapsed to single spaces.
     """
+    from ciao.memory_proposals import MemoryProposal  # noqa: PLC0415
+
     lines = [line for line in entry.splitlines()]
     while lines and (not lines[0].strip() or lines[0].lstrip().startswith("#")):
         lines.pop(0)
     flattened = " ".join(" ".join(lines).split())
     if not flattened:
-        return ""
-    return f"- [{region}] {flattened}  _(from: {_QUEUE_SOURCE})_"
+        return None
+    return MemoryProposal(target=region, text=flattened, source_section=_QUEUE_SOURCE)
 
 
 def strip_region_blocks_text(text: str) -> str:
@@ -702,6 +774,164 @@ def read_region_text(text: str, region: str) -> tuple[list[str], list[Any]]:
     if match is None:
         return [], [f"missing markers for {canonical}"]
     return parse_entries(match.group(1)), []
+
+
+# -- P10.4 applied: give every root its own guide ----------------------------
+
+# The shared guide and its Codex alias both move to the primary root, so history
+# follows and the primary's regions are byte-identical to what its sessions read
+# today. They must not be left behind: providers walk UP from cwd for a guide, so
+# a surviving `<install>/CLAUDE.md` would re-inject the primary's memory regions
+# into every root and undo the split it just performed.
+_GUIDE_NAMES = ("CLAUDE.md", "AGENTS.md")
+
+_QUEUE_RELATIVE = "Workspace/Memory-Proposals.md"
+
+
+def guide_moves(install_root: Path, primary: str) -> list[Move]:
+    """Moves that carry the shared guide into the primary root."""
+    install_root = Path(install_root)
+    moves: list[Move] = []
+    if not primary:
+        return moves
+    for name in _GUIDE_NAMES:
+        source = install_root / name
+        # is_symlink first: AGENTS.md is a relative symlink to CLAUDE.md, and
+        # `exists()` on a symlink follows it, so a broken one would be skipped
+        # and then dangle after its target moved.
+        if not (source.is_symlink() or source.exists()):
+            continue
+        if (install_root / primary / name).exists():
+            continue
+        moves.append(
+            Move(source=name, destination=f"{primary}/{name}", workspace=primary)
+        )
+    return moves
+
+
+def write_guide_split(
+    install_root: Path,
+    split: GuideSplit,
+    vault_destinations: dict[str, str],
+    backup_dir: Path,
+    runtime_root: Path,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Write every secondary root's guide and queue the primary's regions.
+
+    The primary is skipped on purpose: its guide arrived by ``git mv``, so
+    rewriting it here would break both byte-identity and ``git log --follow`` for
+    no gain.
+
+    Returns ``(created, stashed)``. A queue file that already existed is stashed
+    before being appended to, so undo restores it byte-for-byte; one that did not
+    exist is recorded as created, so undo removes it. Both are needed — the
+    reference install has a `Memory-Proposals.md` in both workspaces, and a fresh
+    root has none.
+    """
+    from ciao.memory_proposals import append_proposals  # noqa: PLC0415
+
+    install_root = Path(install_root)
+    created: list[str] = []
+    stashed: list[dict[str, str]] = []
+
+    for name, text in sorted(split.per_root.items()):
+        if name == split.primary:
+            continue
+        root = install_root / name
+        root.mkdir(parents=True, exist_ok=True)
+        guide = root / "CLAUDE.md"
+        if not guide.exists():
+            guide.write_text(text, encoding="utf-8")
+            created.append(f"{name}/CLAUDE.md")
+
+        proposals = split.queued_proposals.get(name) or []
+        destination = vault_destinations.get(name)
+        if not proposals or not destination:
+            continue
+        queue = install_root / destination / _QUEUE_RELATIVE
+        if queue.is_file():
+            # Keyed on the full relative path, never the stem: both workspaces
+            # hold a Memory-Proposals.md, so a flat backup name would have one
+            # root's queue overwrite the other's.
+            target = backup_dir / destination / _QUEUE_RELATIVE
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(queue.read_bytes())
+            stashed.append(
+                {
+                    "source": f"{destination}/{_QUEUE_RELATIVE}",
+                    "backup": str(target.relative_to(runtime_root)),
+                }
+            )
+        written = append_proposals(
+            proposals, install_root / destination, source_path=Path("CLAUDE.md")
+        )
+        if written is not None and not stashed_holds(stashed, destination):
+            created.append(f"{destination}/{_QUEUE_RELATIVE}")
+    return created, stashed
+
+
+def stashed_holds(stashed: list[dict[str, str]], destination: str) -> bool:
+    """Whether this run already stashed that root's queue file."""
+    wanted = f"{destination}/{_QUEUE_RELATIVE}"
+    return any(entry["source"] == wanted for entry in stashed)
+
+
+def guide_split_pending(root: Path) -> bool:
+    """Whether this root has no guide while the install root still holds one.
+
+    One definition, honoured by the bootstrap and reported by ``--repair``.
+    Seeding the packaged stock guide in that state replaces the user's guide with
+    empty memory regions, so nothing may seed one until the split has run. During
+    a migration the shared guide has already moved into the primary root, so this
+    is false for every root and the bootstrap proceeds normally.
+    """
+    root = Path(root)
+    return not (root / "CLAUDE.md").is_file() and (root.parent / "CLAUDE.md").is_file()
+
+
+def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
+    """Install the agent assets a root needs to be usable. Safe to run twice.
+
+    Called by both the migration and ``--repair``, so "after a migration,
+    ``--repair`` is a no-op" is an invariant rather than a coincidence. Without
+    this, ``apply`` produced roots holding a vault and nothing else: no
+    ``.claude/``, no ``AGENTS.md``, so a session in that root discovered no
+    skill, agent or command at all.
+
+    Returns ``(created files, created directories)`` relative to ``root``, so
+    undo removes exactly what this added. The directory list exists because
+    ``.claude/`` holds hundreds of packaged files and recording each one in the
+    receipt would bury the reverse map in noise.
+    """
+    from ciao.sync_skills import (  # noqa: PLC0415
+        _ensure_linked_workspace_guides,
+        _install_stock_agents,
+        _install_stock_skills,
+        _rebuild_custom_skill_links,
+        mirror_shared_skill_sources,
+    )
+
+    root = Path(root)
+    before = {name: (root / name).exists() for name in _GUIDE_NAMES}
+    claude_existed = (root / ".claude").is_dir()
+
+    # Skills and agents are always safe to install; a guide is not. See
+    # `guide_split_pending`.
+    if not guide_split_pending(root):
+        _ensure_linked_workspace_guides(root)
+    _install_stock_skills(root)
+    _rebuild_custom_skill_links(root)
+    mirror_shared_skill_sources(root, shared)
+    # No guard here: like _install_stock_skills, this handles its own missing
+    # package resources. A bare except would only hide a real failure.
+    _install_stock_agents(root)
+
+    created_files = [
+        name
+        for name in _GUIDE_NAMES
+        if not before[name] and ((root / name).is_symlink() or (root / name).exists())
+    ]
+    return created_files, ([] if claude_existed else [".claude"])
 
 
 # -- P10.6: rebuild the derived artefacts per root ---------------------------
@@ -1221,18 +1451,11 @@ def repair(
 
 def _repair_one_root(root: Path, name: str, shared: Path, record: Any) -> None:
     """Reconcile one agent root. Every branch is safe to run twice."""
-    from ciao.sync_skills import (  # noqa: PLC0415
-        _ensure_linked_workspace_guides,
-        _install_stock_skills,
-        _rebuild_custom_skill_links,
-        mirror_shared_skill_sources,
-    )
+    from ciao.sync_skills import _ensure_linked_workspace_guides  # noqa: PLC0415
 
     if not root.is_dir():
         root.mkdir(parents=True, exist_ok=True)
-        _ensure_linked_workspace_guides(root)
-        _install_stock_skills(root)
-        _rebuild_custom_skill_links(root)
+        bootstrap_root(root, shared)
         record(
             RepairItem(
                 workspace=name,
@@ -1259,7 +1482,7 @@ def _repair_one_root(root: Path, name: str, shared: Path, record: Any) -> None:
     guide = root / "CLAUDE.md"
     agents = root / "AGENTS.md"
     shared_guide = root.parent / "CLAUDE.md"
-    if not guide.is_file() and shared_guide.is_file():
+    if guide_split_pending(root):
         # Refuse to seed a stock guide over an unsplit one. This root has no
         # guide and the install root still holds the pre-migration one, so
         # `_ensure_linked_workspace_guides` would copy the ~2 KB packaged stock
@@ -1297,9 +1520,7 @@ def _repair_one_root(root: Path, name: str, shared: Path, record: Any) -> None:
     # Read the drift BEFORE mirroring, or the report always comes back empty and
     # a genuine repair looks like a no-op.
     missing = _missing_skill_links(root, shared)
-    stock_installed, _stock_pruned = _install_stock_skills(root)
-    custom_installed, _custom_pruned = _rebuild_custom_skill_links(root)
-    shared_linked, _shared_pruned = mirror_shared_skill_sources(root, shared)
+    bootstrap_root(root, shared)
     if missing:
         record(
             RepairItem(
@@ -1307,10 +1528,7 @@ def _repair_one_root(root: Path, name: str, shared: Path, record: Any) -> None:
                 drift="skills_unmirrored",
                 detail=f"{len(missing)} skill(s) were not linked into the catalog: "
                 + ", ".join(missing[:5]),
-                action=(
-                    f"re-mirrored {stock_installed} stock, {custom_installed} own "
-                    f"and {shared_linked} shared skill(s)"
-                ),
+                action=f"re-mirrored the catalog, restoring {len(missing)} link(s)",
             )
         )
 

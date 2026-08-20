@@ -1061,6 +1061,23 @@ def test_index_prefix_detection_only_matches_registered_names(tmp_path: Path) ->
     assert index_workspace_prefixes(index, ["personal", "work"]) == ["personal/People/Peter"]
 
 
+def _unsplit(install: Path) -> None:
+    """The state an install migrated by an EARLIER build is left in.
+
+    `apply` now splits the guide, so a fresh migration cannot reach this. An
+    install migrated before that landed can: roots with no guide, and the
+    pre-migration one still at the install root.
+    """
+    for name in ("personal", "work"):
+        (install / name / "CLAUDE.md").unlink(missing_ok=True)
+        (install / name / "AGENTS.md").unlink(missing_ok=True)
+    (install / "CLAUDE.md").write_text(
+        "# The real guide\n\n<!-- ciao:memory:start -->\n- a fact\n"
+        "<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+
+
 def test_repair_refuses_to_seed_a_stock_guide_over_an_unsplit_one(tmp_path: Path) -> None:
     """The gap this guard exists for was measured, not imagined.
 
@@ -1071,11 +1088,7 @@ def test_repair_refuses_to_seed_a_stock_guide_over_an_unsplit_one(tmp_path: Path
     every session, and the repair would have reported success.
     """
     install, runtime = _migrated(tmp_path)
-    (install / "CLAUDE.md").write_text(
-        "# The real guide\n\n<!-- ciao:memory:start -->\n- a fact\n"
-        "<!-- ciao:memory:end -->\n",
-        encoding="utf-8",
-    )
+    _unsplit(install)
 
     result = _repair(install, runtime)
 
@@ -1087,10 +1100,182 @@ def test_repair_refuses_to_seed_a_stock_guide_over_an_unsplit_one(tmp_path: Path
 def test_repair_still_relinks_once_a_root_has_its_own_guide(tmp_path: Path) -> None:
     """The guard must not disable the repair it guards."""
     install, runtime = _migrated(tmp_path)
-    (install / "CLAUDE.md").write_text("# The real guide\n", encoding="utf-8")
+    _unsplit(install)
     (install / "work" / "CLAUDE.md").write_text("# work's own guide\n", encoding="utf-8")
 
     result = _repair(install, runtime)
 
     assert "guide_unsplit" in _drifts(result, "reported")  # personal still lacks one
     assert (install / "work" / "AGENTS.md").is_symlink()
+
+
+# -- P10.4 applied: apply() gives every root its own guide -------------------
+#
+# `split_guide` had seven tests and no caller. Measured on the reference clone
+# before this landed: after `--apply` plus `--repair`, each root held the
+# 2202-byte packaged stock guide with EMPTY memory regions while the operator's
+# real 27377-byte guide sat orphaned at `<install>/CLAUDE.md` — a path no
+# session's cwd reads any more. All 20 remembered facts, gone, silently.
+
+_REAL_GUIDE = """# Ciaobot
+
+Standing directives that apply everywhere.
+
+<!-- ciao:memory:start -->
+## Agent memory
+
+- the deploy script needs a tag
+§
+- releases go out on Thursdays
+<!-- ciao:memory:end -->
+
+<!-- ciao:profile:start -->
+- prefers terse replies
+<!-- ciao:profile:end -->
+"""
+
+
+def _with_guide(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A committed install holding a real shared guide and a queue per workspace."""
+    install, vault, runtime = _git_install(tmp_path)
+    (install / "CLAUDE.md").write_text(_REAL_GUIDE, encoding="utf-8")
+    (install / "AGENTS.md").symlink_to("CLAUDE.md")
+    for name in ("personal", "work"):
+        queue = vault / name / "Workspace" / "Memory-Proposals.md"
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        queue.write_text(
+            "---\ntags: [ciao, memory, proposals]\n---\n# Memory Proposals\n",
+            encoding="utf-8",
+        )
+    _registry(
+        runtime,
+        [
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "work", "vault_root": "memory-vault/work"},
+        ],
+    )
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "guide")
+    return install, vault, runtime
+
+
+def test_the_primary_inherits_the_real_guide_and_the_install_root_keeps_none(
+    tmp_path: Path,
+) -> None:
+    """The shared guide MOVES, so history follows and nothing is left to leak.
+
+    A surviving `<install>/CLAUDE.md` would be re-read as a parent guide from
+    every root's cwd, re-injecting the primary's memory regions everywhere and
+    undoing the split that had just run.
+    """
+    install, vault, runtime = _with_guide(tmp_path)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "migrated", result.get("refusals")
+    assert not (install / "CLAUDE.md").exists()
+    assert not (install / "AGENTS.md").exists()
+    assert (install / "personal" / "CLAUDE.md").read_text(encoding="utf-8") == _REAL_GUIDE
+    assert (install / "personal" / "AGENTS.md").is_symlink()
+    # `git mv` stages the rename; history follows only once it is committed.
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "reroot")
+    history = _git(install, "log", "--follow", "--oneline", "--", "personal/CLAUDE.md")
+    assert "guide" in history, history
+
+
+def test_a_secondary_root_gets_the_body_and_empty_regions(tmp_path: Path) -> None:
+    install, vault, runtime = _with_guide(tmp_path)
+
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    text = (install / "work" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "Standing directives that apply everywhere." in text
+    assert "releases go out on Thursdays" not in text
+    assert "prefers terse replies" not in text
+    assert "<!-- ciao:memory:start" in text  # the marker carries a cap= attribute
+
+
+def test_the_primary_regions_reach_every_other_roots_queue(tmp_path: Path) -> None:
+    """Nothing is lost and nothing is guessed: the entries land where a human
+    decides on them, one parseable bullet per line."""
+    from ciao.proposal_kinds import BULLET_RE
+
+    install, vault, runtime = _with_guide(tmp_path)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["guide_split"]["queued"] == {"work": 3}
+    queue = (install / "work" / "memory-vault" / "Workspace" / "Memory-Proposals.md")
+    lines = [line for line in queue.read_text(encoding="utf-8").splitlines() if line.startswith("- [")]
+    assert len(lines) == 3
+    assert all(BULLET_RE.match(line) for line in lines), lines
+    assert any("releases go out on Thursdays" in line for line in lines)
+    # The region heading is scaffolding, not a remembered fact.
+    assert not any("Agent memory" in line for line in lines)
+    # The primary already holds these in its own regions, so it queues nothing.
+    primary_queue = install / "personal" / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    assert not [
+        line for line in primary_queue.read_text(encoding="utf-8").splitlines()
+        if line.startswith("- [")
+    ]
+
+
+def test_every_root_is_usable_after_apply(tmp_path: Path) -> None:
+    """Before this, apply left roots holding a vault and nothing else, so a
+    session in one discovered no skill, agent or command at all."""
+    install, vault, runtime = _with_guide(tmp_path)
+
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    for name in ("personal", "work"):
+        root = install / name
+        assert (root / "CLAUDE.md").is_file(), name
+        assert (root / "AGENTS.md").is_symlink(), name
+        assert (root / ".claude" / "skills").is_dir(), name
+        assert any((root / ".claude" / "skills").iterdir()), name
+
+
+def test_repair_is_a_no_op_immediately_after_apply(tmp_path: Path) -> None:
+    """The invariant that makes the bootstrap trustworthy: both go through the
+    same code, so a freshly migrated install has nothing left to reconcile."""
+    install, vault, runtime = _with_guide(tmp_path)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    rebuild_indexes(install, ["personal", "work"])
+
+    result = _repair(install, runtime)
+
+    assert result["status"] == "clean", result["repaired"]
+    assert result["reported"] == [], result["reported"]
+
+
+def test_apply_then_undo_restores_an_install_that_had_a_real_guide(
+    tmp_path: Path,
+) -> None:
+    """The round trip has to cover what the split and the bootstrap wrote:
+    per-root guides, the AGENTS.md links, `.claude/`, and the appended queue."""
+    install, vault, runtime = _with_guide(tmp_path)
+    before = _install_hashes(install)
+
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+
+    result = undo(install, runtime)
+    assert result["status"] == "undone", result
+
+    assert _install_hashes(install) == before
+    assert not (install / "personal").exists()
+    assert not (install / "work").exists()
+    assert (install / "CLAUDE.md").read_text(encoding="utf-8") == _REAL_GUIDE
+
+
+def test_a_dirty_guide_refuses_before_anything_moves(tmp_path: Path) -> None:
+    """The guide moves, so the clean-tree gate has to cover it too."""
+    install, vault, runtime = _with_guide(tmp_path)
+    (install / "CLAUDE.md").write_text(_REAL_GUIDE + "\n- edited\n", encoding="utf-8")
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "refused"
+    assert result["dirty_tracked"] == ["CLAUDE.md"]
+    assert (install / "memory-vault").is_dir()

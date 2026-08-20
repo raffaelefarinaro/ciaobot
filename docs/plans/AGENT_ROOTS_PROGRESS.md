@@ -42,7 +42,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | delegate | DONE | commit 001639e6 |
 | P9 Per-root memory + MCP allowlist | delegate | DONE | P9.1+P9.2 a0d55751; P9.3 beaeda6f |
-| P10 The cut | coordinator | IN PROGRESS | 970bd3d0, 59dda6b0, c70707f7, 2895f1bd, ee6f85e0, f9539770, b924e438, 0dda15a8; **P10.4's split is written and unwired, P10.9/P10.10 BLOCKED, see below** |
+| P10 The cut | coordinator | IN PROGRESS | 970bd3d0, 59dda6b0, c70707f7, 2895f1bd, ee6f85e0, f9539770, b924e438, 0dda15a8; **P10.4 wired at apply time; P10.9/P10.10 BLOCKED on the migration running, see below** |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | coordinator | DONE | 14 tests, commit 970bd3d0 |
 | V3 Real-data rehearsal | coordinator | DONE | APFS clone, 2318 files, zero refusals |
@@ -860,7 +860,7 @@ P10.6 verification read "426 indexed, 155 skipped" as benign. Renamed to `remove
   and left the fourth run clean; a shared skill shadowing a stock name is reported and linked and
   converges immediately.
 
-### NEW BLOCKING GAP: P10.4's split is written and never applied
+### BLOCKING GAP, found and then closed in the same session: P10.4's split was never applied
 `split_guide` is a pure function with seven tests and **no caller**. Nothing writes each root's
 `CLAUDE.md`, nothing queues the primary's region entries into the other roots'
 `Memory-Proposals.md`, and nothing retires the shared `<install>/CLAUDE.md`. So `--apply` today
@@ -873,22 +873,64 @@ while the operator's real **27377-byte** guide (4 region markers, 20 entries) sa
 `<install>/CLAUDE.md`. Every remembered fact would have disappeared from every session, and the
 repair would have reported success. `_ensure_linked_workspace_guides` copies the stock guide
 whenever one is missing, which is right on a fresh install and catastrophic here.
-So `--repair` now REFUSES to seed a guide while the install root still holds an unsplit one, and
-reports `guide_unsplit` instead. That converts silent loss into a visible finding, but it is a
-guard, not the fix: the fix is wiring the split.
+So `--repair` REFUSES to seed a guide while the install root still holds an unsplit one, and
+reports `guide_unsplit` instead. That converts silent loss into a visible finding, and it stays as
+the guard for an install migrated by an earlier build — but it was never the fix. The fix is wiring
+the split, which the next section covers.
 Related and from the same cause: after `--apply` a root has no `.claude/`, no `CLAUDE.md` and no
 `AGENTS.md` until something syncs it. `--repair` is currently the only thing that completes a root,
 which is P10.10 `_bootstrap_workspace` territory. **Wiring the guide split and the root bootstrap
 into `apply()` must land before the real migration runs.**
 
+### The blocking gap is CLOSED
+`apply()` now performs the split and bootstraps every root.
+
+- The shared `CLAUDE.md` and its `AGENTS.md` symlink **move** to the primary root through the same
+  `git mv` loop as the vaults, so the primary's regions are byte-identical to what its sessions read
+  today and `git log --follow` still reaches them. They must not be left behind: providers walk UP
+  from cwd for a guide, so a surviving `<install>/CLAUDE.md` would re-inject the primary's memory
+  regions into every root and undo the split that had just run.
+- Every other root gets the unbounded body with EMPTY bounded regions, and the primary's entries are
+  queued into that root's `Workspace/Memory-Proposals.md`.
+- `_queue_bullet` became `_queue_proposal`, returning a real `MemoryProposal` so
+  `MemoryProposal.as_bullet` is the ONE definition of the bullet format and the queue is written
+  through `append_proposals` (which carries the dedupe and the header-refresh fix). The existing
+  seven guide-split tests passed unchanged, which is the proof the rendering is identical.
+- `bootstrap_root` installs each root's agent assets, and `--repair` calls the SAME function. So
+  "after a migration, `--repair` is a no-op" is an invariant, not a hope, and it is asserted.
+- `guide_split_pending` is one predicate shared by the bootstrap and the repair: nothing seeds a
+  per-root guide while the install root still holds an unsplit one.
+- Undo covers all of it: the queue file is stashed before being appended to (keyed on the FULL
+  relative path, because both workspaces hold a `Memory-Proposals.md`), the created guides and
+  symlinks are recorded in `created_files`, and `.claude/` is recorded in a new `created_dirs` and
+  removed whole rather than listed file by file.
+- The clean-tree gate now covers the guide too, since it moves.
+
+**Verified on a second APFS clone of the live install, migrated from a genuinely clean tree:**
+9 moves; the 27377-byte guide landed at `personal/CLAUDE.md` byte-identical; `work/CLAUDE.md` is
+23749 bytes with **0 entries in both regions** while personal keeps all **20** (18 memory,
+2 profile); all 20 entries queued into work's queue and every one parses through
+`proposal_kinds.BULLET_RE`; the install root has no guide left; both roots have `AGENTS.md` as a
+symlink and a populated `.claude/skills` (48 for personal, 29 for work); `--repair` immediately
+after came back **clean with nothing reported**; undo reversed 9 moves, restored 5 stashed files,
+removed 6 created ones, put the 27377-byte guide and its symlink back, removed both roots and
+`skills-src/`, and left `git status` **completely clean**. The live install was byte-identical
+throughout.
+
+Seven mutations of the wiring each fail the test written for it. One survived and was investigated
+rather than papered over: dropping the `if not guide.exists()` guard on the primary's guide writes
+byte-identical content, so it is behaviourally equivalent, not an uncovered defect.
+
 ### Remaining
-1. **Wire P10.4's `split_guide` and a root bootstrap into `apply()`** — blocking, see above.
-2. Operator decision: run `ciao workspace-reroot --apply` on the live install (vault now committed).
-3. P10.9 the eight deletions and P10.10 `_bootstrap_workspace` — still gated on (2).
-4. §11.2's five `operator_actions` detectors (`workspace-unmigrated`, `workspace-root-missing`,
+1. Operator decision: run `ciao workspace-reroot --apply` on the live install. The vault is
+   committed and the migration is now complete, so this is the next step and it is theirs to take.
+2. P10.9 the eight deletions and P10.10 `_bootstrap_workspace` — still gated on (1). Note
+   `bootstrap_root` is NOT P10.10: that step is about `_legacy_workspaces()` manufacturing two
+   phantom workspaces for an install that skipped setup, which is untouched.
+3. §11.2's five `operator_actions` detectors (`workspace-unmigrated`, `workspace-root-missing`,
    `workspace-assets-stale`, `skill-triage-pending`, `legacy-env-ignored`), which give `--repair` a
    run button. Deliberately after the repair rather than before it.
-5. V5 end-to-end drain — needs the migration to have run.
+4. V5 end-to-end drain — needs the migration to have run.
 
 ### Follow-ups filed this session, none blocking
 1. `rebuild_indexes` and `rebuild_search_index` hardcode `"memory-vault"` rather than taking the
