@@ -1402,7 +1402,7 @@ if (typeof window !== 'undefined') {
   color: var(--bg);
 }
 .fv-actions .btn-icon.ok {
-  color: var(--ok, #4ade80);
+  color: var(--success);
 }
 .fv-actions .btn-icon:disabled {
   opacity: 0.45;
@@ -1646,7 +1646,7 @@ if (typeof window !== 'undefined') {
   color: var(--accent-strong);
 }
 .fv-md :deep(.vault-link-unresolved) {
-  color: var(--fg-muted, #888);
+  color: var(--fg2);
   text-decoration: underline dotted;
   cursor: help;
 }
@@ -1718,7 +1718,7 @@ if (typeof window !== 'undefined') {
   font-size: var(--text-sm);
   font-weight: 600;
   color: white;
-  background: var(--danger, #e06c75);
+  background: var(--error);
   border: none;
   border-radius: 999px;
   cursor: pointer;

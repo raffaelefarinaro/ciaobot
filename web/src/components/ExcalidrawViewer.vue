@@ -271,7 +271,7 @@ onBeforeUnmount(() => {
 }
 
 .save-status.saving .status-dot {
-  background: var(--primary, #3b82f6);
+  background: var(--accent);
   animation: pulse 1.2s infinite;
 }
 

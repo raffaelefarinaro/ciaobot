@@ -39,15 +39,12 @@ function runtimeSources(): string[] {
 }
 
 const KNOWN_GAPS: Record<string, string[]> = {
-  'ChatPanel.vue': ['--danger', '--fg-muted', '--hover', '--muted'],
-  'CsvViewer.vue': ['--text-muted'],
-  'ExcalidrawViewer.vue': ['--primary'],
-  'FileViewerModal.vue': ['--danger', '--fg-muted', '--ok'],
-  'HtmlArtifactViewer.vue': ['--text-muted'],
-  'NotificationBell.vue': ['--danger'],
-  'PinnedFilePanel.vue': ['--danger', '--fg-muted', '--ok'],
-  'ProjectView.vue': ['--fg1'],
-  'SettingsView.vue': ['--fg-muted', '--radius-md'],
+  // Empty, and meant to stay that way. Ten components were listed here when this
+  // guard went in; each was mapped onto the real palette (--error, --success,
+  // --accent, --fg2, --fg3, --bg3, --fg, --radius) using the literal fallback its
+  // author had written as the guide. Four of them named a token with NO fallback,
+  // which makes the declaration invalid and dropped outright — Settings cards had
+  // square corners and two colours silently inherited.
 }
 
 /** Comments describe bugs like this one, so they must not be scanned for them. */

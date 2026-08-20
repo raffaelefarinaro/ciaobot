@@ -1095,7 +1095,7 @@ watch(() => props.projectId, async () => {
 }
 
 .context-hint .link-btn:hover {
-  color: var(--fg1);
+  color: var(--fg);
 }
 
 .chat-list { display: flex; flex-direction: column; }

@@ -6150,7 +6150,7 @@ details[open] > .activity-summary::before {
   font-weight: 500;
 }
 .tokens-group :deep(.context-pct) {
-  color: var(--fg-muted);
+  color: var(--fg2);
   font-weight: 500;
 }
 
@@ -6429,7 +6429,7 @@ details[open] > .activity-summary::before {
   cursor: pointer;
 }
 .commands-picker-row.active {
-  background: var(--hover, rgba(128, 128, 128, 0.12));
+  background: var(--bg3);
 }
 .commands-picker-head {
   display: flex;
@@ -6452,7 +6452,7 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
 }
 .commands-picker-hint {
-  color: var(--muted, #888);
+  color: var(--fg3);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85em;
   min-width: 0;
@@ -6460,7 +6460,7 @@ details[open] > .activity-summary::before {
   text-overflow: ellipsis;
 }
 .commands-picker-desc {
-  color: var(--muted, #888);
+  color: var(--fg3);
   font-size: 0.85em;
   line-height: 1.35;
   display: -webkit-box;
@@ -7254,7 +7254,7 @@ details[open] > .activity-summary::before {
 .picker-hint {
   margin: 6px 0 0;
   font-size: 11px;
-  color: var(--fg-muted, var(--fg));
+  color: var(--fg2);
   opacity: 0.7;
 }
 
@@ -7368,7 +7368,7 @@ details[open] > .activity-summary::before {
   font-size: var(--text-sm);
   font-weight: 600;
   color: white;
-  background: var(--danger, #e06c75);
+  background: var(--error);
   border: none;
   border-radius: 999px;
   cursor: pointer;

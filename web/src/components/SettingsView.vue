@@ -5354,7 +5354,7 @@ a.btn-secondary {
 }
 .routine-voice-icon {
   flex: none;
-  color: var(--fg-muted);
+  color: var(--fg2);
 }
 .routine-detail {
   font-size: var(--text-xs);
@@ -6706,14 +6706,14 @@ a.btn-secondary {
   padding: var(--space-3);
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius);
 }
 
 .workspace-connectors-preview {
   grid-column: 1 / -1;
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius);
   padding: var(--space-3);
   margin-top: var(--space-2);
 }
@@ -6800,7 +6800,7 @@ a.btn-secondary {
 .mcp-inspector-panel {
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius);
   padding: var(--space-3);
 }
 
@@ -6890,7 +6890,7 @@ a.btn-secondary {
 .mcp-server-card {
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius);
   padding: var(--space-3);
 }
 

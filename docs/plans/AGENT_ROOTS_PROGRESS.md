@@ -1542,7 +1542,7 @@ workspace, and ignoring the stem on the way back each fail their own test. The t
 mutations survived the first round and are the reason the "links to someone else over there" and
 "links back to a different person" cases exist.
 
-### Filed, not fixed: the per-root scan drops cross-workspace links
+### Fixed: the per-root scan no longer drops what it cannot resolve
 `Entry.related` holds *resolved* paths, and the per-root scan resolves each root's refs against that
 root's own filename index. Any ref naming another workspace resolves to nothing and is dropped
 silently — including `personal/People/Oliver.md` → `work/People/Oliver-Akermann`, which is why this
@@ -1550,6 +1550,43 @@ rule reads the note's raw frontmatter instead of the scanned entry. Measured on 
 of 293 `related` refs name another workspace and vanish from the index.** The legacy unprefixed form
 (`People/Oliver` inside the work root) is dropped the same way.
 
-Consumers today are workspace-scoped, so no rendered graph is missing an edge it would have drawn,
-which is why this is filed rather than fixed. It should not stay filed: the index quietly disagrees
-with the notes, and the next thing to read `related` across roots will inherit the gap.
+Per-root scanning is deliberate — `scan_targets` documents it as how the graph avoids cross-workspace
+edges it could not draw anyway, since the graph is rendered per workspace. So the fix keeps `related`
+scoped exactly as it was and stops the *loss* instead. `Entry` gained two named homes for what the
+resolution loop used to discard:
+
+- `related_external` — refs that resolve in another root. Real links, deliberately not graph edges.
+- `related_unresolved` — refs that resolve nowhere. Genuinely broken, and now inspectable; **44 exist
+  on the live vault**, previously indistinguishable from having no links at all.
+
+`scan_targets` sorts the two apart after every root is scanned, which is the earliest point they are
+distinguishable: inside one root's scan, "names another workspace" and "names nothing" look identical.
+Resolution is keyed `<workspace>/<vault-relative>`, the shape a cross ref actually uses, and the
+legacy unprefixed form (`People/Oliver` inside the work root) is tried against each other root and
+accepted only on exactly one hit — guessing between two same-named notes is how a link lands on the
+wrong person.
+
+**It also found edges that were being lost inside a single root.** A ref naming its own workspace
+(`work/projects/rossmann/README` written inside `work`) does not resolve in-root either, because the
+in-root index keys paths without the workspace segment. With one `README` in the root the bare-stem
+fallback still caught it, which is why this went unnoticed; on a real vault names repeat. Those
+resolve to the same workspace and now go into `related`, where the graph draws them: **7 recovered
+edges on the live vault** (957 → 964), against 17 genuinely crossing and 44 dangling.
+
+Mutation-tested. Two mutations survived the first round: classifying same-root refs as external
+(because the test's bare stem was unique, so the in-root fallback resolved it and the new code never
+ran — the test now has a second `README`, as the real vault does), and guessing on an ambiguous
+unprefixed ref.
+
+### Fixed: ten components were styled with tokens that do not exist
+`web/src/components/__tests__/cssTokens.test.ts` fails any component naming a `var(--token)` this app
+does not define, and its `KNOWN_GAPS` list is now empty. All ten offenders were mapped onto the real
+palette using the literal fallback each author had written as the guide: `--danger` → `--error`,
+`--ok` → `--success`, `--primary` → `--accent`, `--fg-muted` → `--fg2`, `--muted` → `--fg3`,
+`--hover` → `--bg3`, `--fg1` → `--fg`, `--radius-md` → `--radius`, plus dead inner fallbacks like
+`var(--fg2, var(--text-muted, …))` collapsed to `var(--fg2)`.
+
+Four of those named a token with **no fallback at all**, which makes the declaration invalid and
+dropped outright rather than merely wrong: Settings cards had square corners and two colours silently
+inherited. This is the same class of defect as the review panel's translucent batch bar, and the
+reason the guard exists is that nothing about it ever failed — it only looked wrong.

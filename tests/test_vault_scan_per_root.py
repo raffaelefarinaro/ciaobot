@@ -365,3 +365,160 @@ def test_a_note_outside_a_people_directory_is_not_a_candidate(tmp_path: Path) ->
     )
 
     assert not any("Ideas" in c.path for c in candidates), [c.path for c in candidates]
+
+
+# -- cross-workspace refs are sorted, not dropped -----------------------------
+#
+# `related` stays scoped to one root, because the graph is rendered per workspace
+# and an edge to a node outside it draws nothing. What changed is that the refs
+# which do not resolve in a root are no longer discarded without a trace: a
+# deliberate cross-workspace link, a same-root link written in the prefixed
+# dialect, and a genuinely broken link were all indistinguishable from a note
+# with no links at all.
+
+
+def _linked(path: Path, title: str, related: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "".join(f'  - "{ref}"\n' for ref in related)
+    path.write_text(
+        f"---\ntype: note\ntitle: {title}\nrelated:\n{body}---\n# {title}\n",
+        encoding="utf-8",
+    )
+
+
+def _two_roots(tmp_path: Path) -> CiaoConfig:
+    root = tmp_path
+    (root / ".runtime" / "migration").mkdir(parents=True, exist_ok=True)
+    (root / ".runtime" / "migration" / "workspace-rooting.json").write_text(
+        json.dumps({"status": "migrated"}), encoding="utf-8"
+    )
+    reset_reroot_cache()
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=root,
+        vault_root=root / "memory-vault",
+        state_path=root / ".runtime" / "state.json",
+        media_root=root / ".runtime" / "media",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="personal/memory-vault"),
+            "work": WorkspaceConfig(name="work", vault_root="work/memory-vault"),
+        },
+    )
+
+
+def _by_path(entries: list) -> dict[str, object]:
+    return {str(e.path): e for e in entries}
+
+
+def test_a_ref_naming_another_workspace_is_kept_out_of_the_graph_but_recorded(
+    tmp_path: Path,
+) -> None:
+    config = _two_roots(tmp_path)
+    _linked(
+        tmp_path / "personal" / "memory-vault" / "People" / "Oliver.md",
+        "Oliver",
+        ["work/People/Oliver-Akermann"],
+    )
+    _note(tmp_path / "work" / "memory-vault" / "People" / "Oliver-Akermann.md", "Oliver Akermann")
+
+    entries, _ = scan_targets(config.vault_scan_targets())
+    oliver = _by_path(entries)["personal/memory-vault/People/Oliver.md"]
+
+    assert oliver.related == []          # the graph is per workspace
+    assert oliver.related_external == ["work/memory-vault/People/Oliver-Akermann.md"]
+    assert oliver.related_unresolved == []
+
+
+def test_a_same_root_ref_written_with_its_workspace_prefix_becomes_a_real_edge(
+    tmp_path: Path,
+) -> None:
+    """The in-root pass keys paths without the workspace segment, so a note in
+    `work` linking to `work/projects/x` resolved to nothing and lost the edge.
+
+    A SECOND README is what makes this bite, and why it went unnoticed: with one
+    README in the root the in-root pass still resolves the ref by bare stem, so
+    the prefixed dialect only fails once a name repeats — which on a real vault
+    it always does.
+    """
+    config = _two_roots(tmp_path)
+    _linked(
+        tmp_path / "work" / "memory-vault" / "People" / "Mateusz.md",
+        "Mateusz",
+        ["work/projects/rossmann/README"],
+    )
+    _note(tmp_path / "work" / "memory-vault" / "projects" / "rossmann" / "README.md", "Rossmann")
+    _note(tmp_path / "work" / "memory-vault" / "projects" / "samsung" / "README.md", "Samsung")
+    _note(tmp_path / "personal" / "memory-vault" / "People" / "Sara.md", "Sara")
+
+    entries, _ = scan_targets(config.vault_scan_targets())
+    mateusz = _by_path(entries)["work/memory-vault/People/Mateusz.md"]
+
+    assert mateusz.related == ["work/memory-vault/projects/rossmann/README.md"]
+    assert mateusz.related_external == []
+
+
+def test_a_legacy_unprefixed_ref_resolves_into_the_other_root(tmp_path: Path) -> None:
+    """Pre-migration notes name the other half unprefixed; after the split that
+    can only mean another root."""
+    config = _two_roots(tmp_path)
+    _linked(
+        tmp_path / "work" / "memory-vault" / "People" / "Oliver-Akermann.md",
+        "Oliver Akermann",
+        ["People/Oliver"],
+    )
+    _note(tmp_path / "personal" / "memory-vault" / "People" / "Oliver.md", "Oliver")
+
+    entries, _ = scan_targets(config.vault_scan_targets())
+    work_note = _by_path(entries)["work/memory-vault/People/Oliver-Akermann.md"]
+
+    assert work_note.related_external == ["personal/memory-vault/People/Oliver.md"]
+
+
+def test_an_ambiguous_unprefixed_ref_is_left_unresolved(tmp_path: Path) -> None:
+    """Two notes over there share the stem. Guessing is how a link lands on the
+    wrong person, so it stays reported as unresolved instead."""
+    config = _two_roots(tmp_path)
+    _linked(tmp_path / "personal" / "memory-vault" / "Ideas" / "Plan.md", "Plan", ["README"])
+    _note(tmp_path / "work" / "memory-vault" / "projects" / "a" / "README.md", "A")
+    _note(tmp_path / "work" / "memory-vault" / "projects" / "b" / "README.md", "B")
+
+    entries, _ = scan_targets(config.vault_scan_targets())
+    plan = _by_path(entries)["personal/memory-vault/Ideas/Plan.md"]
+
+    assert plan.related_external == []
+    assert plan.related_unresolved == ["README"]
+
+
+def test_a_broken_ref_is_reported_rather_than_forgotten(tmp_path: Path) -> None:
+    config = _two_roots(tmp_path)
+    _linked(
+        tmp_path / "personal" / "memory-vault" / "People" / "Ida.md",
+        "Ida",
+        ["work/People/Nobody"],
+    )
+    _note(tmp_path / "work" / "memory-vault" / "People" / "Someone.md", "Someone")
+
+    entries, _ = scan_targets(config.vault_scan_targets())
+    ida = _by_path(entries)["personal/memory-vault/People/Ida.md"]
+
+    assert ida.related == []
+    assert ida.related_external == []
+    assert ida.related_unresolved == ["work/People/Nobody"]
+
+
+def test_one_shared_vault_resolves_across_workspaces_as_it_always_did(tmp_path: Path) -> None:
+    """Before the re-rooting every workspace is in one index, so a
+    `work/People/X` ref is an ordinary in-scan hit and nothing crosses."""
+    config = _install(tmp_path, migrated=False)
+    _linked(
+        tmp_path / "memory-vault" / "personal" / "People" / "Oliver.md",
+        "Oliver",
+        ["work/People/Oliver-Akermann"],
+    )
+    _note(tmp_path / "memory-vault" / "work" / "People" / "Oliver-Akermann.md", "Oliver Akermann")
+
+    entries, _ = scan_targets(config.vault_scan_targets())
+    oliver = _by_path(entries)["memory-vault/personal/People/Oliver.md"]
+
+    assert oliver.related == ["memory-vault/work/People/Oliver-Akermann.md"]
+    assert oliver.related_external == []

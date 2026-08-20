@@ -1158,7 +1158,7 @@ watch(() => props.filePath, () => {
 @media (max-width: 768px) { .desktop-only { display: none; } }
 
 .btn-icon.ok {
-  color: var(--ok, #4ade80);
+  color: var(--success);
 }
 
 /* ── Body + sidebar split ──────────────────────────────────────────── */
@@ -1411,7 +1411,7 @@ watch(() => props.filePath, () => {
 /* A vault link whose target does not exist: readable, but not styled or
    shaped like something you can tap. Mirrors the file viewer modal. */
 .pfp-md :deep(.vault-link-unresolved) {
-  color: var(--fg-muted, #888);
+  color: var(--fg2);
   text-decoration: underline dotted;
   cursor: help;
 }
@@ -1704,7 +1704,7 @@ watch(() => props.filePath, () => {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  background: var(--danger, #e06c75);
+  background: var(--error);
   color: white;
   border: none;
   border-radius: 999px;

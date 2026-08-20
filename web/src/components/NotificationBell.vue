@@ -202,7 +202,7 @@ function formatTime(iso: string | undefined): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--danger, #e06c75);
+  background: var(--error);
   color: white;
   border-radius: 999px;
   font-size: 10px;

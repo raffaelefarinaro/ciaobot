@@ -168,6 +168,18 @@ class Entry:
     tags: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
     related: list[str] = field(default_factory=list)  # normalized repo-relative paths
+    # Refs that resolved in ANOTHER root, and refs that resolved nowhere. Both
+    # used to be discarded by the resolution loop without a trace, which made a
+    # dangling link and a deliberate cross-workspace link indistinguishable —
+    # from each other and from a note with no links at all. Measured on a real
+    # two-root vault: 14 of 293 `related` refs named another workspace and
+    # vanished, including a person's own other half.
+    #
+    # `related` itself stays scoped to one root on purpose: the graph is rendered
+    # per workspace, so an edge to a node that is not in the graph draws nothing.
+    # Keeping these separate preserves that while making the loss inspectable.
+    related_external: list[str] = field(default_factory=list)
+    related_unresolved: list[str] = field(default_factory=list)
     workspace: str = "personal"
     description: str = ""
 
@@ -502,10 +514,17 @@ def scan_vault(
     filename_idx = _build_filename_index(entries, prefix)
     for e in entries:
         resolved: list[str] = []
+        unresolved: list[str] = []
         seen: set[str] = set()
         for ref in e.related:
             target = _resolve_related(ref, filename_idx)
             if target is None:
+                # Not necessarily broken: in a per-root scan this is every ref
+                # naming another workspace. `scan_targets` sorts the two apart
+                # once it has seen all the roots; a single-vault scan cannot
+                # tell, and says so by leaving it here.
+                if ref not in unresolved:
+                    unresolved.append(ref)
                 continue
             key = str(target)
             if key in seen or target == e.path:
@@ -513,6 +532,7 @@ def scan_vault(
             seen.add(key)
             resolved.append(key)
         e.related = resolved
+        e.related_unresolved = unresolved
 
     return entries
 
@@ -929,11 +949,13 @@ def scan_targets(
     """
     merged: list[Entry] = []
     absolute: dict[str, Path] = {}
+    prefixes: dict[str, Path] = {}
     for vault_root, workspace, prefix in targets:
         root = Path(vault_root)
         if not root.is_dir():
             continue
         scanned = scan_vault(root, workspace=workspace, path_prefix=prefix)
+        prefixes[workspace] = Path(prefix)
         for entry in scanned:
             rendered = str(entry.path)
             try:
@@ -942,7 +964,101 @@ def scan_targets(
                 tail = entry.path
             absolute[rendered] = root / tail
         merged.extend(scanned)
+    _resolve_cross_workspace(merged, prefixes)
     return merged, absolute
+
+
+def _build_workspace_index(
+    entries: list[Entry], prefixes: dict[str, Path]
+) -> dict[str, list[Path]]:
+    """Entries keyed the way a cross-workspace ref spells them.
+
+    A ref names the other half as ``work/People/Ipek-Kahraman-Scandit`` — the
+    workspace, then the path inside that workspace's vault. Neither of
+    ``_build_filename_index``'s keys is that shape: it strips the whole prefix,
+    workspace segment included, because within one root the segment is not part
+    of any ref. So this keys by ``<workspace>/<vault-relative>`` and by
+    ``<workspace>/<stem>``.
+    """
+    idx: dict[str, list[Path]] = defaultdict(list)
+    for e in entries:
+        if not e.workspace:
+            continue
+        inside = _strip_prefix(e.path, prefixes.get(e.workspace, Path("memory-vault")))
+        idx[f"{e.workspace}/{inside.with_suffix('')}"].append(e.path)
+        idx[f"{e.workspace}/{e.path.stem}"].append(e.path)
+    return idx
+
+
+def _resolve_cross_workspace(entries: list[Entry], prefixes: dict[str, Path]) -> None:
+    """Sort each entry's unresolved refs into cross-workspace hits and misses.
+
+    Runs after every root is scanned, which is the earliest point at which the
+    two are distinguishable: inside one root's scan, "names another workspace"
+    and "names nothing" look identical.
+    """
+    if len(prefixes) < 2:
+        return
+    idx = _build_workspace_index(entries, prefixes)
+    workspaces = set(prefixes)
+    owner = {str(e.path): e.workspace for e in entries}
+    for e in entries:
+        if not e.related_unresolved:
+            continue
+        external: list[str] = []
+        still_missing: list[str] = []
+        seen = {*e.related}
+        for ref in e.related_unresolved:
+            target = _resolve_workspace_ref(ref, e.workspace, idx, workspaces)
+            if target is None or str(target) == str(e.path):
+                still_missing.append(ref)
+                continue
+            key = str(target)
+            if key in seen:
+                continue
+            seen.add(key)
+            # A ref can name this root explicitly (`work/projects/x` written
+            # inside work), which the in-root pass also fails to resolve because
+            # its keys omit the workspace segment. That is an ordinary edge that
+            # was being dropped, not a cross-workspace one — it belongs in
+            # `related` so the graph draws it. Seven such refs exist on the live
+            # vault, against seventeen genuinely crossing ones.
+            if owner.get(key, "") == e.workspace:
+                e.related.append(key)
+            else:
+                external.append(key)
+        e.related_external = external
+        e.related_unresolved = still_missing
+
+
+def _resolve_workspace_ref(
+    ref: str,
+    workspace: str,
+    idx: dict[str, list[Path]],
+    workspaces: set[str],
+) -> Path | None:
+    """One ref, resolved against another workspace's notes.
+
+    Two spellings occur. A prefixed ref (``work/People/X``) names its workspace
+    outright. A pre-migration ref is unprefixed (``People/Oliver`` inside the
+    work root), and after the split that can only mean another root — tried
+    against each, and accepted only when exactly one has it, because guessing
+    between two same-named notes is how a link lands on the wrong person.
+    """
+    value = ref.strip()
+    if value.startswith("memory-vault/"):
+        value = value[len("memory-vault/"):]
+    if value.endswith(".md"):
+        value = value[:-3]
+    if not value:
+        return None
+    head = value.split("/", 1)[0]
+    if head in workspaces:
+        hits = idx.get(value)
+        return hits[0] if hits else None
+    others = sorted(name for name in workspaces if name and name != workspace)
+    found = [hit for name in others for hit in idx.get(f"{name}/{value}", [])]
+    return found[0] if len(found) == 1 else None
 
 
 def vocabulary_report(entries: list[Entry]) -> dict[str, Any]:
