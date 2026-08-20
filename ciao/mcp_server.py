@@ -1302,6 +1302,13 @@ class CiaoMcpService:
                     tier alias). Unknown ids are rejected with `invalid_model`
                     and a list of valid alternatives. Omit to inherit the
                     workspace default.
+                mode: Permission mode for the delegate. A mode weaker than
+                    this chat's is always honoured (spawn a `plan` delegate to
+                    read and report without writing). A stronger one is capped
+                    at this chat's own mode, unless the operator has raised the
+                    workspace's delegate ceiling; when that happens the reply
+                    carries `mode_clamped` and `requested_mode` rather than
+                    failing. Omit to inherit this chat's mode.
                 delegation_id: Shared tag for delegates dispatched as one
                     batch, so their completion reports group together.
             """

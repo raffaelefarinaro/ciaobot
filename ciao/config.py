@@ -175,6 +175,17 @@ class WorkspaceConfig:
     # request time; this field is the source, not the deny list.
     allowed_mcp_servers: list[str] | None = None
     gws_profile: str = ""
+    # Highest permission mode a chat created *by an agent* in this workspace may
+    # run in — the operator's lever for letting a delegate run stronger than the
+    # chat that dispatched it (an auto supervisor spawning a bypass delegate).
+    # One of the BridgeMode values; "" means no override, so a child is capped at
+    # its parent's own mode.
+    #
+    # Deliberately NOT exposed through ``workspace_update``: that tool is on
+    # AUTO_APPROVED_MCP_TOOLS and bypasses the PermissionGate, so a
+    # model-settable ceiling could raise itself and would guard nothing. Edited
+    # in ``.runtime/workspaces.json``, like ``allowed_mcp_servers``.
+    delegate_max_mode: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
 
@@ -201,6 +212,17 @@ def _coerce_allowed_mcp_servers(raw: object) -> list[str] | None:
     return None
 
 
+def _coerce_delegate_max_mode(raw: object) -> str:
+    """Normalize a stored delegate ceiling, dropping anything unrecognized.
+
+    An unknown value falls back to "" (no override) rather than raising: a typo
+    in the registry must not stop the app from loading, and "" is the
+    conservative reading — cap children at the parent's mode.
+    """
+    value = str(raw or "").strip().casefold()
+    return value if value in {"plan", "normal", "auto", "bypass"} else ""
+
+
 def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     name = str(data.get("name", "")).strip()
     if not name:
@@ -220,6 +242,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
             data.get("allowed_mcp_servers")
         ),
         gws_profile=str(data.get("gws_profile", "")).strip(),
+        delegate_max_mode=_coerce_delegate_max_mode(data.get("delegate_max_mode")),
         color=color,
     )
 
@@ -830,6 +853,9 @@ class CiaoConfig:
                 "disallowed_tools": workspace.disallowed_tools,
                 "allowed_mcp_servers": workspace.allowed_mcp_servers,
                 "gws_profile": workspace.gws_profile,
+                # Must be written back, or an operator-set ceiling is silently
+                # dropped the next time anything saves the registry.
+                "delegate_max_mode": workspace.delegate_max_mode,
                 "color": workspace.color,
             }
             for workspace in self.workspaces.values()

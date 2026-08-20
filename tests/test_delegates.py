@@ -592,6 +592,152 @@ def test_chat_update_cannot_upgrade_mode_through_mcp(tmp_path: Path) -> None:
     assert result["data"]["requested_mode"] == "bypass"
 
 
+def _control_plane_with_ceiling(
+    manager: ProjectChatManager, delegate_max_mode: str
+) -> CiaoControlPlane:
+    """A control plane whose "work" workspace carries an operator-set ceiling."""
+    workspace = SimpleNamespace(delegate_max_mode=delegate_max_mode)
+    return CiaoControlPlane(
+        SimpleNamespace(
+            workspace=lambda name: workspace if name == "work" else None
+        ),
+        project_chat_manager=manager,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+
+
+def test_delegate_spawn_honours_a_weaker_requested_mode(tmp_path: Path) -> None:
+    """A ceiling caps escalation; it must not block de-escalation.
+
+    _child_mode used to return the parent's mode outright, so a bypass chat
+    could not dispatch a read-only delegate — the request was overridden
+    *upward* into bypass, the opposite of safe.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(
+        project.project_id, title="Supervisor", mode="bypass"
+    )
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    manager.queue_message = lambda _chat_id, _text: True  # type: ignore[method-assign]
+    plane = _control_plane(manager)
+
+    result = plane.delegate_spawn(
+        _principal(parent.chat_id, project.project_id),
+        prompt="read the code and report",
+        mode="plan",
+    )
+
+    child = manager.get_chat(result["data"]["chat_id"])
+    assert child is not None
+    assert child.mode == "plan"
+    # A downgrade is not a clamp and must not be reported as one.
+    assert "mode_clamped" not in result["data"]
+
+
+def test_chat_update_can_lower_a_running_chats_mode(tmp_path: Path) -> None:
+    """Dropping a delegate to plan mid-flight was silently reverted."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(
+        project.project_id, title="Supervisor", mode="bypass"
+    )
+    plane = _control_plane(manager)
+
+    result = plane.chat_update(
+        _principal(parent.chat_id, project.project_id),
+        "",
+        mode="normal",
+    )
+
+    assert manager.get_chat(parent.chat_id).mode == "normal"
+    assert "mode_clamped" not in result["data"]
+
+
+def test_workspace_ceiling_lets_a_delegate_outrank_its_supervisor(
+    tmp_path: Path,
+) -> None:
+    """The operator's lever: an auto supervisor dispatching a bypass delegate.
+
+    This is the case the pin made impossible. The ceiling is set in the
+    workspace registry, not by the model.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor", mode="auto")
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    manager.queue_message = lambda _chat_id, _text: True  # type: ignore[method-assign]
+    plane = _control_plane_with_ceiling(manager, "bypass")
+
+    result = plane.delegate_spawn(
+        _principal(parent.chat_id, project.project_id),
+        prompt="do the migration",
+        mode="bypass",
+    )
+
+    child = manager.get_chat(result["data"]["chat_id"])
+    assert child is not None
+    assert child.mode == "bypass"
+    assert "mode_clamped" not in result["data"]
+
+
+def test_workspace_ceiling_still_caps_a_stronger_request(tmp_path: Path) -> None:
+    """A ceiling of auto does not license bypass."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(
+        project.project_id, title="Supervisor", mode="normal"
+    )
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    manager.queue_message = lambda _chat_id, _text: True  # type: ignore[method-assign]
+    plane = _control_plane_with_ceiling(manager, "auto")
+
+    result = plane.delegate_spawn(
+        _principal(parent.chat_id, project.project_id),
+        prompt="do the migration",
+        mode="bypass",
+    )
+
+    child = manager.get_chat(result["data"]["chat_id"])
+    assert child is not None
+    assert child.mode == "auto"
+    assert result["data"]["mode_clamped"] is True
+    assert result["data"]["requested_mode"] == "bypass"
+
+
+def test_delegate_ceiling_is_not_settable_through_the_mcp_surface() -> None:
+    """The ceiling must not be reachable from a model-authored tool call.
+
+    workspace_update is on AUTO_APPROVED_MCP_TOOLS and bypasses the
+    PermissionGate, so accepting delegate_max_mode there would let a model raise
+    its own ceiling and the guard would protect nothing. Asserted on the
+    signature so a future edit has to come here and read this.
+    """
+    import inspect
+
+    from ciao import workspaces
+    from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS
+
+    assert "workspace_update" in AUTO_APPROVED_MCP_TOOLS
+    params = inspect.signature(CiaoControlPlane.workspace_update).parameters
+    assert "delegate_max_mode" not in params
+
+    # Same for the shared request parser both surfaces feed.
+    built = workspaces.workspace_from_request(
+        {"name": "work", "delegate_max_mode": "bypass"},
+        config=SimpleNamespace(
+            workspace_names=lambda: ["work"],
+            default_provider_for_workspace=lambda _name: "claude",
+            stored_workspace_vault_root=lambda _name: "memory-vault/work",
+        ),
+        existing=WorkspaceConfig(
+            name="work", vault_root="memory-vault/work", delegate_max_mode=""
+        ),
+    )
+    assert built.delegate_max_mode == ""
+
+
 def test_finished_delegates_free_their_slot(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Delegates", workspace="work")

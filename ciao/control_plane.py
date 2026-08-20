@@ -103,6 +103,13 @@ class McpPrincipal:
         )
 
 
+# Permission modes ordered weakest to strongest, so a child chat's requested
+# mode can be compared against its ceiling. ``plan`` is read-only, ``normal``
+# asks before acting, ``auto`` acts with safer defaults, ``bypass`` skips
+# approvals. Mirrors ``BridgeMode`` in ciao.models.
+_MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
+
+
 class ControlPlaneError(ValueError):
     """Stable application error returned by MCP adapters."""
 
@@ -308,25 +315,59 @@ class CiaoControlPlane:
         return str(getattr(chat, "mode", "auto") or "auto")
 
     def _child_mode(self, principal: McpPrincipal, requested: str | None) -> str:
-        """Keep an MCP-created child at its caller's permission ceiling.
+        """Hold an MCP-created child at or below its permission ceiling.
 
-        The child starts its first turn immediately, so accepting a stronger
+        The child starts its first turn immediately, so accepting a *stronger*
         mode from model-authored tool arguments would let a normal/auto chat
-        manufacture a bypass session without an operator approval. The
-        provider enforces the returned mode as its session permission rules;
-        keeping the clamp here also covers Codex and Claude child chats.
+        manufacture a bypass session without an operator approval. The provider
+        enforces the returned mode as its session permission rules; keeping the
+        clamp here also covers Codex and Claude child chats.
+
+        A ceiling, not a pin. This used to return the parent's mode outright and
+        ignore ``requested``, which blocked *de-escalation* too: a bypass chat
+        could not spawn a read-only ``plan`` delegate, and a ``chat_update``
+        lowering a running delegate's mode was silently reverted (and, once
+        clamp reporting landed, announced as a clamp on a downgrade). A weaker
+        request is always honoured; only an upward one is clamped.
+
+        The ceiling is the parent's own mode, or the workspace's
+        ``delegate_max_mode`` when that is set and higher — the operator-only
+        lever that lets a delegate run stronger than the chat that dispatched
+        it. It is deliberately absent from ``workspace_update``: that tool is
+        auto-approved, so a model-settable ceiling would raise itself.
         """
         parent_mode = self.chat_mode(principal)
-        if parent_mode not in {"normal", "plan", "auto", "bypass"}:
+        if parent_mode not in _MODE_RANK:
             parent_mode = "normal"
-        if requested and requested != parent_mode:
-            logger.warning(
-                "Clamping child chat mode %r to parent %r for %s",
-                requested,
-                parent_mode,
-                principal.chat_id or "unscoped MCP session",
-            )
-        return parent_mode
+        ceiling = parent_mode
+        allowed_max = self._delegate_max_mode(principal)
+        if allowed_max and _MODE_RANK[allowed_max] > _MODE_RANK[ceiling]:
+            ceiling = allowed_max
+        if not requested or requested not in _MODE_RANK:
+            return ceiling
+        if _MODE_RANK[requested] <= _MODE_RANK[ceiling]:
+            return requested
+        logger.warning(
+            "Clamping child chat mode %r to ceiling %r for %s",
+            requested,
+            ceiling,
+            principal.chat_id or "unscoped MCP session",
+        )
+        return ceiling
+
+    def _delegate_max_mode(self, principal: McpPrincipal) -> str:
+        """The workspace's operator-set maximum mode for a child chat, if any.
+
+        Reads ``principal.workspace`` directly rather than going through
+        ``_workspace``: that helper raises for an unscoped MCP session, and an
+        unscoped caller should fall back to the parent-mode ceiling, not fail to
+        create a chat at all.
+        """
+        if not principal.workspace:
+            return ""
+        workspace = self.config.workspace(principal.workspace)
+        value = str(getattr(workspace, "delegate_max_mode", "") or "")
+        return value if value in _MODE_RANK else ""
 
     def _vault_root(self, principal: McpPrincipal) -> Path:
         workspace = self._workspace(principal)
