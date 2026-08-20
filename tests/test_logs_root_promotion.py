@@ -126,3 +126,32 @@ def test_no_reader_derives_the_archive_from_the_vault_root_any_more(tmp_path: Pa
             if 'vault_root / "Logs"' in line and not line.strip().startswith("#")
         ]
         assert offenders == [], f"{module.__name__}: {offenders}"
+
+
+def test_a_dry_run_backfill_log_line_cannot_raise(tmp_path: Path) -> None:
+    """It rendered the archive path relative to the VAULT root.
+
+    The re-rooting promotes Logs/ out of the vault, so `relative_to(vault_root)`
+    raises ValueError — from inside a `logger.info` call, taking down the dry run
+    with it. A log line must never be the thing that fails.
+    """
+    import inspect
+
+    from ciao import insights
+
+    source = inspect.getsource(insights)
+    assert "md.relative_to(vault_root)" not in source
+    # And the replacement is total.
+    assert "shown = md" in source
+
+    install = tmp_path / "install"
+    archive = install / "Logs" / "Chats" / "chat-1" / "session.md"
+    archive.parent.mkdir(parents=True)
+    archive.write_text("# chat\n", encoding="utf-8")
+    # The shape that used to raise: the archive is not under the vault root.
+    try:
+        archive.relative_to(install / "memory-vault")
+    except ValueError:
+        pass
+    else:  # pragma: no cover - guards the premise of this test
+        raise AssertionError("expected the archive to sit outside the vault root")

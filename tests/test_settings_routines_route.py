@@ -62,6 +62,12 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert data["workspace_context"] == {
         "workspace_root": str(config.workspace_root),
         "vault_root": str(config.vault_root),
+        # After the re-rooting `vault_root` is the emptied shared path — true but
+        # useless alone — so the vaults that actually hold notes come with it.
+        # One entry, unnamed, before the migration.
+        "vault_roots": [
+            {"workspace": "", "path": str(config.vault_root)},
+        ],
     }
     # Voice is on-device only: availability and a reason, no engine to pick.
     assert data["transcription"]["locale"] == "en-US"

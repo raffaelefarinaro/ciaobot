@@ -5427,7 +5427,18 @@ def _routines_payload(config, app_settings) -> dict:
         },
         "workspace_context": {
             "workspace_root": str(config.workspace_root),
+            # `vault_root` is the configured path, which after the re-rooting is
+            # the emptied shared one — true but useless on its own, so the vaults
+            # that actually hold notes are reported beside it.
             "vault_root": str(config.vault_root),
+            "vault_roots": [
+                {"workspace": name, "path": str(root)}
+                for root, name, _prefix in (
+                    config.vault_scan_targets()
+                    if hasattr(config, "vault_scan_targets")
+                    else []
+                )
+            ],
         },
     }
 

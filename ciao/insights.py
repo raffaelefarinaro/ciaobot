@@ -1169,7 +1169,15 @@ async def backfill_insights_task(
     if dry_run:
         for md, _, hj in todo[:20]:
             m = "full" if hj else "text"
-            logger.info("  [%s] %s", m, md.relative_to(vault_root))
+            # Relative to the ARCHIVE root, not the vault: the re-rooting
+            # promotes Logs/ out of the vault, so `relative_to(vault_root)`
+            # raises ValueError and takes down the dry run from inside a log
+            # call. Total, because a log line must never be the thing that fails.
+            try:
+                shown: object = md.relative_to(base)
+            except ValueError:
+                shown = md
+            logger.info("  [%s] %s", m, shown)
         if len(todo) > 20:
             logger.info("  ... and %d more", len(todo) - 20)
         return stats
