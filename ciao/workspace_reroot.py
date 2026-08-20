@@ -765,6 +765,7 @@ def rebuild_search_index(
 
     from ciao.fts_search import get_db_path, index_vault, init_db
 
+    install_root = Path(install_root).resolve()
     db = Path(db_path) if db_path is not None else get_db_path()
     result: dict[str, Any] = {"database": str(db), "indexed": [], "errors": []}
     try:
@@ -782,9 +783,14 @@ def rebuild_search_index(
             if not vault.is_dir():
                 continue
             try:
-                indexed, skipped = index_vault(conn, vault)
+                # Keyed against the install root, so `personal/memory-vault/...`
+                # and `work/memory-vault/...` stay distinct. Keyed per root, both
+                # collapsed to `memory-vault/...`: the second pass overwrote the
+                # first root's rows and its prune deleted the rest, so a rebuild
+                # left only the LAST root searchable while reporting both.
+                indexed, removed = index_vault(conn, vault, path_base=install_root)
                 result["indexed"].append(
-                    {"workspace": name, "indexed": indexed, "skipped": skipped}
+                    {"workspace": name, "indexed": indexed, "removed": removed}
                 )
             except Exception as exc:  # noqa: BLE001
                 result["errors"].append({"workspace": name, "error": str(exc)})
