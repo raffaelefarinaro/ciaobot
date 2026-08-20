@@ -613,3 +613,79 @@ def read_region_text(text: str, region: str) -> tuple[list[str], list[Any]]:
     if match is None:
         return [], [f"missing markers for {canonical}"]
     return parse_entries(match.group(1)), []
+
+
+# -- P10.6: rebuild the derived artefacts per root ---------------------------
+
+
+def rebuild_indexes(install_root: Path, workspaces: list[str]) -> dict[str, Any]:
+    """Rebuild each root's INDEX.md and VOCABULARY.md, with no path prefix.
+
+    Every index written before the migration describes the old layout: entries
+    keyed under ``personal/...`` inside one shared vault. After the move each
+    root holds exactly one vault, so a prefix has nothing to disambiguate and its
+    presence would be a lie about where a note lives. A stale index is worse than
+    an absent one, because it reads as current, which is why the pre-migration
+    copies are stashed rather than left in place.
+
+    Reports per root rather than aggregating: a failure in one root's rebuild
+    must be attributable to that root, not hidden in a total.
+    """
+    from ciao.vault_index import format_vocabulary, scan_vault, write_index_file
+
+    out: dict[str, Any] = {"rebuilt": [], "errors": []}
+    for name in workspaces:
+        vault = Path(install_root) / name / "memory-vault"
+        if not vault.is_dir():
+            out["errors"].append({"workspace": name, "error": f"no vault at {vault}"})
+            continue
+        try:
+            entries = scan_vault(vault)
+            write_index_file(entries, vault / "INDEX.md")
+            (vault / "VOCABULARY.md").write_text(
+                format_vocabulary(entries), encoding="utf-8"
+            )
+        except Exception as exc:  # noqa: BLE001 — reported per root, never fatal
+            out["errors"].append({"workspace": name, "error": str(exc)})
+            continue
+        out["rebuilt"].append({"workspace": name, "entries": len(entries)})
+    return out
+
+
+def rebuild_search_index(install_root: Path, workspaces: list[str]) -> dict[str, Any]:
+    """Drop and rebuild the full-text index against the new paths.
+
+    Every row in the old database points at a path under the shared vault, so
+    incremental repair is not possible: the rows are not stale, they are wrong.
+    Dropping is the only honest option.
+    """
+    import sqlite3
+
+    from ciao.fts_search import get_db_path, index_vault, init_db
+
+    db = get_db_path()
+    result: dict[str, Any] = {"database": str(db), "indexed": [], "errors": []}
+    try:
+        if db.exists():
+            db.unlink()
+        db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db)
+    except OSError as exc:
+        result["errors"].append({"workspace": "", "error": f"could not reset {db}: {exc}"})
+        return result
+    try:
+        init_db(conn)
+        for name in workspaces:
+            vault = Path(install_root) / name / "memory-vault"
+            if not vault.is_dir():
+                continue
+            try:
+                indexed, skipped = index_vault(conn, vault)
+                result["indexed"].append(
+                    {"workspace": name, "indexed": indexed, "skipped": skipped}
+                )
+            except Exception as exc:  # noqa: BLE001
+                result["errors"].append({"workspace": name, "error": str(exc)})
+    finally:
+        conn.close()
+    return result

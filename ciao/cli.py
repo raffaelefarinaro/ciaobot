@@ -1752,6 +1752,51 @@ def _os_audit_command(args: argparse.Namespace) -> int:
     }.get(report["status"], 2)
 
 
+def _workspace_reroot_command(args: argparse.Namespace) -> int:
+    """Plan, rehearse, apply, or undo the per-workspace agent-root migration.
+
+    Planning and rehearsing are read only. Applying refuses outright rather than
+    stopping halfway, because a half-rooted install has no filter over a still
+    prefixed index and would make every entity visible in every session. --undo
+    stays CLI only: reverting the architecture is not a housekeeping button.
+    """
+    from ciao import workspace_reroot
+
+    workspace = Path(args.workspace or os.environ.get("CIAO_WORKSPACE") or ".").expanduser().resolve()
+    runtime = workspace / ".runtime"
+    vault = _resolve_vault_root(args.vault_root)
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({
+        **os.environ,
+        "CIAO_WORKSPACE": str(workspace),
+        "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "workspace-reroot",
+    })
+    names = sorted(config.workspace_names())
+
+    if args.undo:
+        result = workspace_reroot.undo(workspace, runtime)
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
+
+    if args.apply:
+        result = workspace_reroot.apply(workspace, vault, names, runtime)
+        if result["status"] == "migrated":
+            result["indexes"] = workspace_reroot.rebuild_indexes(workspace, names)
+            result["search"] = workspace_reroot.rebuild_search_index(workspace, names)
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] == "migrated" else 1
+
+    if args.rehearse:
+        print(json.dumps(workspace_reroot.rehearse(workspace, vault, names, runtime), indent=2))
+        return 0
+
+    result = workspace_reroot.plan(workspace, vault, names)
+    print(json.dumps(result.as_dict(), indent=2))
+    # Exit 1 on a refusal so a script can gate on it, 0 when the plan is clean.
+    return 1 if result.refused else 0
+
+
 def _workspace_census_command(args: argparse.Namespace) -> int:
     """Survey a vault root and print the reported shapes.
 
@@ -2705,6 +2750,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output raw JSON audit report.",
     )
     os_audit_parser.set_defaults(func=_os_audit_command)
+
+    reroot_parser = subparsers.add_parser(
+        "workspace-reroot",
+        help="Plan or apply the per-workspace agent-root migration.",
+        description=(
+            "Move each registered workspace's vault into its own agent root. "
+            "Prints the plan by default and changes nothing; --rehearse records a "
+            "receipt without moving; --apply performs the migration and rebuilds "
+            "each root's index and search database; --undo reverses a completed "
+            "migration to a byte-identical tree."
+        ),
+    )
+    reroot_parser.add_argument("--workspace", type=Path, default=None, help="Install root.")
+    reroot_parser.add_argument("--vault-root", type=Path, default=None, help="Vault root.")
+    reroot_parser.add_argument("--rehearse", action="store_true", help="Record a survey receipt, move nothing.")
+    reroot_parser.add_argument("--apply", action="store_true", help="Perform the migration.")
+    reroot_parser.add_argument("--undo", action="store_true", help="Reverse a completed migration.")
+    reroot_parser.set_defaults(func=_workspace_reroot_command)
 
     census_parser = subparsers.add_parser(
         "workspace-census",
