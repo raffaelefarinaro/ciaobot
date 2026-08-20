@@ -1247,6 +1247,27 @@ that finds the note path in a bullet, so a workspace named anything else never m
 of its rows read "no live rehome signal" forever. Built from the registered names now, escaped,
 because a workspace name is the user's.
 
+### Review scoping, and a batch that offered an impossible accept (`9b437cf9`)
+Second screenshot pass. The real bug: the batch bar said **"accept 1"** for a selected re-home row
+whose own actions correctly showed no accept. `selectedNonSkill` excluded only skill rows while a
+row's own button used `canAccept`, which also refuses a re-home row with no backed destination.
+Accepting one drops the bullet and moves nothing — so a batch could silently discard exactly the
+proposals the UI had just said it could not act on. Same predicate now, and the button is ABSENT
+rather than disabled, because "accept 0" still invites the click.
+
+The review view rendered **no sidebar at all**: the sidebar's workspace toggle was gated on
+`mode === 'memory'` and the route is `proposals`. That is why the pane was blank, and why the
+workspace had to be a heading in the list. The toggle covers both modes now (vault stats stay
+graph-only) and the list is SCOPED to the active workspace, matching every other page. No active
+workspace shows everything, because hiding every row until a switcher reports a selection reads as
+an empty queue.
+
+The home strip keeps its grouping: it is not scoped by the sidebar and shows several workspaces at
+once, so a heading is the only thing that can distinguish them there.
+
+Batch **talk about it** added: one chat in the active workspace listing every selected row, rows left
+queued. One chat per row is unusable at 109, and rows selected together are usually related.
+
 ### Remaining
 0. The mandatory upgrade trigger and the blocking gate — the shape is agreed above. Then migrate this
    install and exercise the routines and the Memory Map for real.
