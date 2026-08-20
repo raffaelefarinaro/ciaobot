@@ -368,16 +368,39 @@ def _normalize_related_value(value: str) -> str:
     return value.strip().strip("\"'`")
 
 
-def _build_filename_index(entries: list[Entry]) -> dict[str, list[Path]]:
+def _build_filename_index(
+    entries: list[Entry], path_prefix: Path | None = None
+) -> dict[str, list[Path]]:
+    """Index entries by vault-relative path and by bare stem.
+
+    ``path_prefix`` is what ``Entry.path`` is rendered under. It was hardcoded to
+    ``memory-vault``, which raises the moment a scan renders paths under a
+    per-root prefix, so a caller that knows the prefix has to say so.
+    """
+    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
     idx: dict[str, list[Path]] = defaultdict(list)
     for e in entries:
         # key by vault-relative path without extension
-        rel_from_vault = e.path.relative_to("memory-vault")
+        rel_from_vault = _strip_prefix(e.path, prefix)
         stem_key = str(rel_from_vault.with_suffix(""))
         idx[stem_key].append(e.path)
         # also key by filename stem alone for bare references like "Mo"
         idx[e.path.stem].append(e.path)
     return idx
+
+
+def _strip_prefix(path: Path, prefix: Path) -> Path:
+    """``path`` relative to ``prefix``, or unchanged when it is not under it.
+
+    Total rather than raising: a rendered path and a prefix can legitimately
+    disagree (a caller merging roots, an entry built by hand in a test), and the
+    useful answer there is "leave it alone", not an exception halfway through a
+    vault scan.
+    """
+    try:
+        return path.relative_to(prefix)
+    except ValueError:
+        return path
 
 
 def _resolve_related(ref: str, filename_idx: dict[str, list[Path]]) -> Path | None:
@@ -401,8 +424,28 @@ def _resolve_related(ref: str, filename_idx: dict[str, list[Path]]) -> Path | No
     return None
 
 
-def scan_vault(vault_root: Path | None = None) -> list[Entry]:
+def scan_vault(
+    vault_root: Path | None = None,
+    *,
+    workspace: str = "",
+    path_prefix: Path | None = None,
+) -> list[Entry]:
+    """Scan one vault into entries.
+
+    ``workspace`` stamps every entry instead of inferring the workspace from the
+    first path segment. After the re-rooting a vault belongs to exactly one
+    workspace and its first segment is a FOLDER name, so inference returns
+    things like ``projects`` and any ``?workspace=`` filter drops nearly
+    everything. Pass it whenever the caller knows which root it is reading.
+
+    ``path_prefix`` is what rendered paths are relative to, defaulting to
+    ``memory-vault`` so a single-vault scan is byte-identical to before. A
+    caller merging several roots into one graph must pass a per-root prefix,
+    or two roots holding a note of the same name render the same path and
+    collide — the same defect the search index had.
+    """
     vault_root = (vault_root or default_vault_root()).resolve()
+    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
     entries: list[Entry] = []
     for md_path in sorted(vault_root.rglob("*.md")):
         rel_from_vault = md_path.relative_to(vault_root)
@@ -441,7 +484,7 @@ def scan_vault(vault_root: Path | None = None) -> list[Entry]:
         # Render as a vault-relative path with a "memory-vault/" prefix so
         # output is identical regardless of the absolute location of vault_root
         # (this also lets tests run against a synthetic vault under tmp_path).
-        repo_rel = Path("memory-vault") / rel_from_vault
+        repo_rel = prefix / rel_from_vault
         entries.append(
             Entry(
                 path=repo_rel,
@@ -450,13 +493,13 @@ def scan_vault(vault_root: Path | None = None) -> list[Entry]:
                 tags=tags,
                 aliases=aliases,
                 related=related_refs,  # resolved below
-                workspace=_workspace_of(rel_from_vault),
+                workspace=workspace or _workspace_of(rel_from_vault),
                 description=description,
             )
         )
 
     # Resolve related refs to actual repo-relative paths.
-    filename_idx = _build_filename_index(entries)
+    filename_idx = _build_filename_index(entries, prefix)
     for e in entries:
         resolved: list[str] = []
         seen: set[str] = set()
@@ -643,7 +686,7 @@ def strip_references(vault_root: Path, deleted_path: str) -> list[str]:
     for e in entries:
         if str(e.path) == deleted_path or deleted_path not in e.related:
             continue
-        rel_from_vault = e.path.relative_to("memory-vault")
+        rel_from_vault = _strip_prefix(e.path, Path("memory-vault"))
         abs_path = vault_root / rel_from_vault
         try:
             text = abs_path.read_text(encoding="utf-8")
@@ -866,6 +909,40 @@ def write_index_file(entries: list[Entry], dest: Path) -> None:
         "For filtered queries run `ciao vault-index --help`.\n\n"
     )
     dest.write_text(header + format_md(entries), encoding="utf-8")
+
+
+def scan_targets(
+    targets: list[tuple[Path, str, Path]],
+) -> tuple[list[Entry], dict[str, Path]]:
+    """Scan several vaults into one entry list, plus rendered-path -> file map.
+
+    Each target is ``(vault root, workspace stamp, rendered path prefix)``.
+    Deliberately one scan per target rather than one walk over a common parent:
+    ``related:`` links resolve inside a single scan, so scanning per root keeps a
+    link from resolving across roots. That is the behaviour the graph already
+    wanted — it drops cross-workspace edges — and here it comes for free instead
+    of needing a filter.
+
+    The map exists because rendered paths are no longer a fixed offset from one
+    vault root, so a caller that needs the real file (to stat it, say) cannot
+    reconstruct it by stripping a prefix.
+    """
+    merged: list[Entry] = []
+    absolute: dict[str, Path] = {}
+    for vault_root, workspace, prefix in targets:
+        root = Path(vault_root)
+        if not root.is_dir():
+            continue
+        scanned = scan_vault(root, workspace=workspace, path_prefix=prefix)
+        for entry in scanned:
+            rendered = str(entry.path)
+            try:
+                tail = entry.path.relative_to(prefix)
+            except ValueError:
+                tail = entry.path
+            absolute[rendered] = root / tail
+        merged.extend(scanned)
+    return merged, absolute
 
 
 def vocabulary_report(entries: list[Entry]) -> dict[str, Any]:

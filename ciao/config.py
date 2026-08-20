@@ -667,6 +667,29 @@ class CiaoConfig:
             self.workspace_root / "Logs" if self._rerooted() else self.vault_root / "Logs"
         )
 
+    def vault_scan_targets(self) -> list[tuple[Path, str, Path]]:
+        """Every vault in this install, as ``(root, workspace, path prefix)``.
+
+        One target before the re-rooting — the shared vault, unstamped, so the
+        first-path-segment inference labels the workspaces exactly as it does
+        today. One target PER ROOT afterwards, each stamped with its workspace
+        and rendering paths under ``<name>/memory-vault`` so two roots holding a
+        note of the same name do not render the same path.
+
+        This is the seam for anything that means "all the notes in this install":
+        reading ``vault_root`` directly gives a directory that does not exist
+        after the migration, which is why the Memory Map came back empty.
+        """
+        if not self._rerooted():
+            return [(self.vault_root, "", Path("memory-vault"))]
+        targets: list[tuple[Path, str, Path]] = []
+        for name in self.workspace_names():
+            if not name:
+                continue
+            root = self.agent_vault_root(name)
+            targets.append((root, name, Path(name) / root.name))
+        return targets
+
     def _rerooted(self) -> bool:
         """Whether this install has completed the per-workspace re-rooting.
 

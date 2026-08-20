@@ -67,7 +67,12 @@ from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
-from ciao.vault_index import _build_graph, filter_entries, scan_vault, strip_references
+from ciao.vault_index import (
+    _build_graph,
+    filter_entries,
+    scan_targets,
+    strip_references,
+)
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import (
@@ -4185,11 +4190,16 @@ async def vault_graph(request: Request) -> JSONResponse:
     """
     config = request.app.state.config
     workspace = request.query_params.get("workspace", "").strip() or None
-    # scan_vault reads and parses every markdown file in the vault; run it off
-    # the event loop so a large vault doesn't stall other requests, including
-    # the 5s chat-socket keepalives (see chat_messages above for the same fix).
-    entries = await asyncio.to_thread(scan_vault, config.vault_root)
-    workspaces = sorted({e.workspace for e in entries})
+    # Every vault in the install, which is ONE shared vault before the
+    # re-rooting and one per agent root after it. Scanning `config.vault_root`
+    # returned zero notes on a migrated install, so the whole map went blank.
+    # Reads and parses every markdown file, so run it off the event loop or a
+    # large vault stalls other requests, including the 5s chat-socket keepalives
+    # (see chat_messages above for the same fix).
+    entries, absolute = await asyncio.to_thread(
+        scan_targets, config.vault_scan_targets()
+    )
+    workspaces = sorted({e.workspace for e in entries if e.workspace})
     scoped = filter_entries(entries, workspace=workspace) if workspace else entries
     graph = _build_graph(scoped)
     by_path = {str(e.path) for e in scoped}
@@ -4198,13 +4208,17 @@ async def vault_graph(request: Request) -> JSONResponse:
     # most recently, which is a far more useful entry point than "whatever the
     # biggest hub is". Entry carries no timestamp, so stat the files here; it is
     # one stat per note against files scan_vault has just read anyway.
-    vault_root = Path(config.vault_root).expanduser()
-
     def _mtime(rel: str) -> float:
-        prefix = "memory-vault/"
-        tail = rel[len(prefix):] if rel.startswith(prefix) else rel
+        # Resolved through the scan's own map. Rendered paths are no longer a
+        # fixed offset from one vault root, so stripping a `memory-vault/`
+        # prefix and joining resolved to nothing on a migrated install and every
+        # note reported mtime 0 — which silently broke the map's "most recently
+        # touched note" entry point rather than failing loudly.
+        target = absolute.get(rel)
+        if target is None:
+            return 0.0
         try:
-            return (vault_root / tail).stat().st_mtime
+            return target.stat().st_mtime
         except OSError:
             # A note indexed but unreadable (race with a delete, broken
             # symlink) must not fail the whole graph request.
