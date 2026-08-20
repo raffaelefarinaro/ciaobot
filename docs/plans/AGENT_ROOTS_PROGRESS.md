@@ -1018,7 +1018,65 @@ sandbox rehearsal had surfaced in three separate clone runs — the clones have 
 the one thing that broke was the one thing a clone cannot model. Worth stating plainly: **rehearsing
 on a copy of the data does not rehearse the software that will serve it.**
 
+## NOT SHIPPABLE YET: the migration engine is done, the app's READ paths are not
+
+Found while building a develop install so the operator could exercise the new memory system.
+Measured on a clone, not inferred:
+
+```
+BEFORE migration: scan_vault(config.vault_root) -> 583 notes   workspaces ['personal','work']
+AFTER  migration: scan_vault(config.vault_root) ->   0 notes   <-- the Memory Map is empty
+                  per-root scans DO work: personal 158, work 426
+                  Entry.workspace inside a root: ['personal','projects']  <-- folder names, not workspaces
+```
+
+The migration moves the vault correctly. Nothing that READS the vault knows it moved.
+
+1. **~35 sites read `config.vault_root` directly** (`ciao/web/routes_api.py`,
+   `ciao/web/agent_assets.py`, `ciao/web/project_chats.py`, `ciao/insights.py`, `ciao/main.py`,
+   `ciao/control_plane.py`). Post-migration that path does not exist, so each returns nothing or
+   writes into a recreated empty tree. `GET /api/vault/graph` — the Memory Map — is the clearest
+   case: `scan_vault(config.vault_root)` on a directory that is gone.
+2. **`Entry.workspace` stops meaning anything.** `vault_index._workspace_of` infers the workspace
+   from the first path segment, which inside a root's own vault is a folder name. So
+   `?workspace=personal` filters almost everything out and the graph invents a workspace called
+   `projects`. This is the same symbol P10.9 lists for deletion; deleting it is not enough, the
+   per-root replacement has to exist first.
+3. **D5's promotion of `Logs/` has no read-path counterpart.** Five live sites still compute
+   `vault_root / "Logs"`: `main.py:419` (the TranscriptStore root), `project_chats.py:2266`,
+   `insights.py:1090`, `fts_search.py:284`, and `cleanup_sdk_blobs.py:56` (which hardcodes
+   `workspace/"memory-vault"/Logs/Chats`). After migrating, chat archiving would recreate
+   `<install>/memory-vault/Logs/Chats` and write new transcripts there, orphaned from the promoted
+   1456-file `Logs/` — nothing lost, but the archive silently splits in two and the old half becomes
+   invisible.
+4. **No upgrade trigger.** `grep -rn workspace_reroot ciao/sync_skills.py ciao/main.py
+   ciao/web/app.py` is empty: the migration is CLI-only. An upgrading user gets nothing, which is
+   safe (the receipt gate keeps them on the old layout) but means the release ships a feature nobody
+   reaches.
+5. **No in-app surface.** No `workspace-unmigrated` detector, tile or run button, so nobody would
+   know the migration exists. §11.2's five detectors are still unbuilt.
+
+Three clone rehearsals and one live run did not surface any of this, because all four exercised the
+CLI and never asked the APP to read a migrated vault. Companion to the lesson above: rehearsing the
+data does not rehearse the software, and rehearsing the *writer* does not rehearse the *readers*.
+
+**Consequence for sequencing.** The read sweep is now the blocker, ahead of P10.9/P10.10 — and it
+partly subsumes them, since `_workspace_of` and `_entity_visible_in_workspace` cannot simply be
+deleted until the per-root readers exist. The develop build is installed and healthy on the
+operator's machine (see below) and the install is deliberately LEFT UNMIGRATED, because migrating it
+today would empty the Memory Map and split the transcript archive.
+
+### The develop install (2026-08-20)
+Built and installed from `3e9aea48` via the `ciao-dev-install` skill: PWA, embedded runtime (both
+arches) and the Tauri bundle, staged swap preserving the workspace and password. Verified the bundle
+carries this session's work (`agent_vault_root`, `bootstrap_root`, `repair`, `os-audit --scope`).
+Engine healthy: HTTP 200, zero tracebacks or import errors, 19 custom skills installed, the P4
+detectors reporting 2 actions, and `system-install-health` — the routine added today — fired on
+schedule catch-up. So the schedule changes and the audit split are live and exercisable NOW, on the
+shared layout; only the per-root layout is gated.
+
 ### Remaining
+0. **The per-root read sweep**, items 1–3 above. Blocks everything else.
 1. **Ship this work in a release, and let the upgrade run the migration.** Do NOT run `--apply` by
    hand from a dev checkout again — that is what broke the install today. Mechanics for whenever it
    does run: the app must be stopped, and `com.ciao.server` is a launchd agent with
