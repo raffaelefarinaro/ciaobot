@@ -35,7 +35,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P1 Proposal-kind registry | delegate | DONE | commit 83000847 |
 | P2 Audit split (D2) | delegate | DONE | commit c121678b; pre-existing os-audit failure fixed too |
 | P3 unrehomed_people notice | delegate | DONE | commit 4cc0510f |
-| P4 Surfaced-actions strip | delegate | PARTIAL | 481a31c9 + P4.7 in c907e7da; P4.2 re-dispatched chat-0cfeb9e6 |
+| P4 Surfaced-actions strip | done | DONE | 481a31c9 + c907e7da + 96afccca; **P4.2 literal form DROPPED, see below** |
 | P5 Queue review UI | split | DONE | server b77f78b4, UI c907e7da |
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
@@ -557,3 +557,38 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   `os_audit`, verified directly), the remedy-text constraint stated up front, and an explicit working
   instruction to stop reading and start writing after roughly ten calls. Mapping restricted to the
   three kinds that already have a notice: vault-location, unrehomed-people, unmigrated-links.
+- 2026-08-20 — P4.2 retry ALSO stalled: 20 tool events, all `read`/`grep`, zero edits, turn ended
+  cleanly rather than looping. Different cause from the first stall. The brief I wrote to fix attempt
+  one demanded 5097 lines across 7 files (`os_audit` 1463, `test_cli` 1129, `test_os_audit` 1036,
+  `operator_actions` 635, `test_operator_actions` 406, `test_workspace_vault_root` 358,
+  `test_link_migration_triggers` 70). `deepseek-v4-flash` cannot hold that and still act. So the two
+  failures were opposite errors of mine: too few files made the task impossible, enough files made it
+  exceed the model's context. This step is not delegatable at this scope to this model.
+- 2026-08-20 — **P4.2's literal instruction is the wrong shape, and dropping it is the right call.**
+  Took it over directly and compared the three duplicated pairs by hand. The finding:
+  * `vault-location`: the notice's `remedy` and the action's `chat_prompt` are DIFFERENT prose, and
+    `test_workspace_vault_root.py` pins `"Open a Ciaobot chat"` which appears only in the notice. A
+    faithful adapter would have to reconstruct CLI prose from action fields, so the phrasing stays in
+    two places anyway and the "single source" is illusory.
+  * `unmigrated-links`: the two predicates ALREADY DISAGREE, and for good reasons.
+    `audit_upgrade_notices` requires a receipt to be absent AND `has_unmigrated_links` to return a
+    real example, so it walks the vault and is accurate. The detector requires
+    `vault_mode == "existing"` AND no receipt, and deliberately skips the walk because P4.3 forbids
+    one on a path that runs every app open and window focus.
+  Unifying them is actively harmful in either direction: adopting the accurate predicate puts a vault
+  walk on the focus path, adopting the cheap one makes the CLI report a migration that is not needed.
+  The drift worth removing is in the shared *condition*, but here the conditions differ by design in
+  cost. So the duplication stays, documented, and P4.2's "render the notices from the registry" is
+  recorded as rejected with this reasoning rather than half-implemented.
+- 2026-08-20 — What the investigation DID find, and it was worth more than the refactor: a live false
+  positive shipped in P4 (`481a31c9`), fixed in `96afccca`. On an adopted vault written in markdown
+  links from the start with no receipt, the cheap predicate is satisfied while nothing needs
+  converting, yet the tile asserted "The vault still uses the retired wikilink dialect" and "An
+  adopted vault still contains `[[wikilinks]]`". Reproduced directly: `has_unmigrated_links` returned
+  empty and the tile fired anyway. Both strings state a fact the detector never established. Reworded
+  to "may still use", matching what its own `chat_prompt` already said, with a regression test.
+  This is the third overclaiming-detector bug in this release, after the unrehomed-people
+  single-workspace tile and the two MCP-allowlist docstrings. Pattern worth naming: a cheap detector
+  must word its tile to what its predicate actually proves.
+- 2026-08-20 — Suites after the fix: python 2682 passed / 1 pre-existing failure; web 709 passed
+  across 69 files. **Every phase except P10 is now complete.**
