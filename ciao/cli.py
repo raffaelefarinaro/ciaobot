@@ -1774,7 +1774,20 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
 
     workspace = Path(args.workspace or os.environ.get("CIAO_WORKSPACE") or ".").expanduser().resolve()
     runtime = workspace / ".runtime"
-    vault = _resolve_vault_root(args.vault_root)
+    # An explicit --workspace must win over the environment, the same rule the
+    # os-audit command needed: a running Ciaobot chat exports CIAO_VAULT_ROOT and
+    # CIAO_WORKSPACE for its OWN install, so resolving the vault from the ambient
+    # environment while writing the named install's registry would migrate one
+    # install's layout using another install's vault. Here it merely refused,
+    # because the ambient relative default landed outside the named root — but a
+    # colleague with an absolute CIAO_VAULT_ROOT would have got the dangerous
+    # version of the same mistake.
+    if args.workspace is not None and args.vault_root is None:
+        vault = (workspace / "memory-vault").resolve()
+    else:
+        vault = _resolve_vault_root(args.vault_root)
+    if not vault.is_absolute():
+        vault = (workspace / vault).resolve()
     from ciao.config import CiaoConfig
 
     config = CiaoConfig.from_env({
@@ -1814,9 +1827,27 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         return 0
 
     result = workspace_reroot.plan(workspace, vault, names)
-    print(json.dumps(result.as_dict(), indent=2))
+    primary = config.primary_workspace()
+    triage = workspace_reroot.plan_skills_triage(workspace, primary)
+    guides = workspace_reroot.guide_moves(workspace, primary)
+    payload = result.as_dict()
+    # The dry run is what a person reads before approving, so it has to show
+    # EVERY move the apply would make. Printing only the vault moves understated
+    # it by four on the reference install, which is exactly the kind of gap that
+    # makes a plan untrustworthy.
+    payload["primary"] = primary
+    payload["skills_triage"] = triage.as_dict()
+    payload["guide_moves"] = [
+        {"source": m.source, "destination": m.destination, "workspace": m.workspace}
+        for m in guides
+    ]
+    payload["total_moves"] = len(result.moves) + len(triage.moves) + len(guides)
+    if triage.refusals:
+        payload["refusals"] = [*payload["refusals"], *triage.refusals]
+        payload["refused"] = True
+    print(json.dumps(payload, indent=2))
     # Exit 1 on a refusal so a script can gate on it, 0 when the plan is clean.
-    return 1 if result.refused else 0
+    return 1 if payload["refused"] else 0
 
 
 def _workspace_census_command(args: argparse.Namespace) -> int:

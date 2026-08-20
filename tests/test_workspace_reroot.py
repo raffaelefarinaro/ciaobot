@@ -1380,3 +1380,79 @@ def test_a_missing_or_unreadable_chat_store_does_not_fail_the_migration(
     assert flag_stranded_sessions(runtime)["flagged"] == []
     result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
     assert result["status"] == "migrated", result.get("refusals")
+
+
+# -- CLI: an explicit --workspace must win over the environment --------------
+
+
+def test_reroot_cli_resolves_the_vault_under_the_named_workspace(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The same environment leak P2 fixed in the os-audit command.
+
+    A running Ciaobot chat exports CIAO_VAULT_ROOT and CIAO_WORKSPACE for its OWN
+    install. Resolving the vault from those while writing the NAMED install's
+    registry would migrate one install's layout using another install's vault.
+    Caught on the operator's machine: the plan reported "vault root is not a
+    directory" pointing at the cwd, not at the workspace it was given.
+    """
+    from ciao.cli import main
+
+    install, _vault, runtime = _git_install(tmp_path)
+    _registry(
+        runtime,
+        [
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "work", "vault_root": "memory-vault/work"},
+        ],
+    )
+    foreign = tmp_path / "foreign"
+    (foreign / "memory-vault").mkdir(parents=True)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(foreign))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(foreign / "memory-vault"))
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
+
+    code = main(["workspace-reroot", "--workspace", str(install)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload["refusals"]
+    assert payload["vault_root"] == str(install / "memory-vault")
+    assert "foreign" not in payload["vault_root"]
+
+
+def test_the_dry_run_shows_every_move_the_apply_would_make(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A plan that understates the work is a plan nobody should approve.
+
+    On the reference install it listed 5 moves while `--apply` made 9: the skill
+    catalog, its lockfile, the guide and the guide's symlink were all missing.
+    """
+    from ciao.cli import main
+
+    install, _vault, runtime = _git_install(tmp_path)
+    _catalog(install)
+    (install / "CLAUDE.md").write_text("# guide\n", encoding="utf-8")
+    (install / "AGENTS.md").symlink_to("CLAUDE.md")
+    _registry(
+        runtime,
+        [
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "work", "vault_root": "memory-vault/work"},
+        ],
+    )
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
+
+    main(["workspace-reroot", "--workspace", str(install)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["primary"] == "personal"
+    assert payload["total_moves"] == 9
+    sources = (
+        [m["source"] for m in payload["moves"]]
+        + [m["source"] for m in payload["skills_triage"]["moves"]]
+        + [m["source"] for m in payload["guide_moves"]]
+    )
+    assert "skills" in sources and "skills-lock.json" in sources
+    assert "CLAUDE.md" in sources and "AGENTS.md" in sources

@@ -936,8 +936,42 @@ Seven mutations of the wiring each fail the test written for it. One survived an
 rather than papered over: dropping the `if not guide.exists()` guard on the primary's guide writes
 byte-identical content, so it is behaviourally equivalent, not an uncovered defect.
 
+### Two CLI bugs found by pointing the dry run at the live install
+Both in `_workspace_reroot_command`, both found in the minute before the real run, neither covered
+by any test.
+1. **`--workspace` did not win over the environment.** The command resolved the vault through
+   `_resolve_vault_root`, which reads `CIAO_VAULT_ROOT` / `CIAO_WORKSPACE`, so naming the install
+   explicitly still read the ambient one's vault. Here it merely refused (`vault root is not a
+   directory: <cwd>/memory-vault`), because the ambient relative default landed outside the named
+   root — but with an absolute `CIAO_VAULT_ROOT` it would have migrated one install's layout using
+   another install's vault while writing the named install's registry. This is the THIRD instance of
+   the same class in this release, after `_os_audit_command` (P2) and `rebuild_search_index`. Worth
+   naming as a rule: **any command that takes an install root must resolve every other path under
+   it, never from the environment.**
+2. **The dry run understated the work.** It printed the 5 vault moves while `--apply` makes 9: the
+   skill catalog, its lockfile, the guide and the guide's symlink were all computed inside `apply`
+   and invisible to the plan. The dry run is what a person reads before approving, so a plan that
+   understates it is a plan nobody should approve. It now reports `total_moves`, the skills triage
+   and the guide moves, and folds a triage refusal into its own exit code.
+
+### The plan against the live install, verified read-only
+```
+total moves: 9   (refused: false, unclassified: none)
+  vault   memory-vault/{.obsidian,Logs,Templates}  -> .obsidian, Logs, templates-src
+  vault   memory-vault/{personal,work}             -> {personal,work}/memory-vault
+  skills  skills, skills-lock.json                 -> personal/
+  guide   CLAUDE.md, AGENTS.md                     -> personal/
+stashed: INDEX.md, MEMORY.md, VOCABULARY.md, .DS_Store
+skills to triage: 27
+```
+
 ### Remaining
-1. Operator decision: run `ciao workspace-reroot --apply` on the live install. The vault is
+1. Operator decision: run `ciao workspace-reroot --apply` on the live install. **The app must be
+   stopped first**, and `com.ciao.server` is a launchd agent with `KeepAlive = true`, so killing the
+   process restarts it — it needs `launchctl bootout gui/$(id -u)/com.ciao.server` and a
+   `bootstrap` afterwards. A restart mid-migration would race the vault move.
+   The two ungitignored state files (`workspaces.json`, `web_projects.json`) were copied to the
+   session scratchpad as a belt-and-braces net; `--undo` and `git checkout` cover everything else. The vault is
    committed and the migration is now complete, so this is the next step and it is theirs to take.
 2. P10.9 the eight deletions and P10.10 `_bootstrap_workspace` — still gated on (1). Note
    `bootstrap_root` is NOT P10.10: that step is about `_legacy_workspaces()` manufacturing two
