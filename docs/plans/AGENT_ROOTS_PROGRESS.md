@@ -35,7 +35,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P1 Proposal-kind registry | delegate | DONE | commit 83000847 |
 | P2 Audit split (D2) | delegate | DONE | commit c121678b; pre-existing os-audit failure fixed too |
 | P3 unrehomed_people notice | delegate | DONE | commit 4cc0510f |
-| P4 Surfaced-actions strip | delegate | RUNNING | P4.2 chat-893eb5df; P4.7 folded into chat-7ffb29f7 |
+| P4 Surfaced-actions strip | delegate | PARTIAL | 481a31c9 + P4.7 in c907e7da; P4.2 re-dispatched chat-0cfeb9e6 |
 | P5 Queue review UI | split | DONE | server b77f78b4, UI c907e7da |
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
@@ -539,3 +539,21 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   note, so every accept or dismiss now costs a vault walk, and draining 353 items would cost 353 of
   them. The fix belongs on the server, returning the updated rows the way housekeeping already does.
   Filed, not blocking.
+- 2026-08-20 — **P4.2 reported "done" having written nothing.** Tree was completely clean. Read the
+  transcript: 76 tool events, counted as 38 `bash`, 36 `read`, 2 `grep`, and ZERO edits. The response
+  ends mid-sentence on "before editing", with the same "let me check one more thing" phrasing
+  repeating a dozen times. A pure analysis loop.
+  Diagnosed the cause rather than blaming the model: **my file set made the task impossible.** I gave
+  it `ciao/os_audit.py` and `tests/test_os_audit.py`. But FIVE test files pin this behaviour, and
+  `tests/test_workspace_vault_root.py` asserts exact substrings inside the vault-location notice's
+  `remedy` (lines 245-247, 279-282, 308-310). Any adapter regenerating that text from `OperatorAction`
+  breaks three test files it was forbidden to touch. It correctly sensed the job could not be
+  completed inside its grant and stalled instead of breaking things.
+  This is the third instance of the same coordinator error, after P5's missing `app.py` and P4's
+  missing `ChatLayout.vue`: **scope a phase by what it must CHANGE, not by what it must not break.**
+  Before writing any further brief, grep for every test that pins the behaviour and grant those files.
+- 2026-08-20 — P4.2 re-dispatched (`chat-0cfeb9e6`) with all five test files granted, the
+  circular-import question pre-answered as settled fact (`operator_actions` does not import
+  `os_audit`, verified directly), the remedy-text constraint stated up front, and an explicit working
+  instruction to stop reading and start writing after roughly ten calls. Mapping restricted to the
+  three kinds that already have a notice: vault-location, unrehomed-people, unmigrated-links.
