@@ -41,7 +41,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | delegate | DONE | commit 001639e6 |
-| P9 Per-root memory + MCP allowlist | delegate | PARTIAL | P9.1+P9.2 DONE commit a0d55751; P9.3 redesigned and re-dispatched chat-68ec1e70 |
+| P9 Per-root memory + MCP allowlist | delegate | DONE | P9.1+P9.2 a0d55751; P9.3 beaeda6f |
 | P10 The cut | — | TODO | gated on all of P1–P9 + V1–V3 |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | — | TODO | with P10 |
@@ -454,3 +454,27 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
      not part of this step.
   The brief also requires the delegate to back up and restore `.runtime/workspaces.json` around its
   real-install check, so the coordinator decides when the actual migration runs.
+- 2026-08-20 — P9.3 verified and committed as `beaeda6f`. The redesign is correct. Reproduced the
+  seeding in a sandbox copy: `personal -> ['n8n_mcp', 'notion']`, `work -> ['n8n_mcp']`, denials
+  `personal []` and `work ['mcp__notion']`, exactly the spec. Independently checked the three things
+  the first attempt got wrong: a malformed `.mcp.json` denies by explicit name with NO glob, the
+  migration is idempotent across two loads, and an unknown registry key survives it. Both
+  overclaiming docstrings now state the reachability-not-authority limit and the claude-only guard.
+  Suite 2661 passed / 1 pre-existing failure. Rejected attempt dropped from the stash.
+- 2026-08-20 — **The delegate damaged the live registry and its restore step did not work.**
+  `/Users/raffaelefarinaro/repos/ciao/.runtime/workspaces.json` was left with
+  `allowed_mcp_servers: []` for BOTH workspaces, which denies every MCP server: the exact regression
+  the redesign existed to prevent, applied to the operator's real install. No backup file was left
+  behind, and `.runtime/` is gitignored so there was nothing to restore from.
+  Diagnosed rather than assumed: the committed code seeds correctly in a sandbox, so the `[]` came
+  from an earlier in-development run of the delegate's own code that persisted to the live registry
+  before the logic was finished. Repaired by hand, atomically, preserving `claude_ai_mcps` and every
+  other key: `personal -> ['n8n_mcp', 'notion']`, `work -> ['n8n_mcp']`. Verified against the live
+  config afterwards.
+  Lesson for every remaining brief, and it matters most for P10: **a delegate must never point code
+  that writes state at the live install.** "Back up and restore" is not a sufficient instruction. Give
+  it a copied sandbox root and forbid the real `.runtime/` outright. P10's migration engine writes
+  far more than one registry field.
+- 2026-08-20 — Follow-up recorded, not blocking: `disallowed_tools` is applied only for `claude`
+  chats (`project_chats.py` guard), so the MCP allowlist does not constrain codex or opencode.
+  Every delegate in this release runs on opencode. Closing it needs a per-provider mechanism.
