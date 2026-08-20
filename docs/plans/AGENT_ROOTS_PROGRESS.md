@@ -42,7 +42,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | delegate | DONE | commit 001639e6 |
 | P9 Per-root memory + MCP allowlist | delegate | DONE | P9.1+P9.2 a0d55751; P9.3 beaeda6f |
-| P10 The cut | coordinator | IN PROGRESS | plan 970bd3d0, apply+undo 59dda6b0; P10.4-P10.11 remain |
+| P10 The cut | coordinator | IN PROGRESS | plan 970bd3d0, apply+undo 59dda6b0, guide split c70707f7; P10.5-P10.11 remain |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | coordinator | DONE | 14 tests, commit 970bd3d0 |
 | V3 Real-data rehearsal | coordinator | DONE | APFS clone, 2318 files, zero refusals |
@@ -671,3 +671,24 @@ P10.4 CLAUDE.md split (unbounded body verbatim to every root, bounded regions to
 other roots' queued into their Memory-Proposals.md, no heuristic classification) · P10.5 skills
 triage · P10.6 indexes/FTS/sessions rebuild · P10.8 routines · P10.9 the eight deletions ·
 P10.10 `_bootstrap_workspace` · P10.11 `--repair` · CLI wiring · V5 end-to-end drain.
+- 2026-08-20 — **P10.4 guide split landed (`c70707f7`).** Unbounded body verbatim to every root,
+  bounded regions to the primary only, the primary's entries queued into every other root's
+  proposal queue. No heuristic classification, which is the point: deciding which remembered fact
+  belongs to which workspace is a judgement about the user's prose, and guessing would reproduce
+  the misfiling this release repairs, in the one place read before the user speaks.
+- 2026-08-20 — Two bugs found by running it against the REAL guide rather than a fixture, which is
+  becoming the pattern of this phase:
+  1. A region body opens with its own markdown heading (`## Agent memory`), and `parse_entries`
+     keeps it attached to the first entry, because entries are separated by `§` and a heading is
+     not one. It was being queued as a remembered fact. Now dropped as scaffolding.
+  2. Entries may span multiple lines, and the real guide has exactly one that does. The queue's
+     invariant is one bullet per line, since `proposal_kinds.BULLET_RE` matches line by line, so a
+     multi-line bullet would leave its continuation as loose prose in `Memory-Proposals.md`:
+     uncountable by every counter and invisible to the dedupe check. Newlines now collapsed, with a
+     test that asserts every generated bullet parses through the shared regex.
+- 2026-08-20 — Verified against the live guide: 20 entries in, 20 single-line bullets out, all
+  parsing, none carrying a heading, ZERO entries whose text fails to reach the queue, body
+  byte-identical between roots, work's regions genuinely empty. Suite 2711 passed / 1 pre-existing.
+- 2026-08-20 — `read_region_text` reuses `memory_tool`'s marker regexes on text instead of adding a
+  second parser. One definition of where a region begins and ends is the entire point of this
+  release, after three copies of one bullet regex drifted apart in P1.
