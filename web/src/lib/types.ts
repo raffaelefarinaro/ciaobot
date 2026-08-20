@@ -1073,6 +1073,9 @@ export interface OperatorAction {
   /** A purpose-built surface for this action, when one already exists. */
   view_label: string
   view_route: string
+  /** A precondition the install cannot get past on its own: unmissable and not
+   *  dismissible. Deliberately not an app-wide lock. */
+  blocking: boolean
 }
 
 export interface HousekeepingResponse {

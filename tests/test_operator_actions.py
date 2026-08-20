@@ -45,6 +45,14 @@ class _FakeConfig:
     def workspace_names(self) -> list[str]:
         return list(self._names)
 
+    def primary_workspace(self) -> str:
+        # Same preference as CiaoConfig: `personal` for continuity, else the
+        # first registered. Required rather than optional — the migration must
+        # never guess which root inherits the guide and the skill catalog.
+        if "personal" in self._names:
+            return "personal"
+        return self._names[0] if self._names else ""
+
     def workspace_vault_root(self, name: str) -> Path:
         return self._roots.get(name, self.vault_root / name)
 
@@ -537,3 +545,118 @@ def test_both_queue_tiles_point_at_the_panel_that_has_the_buttons() -> None:
         source = inspect.getsource(detector)
         assert 'view_route="/proposals"' in source, detector.__name__
         assert "view_label=" in source, detector.__name__
+
+
+# -- the mandatory re-rooting gate -------------------------------------------
+
+
+def _reroot_receipt(tmp_path: Path, payload: dict) -> None:
+    import json
+
+    path = _runtime(tmp_path) / "migration" / "workspace-rooting.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    from ciao.config import reset_reroot_cache
+
+    reset_reroot_cache()
+
+
+def _reroot_actions(tmp_path: Path, *, workspaces=("personal", "work")) -> list:
+    from ciao.operator_actions import _detect_workspace_unmigrated
+
+    (tmp_path / "memory-vault").mkdir(parents=True, exist_ok=True)
+    config = _FakeConfig(tmp_path, workspaces=workspaces)
+    return _detect_workspace_unmigrated(_context(tmp_path, config=config))
+
+
+def test_the_gate_fires_when_the_move_has_not_run(tmp_path: Path) -> None:
+    actions = _reroot_actions(tmp_path)
+
+    assert len(actions) == 1
+    action = actions[0]
+    assert action.blocking is True
+    assert action.run_label, "it must be actionable, not just informative"
+    assert action.severity == 0, "it sorts above everything else"
+
+
+def test_the_gate_names_what_blocked_it(tmp_path: Path) -> None:
+    """Reaching the tile means the automatic attempt REFUSED, so the reason is
+    the only useful thing it can say."""
+    _reroot_receipt(tmp_path, {
+        "status": "refused",
+        "refusals": ["3 tracked file(s) in memory-vault have uncommitted changes"],
+        "dirty_tracked": ["memory-vault/work/People/Mo.md"],
+    })
+
+    detail = _reroot_actions(tmp_path)[0].detail
+
+    assert "uncommitted changes" in detail
+    assert "memory-vault/work/People/Mo.md" in detail
+
+
+def test_the_gate_clears_once_the_move_succeeded(tmp_path: Path) -> None:
+    _reroot_receipt(tmp_path, {"status": "migrated"})
+
+    assert _reroot_actions(tmp_path) == []
+
+
+def test_a_single_workspace_install_is_never_gated(tmp_path: Path) -> None:
+    """One workspace has no second root to separate from, so the shared layout
+    is already correct for it. Same rule as the re-home tile."""
+    assert _reroot_actions(tmp_path, workspaces=("personal",)) == []
+
+
+def test_no_shared_vault_means_nothing_to_separate(tmp_path: Path) -> None:
+    from ciao.operator_actions import _detect_workspace_unmigrated
+    from ciao.config import reset_reroot_cache
+
+    reset_reroot_cache()
+    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
+    # No memory-vault directory: already migrated, or never set up.
+    assert _detect_workspace_unmigrated(_context(tmp_path, config=config)) == []
+
+
+def test_the_run_button_goes_through_the_same_entry_point_as_startup(tmp_path: Path) -> None:
+    """The button must not drift from what the upgrade does."""
+    import inspect
+
+    from ciao import operator_actions as oa
+
+    source = inspect.getsource(oa._run_workspace_reroot)
+    assert "migrate_if_needed" in source
+    # A refusal raises, so the route renders a failed tile carrying the reason
+    # instead of silently re-offering the button.
+    assert "raise RuntimeError" in source
+
+
+def test_the_button_reports_nothing_to_do_rather_than_pretending(tmp_path: Path) -> None:
+    from ciao.operator_actions import _run_workspace_reroot
+
+    context = _context(tmp_path, config=_FakeConfig(tmp_path, workspaces=("personal", "work")))
+
+    # No vault on disk: there is nothing to move, and saying so beats reporting
+    # a successful migration that moved nothing.
+    result, summary = _run_workspace_reroot(context)
+
+    assert result["status"] == "not_applicable"
+    assert "Nothing to separate" in summary
+
+
+def test_a_refusal_from_the_button_raises_with_the_reason(tmp_path: Path) -> None:
+    """The route turns the raise into a failed tile carrying the reason, rather
+    than silently re-offering the button as though nothing happened."""
+    import pytest as _pytest
+
+    from ciao.operator_actions import _run_workspace_reroot
+
+    (tmp_path / "memory-vault" / "personal").mkdir(parents=True)
+    (tmp_path / "memory-vault" / "work").mkdir(parents=True)
+    # A non-empty destination is one of the plan's refusal conditions.
+    (tmp_path / "personal").mkdir()
+    (tmp_path / "personal" / "squatter.md").write_text("in the way\n", encoding="utf-8")
+    context = _context(tmp_path, config=_FakeConfig(tmp_path, workspaces=("personal", "work")))
+
+    with _pytest.raises(RuntimeError) as excinfo:
+        _run_workspace_reroot(context)
+
+    assert "personal" in str(excinfo.value)

@@ -28,6 +28,7 @@ file it did not recognise is how a vault loses notes.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -35,6 +36,8 @@ from pathlib import Path
 from typing import Any
 
 from ciao.vault_index import EXCLUDED_TOP_DIRS
+
+logger = logging.getLogger(__name__)
 
 RECEIPT_VERSION = 1
 
@@ -205,6 +208,24 @@ def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     return data if data.get("status") == "migrated" else None
+
+
+def peek_receipt(runtime_root: Path) -> dict[str, Any] | None:
+    """The receipt file whatever its status, for the detection side.
+
+    ``read_receipt`` gates on ``status == "migrated"`` and must, because a
+    refused or surveyed receipt is work still to do. But a detector whose whole
+    job is to surface that work needs to READ the refusal, so it reads this
+    instead — the same split ``vault_rehome`` already makes for the same reason.
+    """
+    path = receipt_path(runtime_root)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def write_receipt(runtime_root: Path, payload: dict[str, Any]) -> Path:
@@ -1526,6 +1547,82 @@ def write_skills_triage(
             doc.write_text(format_skill_triage(triage, workspaces), encoding="utf-8")
             created.append(f"{primary_vault}/{_SKILL_TRIAGE_RELATIVE}")
     return created
+
+
+# -- The upgrade trigger ----------------------------------------------------
+
+
+def migrate_if_needed(config: Any) -> dict[str, Any]:
+    """Re-root this install once, at upgrade, before anything reads the vault.
+
+    The design always intended this to run unattended at upgrade rather than
+    from a command: an install nobody migrates gets a feature nobody reaches, and
+    asking every user to run a CLI migration by hand is how one gets run against
+    an engine that does not understand the result. Which is exactly what happened
+    once already on the reference install.
+
+    Never raises. A migration that cannot run is a condition to SURFACE, not a
+    reason to fail an upgrade and leave the install half-started — the refusal is
+    already recorded in the receipt, and the `workspace-unmigrated` action reads
+    it back and offers the retry.
+
+    Ordering matters and is the caller's job: after the git sync, so the
+    clean-tree gate judges the real tree, and before the index refresh, so the
+    indexes are rebuilt for the layout that now exists.
+    """
+    outcome: dict[str, Any] = {"status": "skipped"}
+    try:
+        install_root = Path(config.workspace_root)
+        # Same fallback `DetectionContext.runtime` uses, so this is callable from
+        # any config-like object rather than only a full CiaoConfig.
+        state_path = getattr(config, "state_path", None)
+        runtime_root = (
+            Path(state_path).parent if state_path else install_root / ".runtime"
+        )
+        vault_root = Path(config.vault_root)
+        names = sorted(n for n in config.workspace_names() if n)
+        primary = config.primary_workspace()
+    except Exception as exc:  # noqa: BLE001 — a broken config is not our error
+        logger.exception("re-root: could not read the install layout")
+        return {"status": "error", "reason": str(exc)}
+
+    if read_receipt(runtime_root) is not None:
+        return {"status": "already_migrated"}
+    if not names or not primary:
+        # Nothing registered yet: a fresh install still in setup. There is no
+        # root to create and nothing to move.
+        return {"status": "not_applicable", "reason": "no registered workspace"}
+    if not vault_root.is_dir():
+        return {"status": "not_applicable", "reason": f"no vault at {vault_root}"}
+
+    try:
+        outcome = apply(install_root, vault_root, names, runtime_root, primary=primary)
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        logger.exception("re-root: apply failed")
+        return {"status": "error", "reason": str(exc)}
+
+    if outcome.get("status") != "migrated":
+        logger.warning(
+            "re-root: refused, install stays on the shared layout (%s)",
+            "; ".join(outcome.get("refusals") or ["no reason recorded"]),
+        )
+        return outcome
+
+    # Derived state, rebuilt for the layout that now exists. Reported per root
+    # and never fatal: a failed index rebuild is a stale index, not a lost vault,
+    # and the migration itself has already succeeded and been recorded.
+    try:
+        outcome["indexes"] = rebuild_indexes(install_root, names)
+        outcome["search"] = rebuild_search_index(install_root, names)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("re-root: rebuilding derived state failed")
+        outcome["derived_error"] = str(exc)
+    logger.info(
+        "re-root: migrated %d workspace(s); %d session(s) flagged for handover",
+        len(names),
+        len((outcome.get("stranded_sessions") or {}).get("flagged") or []),
+    )
+    return outcome
 
 
 # -- P10.11: idempotent reconciliation to the registry -----------------------

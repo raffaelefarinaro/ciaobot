@@ -94,6 +94,7 @@ async function openChat(action: OperatorAction): Promise<void> {
         v-for="action in group.actions"
         :key="action.id"
         class="housekeeping-tile"
+        :class="{ 'housekeeping-tile--blocking': action.blocking }"
       >
       <span class="housekeeping-glyph" aria-hidden="true">{{ action.glyph }}</span>
       <div class="housekeeping-body">
@@ -134,6 +135,15 @@ async function openChat(action: OperatorAction): Promise<void> {
 </template>
 
 <style scoped>
+/* A blocking action is a precondition the install cannot get past on its own,
+   so it reads as a warning rather than as one tile among several. Not a modal
+   and not an app-wide lock: the one realistic cause is an uncommitted vault, and
+   locking the app would take away the assistant needed to fix it. */
+.housekeeping-tile--blocking {
+  border-color: var(--warn, #d29922);
+  background: rgba(210, 153, 34, 0.08);
+}
+
 .housekeeping-group {
   margin: var(--space-2) 0 0;
   font-size: 0.72rem;

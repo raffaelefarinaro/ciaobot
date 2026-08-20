@@ -18,6 +18,7 @@ function action(overrides: Partial<OperatorAction> = {}): OperatorAction {
     glyph: '▲',
     workspace: 'personal',
     view_label: '',
+    blocking: false,
     view_route: '',
     run_label: '',
     chat_label: '',
@@ -159,5 +160,23 @@ describe('grouping by workspace', () => {
     await nextTick()
 
     expect(wrapper.findAll('.housekeeping-group')).toHaveLength(0)
+  })
+})
+
+describe('a blocking precondition', () => {
+  it('renders as a warning rather than one tile among several', async () => {
+    const housekeeping = useHousekeepingStore()
+    housekeeping.actions = [
+      action({ id: 'gate', blocking: true, title: 'Workspaces still share one vault', run_label: 'Separate them now' }),
+      action({ id: 'other', title: 'Something optional' }),
+    ]
+    const wrapper = mount(HousekeepingStrip)
+    await nextTick()
+
+    const tiles = wrapper.findAll('.housekeeping-tile')
+    expect(tiles[0].classes()).toContain('housekeeping-tile--blocking')
+    expect(tiles[1].classes()).not.toContain('housekeeping-tile--blocking')
+    // It is actionable in place: no navigation required to clear it.
+    expect(tiles[0].text()).toContain('Separate them now')
   })
 })

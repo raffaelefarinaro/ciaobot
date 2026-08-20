@@ -154,6 +154,7 @@ describe('ChatLayout', () => {
       chat_label: '',
       chat_prompt: '',
       view_label: '',
+      blocking: false,
       view_route: '',
     }]
 

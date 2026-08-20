@@ -1566,3 +1566,170 @@ def test_an_empty_catalog_directory_is_not_moved(tmp_path: Path) -> None:
     result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
     assert result["status"] == "migrated", result.get("refusals")
     assert (install / "personal" / "commands" / "thing.md").is_file()
+
+
+# -- the upgrade trigger -----------------------------------------------------
+#
+# The design always intended this to run unattended at upgrade. An install
+# nobody migrates gets a feature nobody reaches, and asking every user to run a
+# CLI migration by hand is how one gets run against an engine that does not
+# understand the result — which is exactly what happened once on the reference
+# install.
+
+
+def _trigger_config(install: Path, runtime: Path, workspaces=("personal", "work")):
+    from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+
+    reset_reroot_cache()
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=install,
+        vault_root=install / "memory-vault",
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+            for name in workspaces
+        },
+    )
+
+
+def test_the_trigger_migrates_a_committed_install(tmp_path: Path) -> None:
+    from ciao.workspace_reroot import migrate_if_needed
+
+    install, _vault, runtime = _with_guide(tmp_path)
+
+    result = migrate_if_needed(_trigger_config(install, runtime))
+
+    assert result["status"] == "migrated", result.get("refusals")
+    assert (install / "personal" / "memory-vault").is_dir()
+    assert (install / "work" / "CLAUDE.md").is_file()
+    # Derived state rebuilt for the layout that now exists.
+    assert result["indexes"]["rebuilt"], result["indexes"]
+    assert (install / "personal" / "memory-vault" / "INDEX.md").is_file()
+
+
+def test_the_trigger_is_idempotent(tmp_path: Path) -> None:
+    """It runs on every start, so a second start must be a no-op."""
+    from ciao.workspace_reroot import migrate_if_needed
+
+    install, _vault, runtime = _with_guide(tmp_path)
+    config = _trigger_config(install, runtime)
+    assert migrate_if_needed(config)["status"] == "migrated"
+
+    again = migrate_if_needed(config)
+
+    assert again == {"status": "already_migrated"}
+
+
+def test_the_trigger_refuses_without_raising(tmp_path: Path) -> None:
+    """A migration that cannot run is a condition to surface, not a reason to
+    fail an upgrade and leave the install half-started."""
+    from ciao.workspace_reroot import migrate_if_needed, peek_receipt
+
+    install, _vault, runtime = _with_guide(tmp_path)
+    (install / "CLAUDE.md").write_text("edited, uncommitted\n", encoding="utf-8")
+
+    result = migrate_if_needed(_trigger_config(install, runtime))
+
+    assert result["status"] == "refused"
+    assert result["refusals"], "the reason has to reach the receipt"
+    assert (install / "memory-vault").is_dir(), "a refusal moves nothing"
+    # And the reason is readable by the detector afterwards.
+    assert peek_receipt(runtime)["status"] == "refused"
+
+
+def test_the_trigger_does_nothing_without_a_vault(tmp_path: Path) -> None:
+    """A fresh install still in setup has no vault to move."""
+    from ciao.workspace_reroot import migrate_if_needed
+
+    install = tmp_path / "install"
+    runtime = install / ".runtime"
+    runtime.mkdir(parents=True)
+
+    result = migrate_if_needed(_trigger_config(install, runtime))
+
+    assert result["status"] == "not_applicable"
+    assert "no vault" in result["reason"]
+
+
+def test_the_trigger_migrates_an_install_that_skipped_setup(tmp_path: Path) -> None:
+    """No REGISTERED workspaces, but the vault already has the two directories.
+
+    `workspace_names` falls back to the bootstrap default here, and that fallback
+    is load-bearing: nothing else seeds a registry for an install that never ran
+    `ciao setup`. So this install does need separating, and the trigger is right
+    to do it rather than treating an empty registry as "nothing to do".
+    """
+    from ciao.workspace_reroot import migrate_if_needed
+
+    install, _vault, runtime = _with_guide(tmp_path)
+    (runtime / "workspaces.json").unlink(missing_ok=True)
+
+    result = migrate_if_needed(_trigger_config(install, runtime, workspaces=()))
+
+    assert result["status"] == "migrated", result.get("refusals")
+    assert (install / "personal" / "memory-vault").is_dir()
+
+
+def test_a_failure_inside_apply_does_not_escape_the_trigger(tmp_path: Path) -> None:
+    """An upgrade must not die because the migration hit something unexpected.
+
+    Distinct from the refusal path: a refusal is a recorded decision, this is an
+    exception nobody predicted, and it must still leave the install started and
+    the condition surfaced rather than aborting startup.
+    """
+    from ciao import workspace_reroot
+
+    install, _vault, runtime = _with_guide(tmp_path)
+    config = _trigger_config(install, runtime)
+    real_apply = workspace_reroot.apply
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk fell over")
+
+    workspace_reroot.apply = boom
+    try:
+        result = workspace_reroot.migrate_if_needed(config)
+    finally:
+        workspace_reroot.apply = real_apply
+
+    assert result["status"] == "error"
+    assert "disk fell over" in result["reason"]
+    assert (install / "memory-vault").is_dir(), "nothing moved"
+
+
+def test_the_trigger_never_raises_on_a_broken_config(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from ciao.workspace_reroot import migrate_if_needed
+
+    result = migrate_if_needed(SimpleNamespace())
+
+    assert result["status"] == "error"
+    assert result["reason"]
+
+
+def test_startup_runs_the_trigger_between_the_sync_and_the_index(tmp_path: Path) -> None:
+    """Ordering is the caller's job and it matters both ways.
+
+    After the git sync, so the clean-tree gate judges the real tree. Before the
+    index refresh, so the indexes are rebuilt for the layout that now exists.
+    """
+    import inspect
+
+    from ciao import main
+
+    # Anchored on the actual CALLS, not on tracker labels: a commented-out
+    # `tracker.start("reroot_workspaces")` still contains the string, so a
+    # label-based check passed with the whole step disabled.
+    # Comments stripped, including trailing ones: a call moved into a comment
+    # still contains the string, so a text search over the raw source passed with
+    # the whole step disabled.
+    source = "\n".join(
+        line.split("#", 1)[0] for line in inspect.getsource(main).splitlines()
+    )
+    sync = source.index("await sync_workspace(")
+    reroot = source.index("migrate_if_needed, config")
+    index = source.index("_refresh_vault_index,")
+    assert sync < reroot < index, (sync, reroot, index)

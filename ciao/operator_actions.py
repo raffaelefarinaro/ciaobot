@@ -75,6 +75,11 @@ class OperatorAction:
     # unreachable from the one place that mentions them.
     view_label: str = ""
     view_route: str = ""
+    # Unmissable and not dismissible: a precondition the install cannot get past
+    # on its own. Deliberately NOT an app-wide lock — the one realistic cause is
+    # an uncommitted vault, and locking the app would take away the assistant the
+    # operator needs to fix it. Prominent, permanent, and retryable beats modal.
+    blocking: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """Serializable form for the API payload."""
@@ -91,6 +96,7 @@ class OperatorAction:
             "chat_prompt": self.chat_prompt,
             "view_label": self.view_label,
             "view_route": self.view_route,
+            "blocking": self.blocking,
         }
 
 
@@ -260,6 +266,79 @@ def _count(value: Any) -> int:
     if isinstance(value, (list, tuple, set, dict)):
         return len(value)
     return 0
+
+
+def _detect_workspace_unmigrated(context: DetectionContext) -> list[OperatorAction]:
+    """The re-rooting has not run, and this install needs it.
+
+    The migration is attempted automatically at every start, so reaching this
+    means it REFUSED — and the only realistic reason is uncommitted vault
+    changes, which is the gate working: `git checkout` has to stay a working undo
+    before a release rewrites someone's layout.
+
+    Silent on an install with nothing to migrate. A single workspace, or no
+    registered workspace at all, has no second root to separate from and the
+    shared layout is already correct for it.
+    """
+    config = context.config
+    runtime = context.runtime
+    lister = getattr(config, "workspace_names", None)
+    if not callable(lister):
+        return []
+    names = [n for n in lister() if n]
+    if len(names) <= 1:
+        return []
+    vault_root = getattr(config, "vault_root", None)
+    if vault_root is None or not Path(vault_root).is_dir():
+        # No shared vault to move: either already migrated or never set up.
+        return []
+    try:
+        from ciao.workspace_reroot import peek_receipt, read_receipt
+
+        if read_receipt(runtime) is not None:
+            return []
+        receipt = peek_receipt(runtime)
+    except Exception:  # noqa: BLE001 — advisory
+        logger.exception("operator actions: re-root check failed")
+        return []
+
+    refusals = list((receipt or {}).get("refusals") or [])
+    dirty = list((receipt or {}).get("dirty_tracked") or [])
+    if refusals:
+        detail = (
+            "Each workspace needs its own agent root, and the move refused: "
+            + refusals[0]
+        )
+        if dirty:
+            detail += f" First: {dirty[0]}"
+    else:
+        detail = (
+            "Each workspace needs its own agent root so its notes, guide and "
+            "skills stop being shared. The move has not run yet."
+        )
+    return [
+        OperatorAction(
+            id="workspace-unmigrated",
+            kind="workspace-unmigrated",
+            severity=0,
+            title="Workspaces are still sharing one vault",
+            detail=detail,
+            glyph="⇄",
+            workspace="",
+            blocking=True,
+            run_label="Separate them now",
+            chat_label="Ask what is blocking it",
+            chat_prompt=(
+                "This install still keeps every workspace in one shared vault, "
+                "and the automatic separation refused. Run "
+                "`ciao workspace-reroot --workspace . ` to print the plan and the "
+                "refusal, then fix the cause: commit any uncommitted vault "
+                "changes so `git checkout` stays a working undo, or empty a "
+                "destination directory that already exists. Do not pass --apply "
+                "yourself; report what is blocking it and I will press the button."
+            ),
+        )
+    ]
 
 
 def _detect_unrehomed_people(context: DetectionContext) -> list[OperatorAction]:
@@ -611,6 +690,7 @@ def _detect_review_queue(context: DetectionContext) -> list[OperatorAction]:
 
 
 _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
+    _detect_workspace_unmigrated,
     _detect_package_update,
     _detect_vault_location,
     _detect_unrehomed_people,
@@ -638,7 +718,33 @@ def run_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any
         return _run_vault_vocabulary(context)
     if action_id == "missed-schedules":
         return _run_missed_schedules(context)
+    if action_id == "workspace-unmigrated":
+        return _run_workspace_reroot(context)
     raise ValueError(f"unknown operator action id: {action_id}")
+
+
+def _run_workspace_reroot(context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Retry the re-rooting the automatic attempt refused.
+
+    Same entry point the upgrade uses, so the button cannot drift from what
+    startup does. A refusal raises, which the route renders as a failed tile
+    carrying the reason rather than silently re-offering the button.
+    """
+    from ciao.workspace_reroot import migrate_if_needed
+
+    result = migrate_if_needed(context.config)
+    status = str(result.get("status", ""))
+    if status == "migrated":
+        moves = len(result.get("applied") or [])
+        flagged = len((result.get("stranded_sessions") or {}).get("flagged") or [])
+        return result, (
+            f"Separated {len(result.get('workspaces') or [])} workspace(s): "
+            f"{moves} moves, {flagged} chat(s) will start a fresh session."
+        )
+    if status in {"already_migrated", "not_applicable"}:
+        return result, "Nothing to separate."
+    reasons = result.get("refusals") or [result.get("reason") or "no reason recorded"]
+    raise RuntimeError(str(reasons[0]))
 
 
 def _run_package_update(context: DetectionContext) -> tuple[dict[str, Any], str]:

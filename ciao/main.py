@@ -395,6 +395,28 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             tracker.fail("sync_workspace", "git sync failed")
             logger.exception("Workspace sync failed")
 
+    # Re-root the install, once, before anything reads the vault. After the git
+    # sync so the clean-tree gate judges the real tree; before the index refresh
+    # so the indexes are rebuilt for the layout that now exists; and before the
+    # server binds, so no chat is holding a session in a directory that moves.
+    tracker.start("reroot_workspaces")
+    try:
+        from ciao.workspace_reroot import migrate_if_needed
+
+        reroot = await asyncio.to_thread(migrate_if_needed, config)
+        status = str(reroot.get("status", ""))
+        if status == "migrated":
+            tracker.done("reroot_workspaces", f"{len(reroot.get('applied') or [])} moves")
+        elif status == "refused":
+            # Surfaced by the `workspace-unmigrated` action, which reads the
+            # refusal back out of the receipt and offers the retry.
+            tracker.fail("reroot_workspaces", "refused; see the housekeeping strip")
+        else:
+            tracker.done("reroot_workspaces", status or "skipped")
+    except Exception:
+        tracker.fail("reroot_workspaces", "re-root check failed")
+        logger.exception("Workspace re-root check failed")
+
     # Refresh vault index after git pull so INDEX.md reflects any remote changes
     if config.auto_vault_index:
         tracker.start("refresh_vault_index")
