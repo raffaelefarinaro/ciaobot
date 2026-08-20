@@ -404,3 +404,37 @@ def test_scan_vault_is_never_touched(tmp_path: Path) -> None:
 def test_run_action_unknown_id_raises_value_error(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         run_action("no-such-action", DetectionContext(config=_FakeConfig(tmp_path)))
+
+
+def test_unmigrated_links_tile_does_not_assert_wikilinks_it_cannot_verify(
+    tmp_path: Path,
+) -> None:
+    """The cheap predicate cannot know a wikilink exists, so it must not claim one.
+
+    This detector fires on "vault adopted, no migration receipt", which is true
+    of an adopted vault that was written in markdown links from the start and
+    has nothing to convert. It runs on every app open and window focus, so it
+    cannot call has_unmigrated_links, which walks the vault. The audit's notice
+    does run that accurate check and may legitimately stay silent here, so the
+    two surfaces disagree by design and the tile's wording has to be honest
+    about what it actually knows.
+    """
+    config = _FakeConfig(tmp_path, workspaces=("personal",))
+    config.vault_mode = "existing"
+    root = config.workspace_vault_root("personal")
+    root.mkdir(parents=True, exist_ok=True)
+    # A markdown link only: nothing to migrate.
+    (root / "Note.md").write_text("[Peter](./People/Peter.md)\n", encoding="utf-8")
+
+    context = DetectionContext(
+        config=config, runtime_dir=_runtime(tmp_path), schedule_store=_Store([])
+    )
+    tiles = [a for a in detect_actions(context) if a.kind == "unmigrated-links"]
+
+    assert tiles, "the tile should still offer the preview"
+    action = tiles[0]
+    assert "may still" in action.title
+    # It must not state as fact that wikilinks are present.
+    assert "still uses the retired" not in action.title
+    assert "still contains" not in action.detail
+

@@ -386,10 +386,21 @@ def _detect_unmigrated_links(context: DetectionContext) -> list[OperatorAction]:
             id="vault-unmigrated-links",
             kind="unmigrated-links",
             severity=20,
-            title="The vault still uses the retired wikilink dialect",
+            # Worded conditionally on purpose. This detector runs on every app
+            # open and window focus, so it cannot call has_unmigrated_links,
+            # which walks the vault. It knows only that the vault was adopted
+            # and no migration receipt exists, which does NOT establish that a
+            # wikilink is present: an adopted vault written in markdown links
+            # from the start satisfies both and contains nothing to convert.
+            # The audit's own notice does run the accurate check and may
+            # legitimately stay silent where this tile speaks.
+            title="The vault may still use the retired wikilink dialect",
             detail=(
-                "An adopted vault still contains `[[wikilinks]]`, which nothing "
-                "reads as graph edges, backlinks, or clickable links."
+                "This vault was adopted and no link migration has been recorded, "
+                "so it may still contain `[[wikilinks]]`, which nothing reads as "
+                "graph edges, backlinks, or clickable links. The preview below "
+                "reports exactly what would change, and finds nothing if the "
+                "vault is already clean."
             ),
             glyph="🔗",
             workspace="",
