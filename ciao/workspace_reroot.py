@@ -254,8 +254,8 @@ def _run_git(root: Path, *args: str) -> tuple[int, str]:
     return proc.returncode, (proc.stdout + proc.stderr).rstrip()
 
 
-def dirty_tracked_paths(install_root: Path, relative: str) -> list[str]:
-    """Tracked files under ``relative`` with staged or unstaged modifications.
+def dirty_tracked_paths(install_root: Path, *relatives: str) -> list[str]:
+    """Tracked files under ``relatives`` with staged or unstaged modifications.
 
     Scoped to TRACKED changes on purpose (P10.2). The reference install carries
     roughly 700 untracked ``Logs/Chats/chat-*`` directories at any moment, so a
@@ -263,8 +263,20 @@ def dirty_tracked_paths(install_root: Path, relative: str) -> list[str]:
     ever migrate. What the gate protects is ``git checkout`` staying a working
     undo for content that is under version control; an untracked chat log has no
     committed state to lose.
+
+    Every path the migration moves has to be covered, not just the vault. The
+    skill catalog moves too (P10.5), and a tracked file carried across with
+    uncommitted edits is precisely the case where ``git checkout`` stops being a
+    working undo.
     """
-    code, out = _run_git(install_root, "status", "--porcelain", "--untracked-files=no", "--", relative)
+    paths = [
+        relative for relative in relatives if relative and (Path(install_root) / relative).exists()
+    ]
+    if not paths:
+        return []
+    code, out = _run_git(
+        install_root, "status", "--porcelain", "--untracked-files=no", "--", *paths
+    )
     if code != 0 or not out:
         return []
     return [line[3:].strip() for line in out.splitlines() if line.strip()]
@@ -278,8 +290,15 @@ def apply(
     vault_root: Path,
     workspaces: list[str],
     runtime_root: Path,
+    *,
+    primary: str,
 ) -> dict[str, Any]:
     """Re-root every registered workspace, or none of them.
+
+    ``primary`` is required rather than derived. Which root inherits the shared
+    guide's regions and the whole skill catalog is the single most consequential
+    choice in the migration, and a caller that has not decided it must not be
+    given a default that looks like a decision.
 
     Every move goes through ``git mv`` so history follows the file, which is what
     makes ``git log --follow`` still work afterwards and what keeps the operation
@@ -300,20 +319,36 @@ def apply(
     runtime_root = Path(runtime_root)
 
     result = plan(install_root, vault_root, workspaces)
+    triage = plan_skills_triage(install_root, primary)
     payload = result.as_dict()
+    payload["primary"] = primary
+    payload["skills_triage"] = triage.as_dict()
     payload["recorded_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
-    if result.refused:
+    if result.refused or triage.refusals:
         payload["status"] = "refused"
+        payload["refused"] = True
+        payload["refusals"] = [*result.refusals, *triage.refusals]
+        payload["receipt_path"] = str(write_receipt(runtime_root, payload))
+        return payload
+    if primary not in result.workspaces:
+        payload["status"] = "refused"
+        payload["refused"] = True
+        payload["refusals"] = [
+            f"primary workspace '{primary}' is not registered, so the guide "
+            "regions and the skill catalog have nowhere to go"
+        ]
         payload["receipt_path"] = str(write_receipt(runtime_root, payload))
         return payload
 
-    dirty = dirty_tracked_paths(install_root, vault_root.name)
+    moved_relatives = [vault_root.name, *(m.source for m in triage.moves)]
+    dirty = dirty_tracked_paths(install_root, *moved_relatives)
     if dirty:
         payload["status"] = "refused"
         payload["refusals"] = [
-            f"{len(dirty)} tracked file(s) under {vault_root.name}/ have uncommitted "
-            "changes; commit or stash them so git checkout stays a working undo"
+            f"{len(dirty)} tracked file(s) in "
+            f"{', '.join(moved_relatives)} have uncommitted changes; commit or "
+            "stash them so git checkout stays a working undo"
         ]
         payload["dirty_tracked"] = dirty[:20]
         payload["refused"] = True
@@ -324,7 +359,11 @@ def apply(
     payload["git_head_before"] = head if code == 0 else ""
 
     applied: list[dict[str, str]] = []
-    for move in result.moves:
+    # The skill catalog moves through the same loop as the vaults, so one failure
+    # rolls back the whole run and one receipt reverses it. A catalog left behind
+    # by a successful vault migration would be a half-rooted install by another
+    # name: the primary root would load no custom skill at all.
+    for move in [*result.moves, *triage.moves]:
         source = install_root / move.source
         destination = install_root / move.destination
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -372,6 +411,13 @@ def apply(
     payload["registry_before"] = registry_before
     payload["registry_after"] = registry_after
 
+    primary_vault = next(
+        (m.destination for m in result.moves if m.workspace == primary), ""
+    )
+    payload["created_files"] = write_skills_triage(
+        install_root, triage, result.workspaces, primary_vault
+    )
+
     payload["status"] = "migrated"
     payload["applied"] = applied
     payload["stashed_files"] = stashed
@@ -391,6 +437,15 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     CLI only. Reverting the architecture is not a housekeeping button, and the
     only reason it exists is so the forward migration is provably exact rather
     than merely tested.
+
+    "Byte-identical" covers what the migration MOVED and CREATED. It does not
+    cover the derived rebuilds that run after it: ``rebuild_indexes`` rewrites
+    each root's ``INDEX.md`` without the path prefix and writes a per-root
+    ``VOCABULARY.md``, and undoing leaves those in the restored vault. On the
+    reference install that is exactly two modified and two new files, all of them
+    regenerated aggregates, and ``git status`` names them. Un-deriving them here
+    would mean the receipt carrying a copy of every index it replaced, which buys
+    nothing: they are rebuilt from the notes on the next sync either way.
     """
     install_root = Path(install_root).resolve()
     runtime_root = Path(runtime_root)
@@ -410,6 +465,21 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
             target.parent.mkdir(parents=True, exist_ok=True)
             backup.replace(target)
             restored.append(entry["source"])
+
+    # Files the migration CREATED are removed before the moves are reversed,
+    # because they live inside the directories about to move back. Removed by
+    # recorded path rather than by pattern, so a file the user wrote into the
+    # same folder afterwards is never touched.
+    removed: list[str] = []
+    for relative in receipt.get("created_files", []):
+        target = install_root / relative
+        if target.is_file():
+            target.unlink()
+            removed.append(relative)
+            _prune_empty_parents(install_root, target.parent)
+    source_dir = install_root / _SKILLS_SRC
+    if source_dir.is_dir() and not any(source_dir.iterdir()):
+        source_dir.rmdir()
 
     reversed_moves: list[str] = []
     for entry in reversed(receipt.get("applied", [])):
@@ -440,7 +510,25 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         "status": "undone",
         "reversed": reversed_moves,
         "restored_stashed": restored,
+        "removed_created": removed,
     }
+
+
+def _prune_empty_parents(install_root: Path, directory: Path) -> None:
+    """Drop directories the migration created and then emptied.
+
+    Without this, undoing leaves an empty ``Workspace/`` inside the vault it
+    moves back. No file changes, so a hash comparison still passes — which is
+    exactly why it has to be handled here rather than caught by the round-trip
+    test.
+    """
+    install_root = Path(install_root).resolve()
+    current = directory.resolve()
+    while current != install_root and install_root in current.parents:
+        if not current.is_dir() or any(current.iterdir()):
+            return
+        current.rmdir()
+        current = current.parent
 
 
 def remove_receipt(runtime_root: Path) -> bool:
@@ -652,18 +740,32 @@ def rebuild_indexes(install_root: Path, workspaces: list[str]) -> dict[str, Any]
     return out
 
 
-def rebuild_search_index(install_root: Path, workspaces: list[str]) -> dict[str, Any]:
+def rebuild_search_index(
+    install_root: Path,
+    workspaces: list[str],
+    *,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
     """Drop and rebuild the full-text index against the new paths.
 
     Every row in the old database points at a path under the shared vault, so
     incremental repair is not possible: the rows are not stale, they are wrong.
     Dropping is the only honest option.
+
+    ``db_path`` exists because ``fts_search.get_db_path`` resolves from the
+    ambient ``CIAO_MEMORY_DIR`` (defaulting to ``~/.ciao``) and there is no
+    per-install search database to derive from an install root. So migrating an
+    install that is NOT the ambient one would otherwise drop the ambient
+    install's index — the same environment leak P2 found in the os-audit command.
+    A caller that knows which database belongs to the install it is migrating
+    must say so; the default is the ambient one, which is correct for the normal
+    case of migrating the install you are running in.
     """
     import sqlite3
 
     from ciao.fts_search import get_db_path, index_vault, init_db
 
-    db = get_db_path()
+    db = Path(db_path) if db_path is not None else get_db_path()
     result: dict[str, Any] = {"database": str(db), "indexed": [], "errors": []}
     try:
         if db.exists():
@@ -689,3 +791,308 @@ def rebuild_search_index(install_root: Path, workspaces: list[str]) -> dict[str,
     finally:
         conn.close()
     return result
+
+
+# -- P10.5: triage the skill catalog, never copy it --------------------------
+
+# The reference catalog is 20 skills of which 16 are work-scoped. Copying it into
+# every root would rebuild the global catalog this release exists to end, and the
+# migration cannot decide which skill belongs where: that is a judgement about
+# the user's own work, exactly like the CLAUDE.md regions in P10.4. So the whole
+# catalog moves to the primary root, where it keeps behaving as it does today,
+# and a triage sheet lists every skill with its destination blank.
+#
+# Nothing packaged needs migrating: `sync_workspace_skills` reinstalls stock
+# skills into each root's `.claude/skills` from package resources on every sync.
+_SKILL_TRIAGE_RELATIVE = "Workspace/Skill-Triage.md"
+_SKILLS_SRC = "skills-src"
+
+# `skills-src/` is created for the user to promote the genuinely general few
+# into as they triage. The design record says "create it empty"; it gets a README
+# instead, because git cannot track an empty directory and this migration's undo
+# is git-based, so an empty directory would be invisible to every check that
+# proves the migration exact.
+_SKILLS_SRC_README = """\
+# skills-src
+
+Shared skill sources, mirrored into every agent root. **Not a workspace**: it has
+no vault, no guide and no sessions of its own.
+
+Put a skill here only when it is genuinely general — it applies in every
+workspace. Anything tied to one workspace's tools, accounts or vocabulary belongs
+in that root's own `skills/` directory instead, which is where the whole
+pre-migration catalog now lives.
+
+See `Workspace/Skill-Triage.md` in the primary root's vault for the catalog that
+was moved and still needs sorting.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class SkillTriageEntry:
+    """One skill awaiting a destination decision."""
+
+    name: str
+    origin: str
+    description: str
+    note: str = ""
+
+
+@dataclass(slots=True)
+class SkillsTriage:
+    """What moves to the primary root, and what the user still has to decide."""
+
+    primary: str
+    moves: list[Move] = field(default_factory=list)
+    entries: list[SkillTriageEntry] = field(default_factory=list)
+    refusals: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "primary": self.primary,
+            "moves": [
+                {"source": m.source, "destination": m.destination, "workspace": m.workspace}
+                for m in self.moves
+            ],
+            "entries": [
+                {
+                    "name": e.name,
+                    "origin": e.origin,
+                    "description": e.description,
+                    "note": e.note,
+                }
+                for e in self.entries
+            ],
+            "refusals": list(self.refusals),
+        }
+
+
+def plan_skills_triage(install_root: Path, primary: str) -> SkillsTriage:
+    """What the skill catalog does at migration time. Never writes.
+
+    Two things move, and both go to the primary root:
+
+    ``skills/`` is the custom catalog, mirrored into ``.claude/skills`` by
+    ``sync_skills._rebuild_custom_skill_links`` from whichever root it sits in.
+
+    ``skills-lock.json`` is the other half of the same non-stock catalog.
+    ``_refresh_upstream_skills`` reads it from the root it is syncing, so leaving
+    it at the install root would strand every upstream skill at a path no root
+    ever reads. Moving it is also self-healing: the upstream copies live under
+    the old ``.claude/skills`` and are not moved, so the primary's next sync sees
+    them as missing and refetches them from the lock.
+    """
+    install_root = Path(install_root).resolve()
+    triage = SkillsTriage(primary=primary)
+    if not primary:
+        triage.refusals.append(
+            "no primary workspace, so there is no root to hold the skill catalog"
+        )
+        return triage
+
+    for relative in ("skills", "skills-lock.json"):
+        source = install_root / relative
+        if not source.exists():
+            continue
+        destination = install_root / primary / relative
+        if destination.exists():
+            triage.refusals.append(
+                f"destination for {relative} already exists: {destination}"
+            )
+            continue
+        triage.moves.append(
+            Move(
+                source=relative,
+                destination=f"{primary}/{relative}",
+                workspace=primary,
+            )
+        )
+
+    triage.entries = _skill_triage_entries(install_root)
+    return triage
+
+
+def _skill_triage_entries(install_root: Path) -> list[SkillTriageEntry]:
+    """Every non-stock skill in the catalog, described well enough to triage.
+
+    Descriptions come from ``skills_inventory.build_skill_inventory`` — the same
+    enumerator the Settings page uses — rather than a second frontmatter parser.
+
+    But the inventory keys on ``*/SKILL.md``, so a catalog DIRECTORY without one
+    is invisible to it while still being moved by the migration. The reference
+    install has exactly one such directory, whose only content is an ignored
+    ``__pycache__``. Listing the directories from disk and taking descriptions
+    from the inventory is what keeps this sheet a complete account of what moved,
+    which is the same conservation rule the vault classification follows.
+    """
+    from ciao.skills_inventory import build_skill_inventory  # noqa: PLC0415
+
+    described: dict[str, dict[str, Any]] = {}
+    try:
+        inventory = build_skill_inventory(install_root, include_content=False)
+    except Exception:  # noqa: BLE001 — a broken inventory must not block the plan
+        inventory = {"skills": []}
+    for skill in inventory.get("skills", []):
+        if not isinstance(skill, dict) or skill.get("label") == "stock":
+            continue
+        name = str(skill.get("name") or "")
+        if name:
+            described[name] = skill
+
+    entries: list[SkillTriageEntry] = []
+    listed: set[str] = set()
+    catalog = install_root / "skills"
+    if catalog.is_dir():
+        for entry in sorted(catalog.iterdir(), key=lambda p: p.name):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            listed.add(entry.name)
+            skill = described.get(entry.name, {})
+            entries.append(
+                SkillTriageEntry(
+                    name=entry.name,
+                    origin="skills/",
+                    description=str(skill.get("description") or ""),
+                    note=(
+                        ""
+                        if (entry / "SKILL.md").is_file()
+                        else "no SKILL.md, so no root loads it"
+                    ),
+                )
+            )
+
+    for name, skill in sorted(described.items()):
+        if name in listed:
+            continue
+        entries.append(
+            SkillTriageEntry(
+                name=name,
+                origin=str(skill.get("source") or "skills-lock.json"),
+                description=str(skill.get("description") or ""),
+                note="",
+            )
+        )
+    return entries
+
+
+def format_skill_triage(triage: SkillsTriage, workspaces: list[str]) -> str:
+    """The triage sheet: every skill listed, every destination blank.
+
+    Deliberately not a proposal queue. A proposal is a claim the agent believes
+    and asks to have confirmed; this sheet makes no claim at all, because a
+    default destination is exactly the guess that would rebuild the global
+    catalog. Blank means blank.
+    """
+    choices = " · ".join([*sorted(workspaces), _SKILLS_SRC, "delete"])
+    stamp = datetime.now(UTC).strftime("%Y-%m-%d")
+    lines = [
+        "---",
+        "type: note",
+        "title: Skill triage after re-rooting",
+        (
+            "description: Every skill from the pre-migration catalog, with its "
+            "destination root left blank on purpose. Fill one in per row."
+        ),
+        "tags: [ciao, skills, migration, triage]",
+        f"created: {stamp}",
+        f"updated: {stamp}",
+        "status: open",
+        "---",
+        "",
+        "# Skill triage after re-rooting",
+        "",
+        (
+            f"The whole catalog moved to `{triage.primary}/`, which is where it "
+            "behaves exactly as it did before the migration. Nothing was copied "
+            "into the other roots: with 16 of 20 skills scoped to one workspace, "
+            "copying would have rebuilt the global catalog the re-rooting exists "
+            "to end."
+        ),
+        "",
+        "**Nothing here is a suggestion.** The destination column is blank because",
+        "deciding which workspace a skill belongs to is a judgement about your own",
+        "work, and a guess here misfiles a skill the same way the shared vault",
+        "misfiled contacts.",
+        "",
+        "## How to move one",
+        "",
+        f"1. Write one of `{choices}` in the **Destination** column.",
+        (
+            "2. `git mv` the directory from "
+            f"`{triage.primary}/skills/<name>` to `<destination>/skills/<name>`, "
+            f"or to `{_SKILLS_SRC}/<name>` when it genuinely applies everywhere."
+        ),
+        (
+            "3. Run a skill sync for both roots. The links under "
+            "`.claude/skills` are rebuilt from `skills/`, so nothing else needs "
+            "editing."
+        ),
+        (
+            "4. Upstream rows (anything not sourced from `skills/`) are pinned in "
+            "`skills-lock.json`, which moved with the catalog. Move the lock "
+            "entry, not the directory: the copy under `.claude/skills` is "
+            "refetched."
+        ),
+        "",
+        "## Catalog",
+        "",
+        "| Skill | Source | Destination | What it does |",
+        "| --- | --- | --- | --- |",
+    ]
+    for entry in triage.entries:
+        description = _one_cell(entry.description) or "—"
+        if entry.note:
+            description = f"{description} _({entry.note})_"
+        lines.append(f"| `{entry.name}` | {_one_cell(entry.origin)} |  | {description} |")
+    lines.extend(
+        [
+            "",
+            f"{len(triage.entries)} skill(s) to triage.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _one_cell(text: str) -> str:
+    """Collapse text to one markdown table cell.
+
+    A newline ends the row and a bare pipe ends the cell, so a SKILL.md
+    description containing either would silently shred the table. The
+    descriptions in the reference catalog are multi-sentence and several are YAML
+    block scalars, so this is the normal case rather than an edge one.
+    """
+    flattened = " ".join((text or "").split())
+    return flattened.replace("|", "\\|")
+
+
+def write_skills_triage(
+    install_root: Path,
+    triage: SkillsTriage,
+    workspaces: list[str],
+    primary_vault: str,
+) -> list[str]:
+    """Create ``skills-src/`` and the triage sheet. Returns what it created.
+
+    The paths come back so the receipt can record them and ``undo`` can remove
+    exactly what the migration added, rather than deleting by pattern.
+    """
+    created: list[str] = []
+    install_root = Path(install_root)
+
+    source_dir = install_root / _SKILLS_SRC
+    source_dir.mkdir(parents=True, exist_ok=True)
+    readme = source_dir / "README.md"
+    if not readme.exists():
+        readme.write_text(_SKILLS_SRC_README, encoding="utf-8")
+        created.append(f"{_SKILLS_SRC}/README.md")
+
+    # No catalog means no sheet. A triage document listing nothing is noise in a
+    # vault, and a fresh install has nothing to sort.
+    if triage.entries and primary_vault:
+        doc = install_root / primary_vault / _SKILL_TRIAGE_RELATIVE
+        if not doc.exists():
+            doc.parent.mkdir(parents=True, exist_ok=True)
+            doc.write_text(format_skill_triage(triage, workspaces), encoding="utf-8")
+            created.append(f"{primary_vault}/{_SKILL_TRIAGE_RELATIVE}")
+    return created

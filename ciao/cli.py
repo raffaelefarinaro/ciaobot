@@ -1780,7 +1780,9 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
 
     if args.apply:
-        result = workspace_reroot.apply(workspace, vault, names, runtime)
+        result = workspace_reroot.apply(
+            workspace, vault, names, runtime, primary=config.primary_workspace()
+        )
         if result["status"] == "migrated":
             result["indexes"] = workspace_reroot.rebuild_indexes(workspace, names)
             result["search"] = workspace_reroot.rebuild_search_index(workspace, names)
@@ -2757,9 +2759,11 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Move each registered workspace's vault into its own agent root. "
             "Prints the plan by default and changes nothing; --rehearse records a "
-            "receipt without moving; --apply performs the migration and rebuilds "
-            "each root's index and search database; --undo reverses a completed "
-            "migration to a byte-identical tree."
+            "receipt without moving; --apply performs the migration, moves the "
+            "skill catalog to the primary root with a blank triage sheet, and "
+            "rebuilds each root's index and search database; --undo restores the "
+            "layout exactly, leaving only the rebuilt per-root index and "
+            "vocabulary behind for git status to report."
         ),
     )
     reroot_parser.add_argument("--workspace", type=Path, default=None, help="Install root.")

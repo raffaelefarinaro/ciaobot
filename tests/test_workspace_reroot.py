@@ -20,7 +20,9 @@ from pathlib import Path
 from ciao.workspace_reroot import (
     apply,
     dirty_tracked_paths,
+    format_skill_triage,
     plan,
+    plan_skills_triage,
     read_receipt,
     rehearse,
     split_guide,
@@ -281,7 +283,7 @@ def test_apply_then_undo_restores_a_byte_identical_tree(tmp_path: Path) -> None:
     install, vault, runtime = _git_install(tmp_path)
     before = _tree_hashes(install / "memory-vault")
 
-    applied = apply(install, vault, ["personal", "work"], runtime)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
     assert applied["status"] == "migrated", applied.get("refusals")
     assert not (install / "memory-vault").exists()
     assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
@@ -298,7 +300,7 @@ def test_apply_then_undo_restores_a_byte_identical_tree(tmp_path: Path) -> None:
 def test_apply_preserves_history_so_git_log_follow_works(tmp_path: Path) -> None:
     install, vault, runtime = _git_install(tmp_path)
 
-    apply(install, vault, ["personal", "work"], runtime)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
     _git(install, "add", "-A")
     _git(install, "commit", "-m", "reroot")
 
@@ -311,7 +313,7 @@ def test_apply_refuses_on_modified_tracked_files(tmp_path: Path) -> None:
     install, vault, runtime = _git_install(tmp_path)
     (vault / "personal" / "People" / "Peter.md").write_text("edited\n", encoding="utf-8")
 
-    applied = apply(install, vault, ["personal", "work"], runtime)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
 
     assert applied["status"] == "refused"
     assert any("uncommitted" in r for r in applied["refusals"])
@@ -331,7 +333,7 @@ def test_apply_does_not_refuse_on_untracked_files(tmp_path: Path) -> None:
     fresh.mkdir(parents=True)
     (fresh / "session.md").write_text("new\n", encoding="utf-8")
 
-    applied = apply(install, vault, ["personal", "work"], runtime)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
 
     assert applied["status"] == "migrated", applied.get("refusals")
     assert (install / "Logs" / "Chats" / "chat-untracked" / "session.md").is_file()
@@ -341,7 +343,7 @@ def test_apply_is_all_or_nothing_when_a_workspace_has_no_vault(tmp_path: Path) -
     """Every registered workspace re-roots or none does."""
     install, vault, runtime = _git_install(tmp_path, workspaces=("personal",))
 
-    applied = apply(install, vault, ["personal", "work"], runtime)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
 
     assert applied["status"] == "refused"
     assert (install / "memory-vault" / "personal").is_dir()
@@ -351,7 +353,7 @@ def test_apply_is_all_or_nothing_when_a_workspace_has_no_vault(tmp_path: Path) -
 def test_a_migrated_receipt_records_the_reverse_map(tmp_path: Path) -> None:
     install, vault, runtime = _git_install(tmp_path)
 
-    apply(install, vault, ["personal", "work"], runtime)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
     receipt = read_receipt(runtime)
 
     assert receipt is not None
@@ -505,7 +507,7 @@ def test_apply_repoints_the_registry_at_the_new_roots(tmp_path: Path) -> None:
         {"name": "work", "vault_root": "memory-vault/work"},
     ])
 
-    apply(install, vault, ["personal", "work"], runtime)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
 
     after = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
     roots = {e["name"]: e["vault_root"] for e in after}
@@ -523,7 +525,7 @@ def test_undo_restores_the_previous_registry(tmp_path: Path) -> None:
     ]
     _registry(runtime, original)
 
-    apply(install, vault, ["personal", "work"], runtime)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
     undo(install, runtime)
 
     after = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
@@ -554,8 +556,256 @@ def test_agent_root_flips_only_after_a_migrated_receipt(tmp_path: Path) -> None:
     reset_reroot_cache()
     assert config.agent_root("work") == install, "flipped before migrating"
 
-    apply(install, vault, ["personal", "work"], runtime)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
     assert config.agent_root("work") == install / "work"
 
     undo(install, runtime)
     assert config.agent_root("work") == install, "stayed flipped after undo"
+
+
+# -- P10.5: skills triage ----------------------------------------------------
+#
+# The reference install's catalog has a shape no fixture had before: a directory
+# with NO SKILL.md (its only content is an ignored __pycache__), which the
+# Settings inventory cannot see because it globs `*/SKILL.md`. It still moves, so
+# the triage sheet has to account for it or the sheet is an incomplete record of
+# what the migration did.
+
+
+def _catalog(install: Path) -> None:
+    """A skill catalog shaped like the real one."""
+    skills = install / "skills"
+    (skills / "jira-tickets").mkdir(parents=True)
+    (skills / "jira-tickets" / "SKILL.md").write_text(
+        "---\nname: jira-tickets\ndescription: |\n  File a Jira ticket.\n  Work only.\n---\n# Jira\n",
+        encoding="utf-8",
+    )
+    (skills / "linkedin-writing").mkdir()
+    (skills / "linkedin-writing" / "SKILL.md").write_text(
+        "---\nname: linkedin-writing\ndescription: Draft a post | with a pipe\n---\n# LinkedIn\n",
+        encoding="utf-8",
+    )
+    # The husk: no SKILL.md, so no root ever loads it, but it is still on disk.
+    (skills / "adversarial-review" / "scripts").mkdir(parents=True)
+    (skills / "adversarial-review" / "scripts" / "run.py").write_text("x\n", encoding="utf-8")
+    (skills / "README.md").write_text("catalog\n", encoding="utf-8")
+    (install / "skills-lock.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "skills": {
+                    "defuddle": {
+                        "source": "kepano/obsidian-skills",
+                        "sourceType": "github",
+                        "skillPath": "skills/defuddle/SKILL.md",
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _install_hashes(install: Path) -> dict[str, str]:
+    """Every tracked-or-not file in the install except git and runtime state."""
+    out: dict[str, str] = {}
+    for path in sorted(install.rglob("*")):
+        relative = path.relative_to(install)
+        if relative.parts and relative.parts[0] in {".git", ".runtime"}:
+            continue
+        if path.is_file():
+            out[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return out
+
+
+def test_triage_lists_every_catalog_directory_including_one_without_a_skill_md(
+    tmp_path: Path,
+) -> None:
+    install, _vault_root, _runtime = _git_install(tmp_path)
+    _catalog(install)
+
+    triage = plan_skills_triage(install, "personal")
+
+    names = [entry.name for entry in triage.entries]
+    assert names == ["adversarial-review", "jira-tickets", "linkedin-writing", "defuddle"]
+    husk = next(entry for entry in triage.entries if entry.name == "adversarial-review")
+    assert husk.note, "a directory with no SKILL.md must be reported, not silently moved"
+    described = next(entry for entry in triage.entries if entry.name == "jira-tickets")
+    assert "File a Jira ticket" in described.description
+    assert triage.refusals == []
+
+
+def test_triage_planning_is_read_only(tmp_path: Path) -> None:
+    install, _vault_root, _runtime = _git_install(tmp_path)
+    _catalog(install)
+    before = _install_hashes(install)
+
+    plan_skills_triage(install, "personal")
+
+    assert _install_hashes(install) == before
+
+
+def test_triage_refuses_when_the_primary_already_holds_a_catalog(tmp_path: Path) -> None:
+    install, _vault_root, _runtime = _git_install(tmp_path)
+    _catalog(install)
+    (install / "personal" / "skills").mkdir(parents=True)
+
+    triage = plan_skills_triage(install, "personal")
+
+    assert any("skills" in reason for reason in triage.refusals)
+
+
+def test_triage_refuses_without_a_primary(tmp_path: Path) -> None:
+    install, _vault_root, _runtime = _git_install(tmp_path)
+    _catalog(install)
+
+    assert plan_skills_triage(install, "").refusals
+
+
+def test_no_catalog_at_all_is_not_a_refusal(tmp_path: Path) -> None:
+    install, _vault_root, _runtime = _git_install(tmp_path)
+
+    triage = plan_skills_triage(install, "personal")
+
+    assert triage.refusals == []
+    assert triage.moves == []
+    assert triage.entries == []
+
+
+def test_apply_moves_the_catalog_to_the_primary_and_copies_it_nowhere(
+    tmp_path: Path,
+) -> None:
+    """The whole point of triage: exactly one root gets the catalog."""
+    install, vault, runtime = _git_install(tmp_path)
+    _catalog(install)
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "catalog")
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "migrated", result.get("refusals")
+    assert (install / "personal" / "skills" / "jira-tickets" / "SKILL.md").is_file()
+    assert (install / "personal" / "skills-lock.json").is_file()
+    assert not (install / "skills").exists()
+    assert not (install / "work" / "skills").exists()
+    assert not (install / "work" / "skills-lock.json").exists()
+    # The husk's untracked content comes along, because the move is a rename.
+    assert (install / "personal" / "skills" / "adversarial-review" / "scripts" / "run.py").is_file()
+
+
+def test_apply_writes_a_triage_sheet_with_every_destination_blank(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    _catalog(install)
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "catalog")
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    sheet = install / "personal" / "memory-vault" / "Workspace" / "Skill-Triage.md"
+    assert sheet.is_file()
+    assert str(sheet.relative_to(install)) in result["created_files"]
+    text = sheet.read_text(encoding="utf-8")
+    rows = [line for line in text.splitlines() if line.startswith("| `")]
+    assert len(rows) == 4, rows
+    for row in rows:
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        assert cells[2] == "", f"destination must be blank, got {cells[2]!r}"
+
+
+def test_the_sheet_accounts_for_every_directory_that_moved(tmp_path: Path) -> None:
+    """Conservation, keyed on the directories on disk rather than on the inventory."""
+    install, vault, runtime = _git_install(tmp_path)
+    _catalog(install)
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "catalog")
+
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    moved = {
+        path.name
+        for path in (install / "personal" / "skills").iterdir()
+        if path.is_dir()
+    }
+    text = (install / "personal" / "memory-vault" / "Workspace" / "Skill-Triage.md").read_text(
+        encoding="utf-8"
+    )
+    for name in moved:
+        assert f"| `{name}` |" in text, f"{name} moved but is missing from the sheet"
+
+
+def test_a_pipe_in_a_description_does_not_shred_the_table(tmp_path: Path) -> None:
+    install, _vault_root, _runtime = _git_install(tmp_path)
+    _catalog(install)
+
+    text = format_skill_triage(plan_skills_triage(install, "personal"), ["personal", "work"])
+
+    row = next(line for line in text.splitlines() if line.startswith("| `linkedin-writing`"))
+    # Escaped pipes are still `|` characters, so count the separators only.
+    assert row.replace("\\|", "").count("|") == 5, row
+    assert "\\|" in row
+    assert "with a pipe" in row
+
+
+def test_apply_creates_skills_src_as_a_source_not_a_workspace(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    _catalog(install)
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "catalog")
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    source_dir = install / "skills-src"
+    assert (source_dir / "README.md").is_file()
+    assert "skills-src/README.md" in result["created_files"]
+    assert not (source_dir / "memory-vault").exists()
+    assert not (source_dir / "CLAUDE.md").exists()
+
+
+def test_apply_refuses_when_the_primary_is_not_registered(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="archive")
+
+    assert result["status"] == "refused"
+    assert any("archive" in reason for reason in result["refusals"])
+    assert (install / "memory-vault").is_dir(), "a refusal must move nothing"
+
+
+def test_apply_refuses_on_a_dirty_tracked_skill(tmp_path: Path) -> None:
+    """The clean-tree gate covers everything that moves, not only the vault."""
+    install, vault, runtime = _git_install(tmp_path)
+    _catalog(install)
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "catalog")
+    (install / "skills" / "jira-tickets" / "SKILL.md").write_text("edited\n", encoding="utf-8")
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "refused"
+    assert result["dirty_tracked"] == ["skills/jira-tickets/SKILL.md"]
+    assert (install / "skills").is_dir()
+
+
+def test_apply_then_undo_restores_the_whole_install_byte_identical(tmp_path: Path) -> None:
+    """Round trip over the whole install, not just the vault.
+
+    The vault-only version of this test cannot see a leftover skills-src/, a
+    stranded triage sheet, or a catalog that did not come back.
+    """
+    install, vault, runtime = _git_install(tmp_path)
+    _catalog(install)
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "catalog")
+    before = _install_hashes(install)
+
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+
+    result = undo(install, runtime)
+    assert result["status"] == "undone", result
+
+    assert _install_hashes(install) == before
+    assert not (install / "skills-src").exists()
+    assert not (install / "personal").exists()
+    assert not (install / "memory-vault" / "personal" / "Workspace").exists()
