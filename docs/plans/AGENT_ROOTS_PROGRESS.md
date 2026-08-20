@@ -42,7 +42,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | delegate | DONE | commit 001639e6 |
 | P9 Per-root memory + MCP allowlist | delegate | DONE | P9.1+P9.2 a0d55751; P9.3 beaeda6f |
-| P10 The cut | coordinator | IN PROGRESS | P10.1 plan half DONE 970bd3d0; apply half next |
+| P10 The cut | coordinator | IN PROGRESS | plan 970bd3d0, apply+undo 59dda6b0; P10.4-P10.11 remain |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | coordinator | DONE | 14 tests, commit 970bd3d0 |
 | V3 Real-data rehearsal | coordinator | DONE | APFS clone, 2318 files, zero refusals |
@@ -638,3 +638,36 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
    P10.10 `_bootstrap_workspace`, P10.11 repair/undo.
 4. V5 end-to-end drain through the new UI.
 Every step rehearsed in the sandbox before the live install, per the rule the P9.3 incident set.
+- 2026-08-20 — **apply() and undo() landed (`59dda6b0`), round trip proved on real data.**
+  `git mv` per move so history follows; a failed move rolls back what the run already did.
+  Clean-tree gate scoped to TRACKED changes per P10.2. Generated root notes AND the ignorable
+  cruft are stashed into the runtime dir rather than deleted, so undo is byte-identical with no
+  caveats: an earlier version recreated the Finder sidecar empty and failed the round-trip test by
+  exactly one file. `.obsidian` promoted beside the workspaces so the vault directory ends up
+  genuinely empty and is removed.
+- 2026-08-20 — Verified on the APFS clone, **2318 files**:
+  refused while 18 tracked files were dirty and moved nothing; after committing them migrated in
+  0.1s with 5 moves and 4 stashed; conservation exact (2314 under the new roots + 4 stashed);
+  **zero files changed content**, compared blob-by-blob against `HEAD~1` through the move table;
+  `git log --follow` still reaches the original history; undo restored all 2318, cleared the
+  receipt and removed the new roots; the live vault was byte-identical throughout.
+- 2026-08-20 — Bug found by running the gate on real data, not by a test:
+  `_run_git` stripped its combined output, and `git status --porcelain` encodes index and worktree
+  state in columns 1-2, so stripping ate the leading space of the first line and truncated that
+  path to `emory-vault/...`. A refusal message would have named a file that does not exist. Fixed
+  to rstrip only, with a regression test asserting every reported path resolves on disk.
+- 2026-08-20 — **I made the exact mistake this ledger warned about.** My first real-data
+  conservation count came up 5 short, because I keyed paths relative to each root so duplicate
+  stems collided: the census reports 16 duplicate stems and both workspaces hold `INDEX.md` and
+  `MEMORY.md`. Re-keyed on full path and the count was exact. The V1 note said "conservation checks
+  must key on full path and never on stem" and I still did it. Worth remembering that writing a
+  lesson down is not the same as applying it.
+- 2026-08-20 — **The live install would refuse today**: 18 tracked files under `memory-vault/` have
+  uncommitted changes (deleted People notes, modified Learnings/Memory-Proposals, VOCABULARY). That
+  is the gate working as designed. The vault must be committed before the real cut runs.
+
+### Still remaining for P10
+P10.4 CLAUDE.md split (unbounded body verbatim to every root, bounded regions to the primary only,
+other roots' queued into their Memory-Proposals.md, no heuristic classification) · P10.5 skills
+triage · P10.6 indexes/FTS/sessions rebuild · P10.8 routines · P10.9 the eight deletions ·
+P10.10 `_bootstrap_workspace` · P10.11 `--repair` · CLI wiring · V5 end-to-end drain.
