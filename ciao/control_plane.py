@@ -334,7 +334,13 @@ class CiaoControlPlane:
         chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
         return str(getattr(chat, "mode", "auto") or "auto")
 
-    def _child_mode(self, principal: McpPrincipal, requested: str | None) -> str:
+    def _child_mode(
+        self,
+        principal: McpPrincipal,
+        requested: str | None,
+        *,
+        workspace_ceiling: bool = True,
+    ) -> str:
         """Hold an MCP-created child at or below its permission ceiling.
 
         The child starts its first turn immediately, so accepting a *stronger*
@@ -355,18 +361,42 @@ class CiaoControlPlane:
         lever that lets a delegate run stronger than the chat that dispatched
         it. It is deliberately absent from ``workspace_update``: that tool is
         auto-approved, so a model-settable ceiling would raise itself.
+
+        ``workspace_ceiling=False`` drops that lever back to the parent's own
+        mode. Callers that edit an *existing* chat (``chat_update``) pass it:
+        the registry setting licenses a chat an agent creates, not a mid-flight
+        upgrade of a chat that already exists — otherwise a ``normal`` chat in a
+        ``bypass``-ceiling workspace could call the auto-approved
+        ``chat_update`` on itself and raise its own permission mode.
         """
         parent_mode = self.chat_mode(principal)
         if parent_mode not in _MODE_RANK:
             parent_mode = "normal"
         ceiling = parent_mode
-        allowed_max = self._delegate_max_mode(principal)
-        if allowed_max and _MODE_RANK[allowed_max] > _MODE_RANK[ceiling]:
-            ceiling = allowed_max
-        if not requested or requested not in _MODE_RANK:
+        if workspace_ceiling:
+            allowed_max = self._delegate_max_mode(principal)
+            if allowed_max and _MODE_RANK[allowed_max] > _MODE_RANK[ceiling]:
+                ceiling = allowed_max
+        # Providers disagree on casing and models mistype; normalize before
+        # ranking so "Plan" is honoured as a downgrade instead of falling into
+        # the unknown-mode branch below.
+        normalized = str(requested or "").strip().casefold()
+        if not normalized:
             return ceiling
-        if _MODE_RANK[requested] <= _MODE_RANK[ceiling]:
-            return requested
+        if normalized not in _MODE_RANK:
+            # An unrecognized mode must never inherit a *raised* ceiling: that
+            # would turn a typo into an escalation. Fall back to the caller's
+            # own mode, which is what this helper returned before the ceiling
+            # existed. update_chat/create_chat reject anything else downstream.
+            logger.warning(
+                "Unknown child chat mode %r; falling back to parent %r for %s",
+                requested,
+                parent_mode,
+                principal.chat_id or "unscoped MCP session",
+            )
+            return parent_mode
+        if _MODE_RANK[normalized] <= _MODE_RANK[ceiling]:
+            return normalized
         logger.warning(
             "Clamping child chat mode %r to ceiling %r for %s",
             requested,
@@ -868,9 +898,12 @@ class CiaoControlPlane:
         requested_mode = mode
         if mode is not None:
             # A normal/auto MCP caller must not upgrade its own or another
-            # chat to bypass through the auto-approved metadata tool. Keep the
-            # same ceiling used for newly-created child chats.
-            mode = self._child_mode(principal, mode)
+            # chat to bypass through the auto-approved metadata tool. The
+            # workspace's `delegate_max_mode` is deliberately NOT honoured
+            # here: it licenses a chat an agent *creates*, and applying it to
+            # an existing chat would let any chat in that workspace raise its
+            # own mode with one auto-approved call. Downgrades still work.
+            mode = self._child_mode(principal, mode, workspace_ceiling=False)
         updated = self.pcm.update_chat(
             chat_id,
             title=title,

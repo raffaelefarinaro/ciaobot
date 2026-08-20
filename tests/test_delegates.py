@@ -706,6 +706,75 @@ def test_workspace_ceiling_still_caps_a_stronger_request(tmp_path: Path) -> None
     assert result["data"]["requested_mode"] == "bypass"
 
 
+def test_chat_update_cannot_borrow_the_workspace_ceiling_to_self_escalate(
+    tmp_path: Path,
+) -> None:
+    """The ceiling licenses a chat an agent *creates*, not an in-place upgrade.
+
+    chat_update is on AUTO_APPROVED_MCP_TOOLS, so if it honoured
+    delegate_max_mode any chat in a bypass-ceiling workspace could raise its own
+    permission mode with a single un-approved tool call — the exact escalation
+    chat_update's own clamp exists to prevent.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Worker", mode="normal")
+    plane = _control_plane_with_ceiling(manager, "bypass")
+
+    result = plane.chat_update(
+        _principal(chat.chat_id, project.project_id), "", mode="bypass"
+    )
+
+    assert manager.get_chat(chat.chat_id).mode == "normal"
+    assert result["data"]["mode_clamped"] is True
+    assert result["data"]["requested_mode"] == "bypass"
+
+
+def test_an_unknown_requested_mode_never_inherits_a_raised_ceiling(
+    tmp_path: Path,
+) -> None:
+    """A typo must not become an escalation.
+
+    The unknown-mode branch fell through to the ceiling, so in a bypass-ceiling
+    workspace a mistyped `plan` was granted bypass — the strongest mode, on a
+    request that asked for the weakest.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor", mode="normal")
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    manager.queue_message = lambda _chat_id, _text: True  # type: ignore[method-assign]
+    plane = _control_plane_with_ceiling(manager, "bypass")
+
+    result = plane.delegate_spawn(
+        _principal(parent.chat_id, project.project_id),
+        prompt="read and report",
+        mode="paln",
+    )
+
+    assert manager.get_chat(result["data"]["chat_id"]).mode == "normal"
+
+
+def test_a_mis_cased_requested_mode_is_still_honoured_as_a_downgrade(
+    tmp_path: Path,
+) -> None:
+    """Providers disagree on casing; "Plan" means plan, not "whatever is max"."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor", mode="auto")
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    manager.queue_message = lambda _chat_id, _text: True  # type: ignore[method-assign]
+    plane = _control_plane_with_ceiling(manager, "bypass")
+
+    result = plane.delegate_spawn(
+        _principal(parent.chat_id, project.project_id),
+        prompt="read and report",
+        mode="Plan",
+    )
+
+    assert manager.get_chat(result["data"]["chat_id"]).mode == "plan"
+
+
 def test_delegate_ceiling_is_not_settable_through_the_mcp_surface() -> None:
     """The ceiling must not be reachable from a model-authored tool call.
 
@@ -1209,6 +1278,84 @@ def _delegate_stop_harness(tmp_path: Path, monkeypatch, by: str):
     return manager, child, wakes
 
 
+async def test_a_stop_only_silences_the_turn_it_ended(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``stopped_by`` must not leak into the next turn on the same stream.
+
+    One ``ChatStream`` spans a stopped turn *and* any queued follow-up: the
+    drive loop consumes ``user_stopped`` and keeps going. With the flag left
+    set, a human stop plus a queued message meant the follow-up turn ran to a
+    clean finish and the supervisor was never woken — it waited forever on a
+    child that had in fact reported. An agent stop was worse: the finished turn
+    came back labelled STOPPED, "did not finish".
+    """
+    from ciao.models import ResultEvent
+
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Long migration")
+    child.title = "Long migration"
+    manager._save()
+
+    prompts: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        prompts.append(prompt)
+        live = manager._broker.get(chat_id)
+        assert live is not None
+        if len(prompts) == 1:
+            # A human stop, with a follow-up already queued behind it.
+            live.enqueue("keep going")
+            live.user_stopped = True
+            live.stopped_by = "user"
+            yield ResultEvent(
+                type="result",
+                result="",
+                session_id="sess-delegate",
+                is_error=True,
+                effective_model=child.model,
+                usage={},
+                quota={},
+                cost_usd=0.0,
+            )
+            return
+        yield ResultEvent(
+            type="result",
+            result="All seven call sites rewritten.",
+            session_id="sess-delegate",
+            is_error=False,
+            effective_model=child.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    manager.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    manager._push_delay_seconds = 0
+    wakes: list[dict] = []
+    monkeypatch.setattr(manager._events, "publish", lambda *_a, **_k: None)
+    monkeypatch.setattr(manager, "_schedule_push", lambda *a, **k: None)
+    monkeypatch.setattr(manager, "_announce_result_ready", lambda *a, **k: None)
+    monkeypatch.setattr(
+        manager,
+        "_queue_delegate_wake",
+        lambda parent_id, **kwargs: wakes.append(
+            {"parent_id": parent_id, **kwargs}
+        ),
+    )
+
+    stream = manager.start_stream(child.chat_id, "start the migration")
+    async for _ in stream.subscribe():
+        pass
+
+    assert prompts == ["start the migration", "keep going"]
+    assert len(wakes) == 1
+    assert wakes[0]["stopped"] is False
+    assert wakes[0]["had_error"] is False
+
+
 # ── tool-activity heartbeat ──────────────────────────────────────────────
 
 
@@ -1346,3 +1493,41 @@ def test_wake_prompt_carries_harness_counted_facts(tmp_path: Path) -> None:
     # And the supervisor must be told how much the numbers do and don't prove.
     assert "no tool calls did" in prompt
     assert "editing through bash is normal" in prompt
+
+
+async def test_wake_counts_are_snapshotted_when_the_delegate_finishes(
+    tmp_path: Path,
+) -> None:
+    """The counts must describe the turn being reported, not the live chat.
+
+    The wake only lands after the 5s coalescing window, and the counters are
+    zeroed by the next turn's start_stream. Reading them live meant a delegate
+    re-prompted inside that window was reported as "0 tool calls" — which the
+    same prompt tells the supervisor to read as "it did nothing".
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Mount the strip")
+    for _ in range(12):
+        manager._bump_tool_activity(child, "Edit")
+
+    manager._queue_delegate_wake(
+        parent.chat_id,
+        child_chat_id=child.chat_id,
+        child_title="Mount the strip",
+        delegation_id="",
+        reply="Done — mounted the strip.",
+        had_error=False,
+    )
+    task = manager._delegate_wake_tasks.pop(parent.chat_id, None)
+    if task is not None:
+        task.cancel()
+    finished = manager._delegate_wake_pending.pop(parent.chat_id)
+
+    # A new turn starts before the window elapses and zeroes the live counters.
+    manager._reset_tool_activity(child)
+
+    prompt = manager._build_delegate_wake_prompt(parent.chat_id, finished)
+    assert "12 tool calls" in prompt
+    assert "12 file writes" in prompt

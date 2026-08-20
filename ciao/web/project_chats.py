@@ -5089,6 +5089,23 @@ class ProjectChatManager:
                 self._record_agent_tool_use(chat, request, event)
                 self._bump_tool_activity(chat, event.tool_name)
 
+    @staticmethod
+    def _reset_tool_activity(chat: ChatInfo) -> None:
+        """Zero the per-turn tool counters. Called at every turn start."""
+        chat.tool_event_count = 0
+        chat.write_tool_count = 0
+        chat.bash_tool_count = 0
+        chat.last_tool_at = ""
+
+    @staticmethod
+    def _tool_activity_snapshot(chat: ChatInfo) -> dict[str, Any]:
+        """The counters as plain values, for a record that outlives the turn."""
+        return {
+            "tool_event_count": chat.tool_event_count,
+            "write_tool_count": chat.write_tool_count,
+            "bash_tool_count": chat.bash_tool_count,
+        }
+
     def _bump_tool_activity(self, chat: ChatInfo, tool_name: str) -> None:
         """Record that *chat* just used a tool.
 
@@ -6087,10 +6104,7 @@ class ProjectChatManager:
             self._invalidate_reentry_summary(chat_meta)
             # Scope the tool counters to this turn: a supervisor reviewing a
             # delegate wants "what did this run do", not a lifetime total.
-            chat_meta.tool_event_count = 0
-            chat_meta.write_tool_count = 0
-            chat_meta.bash_tool_count = 0
-            chat_meta.last_tool_at = ""
+            self._reset_tool_activity(chat_meta)
             # A new user turn answers (or supersedes) any paused question, so
             # the persisted picker state no longer applies.
             chat_meta.pending_question = ""
@@ -6558,6 +6572,14 @@ class ProjectChatManager:
                         stream.user_stopped = False
                         if next_pending is not None:
                             had_error = False
+                            # The stop ended *that turn*, not the stream: a
+                            # follow-up turn is about to start on this same
+                            # ChatStream and reaches teardown on its own
+                            # merits. Leaving the flag set would suppress the
+                            # delegate wake for a turn that actually finished
+                            # (human stop), or report a completed turn as
+                            # STOPPED (agent stop).
+                            stream.stopped_by = ""
                     if next_pending is None or had_error:
                         if had_error and next_pending is not None:
                             # A real error broke the loop after we'd already
@@ -6594,6 +6616,11 @@ class ProjectChatManager:
                     chat_meta2 = self._chats.get(chat_id)
                     if chat_meta2 is not None:
                         chat_meta2.pending_question = ""
+                        # Same turn scoping start_stream applies: a follow-up
+                        # turn runs on this stream, so without this the
+                        # "observed" counts in a delegate's wake report would
+                        # be a running total across every queued turn.
+                        self._reset_tool_activity(chat_meta2)
                         turn_index2 = chat_meta2.user_turn_count
                         chat_meta2.user_turn_count = turn_index2 + 1
                         if merged_image_refs:
@@ -7241,6 +7268,12 @@ class ProjectChatManager:
                 parent_chat_id,
             )
             return
+        # Snapshot the tool counters now, alongside the reply they describe.
+        # The wake only fires after the coalescing window, and the counters are
+        # zeroed by the next turn start — a delegate re-prompted inside that
+        # window would otherwise be reported as "0 tool calls", which the wake
+        # prompt tells the supervisor to read as "it did nothing".
+        child = self._chats.get(child_chat_id)
         self._delegate_wake_pending.setdefault(parent_chat_id, []).append({
             "chat_id": child_chat_id,
             "title": child_title,
@@ -7248,6 +7281,7 @@ class ProjectChatManager:
             "reply": reply or "",
             "had_error": had_error,
             "stopped": stopped,
+            **(self._tool_activity_snapshot(child) if child is not None else {}),
         })
         existing = self._delegate_wake_tasks.get(parent_chat_id)
         if existing is not None and not existing.done():
@@ -7534,15 +7568,21 @@ class ProjectChatManager:
                 entry["reply"], limit=_DELEGATE_WAKE_EXCERPT_CHARS
             ) if entry["reply"].strip() else "(no final message)"
             lines.append(excerpt)
-            if child is not None:
-                # Counted by the harness from the delegate's own tool stream,
-                # so unlike the excerpt above it is not the delegate's account
-                # of itself. A "done" with no tool calls at all is the case
-                # this exists for.
+            # Counted by the harness from the delegate's own tool stream, so
+            # unlike the excerpt above it is not the delegate's account of
+            # itself. A "done" with no tool calls at all is the case this
+            # exists for. Snapshotted at queue time; the live chat is only a
+            # fallback (and may be gone entirely if the delegate was deleted).
+            observed = (
+                self._tool_activity_snapshot(child) if child is not None else None
+            )
+            if "tool_event_count" in entry:
+                observed = entry
+            if observed is not None:
                 lines.append(
-                    f"  [observed: {child.tool_event_count} tool calls, "
-                    f"{child.write_tool_count} file writes, "
-                    f"{child.bash_tool_count} bash]"
+                    f"  [observed: {observed['tool_event_count']} tool calls, "
+                    f"{observed['write_tool_count']} file writes, "
+                    f"{observed['bash_tool_count']} bash]"
                 )
         lines.append("")
         if deferred:
@@ -7556,8 +7596,9 @@ class ProjectChatManager:
             lines.append("")
         if stopped:
             lines.append(
-                "A STOPPED delegate had its turn ended early by a chat_stop "
-                "you issued — it did not fail and it did not finish. Whatever "
+                "A STOPPED delegate had its turn ended early by an "
+                "agent-issued chat_stop (yours, unless another agent chat "
+                "reached it) — it did not fail and it did not finish. Whatever "
                 "it had already written is still on disk. Decide explicitly "
                 "whether to re-dispatch the remainder; do not report it as "
                 "failed."
