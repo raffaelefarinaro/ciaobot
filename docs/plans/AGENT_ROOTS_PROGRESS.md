@@ -41,7 +41,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | delegate | DONE | commit 001639e6 |
-| P9 Per-root memory + MCP allowlist | delegate | PARTIAL | P9.1+P9.2 DONE commit a0d55751; **P9.3 HELD, needs an operator decision** |
+| P9 Per-root memory + MCP allowlist | delegate | PARTIAL | P9.1+P9.2 DONE commit a0d55751; P9.3 redesigned and re-dispatched chat-68ec1e70 |
 | P10 The cut | — | TODO | gated on all of P1–P9 + V1–V3 |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | — | TODO | with P10 |
@@ -429,3 +429,28 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   that seeds each existing workspace from its current effective set so upgrading loses nothing, and
   it must state the Claude-only limit honestly. That is a design decision with a real blast radius,
   so it goes to the operator rather than being improvised.
+- 2026-08-20 — **Bypass now works.** The operator set this coordinating chat to Bypass, so
+  `delegate_spawn` with `mode: "bypass"` produced a bypass child (`chat-68ec1e70`), and
+  `chat_update` successfully moved the running P4 chat from `auto` to `bypass`. Confirms the
+  clamp reads the parent at call time: nothing needed changing on my side, only the parent's mode.
+- 2026-08-20 — P9.3 re-dispatched (`chat-68ec1e70`) with a brief that SUPERSEDES the work order's
+  own wording for this step, because that wording taken literally produced the four defects logged
+  above. Design decided by the coordinator rather than left to the delegate:
+  1. An explicit `allowed_mcp_servers: list[str] | None` on `WorkspaceConfig`, instead of inferring
+     opt-in from an inverted deny list. `None` denies everything, which is fail-closed for anything
+     created after the migration.
+  2. A migration seeding each EXISTING workspace from what it can reach today, so upgrading loses no
+     capability: `personal -> ["n8n_mcp", "notion"]`, `work -> ["n8n_mcp"]`. This is legitimate
+     auto-apply under D1: the registry is Ciaobot-generated metadata and there is exactly one
+     correct outcome per workspace.
+  3. Explicit server names only, never a glob, because nothing in this repo expands `mcp__*` and the
+     rejected version's fail-closed path depended on the SDK honouring one.
+  4. Malformed `.mcp.json` denies every server named in any workspace's allowlist, by name, with the
+     residual limit stated honestly: a server only present in the corrupt file cannot be denied by
+     name because nothing knows it exists.
+  5. Both overclaiming docstrings corrected to say that this scopes reachability rather than
+     authority, and that `disallowed_tools` is applied only for `claude` chats, so codex and opencode
+     are unconstrained. Fixing that gap needs a per-provider mechanism and is an explicit follow-up,
+     not part of this step.
+  The brief also requires the delegate to back up and restore `.runtime/workspaces.json` around its
+  real-install check, so the coordinator decides when the actual migration runs.
