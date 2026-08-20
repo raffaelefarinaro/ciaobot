@@ -1501,3 +1501,42 @@ def test_undo_restages_only_what_was_tracked(tmp_path: Path) -> None:
     # Restoring an untracked file must not newly track it.
     assert "memory-vault/.DS_Store" not in cached
     assert (install / "memory-vault" / ".DS_Store").is_file()
+
+
+def test_undo_is_resumable_after_a_partial_reversal(tmp_path: Path) -> None:
+    """A first undo can stop partway; the second must finish, not fail.
+
+    This happened on the reference install. A stale guide recreated at the old
+    path blocked one reversal, and re-running then failed on the moves it had
+    ALREADY reversed — "bad source", because the source was back where it
+    belonged. There was no way forward but hand-editing the tree.
+    """
+    install, vault, runtime = _with_guide(tmp_path)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    # Reverse one move by hand, exactly as a partial undo would leave it.
+    _git(install, "mv", "personal/AGENTS.md", "AGENTS.md")
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "undone", result
+    assert "AGENTS.md" in result["already_reversed"]
+    assert (install / "CLAUDE.md").read_text(encoding="utf-8") == _REAL_GUIDE
+    assert (install / "memory-vault" / "personal").is_dir()
+    assert not (install / "personal").exists()
+
+
+def test_undo_stages_the_created_files_it_removes(tmp_path: Path) -> None:
+    """Once the migration is COMMITTED those paths are tracked, so deleting them
+    without staging leaves `git mv` of any ancestor failing with "bad source"."""
+    install, vault, runtime = _with_guide(tmp_path)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "reroot")
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "undone", result
+    assert (install / "memory-vault" / "personal").is_dir()
+    assert not (install / "personal").exists()
+    status = _git(install, "-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=no")
+    assert " D " not in status, status

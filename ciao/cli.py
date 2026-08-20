@@ -1769,6 +1769,14 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
     --apply must be run with the app stopped. It moves the vault and writes the
     chat state file, so a live server would both read a path that no longer
     exists and overwrite the handover flags from its in-memory copy.
+
+    And the app the operator runs afterwards must ALREADY contain this migration.
+    An engine without ``CiaoConfig.agent_vault_root`` resolves the vault from a
+    relative ``CIAO_VAULT_ROOT`` to ``<install>/memory-vault``, which this
+    migration empties, so it boots with no vault and its skill sync then prunes
+    the links that now dangle. The receipt gating makes the flip atomic for code
+    that HAS it; it cannot help code that predates it. That is why the design
+    runs this from ``sync_workspace_skills`` at upgrade rather than by hand.
     """
     from ciao import workspace_reroot
 
@@ -2822,6 +2830,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Plan or apply the per-workspace agent-root migration.",
         description=(
             "Move each registered workspace's vault into its own agent root. "
+            "Run --apply only from the engine that will SERVE the install, with "
+            "the app stopped: an older engine has no per-root vault resolution "
+            "and boots with no vault at all. "
             "Prints the plan by default and changes nothing; --rehearse records a "
             "receipt without moving; --apply performs the migration, moves the "
             "skill catalog to the primary root with a blank triage sheet, and "

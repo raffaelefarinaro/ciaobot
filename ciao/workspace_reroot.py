@@ -543,6 +543,12 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         # so a link whose target already moved back would be left dangling.
         if target.is_symlink() or target.is_file():
             target.unlink()
+            # If the migration was COMMITTED, these paths are tracked. Deleting
+            # the file without staging it leaves the index claiming a file that
+            # is gone, and `git mv` of any ancestor directory then fails with
+            # "bad source" — which is exactly how an undo stalled halfway on the
+            # reference install.
+            _run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
             removed.append(relative)
             _prune_empty_parents(install_root, target.parent)
     source_dir = install_root / _SKILLS_SRC
@@ -559,12 +565,28 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         target = install_root / relative
         if target.is_dir():
             shutil.rmtree(target)
+            # Same reason as the created files: once the migration is committed
+            # everything under here is tracked, so the index has to follow the
+            # worktree or `git mv` of an ancestor fails.
+            _run_git(install_root, "rm", "-r", "--cached", "--quiet", "--", relative)
             removed.append(relative)
             _prune_empty_parents(install_root, target.parent)
 
     reversed_moves: list[str] = []
+    already: list[str] = []
     for entry in reversed(receipt.get("applied", [])):
         source = install_root / entry["source"]
+        destination = install_root / entry["destination"]
+        # Resumable on purpose. A first attempt can stop partway — the reference
+        # install hit exactly that, because a stale guide recreated at the old
+        # path blocked one reversal — and re-running then failed on the moves it
+        # had ALREADY reversed, leaving no way forward but hand-editing. A move
+        # whose source is back and whose destination is gone is done, not broken.
+        if not destination.exists() and not destination.is_symlink() and (
+            source.exists() or source.is_symlink()
+        ):
+            already.append(entry["source"])
+            continue
         source.parent.mkdir(parents=True, exist_ok=True)
         code, out = _run_git(install_root, "mv", entry["destination"], entry["source"])
         if code != 0:
@@ -572,6 +594,12 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
                 "status": "failed",
                 "reason": f"git mv failed reversing {entry['destination']}: {out}",
                 "reversed": reversed_moves,
+                "already_reversed": already,
+                "remaining": [
+                    e["destination"]
+                    for e in reversed(receipt.get("applied", []))
+                    if e["source"] not in reversed_moves and e["source"] not in already
+                ],
             }
         reversed_moves.append(entry["source"])
         # Drop the now-empty root directory the migration created.
@@ -597,6 +625,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         "restored_stashed": restored,
         "removed_created": removed,
         "cleared_handover_flags": cleared,
+        "already_reversed": already,
     }
 
 
