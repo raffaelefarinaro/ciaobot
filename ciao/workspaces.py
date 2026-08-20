@@ -62,6 +62,13 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
             if getattr(workspace, "disallowed_tools", None) is not None
             else None
         ),
+        "allowed_mcp_servers": (
+            list(
+                cast(Iterable[Any], getattr(workspace, "allowed_mcp_servers", None))
+            )
+            if getattr(workspace, "allowed_mcp_servers", None) is not None
+            else None
+        ),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
     }
@@ -130,6 +137,14 @@ def workspace_from_request(
         disallowed_tools = existing.disallowed_tools
     else:
         disallowed_tools = None
+    if "allowed_mcp_servers" in data:
+        allowed_mcp_servers = parse_disallowed_tools_value(
+            data.get("allowed_mcp_servers")
+        )
+    elif existing is not None:
+        allowed_mcp_servers = existing.allowed_mcp_servers
+    else:
+        allowed_mcp_servers = None
     if "color" in data:
         color = coerce_workspace_color(data.get("color"))
     elif existing is not None:
@@ -155,6 +170,7 @@ def workspace_from_request(
         default_provider=provider,
         default_model=default_model,
         disallowed_tools=disallowed_tools,
+        allowed_mcp_servers=allowed_mcp_servers,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
         color=color,
     )

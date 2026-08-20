@@ -4661,7 +4661,16 @@ class ProjectChatManager:
 
         Applies the default harness set plus any workspace "extra disallowed
         tools" (``CIAO_DISALLOWED_TOOLS_PERSONAL`` / ``_WORK`` or the PWA
-        field). claude.ai connector MCPs are always allowed.
+        field), plus a derived ``mcp__<server>`` deny for every server declared
+        in ``.mcp.json`` that the workspace's ``allowed_mcp_servers`` allowlist
+        does not name.
+
+        Two limits stated plainly. This scopes REACHABILITY, not authority: a
+        shared account behind a reachable server still holds that account's full
+        authority. And ``disallowed_tools`` is only applied when the chat's
+        provider is ``claude`` (see the guard below); it does NOT constrain codex
+        or opencode chats at all. Closing that non-Claude gap needs a
+        per-provider mechanism and is out of scope.
         """
         if chat.provider != "claude":
             return []
