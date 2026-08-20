@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pathlib
 
+import json
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -17,6 +18,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.web import routes_api
 from ciao.web.routes_api import (
     _scan_proposal_rows,
     dismiss_older_than,
@@ -507,3 +509,49 @@ def test_dismissing_the_same_skill_twice_keeps_both_files(tmp_path: Path) -> Non
         (config.workspace_vault_root("personal") / "Workspace" / "Skill-Proposals" / "dismissed").glob("*.md")
     )
     assert dismissed == ["2026-08-09-defuddle-2.md", "2026-08-09-defuddle.md"]
+
+
+# -- the leak warning is about a SHARED guide, not about a workspace ----------
+
+
+def _rerooted(config: CiaoConfig, tmp_path: Path) -> None:
+    """Flip the config's layout to per-root, as the migration does."""
+    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
+    from ciao.config import reset_reroot_cache
+
+    reset_reroot_cache()
+
+
+def test_no_leak_warning_once_each_workspace_owns_its_guide(tmp_path: Path) -> None:
+    """It said a work row would be "visible in every workspace" — of a guide only
+    work reads. A warning that is false teaches the operator to click through."""
+    config = _default_vault(tmp_path)
+    _rerooted(config, tmp_path)
+
+    assert routes_api._leak_warning(config, "memory", "work") is False
+    assert routes_api._leak_warning(config, "profile", "work") is False
+
+
+def test_a_shared_guide_still_warns(tmp_path: Path) -> None:
+    """Before the re-rooting one CLAUDE.md really is loaded by every session."""
+    config = _default_vault(tmp_path)
+    from ciao.config import reset_reroot_cache
+
+    reset_reroot_cache()   # no receipt: shared layout
+
+    assert routes_api._leak_warning(config, "memory", "work") is True
+    # The primary workspace's own row is where the guide belongs, so no warning.
+    assert routes_api._leak_warning(config, "memory", "personal") is False
+
+
+def test_a_rehome_never_warns_in_either_layout(tmp_path: Path) -> None:
+    """A move is not a region write."""
+    config = _default_vault(tmp_path)
+    from ciao.config import reset_reroot_cache
+
+    reset_reroot_cache()
+    assert routes_api._leak_warning(config, "rehome", "work") is False
+    _rerooted(config, tmp_path)
+    assert routes_api._leak_warning(config, "rehome", "work") is False

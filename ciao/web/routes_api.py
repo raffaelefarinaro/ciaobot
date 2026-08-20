@@ -6802,17 +6802,34 @@ def _rehome_signal(config) -> dict[str, dict[str, Any]]:
 def _leak_warning(config, kind: str, workspace: str) -> bool:
     """True when accepting this row would leak a region into the wrong session.
 
-    A ``[memory]`` / ``[profile]`` accept edits one CLAUDE.md region that is
-    injected into every session of the *primary* workspace. Until per-workspace
-    guides land, a proposal queued from another workspace, accepted here, writes
-    a fact into sessions that did not originate it. Region-edit kinds only: a
-    rehome is a file move, not a region write, so it never leaks.
+    A ``[memory]`` / ``[profile]`` accept edits one CLAUDE.md region. While one
+    guide is shared by every workspace, a proposal queued from another workspace
+    and accepted here writes a fact into sessions that did not originate it.
+    Region-edit kinds only: a rehome is a file move, not a region write, so it
+    never leaks.
+
+    Per-workspace guides have LANDED, which retires this for a migrated install:
+    ``_promote_region_row`` resolves the guide through ``agent_root``, so a work
+    row is written into work's own ``CLAUDE.md`` and nothing else loads it. The
+    condition used to be "not the primary workspace" with the comment "until
+    per-workspace guides land", so after the re-rooting it told the operator that
+    accepting their own work row would be "visible in every workspace" — of a
+    guide only that workspace reads. A warning that is false is worse than none:
+    it teaches the operator to click through warnings.
     """
     try:
         accept = proposal_kinds.accept_for(kind)
     except proposal_kinds.UnknownKindError:
         return False
     if accept.action != "edit_region":
+        return False
+    try:
+        shared_guide = Path(config.agent_root(workspace)) == Path(config.workspace_root)
+    except (AttributeError, ValueError):
+        # No agent_root seam to ask: assume the shared layout, which is the
+        # answer that warns rather than the one that stays quiet.
+        shared_guide = True
+    if not shared_guide:
         return False
     return workspace != config.primary_workspace()
 
@@ -6963,14 +6980,21 @@ def _rehome_lookup(
     path = m.group(1) if m else ""
     signal = rehome.get(path)
     if signal is None:
+        # The bullet outlived its cause: the note was tagged, moved, or a later
+        # rule settled it, and nothing re-detects it now. Marked `stale` rather
+        # than left looking undecided — the queue rendered it identically to a
+        # genuine "needs a decision" row, so the operator could not tell which
+        # rows were asking them something and which were just litter. Two of the
+        # reference install's fourteen are in this state.
         return {
             "note": path,
             "destination": "",
             "candidates": [],
             "justified": False,
+            "stale": True,
             "reason": "no live rehome signal for this note",
         }
-    return {"note": path, **signal}
+    return {"note": path, "stale": False, **signal}
 
 
 async def list_proposals(request: Request) -> JSONResponse:

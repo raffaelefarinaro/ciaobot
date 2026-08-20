@@ -1103,6 +1103,12 @@ export interface RehomeSignal {
   candidates: string[]
   /** True only when a single clean tag signal backs the destination. */
   justified: boolean
+  /**
+   * The bullet outlived its cause: the note was tagged, moved, or a later rule
+   * settled it, and nothing re-detects it now. Distinct from "undecided", which
+   * is a row still asking the operator something.
+   */
+  stale?: boolean
   reason: string
 }
 

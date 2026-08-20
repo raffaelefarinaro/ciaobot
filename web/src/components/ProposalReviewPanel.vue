@@ -73,6 +73,9 @@ function rowSubtitle(row: ProposalRow): string {
         ? `${from} → ${to} · tags back this`
         : `${from} → ${to} · no tag backs it`
     }
+    // A stale row is not asking anything: its cause is gone. Saying "needs a
+    // decision" made litter look identical to a real question.
+    if (sig?.stale) return `${from} · no longer applies · safe to dismiss`
     return `${from} · no destination, needs a decision`
   }
   // The path, not the words "a skill proposal file". The row's whole content is

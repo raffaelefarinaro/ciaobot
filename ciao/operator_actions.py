@@ -354,6 +354,47 @@ def _detect_workspace_unmigrated(context: DetectionContext) -> list[OperatorActi
     ]
 
 
+_QUEUE_RELATIVE = ("Workspace", "Memory-Proposals.md")
+
+
+def _queued_rehome_rows(context: DetectionContext) -> int | None:
+    """How many re-home rows the review queue currently holds, or None.
+
+    This is the number the tile's own button opens, which is the only number a
+    tile should quote. The receipt cannot supply it: it is written once, at
+    migration time, so it cannot know that the operator has dismissed rows since,
+    or that a later rule resolved some of them.
+
+    Counting bullets rather than re-detecting: `detect_misfiled_people` walks
+    every person note, which is not something to do on every strip render, and
+    the queue is two small files.
+    """
+    config = context.config
+    resolver = getattr(config, "workspace_vault_root", None)
+    lister = getattr(config, "workspace_names", None)
+    if not callable(resolver) or not callable(lister):
+        return None
+    total = 0
+    seen = False
+    for name in lister():
+        try:
+            queue = Path(resolver(name)).joinpath(*_QUEUE_RELATIVE)
+        except Exception:  # noqa: BLE001 — advisory
+            continue
+        if not queue.is_file():
+            continue
+        try:
+            text = queue.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        seen = True
+        total += sum(
+            1 for line in text.splitlines()
+            if line.lstrip().startswith(("- ", "* ")) and "[rehome]" in line
+        )
+    return total if seen else None
+
+
 def _detect_unrehomed_people(context: DetectionContext) -> list[OperatorAction]:
     """Person notes that a global curation run may have filed wrong.
 
@@ -383,9 +424,16 @@ def _detect_unrehomed_people(context: DetectionContext) -> list[OperatorAction]:
         return []
     if receipt is not None:
         moved = _count(receipt.get("moves"))
-        undecided = _count(receipt.get("needs_judgement")) + _count(
-            receipt.get("proposals")
-        )
+        # The QUEUE decides this number, not the receipt. Two bugs lived in the
+        # old line: it summed `needs_judgement` and `proposals`, which are not
+        # disjoint — `proposals` records the queue entries written FOR those
+        # judgement cases — and both are frozen at migration time, so neither
+        # knows the operator has dismissed rows since or that a later rule
+        # resolved some. On the reference install that produced four different
+        # numbers for one thing: 16 on the tile, 15 in the receipt, 14 rows in
+        # the queue the tile's own button opens, and 12 live candidates.
+        queued = _queued_rehome_rows(context)
+        undecided = queued if queued is not None else _count(receipt.get("needs_judgement"))
         # An ABSENT status counts as applied. `vault_rehome` only started writing
         # the field when its survey mode was added, so a receipt written before
         # that records a COMPLETED re-home — and reading those as unfinished made
