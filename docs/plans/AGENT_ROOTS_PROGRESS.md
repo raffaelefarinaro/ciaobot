@@ -42,10 +42,10 @@ Re-verified by symbol against the working tree before any dispatch:
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | delegate | DONE | commit 001639e6 |
 | P9 Per-root memory + MCP allowlist | delegate | DONE | P9.1+P9.2 a0d55751; P9.3 beaeda6f |
-| P10 The cut | — | TODO | gated on all of P1–P9 + V1–V3 |
+| P10 The cut | coordinator | IN PROGRESS | P10.1 plan half DONE 970bd3d0; apply half next |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
-| V2 Fixture assertions | — | TODO | with P10 |
-| V3 Real-data rehearsal | — | TODO | with P10 |
+| V2 Fixture assertions | coordinator | DONE | 14 tests, commit 970bd3d0 |
+| V3 Real-data rehearsal | coordinator | DONE | APFS clone, 2318 files, zero refusals |
 | V4 Full suites | coordinator | PARTIAL | python 2597 pass / 2 pre-existing fails; npm not a wave-1 gate (no web files touched) |
 | V5 End-to-end drain | — | TODO | after P5 |
 
@@ -592,3 +592,49 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   must word its tile to what its predicate actually proves.
 - 2026-08-20 — Suites after the fix: python 2682 passed / 1 pre-existing failure; web 709 passed
   across 69 files. **Every phase except P10 is now complete.**
+
+## P10 progress (coordinator-driven, 2026-08-20)
+
+- Census re-run as the live fixture spec: **2045 notes** (Logs 1454, work 427, personal 159,
+  Templates 5, .obsidian 0), 269 non-markdown, 3 loose root notes, max depth 7, 0 symlinks,
+  16 duplicate stems, 24 frontmatter-less notes. Registered: personal, work.
+  Unregistered top-level: `.obsidian`, `Logs`, `Templates`.
+- Deletion blast radius measured before writing anything: 22 references across the six P10.9
+  symbols (`_entity_visible_in_workspace` 2, `legacy_entity_workspace` 7, `_workspace_of` 4,
+  `_per_workspace_vault_paths` 3, `_entity_index_root` 3, `_legacy_workspaces` 3), plus the four
+  `*_personal` / `*_work` config fields. Tractable.
+- **P10.1 planning half landed (`970bd3d0`), read-only by construction.** Classifies every
+  top-level path into moves / global_keeps / regenerated / ignored and REFUSES on anything left
+  over. Destinations follow D5: `Logs/` and `Templates/` promoted to `<install>/Logs/` and
+  `<install>/templates-src/`, each workspace vault to `<install>/<name>/memory-vault/`.
+- **Two V1 gaps from earlier are now closed with explicit decisions**, recorded in code:
+  `.obsidian/` is kept global (editor state for the whole vault, not per workspace); the three
+  loose root notes (`INDEX.md`, `MEMORY.md`, `VOCABULARY.md`) are classified `regenerated`, since
+  P10.6 rebuilds them per root and a stale index describing the old prefixed layout reads as
+  current.
+- **The plan found something the census misses.** It refused on a `.DS_Store` at the vault root.
+  The census counts loose `.md` files at the root and non-`.md` files per top-level directory, so
+  a loose NON-markdown file at the vault root falls between the two and is invisible to it. Now
+  classified as ignorable, by explicit name rather than a pattern, so an unknown dotfile still
+  refuses. Worth folding back into `workspace_census.py` as a reported shape.
+- **V2 gate met**: 14 fixture tests. Classification, top-level conservation (every path in exactly
+  one bucket, none twice, buckets equal to what is on disk), the read-only guarantee proved by
+  hashing the tree before and after, and one refusal test per condition (unregistered dir,
+  unrecognised loose file, symlink, workspace with no vault, non-empty destination, no workspaces,
+  missing vault). Plus the D4 regression: `rehearse` never records "migrated" and `read_receipt`
+  returns None for a survey.
+- **V3 gate met**: APFS copy-on-write clone of the 899M install (instant, no extra space), stripped
+  to 571M, only `workspaces.json` restored. Guarded by asserting the sandbox is neither the live
+  install nor overlapping it. Rehearsal classified all **2318** real vault files with zero refusals
+  and zero unclassified, left the sandbox byte-identical, and left the live vault untouched.
+- Suite: 2696 passed / 1 pre-existing failure.
+
+### Remaining for P10, in order
+1. `apply()` with `git mv` per move so history follows, writing `status: "migrated"` only on full
+   success, plus `--repair` and `--undo`.
+2. P10.4 CLAUDE.md split: unbounded body verbatim to every root, bounded regions to the primary
+   only, other roots' regions queued into their `Memory-Proposals.md`. No heuristic classification.
+3. P10.5 skills triage, P10.6 indexes/FTS/sessions, P10.8 routines, P10.9 the eight deletions,
+   P10.10 `_bootstrap_workspace`, P10.11 repair/undo.
+4. V5 end-to-end drain through the new UI.
+Every step rehearsed in the sandbox before the live install, per the rule the P9.3 incident set.
