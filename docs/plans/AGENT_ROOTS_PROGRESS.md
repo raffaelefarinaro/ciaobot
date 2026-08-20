@@ -1221,6 +1221,32 @@ rather than as an error.
 Correction to the previous entry, which called this "a decision, not a patch": the decision was real,
 but the right construction removes the problem rather than trading it for a migration.
 
+### The review UI, from a screenshot of the running app (`4850ff39`)
+Three operator observations, all correct, all fixed.
+
+- **It is a segment of Memory now, not its own page.** The queue IS the memory system's inbox, so
+  Graph / List / Review inside the memory view, matching the segmented control it already had.
+  `/proposals` still routes there and selects the segment, so the housekeeping tiles keep working.
+  The rail loses an entry and Memory takes the book/tray icon: rectilinear like the rest of the rail,
+  which the organic-curve brain never was.
+- **Grouped by workspace, shared first**, in the queue AND on the home strip. The workspace decides
+  which guide an accept writes to and which vault a re-home moves within, so a flat list of 109 rows
+  from two workspaces read as one pile. No heading at all when there is nothing to distinguish.
+- **Every row has a shape.** A re-home bullet is prose reprinting both paths and a CLI incantation;
+  as a title it made four rows fill the screen and buried the only thing that differs — the name. Now
+  a kind badge, a title, one subtitle carrying the direction and whether tags back it, and the prose
+  behind a disclosure.
+
+Two false claims removed. The header said "rehome rows move a file", which stopped being true when
+accept stopped moving them. And a re-home row with no backed destination rendered "Move to a
+destination?" beside a confirm button that could not name one — a button that cannot do what it says
+is worse than an absent one, so there is no accept there at all.
+
+One bug found while wiring the labels: `_rehome_lookup` hardcoded `(?:personal|work)` in the regex
+that finds the note path in a bullet, so a workspace named anything else never matched and every one
+of its rows read "no live rehome signal" forever. Built from the registered names now, escaped,
+because a workspace name is the user's.
+
 ### Remaining
 0. The mandatory upgrade trigger and the blocking gate — the shape is agreed above. Then migrate this
    install and exercise the routines and the Memory Map for real.
