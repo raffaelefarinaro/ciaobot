@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 from ciao.workspace_reroot import (
@@ -25,6 +26,7 @@ from ciao.workspace_reroot import (
     plan,
     plan_skills_triage,
     read_receipt,
+    ensure_rollback_history,
     rebuild_indexes,
     rebuild_search_index,
     rehearse,
@@ -1861,3 +1863,97 @@ def test_a_missing_per_root_vault_is_reported_not_skipped(tmp_path: Path) -> Non
 
     assert out["indexed"] == []
     assert {row["workspace"] for row in out["errors"]} == {"personal", "work"}
+
+
+# -- an install with no git history gets one -----------------------------------
+
+
+def _no_git_install(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A real-shaped install that is not a git repository, holding secrets."""
+    install = tmp_path / "install"
+    install.mkdir()
+    vault = _vault(install)
+    runtime = install / ".runtime"
+    runtime.mkdir()
+    (install / ".env").write_text("PWA_AUTH_TOKEN=super-secret\n", encoding="utf-8")
+    (install / ".env.example").write_text("PWA_AUTH_TOKEN=\n", encoding="utf-8")
+    (install / "secrets").mkdir()
+    (install / "secrets" / "sa.json").write_text('{"key": "private"}\n', encoding="utf-8")
+    return install, vault, runtime
+
+
+def test_an_install_with_no_repository_is_given_one_before_migrating(tmp_path: Path) -> None:
+    """It used to refuse forever: the first `git mv` failed, so the install could
+    never migrate while the blocking gate kept asking it to."""
+    install, vault, runtime = _no_git_install(tmp_path)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "migrated", result.get("refusals")
+    assert result["git_history"]["created_repo"] is True
+    assert result["git_history"]["commit"]
+    assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
+
+
+def test_the_snapshot_is_a_working_rollback_point(tmp_path: Path) -> None:
+    """The reason the repository is created at all. `--undo` remains the proper
+    path (it also clears the receipt); this is the floor underneath it."""
+    install, vault, runtime = _no_git_install(tmp_path)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert not (install / "memory-vault").exists()
+
+    _git(install, "reset", "--hard", "HEAD")
+    _git(install, "clean", "-fd")
+
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+    assert not (install / "personal").exists()
+
+
+def test_the_snapshot_never_captures_credentials(tmp_path: Path) -> None:
+    """"We made you a backup" must not mean "we committed your provider keys"."""
+    install, vault, runtime = _no_git_install(tmp_path)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    # The snapshot COMMIT's tree, not the index: the index already carries the
+    # staged renames, so it describes the migrated layout rather than the thing a
+    # rollback would restore.
+    snapshot = result["git_history"]["commit"]
+    tracked = subprocess.run(
+        ["git", "-C", str(install), "ls-tree", "-r", "--name-only", snapshot],
+        capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    assert ".env" not in tracked
+    assert "secrets/sa.json" not in tracked
+    assert ".runtime/state.json" not in tracked
+    # Documentation is not a credential.
+    assert ".env.example" in tracked
+    # The vault itself is the thing being protected, so it must be in there.
+    assert any(name.startswith("memory-vault/") for name in tracked)
+
+
+def test_an_existing_repository_is_left_completely_alone(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    before = subprocess.run(
+        ["git", "-C", str(install), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    history = ensure_rollback_history(install)
+
+    assert history["status"] == "existing"
+    assert history["created_repo"] is False
+    assert history["commit"] == before
+
+
+def test_a_repository_with_no_commits_gets_the_snapshot(tmp_path: Path) -> None:
+    """`git mv` works without a HEAD, but `git checkout` has nothing to return
+    to, so an initialised-but-never-committed repo is not a rollback point."""
+    install, vault, runtime = _no_git_install(tmp_path)
+    _git(install, "init", "-b", "main")
+
+    history = ensure_rollback_history(install)
+
+    assert history["status"] == "seeded_empty_repo"
+    assert history["created_repo"] is False
+    assert history["commit"]

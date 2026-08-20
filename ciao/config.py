@@ -293,32 +293,82 @@ def _parse_workspaces_json(raw: str) -> dict[str, WorkspaceConfig]:
     return out
 
 
-def _legacy_workspaces(
-    *,
-    default_model_personal: str = "",
-    default_model_work: str = "",
-    disallowed_tools_personal: list[str] | None = None,
-    disallowed_tools_work: list[str] | None = None,
-    gws_default_profile: str = "personal",
+# A vault directory is a workspace when it CONTAINS one of these, not when it is
+# one. `memory-vault/personal/People/` makes `personal` a workspace;
+# `memory-vault/People/` is a note folder in a single-workspace vault and must
+# not become a workspace called "People". The nesting is what separates them.
+_WORKSPACE_EVIDENCE_DIRS: frozenset[str] = frozenset(
+    {"People", "Projects", "Places", "Ideas", "Resources", "Workspace", "journal", "projects"}
+)
+
+
+def _looks_like_workspace_dir(path: Path) -> bool:
+    """Whether ``path`` is a workspace folder inside a shared vault."""
+    if not path.is_dir() or path.name.startswith("."):
+        return False
+    if (path / "MEMORY.md").is_file():
+        return True
+    try:
+        return any(
+            child.is_dir() and child.name in _WORKSPACE_EVIDENCE_DIRS
+            for child in path.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _bootstrap_registry(
+    vault_root: Path | None = None, *, gws_default_profile: str = "personal"
 ) -> dict[str, WorkspaceConfig]:
-    """Current private-layout defaults until callers fully support N workspaces."""
+    """The registry an install gets before it has one, read off the vault.
+
+    This is the bootstrap default, not a fallback — nothing else seeds a registry
+    for an install that skipped ``ciao setup``, so returning nothing would yield
+    zero workspaces. It used to manufacture BOTH ``personal`` and ``work``
+    unconditionally, which was harmless while every workspace shared one vault
+    directory and is not harmless now:
+
+    - The re-rooting plan refuses when a registered workspace has no vault
+      directory, so a phantom ``work`` entry left such an install permanently
+      unable to migrate while the blocking gate kept telling it to.
+    - Hardcoding ONE instead, as the work order proposed, moves the same problem:
+      an install whose vault really does hold ``personal/`` and ``work/`` would
+      have ``work`` unregistered, and the plan refuses on an unregistered vault
+      directory. Also stuck, from the other side.
+
+    Neither guess is right because the answer is on disk, so read it: one
+    workspace per vault directory that looks like one, and ``personal`` when none
+    do (a fresh or single-workspace vault). The evidence test is deliberately
+    nested — see ``_WORKSPACE_EVIDENCE_DIRS`` — so a vault whose notes sit
+    directly under ``People/`` yields one workspace, not a workspace per folder.
+
+    The four ``*_PERSONAL`` / ``*_WORK`` environment variables that fed the
+    two-entry shape (default model and extra disallowed tools, one pair each)
+    went with it: they could only ever describe those two hardcoded names, and an
+    install that wants per-workspace settings puts them in ``workspaces.json``,
+    which is the supported path and works for any name.
+    """
+    names: list[str] = []
+    if vault_root is not None and Path(vault_root).is_dir():
+        names = sorted(
+            child.name
+            for child in Path(vault_root).iterdir()
+            if _looks_like_workspace_dir(child)
+        )
+    if not names:
+        names = ["personal"]
+    profile = gws_default_profile or "personal"
     return {
-        "personal": WorkspaceConfig(
-            name="personal",
-            vault_root="personal",
+        name: WorkspaceConfig(
+            name=name,
+            vault_root=name,
             default_provider="claude",
-            default_model=default_model_personal,
-            disallowed_tools=disallowed_tools_personal,
-            gws_profile=gws_default_profile or "personal",
-        ),
-        "work": WorkspaceConfig(
-            name="work",
-            vault_root="work",
-            default_provider="claude",
-            default_model=default_model_work,
-            disallowed_tools=disallowed_tools_work,
-            gws_profile="work",
-        ),
+            # The configured profile belongs to the workspace it was configured
+            # for; anything else derived from a directory name would be a guess
+            # about someone's Google account.
+            gws_profile=profile if name == "personal" else name,
+        )
+        for name in names
     }
 
 
@@ -340,11 +390,6 @@ def _parse_disallowed_tools(raw: str) -> list[str] | None:
     if cleaned.lower() == "none":
         return []
     return _split_csv(cleaned)
-
-
-def _env(source: Mapping[str, str], new_name: str, old_name: str, default: str = "") -> str:
-    """Read env var with fallback to old TELEGRAM_BRIDGE_* name for migration."""
-    return source.get(new_name, "").strip() or source.get(old_name, "").strip() or default
 
 
 def _bootstrap_workspace(source: Mapping[str, str]) -> Path:
@@ -407,18 +452,10 @@ class CiaoConfig:
     tts_local_voice: str = ""
     claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku", "fable"])
     claude_default_model: str = "opus"
-    # Per-workspace default models. Empty string falls back to
-    # claude_default_model, so one workspace can prefer a cheaper tier
-    # than another.
-    default_model_personal: str = ""
-    default_model_work: str = ""
-    # Per-workspace tool denylists (the "extra" tools beyond the default
-    # harness set). Forwarded to ``ClaudeAgentOptions.disallowed_tools`` for the
-    # spawned CLI subprocess, so a personal chat can't accidentally touch a
-    # work-only MCP (and vice versa). ``None`` = "unset, use built-in
-    # defaults"; explicit ``[]`` = "operator opted out of the defaults".
-    disallowed_tools_personal: list[str] | None = None
-    disallowed_tools_work: list[str] | None = None
+    # Per-workspace default models and tool denylists live on the WorkspaceConfig
+    # in this registry, set through `workspaces.json`. The former top-level
+    # `*_personal` / `*_work` pairs are gone: they existed only to furnish the
+    # two-entry bootstrap registry, and that now returns one workspace.
     workspaces: dict[str, WorkspaceConfig] = field(default_factory=dict)
     _workspace_registry_changed: bool = field(
         init=False, default=False, repr=False
@@ -515,11 +552,8 @@ class CiaoConfig:
         if self.control_surface not in {"legacy", "mcp"}:
             self.control_surface = "legacy"
         if not self.workspaces:
-            self.workspaces = _legacy_workspaces(
-                default_model_personal=self.default_model_personal,
-                default_model_work=self.default_model_work,
-                disallowed_tools_personal=self.disallowed_tools_personal,
-                disallowed_tools_work=self.disallowed_tools_work,
+            self.workspaces = _bootstrap_registry(
+                self.vault_root,
                 gws_default_profile=self.gws_default_profile,
             )
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
@@ -1217,7 +1251,7 @@ class CiaoConfig:
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "CiaoConfig":
         if env is None:
-            workspace_env_val = os.environ.get("CIAO_WORKSPACE", "").strip() or os.environ.get("TELEGRAM_BRIDGE_WORKSPACE", "").strip() or "."
+            workspace_env_val = os.environ.get("CIAO_WORKSPACE", "").strip() or "."
             dotenv_path = Path(workspace_env_val).expanduser().resolve() / ".env"
             if dotenv_path.exists():
                 from dotenv import load_dotenv
@@ -1253,7 +1287,7 @@ class CiaoConfig:
             pwa_auth_required = bool(pwa_auth_token)
         bootstrap_mode = not (
             (bool(pwa_auth_token) or not pwa_auth_required)
-            and (bool(source.get("CIAO_WORKSPACE")) or bool(source.get("TELEGRAM_BRIDGE_WORKSPACE")))
+            and bool(source.get("CIAO_WORKSPACE"))
         )
         if bootstrap_mode:
             workspace_root = _bootstrap_workspace(source)
@@ -1263,7 +1297,7 @@ class CiaoConfig:
             )
         else:
             workspace_root = Path(
-                _env(source, "CIAO_WORKSPACE", "TELEGRAM_BRIDGE_WORKSPACE", ".")
+                source.get("CIAO_WORKSPACE", ".")
             ).expanduser().resolve()
             runtime_default = Path(".runtime")
             if not pwa_auth_token:
@@ -1284,12 +1318,7 @@ class CiaoConfig:
         else:
             vault_root = (workspace_root / "memory-vault").resolve()
         runtime_root = Path(
-            _env(
-                source,
-                "CIAO_RUNTIME_ROOT",
-                "TELEGRAM_BRIDGE_RUNTIME_ROOT",
-                str(runtime_default),
-            )
+            source.get("CIAO_RUNTIME_ROOT", str(runtime_default))
         ).expanduser()
         if not runtime_root.is_absolute():
             runtime_root = workspace_root / runtime_root
@@ -1307,20 +1336,9 @@ class CiaoConfig:
 
         claude_models = _split_csv(source.get("CLAUDE_MODELS", "opus,sonnet,haiku,fable"))
         claude_default_model = claude_models[0] if claude_models else "opus"
-        default_model_personal = source.get("CLAUDE_DEFAULT_MODEL_PERSONAL", "").strip()
-        default_model_work = source.get("CLAUDE_DEFAULT_MODEL_WORK", "").strip()
-        disallowed_tools_personal = _parse_disallowed_tools(
-            source.get("CIAO_DISALLOWED_TOOLS_PERSONAL", "")
-        )
-        disallowed_tools_work = _parse_disallowed_tools(
-            source.get("CIAO_DISALLOWED_TOOLS_WORK", "")
-        )
         gws_default_profile = source.get("GWS_PROFILE", "personal").strip() or "personal"
-        workspaces = _parse_workspaces_json(workspaces_json) or _legacy_workspaces(
-            default_model_personal=default_model_personal,
-            default_model_work=default_model_work,
-            disallowed_tools_personal=disallowed_tools_personal,
-            disallowed_tools_work=disallowed_tools_work,
+        workspaces = _parse_workspaces_json(workspaces_json) or _bootstrap_registry(
+            vault_root,
             gws_default_profile=gws_default_profile,
         )
 
@@ -1347,13 +1365,13 @@ class CiaoConfig:
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,
             max_image_size_bytes=int(
-                _env(source, "CIAO_MAX_IMAGE_BYTES", "TELEGRAM_BRIDGE_MAX_IMAGE_BYTES", str(10 * 1024 * 1024))
+                source.get("CIAO_MAX_IMAGE_BYTES", str(10 * 1024 * 1024))
             ),
             max_voice_size_bytes=int(
-                _env(source, "CIAO_MAX_VOICE_BYTES", "TELEGRAM_BRIDGE_MAX_VOICE_BYTES", str(25 * 1024 * 1024))
+                source.get("CIAO_MAX_VOICE_BYTES", str(25 * 1024 * 1024))
             ),
             media_ttl_hours=int(
-                _env(source, "CIAO_MEDIA_TTL_HOURS", "TELEGRAM_BRIDGE_MEDIA_TTL_HOURS", "72")
+                source.get("CIAO_MEDIA_TTL_HOURS", "72")
             ),
             transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
             or "en-US",
@@ -1365,11 +1383,10 @@ class CiaoConfig:
                 or source.get("CLAUDE_PERMISSION_MODE", "auto")
             ),
             restart_exit_code=int(
-                _env(source, "CIAO_RESTART_EXIT_CODE", "TELEGRAM_BRIDGE_RESTART_EXIT_CODE", "75")
+                source.get("CIAO_RESTART_EXIT_CODE", "75")
             ),
-            auto_sync_on_start=_env(
-                source, "CIAO_AUTO_SYNC_ON_START", "TELEGRAM_BRIDGE_AUTO_SYNC_ON_START", "true"
-            ).lower() not in {"0", "false", "no", "off"},
+            auto_sync_on_start=source.get("CIAO_AUTO_SYNC_ON_START", "true").lower()
+            not in {"0", "false", "no", "off"},
             auto_vault_index=source.get("CIAO_AUTO_VAULT_INDEX", "true").strip().lower()
             not in {"0", "false", "no", "off"},
             auto_update_github_skills=source.get("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "false").strip().lower()
@@ -1377,10 +1394,6 @@ class CiaoConfig:
             pwa_port=int(source.get("PWA_PORT", "8443")),
             pwa_host=source.get("PWA_HOST", "0.0.0.0").strip(),
             gws_default_profile=gws_default_profile,
-            default_model_personal=default_model_personal,
-            default_model_work=default_model_work,
-            disallowed_tools_personal=disallowed_tools_personal,
-            disallowed_tools_work=disallowed_tools_work,
             workspaces=workspaces,
             insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
             in {"", "0", "false", "no", "off"},

@@ -16,7 +16,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web.routes_api import (
     dismiss_older_than,
     list_proposals,
@@ -33,6 +33,10 @@ def _config(tmp_path: Path) -> CiaoConfig:
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
         vault_root=vault,
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+            for name in ("personal", "work")
+        },
     )
 
 

@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -346,6 +347,12 @@ def apply(
     vault_root = Path(vault_root).resolve()
     runtime_root = Path(runtime_root)
 
+    # Before anything else, because everything else assumes it: the moves are
+    # `git mv` and the undo is `git checkout`. An install with no repository used
+    # to fail on the first move and refuse forever; it now gets one, with a
+    # snapshot commit as the rollback point.
+    history = ensure_rollback_history(install_root)
+
     result = plan(install_root, vault_root, workspaces)
     triage = plan_skills_triage(install_root, primary)
     guides = guide_moves(install_root, primary)
@@ -353,11 +360,36 @@ def apply(
     payload["primary"] = primary
     payload["skills_triage"] = triage.as_dict()
     payload["recorded_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    payload["git_history"] = history
 
-    if result.refused or triage.refusals:
+    history_refusal: list[str] = []
+    if history["status"] in {"no_git_binary", "init_failed", "add_failed", "commit_failed"}:
+        detail = history.get("error") or history["status"]
+        history_refusal = [
+            "the install has no git history to roll back to and one could not be "
+            f"created ({detail}); every move is a git mv and git checkout is the "
+            "undo, so migrating without it would be unrecoverable"
+        ]
+
+    if result.refused or triage.refusals or history_refusal:
         payload["status"] = "refused"
         payload["refused"] = True
-        payload["refusals"] = [*result.refusals, *triage.refusals]
+        # `unclassified` is a refusal reason too — the plan refuses on it — but it
+        # was not part of `refusals`, so a run blocked solely by an unrecognised
+        # vault directory reported `status: refused` with an EMPTY reason list.
+        # That is what the blocking gate renders, so the operator was told to fix
+        # something and not told what.
+        unclassified = [
+            f"{item} is in the vault but the migration has no destination for it; "
+            "register it as a workspace or move it out of the vault"
+            for item in result.unclassified
+        ]
+        payload["refusals"] = [
+            *history_refusal,
+            *result.refusals,
+            *triage.refusals,
+            *unclassified,
+        ]
         payload["receipt_path"] = str(write_receipt(runtime_root, payload))
         return payload
     if primary not in result.workspaces:
@@ -1137,6 +1169,111 @@ def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
         if not dirs_existed[name] and (root / name).is_dir()
     ]
     return created_files, created_dirs
+
+
+# Paths a snapshot commit must never capture. An auto-created repository is a
+# safety net, not a publication: `.env` holds the PWA token and provider keys,
+# `secrets/` holds operator credentials, and `.runtime/` is volatile state the
+# migration writes into as it runs. None of them are moved by the migration, so
+# excluding them costs the rollback nothing. `.env.example` is deliberately not
+# matched — it is documentation.
+_SNAPSHOT_IGNORES: tuple[str, ...] = (
+    ".runtime/",
+    ".env",
+    ".credentials",
+    "secrets/",
+    "node_modules/",
+    ".venv/",
+    ".DS_Store",
+    ".obsidian/workspace*",
+)
+
+
+def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
+    """Give the install a git history to roll back to, creating one if needed.
+
+    Every move is a ``git mv``, and ``git checkout`` is the undo. An install
+    whose vault is not in a repository therefore could not migrate at all: the
+    first ``git mv`` failed and the run refused, permanently, while the blocking
+    gate kept asking. Refusing was correct — losing the undo is worse than not
+    migrating — but the missing piece is cheap to create, so create it.
+
+    Three states, one outcome:
+
+    - a repository with at least one commit: left completely alone.
+    - a repository with no commits: given the snapshot commit, because ``git mv``
+      works without a HEAD but ``git checkout`` has nothing to return to.
+    - not a repository: ``git init``, a ``.gitignore``, then the snapshot.
+
+    The snapshot deliberately excludes credentials and volatile state (see
+    ``_SNAPSHOT_IGNORES``). A safety net that captured `.env` would turn "we made
+    you a backup" into "we committed your provider keys".
+    """
+    root = Path(install_root).resolve()
+    out: dict[str, Any] = {"status": "", "created_repo": False, "commit": ""}
+    if shutil.which("git") is None:
+        out["status"] = "no_git_binary"
+        return out
+    if not root.is_dir():
+        out["status"] = "no_install_root"
+        return out
+
+    code, top = _run_git(root, "rev-parse", "--show-toplevel")
+    inside = code == 0 and top.strip() != ""
+    if inside:
+        head_code, head = _run_git(root, "rev-parse", "HEAD")
+        if head_code == 0 and head.strip():
+            out["status"] = "existing"
+            out["commit"] = head.strip()
+            return out
+        out["status"] = "seeded_empty_repo"
+    else:
+        _write_snapshot_gitignore(root)
+        init_code, init_out = _run_git(root, "init", "-b", "main")
+        if init_code != 0:
+            out["status"] = "init_failed"
+            out["error"] = init_out.strip()
+            return out
+        out["created_repo"] = True
+        out["status"] = "created"
+
+    add_code, add_out = _run_git(root, "add", "-A")
+    if add_code != 0:
+        out["status"] = "add_failed"
+        out["error"] = add_out.strip()
+        return out
+    commit_code, commit_out = _run_git(
+        root,
+        "-c",
+        "user.name=Ciaobot",
+        "-c",
+        "user.email=ciaobot@localhost",
+        "commit",
+        "-m",
+        "Ciaobot: snapshot before the workspace re-rooting",
+    )
+    if commit_code != 0:
+        out["status"] = "commit_failed"
+        out["error"] = commit_out.strip()
+        return out
+    head_code, head = _run_git(root, "rev-parse", "HEAD")
+    out["commit"] = head.strip() if head_code == 0 else ""
+    return out
+
+
+def _write_snapshot_gitignore(root: Path) -> None:
+    """Add the exclusions a fresh snapshot needs, keeping any existing file."""
+    path = root / ".gitignore"
+    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    present = {line.strip() for line in existing.splitlines()}
+    missing = [entry for entry in _SNAPSHOT_IGNORES if entry not in present]
+    if not missing:
+        return
+    header = "" if existing else (
+        "# Ciaobot: credentials and volatile state stay out of snapshots\n"
+    )
+    body = existing if not existing or existing.endswith("\n") else existing + "\n"
+    path.write_text(header + body + "\n".join(missing) + "\n", encoding="utf-8")
 
 
 # -- P10.6: rebuild the derived artefacts per root ---------------------------

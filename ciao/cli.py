@@ -46,7 +46,6 @@ def _restart_exit_code() -> int:
     """
     raw = (
         os.environ.get("CIAO_RESTART_EXIT_CODE", "").strip()
-        or os.environ.get("TELEGRAM_BRIDGE_RESTART_EXIT_CODE", "").strip()
         or "75"
     )
     try:

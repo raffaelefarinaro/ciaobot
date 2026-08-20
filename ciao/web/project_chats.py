@@ -4690,7 +4690,7 @@ class ProjectChatManager:
         """Per-workspace tool denylist for a chat's spawned CLI.
 
         Applies the default harness set plus any workspace "extra disallowed
-        tools" (``CIAO_DISALLOWED_TOOLS_PERSONAL`` / ``_WORK`` or the PWA
+        tools" (the workspace's own `disallowed_tools` in `workspaces.json`, or the PWA
         field), plus a derived ``mcp__<server>`` deny for every server declared
         in ``.mcp.json`` that the workspace's ``allowed_mcp_servers`` allowlist
         does not name.

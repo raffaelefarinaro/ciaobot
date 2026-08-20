@@ -1644,3 +1644,82 @@ install has one; a user who deleted `.git`, or whose vault lives somewhere git i
    other shape above was validated on synthetic three-note vaults, not on somebody's real vault with
    its own history. The rehearsal path (`--rehearse` against an APFS clone) exists and should be the
    documented first step for anyone else.
+
+
+## P10.9 / P10.10: why most of the deletions must NOT happen (2026-08-20)
+
+Asked directly: why can't we delete after the migration? Because the premise changed, and for six of
+the eight items the answer is now "we shouldn't", not "not yet".
+
+The gate was "the migration has to have RUN". It has, here. But the migration is **per install** and
+receipt-gated, and it can still legitimately refuse — a vault with uncommitted tracked changes
+refuses by design, so `git checkout` stays a working undo. That refusal is unbounded in time, so a
+shared-layout install can exist after this release. For those installs
+`_entity_visible_in_workspace`, `legacy_entity_workspace()` and the `INDEX.md` prefix branch are the
+ONLY thing scoping entities to a workspace. Deleting them makes every entity visible in every
+session: fail-open, a privacy regression, strictly worse than not migrating.
+
+What actually changed today is better than deleting them. `index_owns_workspace` made that filter
+**conditional on the layout** rather than legacy scaffolding awaiting a cut. It is no longer dead
+code with a deletion date; it is the shared-layout branch of a two-layout system, and it earns its
+place as long as the shared layout can exist. The same is true of `vault_index._workspace_of` (needed
+whenever a scan has no workspace stamp) and of `_entity_index_root`, which was generalised rather
+than special-cased. **P10.9 should be rewritten**: keep those four as documented branches, and delete
+only what is genuinely dead.
+
+### What WAS genuinely dead, and is now gone
+The four `*_PERSONAL` / `*_WORK` config fields and their env vars. Nothing outside `config.py` read
+them; inside it they fed exactly one thing — the two-entry bootstrap registry — so they could only
+ever describe those two hardcoded names.
+
+### P10.10 turned out to be a live blocker, not cleanup
+The work order called `_legacy_workspaces()` "a phantom entry today, a real unwanted directory tree
+after the cut". Probed on an install with no `workspaces.json`: it is worse than an unwanted tree.
+The phantom `work` entry made the migration **refuse outright** — the plan refuses when a registered
+workspace has no vault directory — so an install that skipped `ciao setup` could never migrate while
+the blocking gate kept telling it to. The same shape as the non-git vault: permanently stuck.
+
+Fixed, but not the way the work order said. "Return exactly one" moves the problem rather than
+solving it: an install whose vault really holds `personal/` and `work/` would then have `work`
+unregistered, and the plan refuses on an unregistered vault directory. Stuck from the other side.
+Neither guess is right because **the answer is on disk**, so `_bootstrap_registry` reads it — one
+entry per vault directory that looks like a workspace, `personal` when none do. The evidence test is
+deliberately nested: `memory-vault/personal/People/` makes `personal` a workspace, while
+`memory-vault/People/` is a note folder in a single-workspace vault and must not become a workspace
+called "People".
+
+Two notes for whoever reads this next:
+
+- The work order's proposed name, `_bootstrap_workspace()`, **already exists** in `config.py` as an
+  unrelated helper that resolves the bootstrap workspace PATH. Defining it twice made the later
+  definition win silently and failed 484 tests. It is `_bootstrap_registry()`.
+- 19 tests depended on the manufactured `work` workspace, having built a `CiaoConfig` with no
+  registry at all. They now declare the workspaces they test. Depending on a manufactured workspace
+  was itself the bug in miniature.
+
+### A refusal with no reason
+Found while probing: `plan()` refuses on an unclassified vault directory, but `unclassified` was not
+part of `refusals` — so a run blocked solely by an unrecognised directory reported
+`status: refused` with an **empty reason list**. That list is exactly what the blocking gate renders,
+so the operator was told to fix something and not told what. Now every unclassified path becomes a
+refusal line naming the directory and what to do about it.
+
+## An install with no git history now gets one (2026-08-20)
+
+Every move is a `git mv` and the undo is `git checkout`, so a vault outside a repository could not
+migrate at all: the first move failed and the run refused, permanently. Refusing was right — losing
+the undo is worse than not migrating — but the missing piece is cheap to create, so `apply` now
+creates it before anything else. Three states: a repository with commits is left alone; a repository
+with no commits gets the snapshot (because `git mv` works without a HEAD but `git checkout` has
+nothing to return to); no repository gets `git init`, a `.gitignore`, then the snapshot. The commit
+sha lands in the receipt.
+
+**The snapshot excludes credentials on purpose.** `.env` holds the PWA token and provider keys and
+`secrets/` holds operator credentials; none of them are moved by the migration, so excluding them
+costs the rollback nothing. A safety net that captured `.env` would turn "we made you a backup" into
+"we committed your provider keys". `.env.example` is deliberately still included — it is
+documentation.
+
+Verified end to end on a sandbox: after migrating, `git reset --hard && git clean -fd` restores the
+pre-migration tree exactly. `--undo` remains the proper path because it also clears the receipt; this
+is the floor underneath it.

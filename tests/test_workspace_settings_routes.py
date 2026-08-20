@@ -171,6 +171,10 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
     delete = client.delete("/api/workspaces/client-a")
     assert delete.status_code == 200
     assert config.workspace("client-a") is None
+    # One entry, not two: the bootstrap registry is read off the vault, and this
+    # fixture's vault has no `work/` directory. It used to manufacture `work`
+    # regardless, which is what left an install unable to migrate — a registered
+    # workspace with no vault directory refuses the whole plan.
     assert json.loads((tmp_path / ".runtime" / "workspaces.json").read_text()) == [
         {
             "name": "personal",
@@ -180,16 +184,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "disallowed_tools": None,
             "allowed_mcp_servers": None,
             "gws_profile": "personal",
-            "color": "pink",
-        },
-        {
-            "name": "work",
-            "vault_root": "memory-vault/work",
-            "default_provider": "claude",
-            "default_model": "",
-            "disallowed_tools": None,
-            "allowed_mcp_servers": None,
-            "gws_profile": "work",
             "color": "pink",
         },
     ]
@@ -249,7 +243,10 @@ def test_workspace_creation_rejects_case_and_vault_owner_collisions(tmp_path):
     assert case_collision.status_code == 400
     assert "conflicts" in case_collision.json()["error"]
 
-    existing = config.workspace("work")
+    # `personal`, not `work`: the bootstrap registry is read off the vault now, so
+    # only workspaces that actually have a vault directory exist. Any registered
+    # workspace serves here — the point is that its vault folder is already owned.
+    existing = config.workspace("personal")
     assert existing is not None
     existing.vault_root = str(tmp_path / "memory-vault" / "client")
     root_collision = client.post(

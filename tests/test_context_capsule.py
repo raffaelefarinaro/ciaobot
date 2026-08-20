@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.context.capsule import build_context_capsule, context_digest
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -62,6 +62,10 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+            for name in ("personal", "work")
+        },
     )
     return ProjectChatManager(
         config,
