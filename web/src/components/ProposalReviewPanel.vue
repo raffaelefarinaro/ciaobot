@@ -2,10 +2,12 @@
 import { computed, onMounted, ref } from 'vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
+import { useFileViewerStore } from '../stores/fileViewer'
 import type { ProposalRow } from '../lib/types'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
+const fileViewer = useFileViewerStore()
 const chatBusy = ref(false)
 
 const confirmLeakId = ref('')
@@ -73,7 +75,10 @@ function rowSubtitle(row: ProposalRow): string {
     }
     return `${from} · no destination, needs a decision`
   }
-  if (isSkill(row)) return 'a skill proposal file'
+  // The path, not the words "a skill proposal file". The row's whole content is
+  // in that file, and naming it is what makes "view" obviously the first thing
+  // to press.
+  if (isSkill(row)) return row.path || 'a skill proposal file'
   return `ciao:${row.region ?? row.kind}`
 }
 
@@ -185,6 +190,54 @@ async function openWorkspaceChat(workspace: string, title: string) {
   if (!project) project = await projectStore.createProject('General')
   if (!project) return null
   return projectStore.createChat(project.project_id, title)
+}
+
+/** Open the proposal itself.
+ *
+ * A skill row showed its filename and the words "a skill proposal file", which
+ * is not enough to decide anything: the whole content of the decision is in the
+ * file. The row already carries a vault-relative path, which is what the file
+ * viewer takes.
+ */
+async function view(row: ProposalRow) {
+  if (!row.path) return
+  await fileViewer.open(row.path)
+}
+
+/** Accept a skill proposal by building it, in a chat, in its own workspace.
+ *
+ * A skill proposal has nothing to promote into a region, so the server refuses
+ * `accept` for it — but "there is nothing to do" was the wrong reading of what
+ * accepting a proposed skill means. Accepting it means implementing it, and that
+ * is a chat. The row stays queued until the skill actually exists, so this does
+ * not lose the proposal if the implementation is abandoned halfway.
+ */
+async function implementSkill(row: ProposalRow) {
+  if (chatBusy.value) return
+  chatBusy.value = true
+  try {
+    const chat = await openWorkspaceChat(row.workspace, `Implement ${row.text}`)
+    if (!chat) return
+    projectStore.sendMessage(chat.chat_id, implementPrompt(row))
+    const { router } = await import('../router')
+    await router.push(`/chat/${chat.chat_id}`)
+  } finally {
+    chatBusy.value = false
+  }
+}
+
+function implementPrompt(row: ProposalRow): string {
+  return (
+    `Implement the skill proposed in \`${row.path}\` (queued in the ${row.workspace} ` +
+    'workspace).\n\n' +
+    'Read the proposal first and tell me what it wants before writing anything. ' +
+    'If it is worth building, create it under this workspace\'s `skills/` directory ' +
+    'as a `SKILL.md` with a name and description, then run `ciao sync-skills` for ' +
+    'this root so the providers can see it. If it is not worth building, say so and ' +
+    'why — a proposal is a suggestion, not an instruction.\n\n' +
+    'Leave the proposal file where it is. I will dismiss it from the review queue ' +
+    'once the skill exists, so nothing is lost if we stop halfway.'
+  )
 }
 
 async function discuss(row: ProposalRow) {
@@ -382,9 +435,30 @@ onMounted(() => { void store.fetch() })
             <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
 
+          <!-- A skill proposal is a FILE, so its actions are the ones a file
+               has: read it, build it, or drop it. "Accept" for a region row means
+               "write this fact"; for a proposed skill it means "implement it",
+               which is a chat, not a write. -->
+          <div v-else-if="isSkill(row)" class="pr-actions">
+            <button
+              type="button"
+              class="btn-small btn-chip"
+              :disabled="!row.path"
+              @click="view(row)"
+            >view</button>
+            <button
+              type="button"
+              class="btn-small btn-primary"
+              :disabled="chatBusy"
+              @click="implementSkill(row)"
+            >implement</button>
+            <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="doDismiss(row)">dismiss</button>
+            <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
+          </div>
+
           <div v-else class="pr-actions">
-            <!-- No accept when nothing backs a destination, and none for a skill
-                 file: a button that cannot do what it says is worse than absent. -->
+            <!-- No accept when nothing backs a destination: a button that cannot
+                 do what it says is worse than absent. -->
             <button
               v-if="canAccept(row)"
               type="button"

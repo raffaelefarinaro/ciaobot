@@ -7,6 +7,7 @@ import { nextTick } from 'vue'
 import ProposalReviewPanel from '../ProposalReviewPanel.vue'
 import { useProposalsStore } from '../../stores/proposals'
 import { useProjectStore } from '../../stores/projects'
+import { useFileViewerStore } from '../../stores/fileViewer'
 import type { ProposalRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -192,7 +193,7 @@ describe('ProposalReviewPanel', () => {
     wrapper.unmount()
   })
 
-  it('renders skill rows distinctly and never shows a region-edit accept action', async () => {
+  it('gives a skill row the actions a FILE has, never a region edit', async () => {
     apiGet.mockResolvedValue({
       rows: [
         row({ id: 'bullet', kind: 'memory' }),
@@ -204,10 +205,65 @@ describe('ProposalReviewPanel', () => {
 
     const skillRow = wrapper.findAll('.pr-row').find(r => r.text().includes('proposal-2026-08-20'))!
     expect(skillRow.find('.pr-kind').text()).toBe('skill')
-    expect(skillRow.text()).toContain('skill proposal file')
-    // No accept button: a skill is a file, not a region edit.
-    expect(skillRow.find('.btn-primary').exists()).toBe(false)
-    expect(skillRow.findAll('.btn-chip').map(b => b.text())).toEqual(['dismiss', 'talk about it'])
+    // The PATH, because the whole content of the decision is in that file and
+    // "a skill proposal file" told the operator nothing they could act on.
+    expect(skillRow.text()).toContain('personal/Workspace/Skill-Proposals/proposal-2026-08-20.md')
+    // Read it, build it, or drop it. `implement` is the primary because accepting
+    // a proposed skill means implementing it — which is a chat, not a write.
+    expect(skillRow.find('.btn-primary').text()).toBe('implement')
+    expect(skillRow.findAll('.btn-chip').map(b => b.text()))
+      .toEqual(['view', 'dismiss', 'talk about it'])
+    wrapper.unmount()
+  })
+
+  it('view opens the proposal file itself', async () => {
+    const path = 'personal/Workspace/Skill-Proposals/proposal-2026-08-20.md'
+    apiGet.mockResolvedValue({
+      rows: [row({ id: 'skill', kind: 'skill', text: 'proposal-2026-08-20', path, line: -1 })],
+    })
+    const viewer = useFileViewerStore()
+    const open = vi.spyOn(viewer, 'open').mockResolvedValue(true)
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const button = wrapper.findAll('.btn-chip').find(b => b.text() === 'view')!
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(open).toHaveBeenCalledWith(path)
+    wrapper.unmount()
+  })
+
+  it('implement opens a chat in the row own workspace and leaves the row queued', async () => {
+    const path = 'work/Workspace/Skill-Proposals/proposal-2026-08-20.md'
+    apiGet.mockResolvedValue({
+      rows: [row({
+        id: 'skill', kind: 'skill', text: 'proposal-2026-08-20',
+        workspace: 'work', path, line: -1,
+      })],
+    })
+    const projects = useProjectStore()
+    projects.activeWorkspace = 'work'
+    projects.projects = [{
+      project_id: 'p-work', name: 'General', workspace: 'work', context: '',
+      created_at: '', order: 0, vault_folder: 'general', is_auto: true,
+    } as never]
+    vi.spyOn(projects, 'createChat').mockResolvedValue({ chat_id: 'chat-x' } as never)
+    const send = vi.spyOn(projects, 'sendMessage').mockImplementation(() => undefined as never)
+    const proposals = useProposalsStore()
+    const act = vi.spyOn(proposals, 'act')
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const button = wrapper.findAll('.btn-primary').find(b => b.text() === 'implement')!
+    await button.trigger('click')
+    await flushPromises()
+
+    const sent = String(send.mock.calls.at(-1)?.[1] ?? '')
+    expect(sent).toContain(path)
+    expect(sent).toContain('skills/')
+    // A proposal is a suggestion: implementing it must not silently resolve it.
+    expect(act).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
