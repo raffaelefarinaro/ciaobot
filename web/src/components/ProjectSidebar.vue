@@ -353,7 +353,11 @@
       </div>
     </template>
 
-    <template v-if="!collapsed && mode === 'memory'">
+    <!-- The workspace toggle covers review as well as the graph: scoping the
+         proposal queue is the same act as scoping the map, and the review view
+         had no sidebar at all, so the workspace was buried in a heading per
+         group instead of living where every other page keeps it. -->
+    <template v-if="!collapsed && (mode === 'memory' || mode === 'proposals')">
       <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
         <button
           v-for="workspace in store.workspaceOptions"
@@ -370,7 +374,7 @@
         </button>
       </div>
 
-      <div class="mm-sidebar-scroll">
+      <div v-if="mode === 'memory'" class="mm-sidebar-scroll">
         <h3>Vault</h3>
         <!-- Three tiles, not four: "notes shown" and "total" were separate
              tiles showing the same number whenever nothing was filtered, so the

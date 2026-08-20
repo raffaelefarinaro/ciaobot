@@ -6,6 +6,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ProposalReviewPanel from '../ProposalReviewPanel.vue'
 import { useProposalsStore } from '../../stores/proposals'
+import { useProjectStore } from '../../stores/projects'
 import type { ProposalRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -113,6 +114,7 @@ describe('ProposalReviewPanel', () => {
     apiGet.mockResolvedValue({
       rows: [row({ id: 'leak', kind: 'memory', workspace: 'work', leak_warning: true, region: 'memory' })],
     })
+    useProjectStore().activeWorkspace = 'work'
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
@@ -249,6 +251,8 @@ describe('talk about it', () => {
     // operator does not yet know which — so a third action hands the row to a
     // chat in that row's workspace and changes nothing here.
     apiGet.mockResolvedValue({ rows: [row({ workspace: 'work' })] })
+    const projects = useProjectStore()
+    projects.activeWorkspace = 'work'
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
@@ -267,7 +271,7 @@ describe('talk about it', () => {
   })
 })
 
-describe('grouping', () => {
+describe('workspace scoping', () => {
   let pinia: ReturnType<typeof createPinia>
 
   beforeEach(() => {
@@ -277,41 +281,40 @@ describe('grouping', () => {
     apiPost.mockReset()
   })
 
-  it('groups rows by workspace, with shared ones first', async () => {
-    // The workspace is the most important thing about a proposal: it decides
-    // which guide an accept writes to. A flat list of 109 rows from two
-    // workspaces read as one undifferentiated pile.
+  it('shows only the active workspace, plus install-wide rows', async () => {
+    // The workspace switcher on the left is where every other page keeps this
+    // choice. Grouping in the list put it in a heading you had to scroll back to.
     apiGet.mockResolvedValue({
       rows: [
-        row({ id: 'w', workspace: 'work' }),
-        row({ id: 'p', workspace: 'personal' }),
-        row({ id: 's', workspace: '' }),
+        row({ id: 'p', workspace: 'personal', text: 'personal fact' }),
+        row({ id: 'w', workspace: 'work', text: 'work fact' }),
+        row({ id: 's', workspace: '', text: 'install-wide fact' }),
       ],
     })
+    const projects = useProjectStore()
+    projects.activeWorkspace = 'work'
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    const headings = wrapper.findAll('.pr-group-name').map((h) => h.text())
-    expect(headings).toEqual(['shared', 'personal', 'work'])
-    expect(wrapper.findAll('.pr-group')).toHaveLength(3)
+    const text = wrapper.text()
+    expect(text).toContain('work fact')
+    expect(text).toContain('install-wide fact')
+    expect(text).not.toContain('personal fact')
     wrapper.unmount()
   })
 
-  it('selects a whole workspace from its heading', async () => {
+  it('shows everything when no workspace is active yet', async () => {
+    // Hiding every row until a switcher reports a selection reads as an empty
+    // queue on a single-workspace install.
     apiGet.mockResolvedValue({
-      rows: [
-        row({ id: 'p1', workspace: 'personal' }),
-        row({ id: 'p2', workspace: 'personal' }),
-        row({ id: 'w1', workspace: 'work' }),
-      ],
+      rows: [row({ id: 'p', workspace: 'personal', text: 'a fact' })],
     })
+    const projects = useProjectStore()
+    projects.activeWorkspace = ''
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    await wrapper.findAll('.pr-group-select input')[0].setValue(true)
-
-    // Only that workspace's rows, and the batch bar appears with the count.
-    expect(wrapper.find('.pr-batch-count').text()).toContain('2')
+    expect(wrapper.text()).toContain('a fact')
     wrapper.unmount()
   })
 
@@ -327,8 +330,50 @@ describe('grouping', () => {
     const rowEl = wrapper.find('.pr-row')
     expect(rowEl.text()).toContain('needs a decision')
     expect(rowEl.find('.pr-actions .btn-primary').exists()).toBe(false)
-    expect(rowEl.findAll('.pr-actions .btn-chip').map((b) => b.text()))
-      .toEqual(['dismiss', 'talk about it'])
+    wrapper.unmount()
+  })
+
+  it('never offers a batch accept for rows that have no accept', async () => {
+    // The bug: the batch bar said "accept 1" for a re-home row whose own actions
+    // correctly showed none, and accepting one drops the bullet while moving
+    // nothing — so a batch could silently discard proposals the UI had just said
+    // it could not act on.
+    apiGet.mockResolvedValue({
+      rows: [rehomeRow({ id: 'r', rehome: { note: 'personal/People/Mo.md', destination: '', candidates: [], justified: false, reason: 'none' } })],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper.find('.pr-row-check').setValue(true)
+
+    const batch = wrapper.find('.pr-batch')
+    expect(batch.text()).toContain('1 selected')
+    const labels = batch.findAll('button').map((b) => b.text())
+    expect(labels).not.toContain('accept 1')
+    expect(labels.some((l) => l.startsWith('accept'))).toBe(false)
+    // Dismiss and discuss remain available for the selection.
+    expect(labels).toContain('dismiss 1')
+    expect(labels).toContain('talk about 1')
+    wrapper.unmount()
+  })
+
+  it('discusses a whole selection in one chat', async () => {
+    apiGet.mockResolvedValue({
+      rows: [row({ id: 'a' }), row({ id: 'b', kind: 'profile' })],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper.find('.pr-group-select input').setValue(true)
+    const store = useProposalsStore()
+    const act = vi.spyOn(store, 'act')
+    const batch = vi.spyOn(store, 'batch')
+    await wrapper.find('.pr-batch').findAll('button')
+      .find((b) => b.text() === 'talk about 2')!.trigger('click')
+
+    // Talking is not deciding: nothing resolves.
+    expect(act).not.toHaveBeenCalled()
+    expect(batch).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })

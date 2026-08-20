@@ -9,16 +9,27 @@ const projectStore = useProjectStore()
 const chatBusy = ref(false)
 
 const kindFilter = ref('all')
-const workspaceFilter = ref('all')
 const selected = ref<Set<string>>(new Set())
 const confirmLeakId = ref('')
 const olderThanDays = ref(30)
 
 const kinds = computed(() => ['all', ...new Set(store.rows.map(r => r.kind))])
 
+/** Rows for the workspace the sidebar has selected.
+ *
+ * Scoped rather than grouped: the workspace switcher on the left is where every
+ * other page keeps this choice, and grouping in the list meant the workspace —
+ * which decides where an accept writes — lived in a heading you had to scroll
+ * back to. A row with no workspace is install-wide and shows under whichever is
+ * active, because it applies to all of them.
+ */
 const filtered = computed(() => store.rows.filter(r =>
   (kindFilter.value === 'all' || r.kind === kindFilter.value) &&
-  (workspaceFilter.value === 'all' || r.workspace === workspaceFilter.value),
+  // No active workspace yet (a single-workspace install, or the store still
+  // loading) shows everything. Hiding every row until a switcher reports a
+  // selection would read as an empty queue.
+  (!projectStore.activeWorkspace || !r.workspace
+    || r.workspace === projectStore.activeWorkspace),
 ))
 
 const counts = computed(() => {
@@ -27,39 +38,6 @@ const counts = computed(() => {
   return [...tally.entries()].sort((a, b) => b[1] - a[1]).map(([kind, n]) => ({ kind, n }))
 })
 
-/** Rows grouped by the workspace that owns them, shared ones first.
- *
- * A flat list of 109 rows from two workspaces reads as one undifferentiated
- * pile, and the workspace is the single most important thing about a proposal:
- * it decides which guide an accept writes to and which vault a re-home moves
- * within. Anything with no workspace is shared, so it sorts to the top rather
- * than into an arbitrary alphabetical position.
- */
-const groups = computed(() => {
-  const byWorkspace = new Map<string, ProposalRow[]>()
-  for (const row of filtered.value) {
-    const key = row.workspace || ''
-    const bucket = byWorkspace.get(key)
-    if (bucket) bucket.push(row)
-    else byWorkspace.set(key, [row])
-  }
-  return [...byWorkspace.entries()]
-    .sort(([a], [b]) => (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b)))
-    .map(([workspace, rows]) => ({ workspace, rows }))
-})
-
-type Group = { workspace: string; rows: ProposalRow[] }
-
-function groupSelected(group: Group): boolean {
-  return group.rows.length > 0 && group.rows.every(r => selected.value.has(r.id))
-}
-
-function toggleGroup(group: Group) {
-  const next = new Set(selected.value)
-  if (groupSelected(group)) group.rows.forEach(r => next.delete(r.id))
-  else group.rows.forEach(r => next.add(r.id))
-  selected.value = next
-}
 
 const KIND_LABELS: Record<string, string> = {
   memory: 'memory',
@@ -146,11 +124,18 @@ function toggleRow(id: string) {
   selected.value = next
 }
 
-// Batch accept must never include skill rows: they are files, not bullets, and
-// the server has no accept descriptor for them (accept_for('skill') raises).
-const selectedNonSkill = computed(() => [...selected.value].filter(id => {
+/** Selected rows an accept can actually be performed on.
+ *
+ * The same predicate as a row's own accept button, and it has to be: the batch
+ * bar offered "accept 1" for a re-home row whose own actions correctly showed no
+ * accept at all, and accepting one drops the bullet while moving nothing — so a
+ * batch could silently discard proposals the UI had just said it could not act
+ * on. A skill row is excluded for the older reason: it is a file, not a bullet,
+ * and `accept_for('skill')` raises on the server.
+ */
+const selectedAcceptable = computed(() => [...selected.value].filter(id => {
   const row = store.rows.find(r => r.id === id)
-  return row && row.kind !== 'skill'
+  return !!row && canAccept(row)
 }))
 
 function isRegionKind(row: ProposalRow): boolean {
@@ -199,6 +184,17 @@ function doDismiss(row: ProposalRow) {
   void store.act(row.id, 'dismiss')
 }
 
+async function openWorkspaceChat(workspace: string, title: string) {
+  const target = workspace || projectStore.activeWorkspace
+  if (projectStore.activeWorkspace !== target) {
+    await projectStore.switchWorkspace(target)
+  }
+  let project = projectStore.projects.find((p) => p.workspace === target && Boolean(p.is_auto))
+  if (!project) project = await projectStore.createProject('General')
+  if (!project) return null
+  return projectStore.createChat(project.project_id, title)
+}
+
 async function discuss(row: ProposalRow) {
   // The row stays queued: this is "talk about it", not a decision. The chat is
   // created in the row's OWN workspace, because a proposal from work discussed
@@ -207,14 +203,7 @@ async function discuss(row: ProposalRow) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const workspace = row.workspace || projectStore.activeWorkspace
-    if (projectStore.activeWorkspace !== workspace) {
-      await projectStore.switchWorkspace(workspace)
-    }
-    let project = projectStore.projects.find((p) => p.workspace === workspace && Boolean(p.is_auto))
-    if (!project) project = await projectStore.createProject('General')
-    if (!project) return
-    const chat = await projectStore.createChat(project.project_id, 'Proposal review')
+    const chat = await openWorkspaceChat(row.workspace, 'Proposal review')
     if (!chat) return
     projectStore.sendMessage(chat.chat_id, discussPrompt(row))
     const { router } = await import('../router')
@@ -244,11 +233,39 @@ function discussPrompt(row: ProposalRow): string {
 }
 
 function batchAccept() {
-  void store.batch(selectedNonSkill.value, 'accept')
+  void store.batch(selectedAcceptable.value, 'accept')
 }
 
 function batchDismiss() {
   void store.batch([...selected.value], 'dismiss')
+}
+
+async function batchDiscuss() {
+  // One chat for the whole selection, in the active workspace, and the rows stay
+  // queued. Opening a chat per row would be unusable at the counts this queue
+  // reaches, and the rows are usually related — which is why they were selected
+  // together.
+  const rows = [...selected.value]
+    .map(id => store.rows.find(r => r.id === id))
+    .filter((r): r is ProposalRow => !!r)
+  if (!rows.length || chatBusy.value) return
+  chatBusy.value = true
+  try {
+    const chat = await openWorkspaceChat(projectStore.activeWorkspace, 'Proposal review')
+    if (!chat) return
+    const lines = rows.map((r, i) => `${i + 1}. [${r.kind}] ${r.text}`).join('\n')
+    projectStore.sendMessage(
+      chat.chat_id,
+      `${rows.length} queued proposals need a decision:\n\n${lines}\n\n` +
+        'For each one, tell me whether it is durable and belongs where it says, ' +
+        'or should be dropped. Do not edit any region or move any file: leave ' +
+        'them queued and I will accept or dismiss them myself.',
+    )
+    const { router } = await import('../router')
+    await router.push(`/chat/${chat.chat_id}`)
+  } finally {
+    chatBusy.value = false
+  }
 }
 
 function dismissOlder() {
@@ -265,7 +282,7 @@ onMounted(() => { void store.fetch() })
   <div class="proposal-review">
     <header class="pr-head">
       <p class="pr-summary">
-        <strong>{{ filtered.length }}</strong> to review
+        <strong>{{ filtered.length }}</strong> to review in {{ projectStore.activeWorkspace }}
         <span v-if="counts.length" class="pr-counts">
           <span v-for="c in counts" :key="c.kind" class="pr-count">{{ c.n }} {{ kindLabel(c.kind) }}</span>
         </span>
@@ -291,39 +308,45 @@ onMounted(() => { void store.fetch() })
 
     <div v-if="selected.size" class="pr-batch">
       <span class="pr-batch-count">{{ selected.size }} selected</span>
+      <!-- Absent rather than disabled when nothing in the selection can be
+           accepted, matching a row's own actions. Rendering "accept 0" invited
+           the click that dropped a re-home bullet while moving nothing. -->
       <button
+        v-if="selectedAcceptable.length"
         type="button"
         class="btn-small btn-primary"
-        :disabled="!selectedNonSkill.length || store.busy"
+        :disabled="store.busy"
         @click="batchAccept"
-      >accept {{ selectedNonSkill.length }}</button>
+      >accept {{ selectedAcceptable.length }}</button>
       <button
         type="button"
         class="btn-small btn-chip"
         :disabled="store.busy"
         @click="batchDismiss"
       >dismiss {{ selected.size }}</button>
+      <button
+        type="button"
+        class="btn-small btn-chip"
+        :disabled="chatBusy"
+        @click="batchDiscuss"
+      >talk about {{ selected.size }}</button>
       <button type="button" class="btn-small btn-chip" @click="selected = new Set()">clear</button>
     </div>
 
     <p v-if="!filtered.length" class="pr-empty">Nothing queued here.</p>
 
-    <section v-for="group in groups" :key="group.workspace || '_shared'" class="pr-group">
-      <header class="pr-group-head">
+    <section class="pr-group">
+      <header v-if="filtered.length" class="pr-group-head">
         <label class="pr-group-select">
-          <input
-            type="checkbox"
-            :checked="groupSelected(group)"
-            @change="toggleGroup(group)"
-          />
-          <span class="pr-group-name">{{ group.workspace || 'shared' }}</span>
+          <input type="checkbox" :checked="allSelected" @change="toggleAll" />
+          <span class="pr-group-name">select all</span>
         </label>
-        <span class="pr-group-count">{{ group.rows.length }}</span>
+        <span class="pr-group-count">{{ filtered.length }}</span>
       </header>
 
       <ul class="pr-rows">
         <li
-          v-for="row in group.rows"
+          v-for="row in filtered"
           :key="row.id"
           class="pr-row"
           :class="{ 'pr-row--leak': row.leak_warning }"
@@ -499,8 +522,9 @@ onMounted(() => { void store.fetch() })
   margin-right: auto;
 }
 
-/* Workspace groups: the workspace decides which guide an accept writes to, so
-   it is a heading rather than a badge repeated on every row. */
+/* The scope bar: a select-all and the count for the workspace the sidebar has
+   selected. The workspace itself lives in the left switcher, like every other
+   page, rather than in a heading you have to scroll back to. */
 .pr-group {
   display: flex;
   flex-direction: column;
