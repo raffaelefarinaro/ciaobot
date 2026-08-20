@@ -36,7 +36,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P2 Audit split (D2) | delegate | DONE | commit c121678b; pre-existing os-audit failure fixed too |
 | P3 unrehomed_people notice | delegate | DONE | commit 4cc0510f |
 | P4 Surfaced-actions strip | delegate | RUNNING | P4.2 chat-893eb5df; P4.7 folded into chat-7ffb29f7 |
-| P5 Queue review UI | split | RUNNING | UI half chat-7ffb29f7 |
+| P5 Queue review UI | split | DONE | server b77f78b4, UI c907e7da |
 | P5.9 User.md must never move | delegate | DONE | commit 1ac96430 |
 | P6 Vocabulary + agent_root | delegate | DONE | commit efa2b6d6 |
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
@@ -517,3 +517,25 @@ blocked behind P2 on `os_audit.py`. P8 is blocked behind P7 on `project_chats.py
   proposal review panel, briefed hard on the three real cases (no-signal question UI, dual-candidate
   picker, the D7 leak warning) and on batch operations being required rather than optional, per the
   measured one-item-per-session drain rate.
+- 2026-08-20 — P4.7 + P5 UI verified and committed as `c907e7da`. Strip mounts at both home
+  branches (84 and 179), mutation-checked by removing the second one: the new ChatLayout test fails,
+  so it genuinely covers both. Panel handles all three real cases: picker for multiple candidates,
+  question rather than pre-filled accept when no tag justifies the destination, explicit confirm on a
+  leak-warning region row. Skill rows are dismiss-only and excluded from batch accept, with the right
+  reason given (`accept_for('skill')` has no descriptor and would raise). Batch select-all, batch
+  accept/dismiss and dismiss-older-than are all present, which was the non-negotiable part. Reached
+  at `/proposals` following the existing settings/schedules/memory view-mode pattern rather than a new
+  paradigm. Web suite 709 passed across 69 files.
+  Coordinator fixed one cosmetic regression: inserting the strip at line 84 had shifted
+  `HomeRecentChats` two spaces left.
+- 2026-08-20 — **My brief was wrong and the delegate was right.** I instructed it to consume the POST
+  response instead of refetching, claiming the batch endpoints return the updated list. They do not:
+  `dismiss_older_than` returns `{ok, removed}` and `proposals_batch` returns `{ok, action, results}`.
+  I had conflated them with P4.5's housekeeping POST, which genuinely does re-run detection and return
+  its new list. Verified by reading the handlers and confirming the only `"rows"` occurrences in that
+  range are an internal grouping dict. The refetch is correct against the real contract, so nothing
+  was changed.
+  Real follow-up this exposed: `GET /api/proposals` builds its rehome signal by walking every person
+  note, so every accept or dismiss now costs a vault walk, and draining 353 items would cost 353 of
+  them. The fix belongs on the server, returning the updated rows the way housekeeping already does.
+  Filed, not blocking.
