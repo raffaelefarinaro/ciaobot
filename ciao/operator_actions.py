@@ -67,6 +67,14 @@ class OperatorAction:
     run_label: str = ""
     chat_label: str = ""
     chat_prompt: str = ""
+    # A view this tile can send the operator to, when a purpose-built surface
+    # already exists. The proposal queue has had per-row accept/dismiss, a
+    # destination picker, a leak confirm and batch operations since P5, and the
+    # tiles offered only "Review in chat" — so the operator was told to discuss
+    # 109 items in prose while the buttons for them sat one route away,
+    # unreachable from the one place that mentions them.
+    view_label: str = ""
+    view_route: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         """Serializable form for the API payload."""
@@ -81,6 +89,8 @@ class OperatorAction:
             "run_label": self.run_label,
             "chat_label": self.chat_label,
             "chat_prompt": self.chat_prompt,
+            "view_label": self.view_label,
+            "view_route": self.view_route,
         }
 
 
@@ -234,6 +244,24 @@ def _detect_vault_location(context: DetectionContext) -> list[OperatorAction]:
 # -- unrehomed people --------------------------------------------------------
 
 
+def _count(value: Any) -> int:
+    """How many, from a receipt field that may be a count or a list.
+
+    The tile read `mechanical`/`conflicts`, which this receipt has never had, and
+    `needs_judgement`, which is a LIST. So it reported "0 to move" while 87 notes
+    were recorded as moved, and interpolated a list of dicts straight into the
+    prose the user reads. Counting defensively is the point: a detail string must
+    never render a container, whatever the schema does next.
+    """
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value)
+    return 0
+
+
 def _detect_unrehomed_people(context: DetectionContext) -> list[OperatorAction]:
     """Person notes that a global curation run may have filed wrong.
 
@@ -261,15 +289,36 @@ def _detect_unrehomed_people(context: DetectionContext) -> list[OperatorAction]:
     except Exception:  # noqa: BLE001 — advisory
         logger.exception("operator actions: re-home check failed")
         return []
-    if receipt is not None and receipt.get("status") == "migrated":
-        return []
     if receipt is not None:
-        detail = (
-            "Person notes may be filed in the wrong workspace: the survey "
-            f"recorded {receipt.get('mechanical', 0)} to move, "
-            f"{receipt.get('needs_judgement', 0)} needing a decision, "
-            f"{receipt.get('conflicts', 0)} conflicting."
+        moved = _count(receipt.get("moves"))
+        undecided = _count(receipt.get("needs_judgement")) + _count(
+            receipt.get("proposals")
         )
+        # An ABSENT status counts as applied. `vault_rehome` only started writing
+        # the field when its survey mode was added, so a receipt written before
+        # that records a COMPLETED re-home — and reading those as unfinished made
+        # this tile a permanent false positive on exactly the installs that had
+        # done the work. The reference install shows it: 87 moves and 165 link
+        # rewrites recorded, no status, tile still firing a day later.
+        applied = receipt.get("status", "migrated") == "migrated"
+        # Applied with nothing left to decide is genuinely finished. Applied with
+        # notes still needing a decision is NOT: the mechanical moves are done and
+        # a human still owes an answer on the rest, which a status-only check
+        # hides the moment the field starts being written.
+        if applied and undecided == 0:
+            return []
+        if applied:
+            detail = (
+                f"{moved} person note(s) were re-homed. {undecided} still need a "
+                "decision because no tag names a workspace, and are queued as "
+                "proposals for review."
+            )
+        else:
+            detail = (
+                "Person notes may be filed in the wrong workspace: a survey found "
+                f"{moved} to move and {undecided} needing a decision, and none of "
+                "it has been applied yet."
+            )
     else:
         detail = (
             "Person notes may be filed in the wrong workspace, but no re-home "
@@ -284,6 +333,8 @@ def _detect_unrehomed_people(context: DetectionContext) -> list[OperatorAction]:
             detail=detail,
             glyph="¶",
             workspace="",
+            view_label="Open queue",
+            view_route="/proposals",
             chat_label="Review in chat",
             chat_prompt=(
                 "Some person notes may be filed in the wrong workspace's vault. "
@@ -542,6 +593,12 @@ def _detect_review_queue(context: DetectionContext) -> list[OperatorAction]:
             ),
             glyph="◌",
             workspace="",
+            # The queue is the point of this tile, and it already has per-row
+            # accept/dismiss, a destination picker, a leak confirm and batch
+            # operations. Offering only chat asked the operator to work through
+            # 109 items in prose.
+            view_label="Open queue",
+            view_route="/proposals",
             chat_label="Review in chat",
             chat_prompt=(
                 f"There are {depth} pending memory and skill proposals across "

@@ -565,109 +565,128 @@ def workspace_health(config: Any) -> dict:
             target,
         )
 
-    memory_paths = _workspace_memory_paths(config, root, vault)
-
-    check_paths = [
-        (root / "CLAUDE.md", "Project CLAUDE.md"),
-        (root / "AGENTS.md", "Project AGENTS.md"),
-    ]
-    check_paths.extend(memory_paths)
-    check_paths.extend([
-        (root / "subagents", "Canonical subagents directory"),
-        (root / "commands", "Canonical commands directory"),
-        (root / ".claude" / "agents", "Generated .claude agents directory"),
-        (root / ".claude" / "commands", "Generated .claude commands directory"),
-        (root / ".agents" / "skills", "Generated Codex skills directory"),
-        (root / ".codex" / "agents", "Generated Codex native agents directory"),
-        (root / ".codex" / "config.toml", "Generated Codex agent registrations"),
-        # opencode reads .claude/skills, .agents/skills, AGENTS.md and
-        # CLAUDE.md natively, so only these two directories are generated.
-        (root / ".opencode" / "agents", "Generated opencode subagents directory"),
-        (root / ".opencode" / "commands", "Generated opencode commands directory"),
-    ])
-
-    for path, title in check_paths:
-        exists = path.exists()
-        add(
-            f"path-{_relative_or_absolute(path, root)}",
-            title,
-            "ok" if exists else "warn",
-            "Present." if exists else "Missing; Ciaobot can continue, but this workspace is less discoverable to its agent providers.",
-            path,
-            "Create it or run sync-skills." if not exists else "",
-        )
-
-    claude_guide = root / "CLAUDE.md"
-    codex_guide = root / "AGENTS.md"
-    if claude_guide.is_file() and (codex_guide.exists() or codex_guide.is_symlink()):
+    # Every agent root, which is the install root before the re-rooting and
+    # one per workspace after it. Checking only `workspace_root` found the
+    # install root's stale `.claude/`, whose links point at a catalog that
+    # moved, so a correctly migrated install reported every custom skill as a
+    # broken generated link.
+    root_targets: list[tuple[Path, str]] = []
+    targets_getter = getattr(config, "agent_root_targets", None)
+    if callable(targets_getter):
         try:
-            guides_linked = codex_guide.resolve() == claude_guide.resolve()
-        except OSError:
-            guides_linked = False
-        add(
-            "guides-linked",
-            "Linked workspace guides",
-            "ok" if guides_linked else "warn",
-            "AGENTS.md links to CLAUDE.md, so Claude Code and Codex share one workspace guide."
-            if guides_linked
-            else "AGENTS.md is a separate file, so Claude Code and Codex read different workspace instructions.",
-            codex_guide,
-            "" if guides_linked else "Merge AGENTS.md into CLAUDE.md, delete AGENTS.md, then run sync-skills to relink.",
-        )
+            root_targets = [(Path(r), str(n)) for r, n in targets_getter()]
+        except Exception:  # noqa: BLE001 — fall back to the single-root checks
+            root_targets = []
+    if not root_targets:
+        root_targets = [(root, "")]
 
-    if claude_guide.is_file():
-        from ciao.memory_tool import diagnose_guide
+    for agent_root, ws_name in root_targets:
+        root = agent_root
+        suffix = f" ({ws_name})" if ws_name else ""
+        id_suffix = f"-{ws_name}" if ws_name else ""
+        memory_paths = _workspace_memory_paths(config, root, vault)
 
-        region_diags = diagnose_guide(claude_guide)
-        add(
-            "memory-regions",
-            "Bounded memory regions",
-            "ok" if not region_diags else "warn",
-            "The `ciao:memory` and `ciao:profile` regions are present and well-formed."
-            if not region_diags
-            else "; ".join(d.message for d in region_diags),
-            claude_guide,
-            "" if not region_diags else "Run sync-skills to add any missing region markers.",
-        )
+        check_paths = [
+            (root / "CLAUDE.md", "Project CLAUDE.md"),
+            (root / "AGENTS.md", "Project AGENTS.md"),
+        ]
+        check_paths.extend(memory_paths)
+        check_paths.extend([
+            (root / "subagents", "Canonical subagents directory"),
+            (root / "commands", "Canonical commands directory"),
+            (root / ".claude" / "agents", "Generated .claude agents directory"),
+            (root / ".claude" / "commands", "Generated .claude commands directory"),
+            (root / ".agents" / "skills", "Generated Codex skills directory"),
+            (root / ".codex" / "agents", "Generated Codex native agents directory"),
+            (root / ".codex" / "config.toml", "Generated Codex agent registrations"),
+            # opencode reads .claude/skills, .agents/skills, AGENTS.md and
+            # CLAUDE.md natively, so only these two directories are generated.
+            (root / ".opencode" / "agents", "Generated opencode subagents directory"),
+            (root / ".opencode" / "commands", "Generated opencode commands directory"),
+        ])
 
-    for source_dir, link_dir, label in [
-        (root / "subagents", root / ".claude" / "agents", "subagent"),
-        (root / "commands", root / ".claude" / "commands", "command"),
-    ]:
-        for source in _iter_markdown_files(source_dir):
-            link = link_dir / source.name
+        for path, title in check_paths:
+            exists = path.exists()
+            add(
+                f"path-{_relative_or_absolute(path, root)}{id_suffix}",
+                title + suffix,
+                "ok" if exists else "warn",
+                "Present." if exists else "Missing; Ciaobot can continue, but this workspace is less discoverable to its agent providers.",
+                path,
+                "Create it or run sync-skills." if not exists else "",
+            )
+
+        claude_guide = root / "CLAUDE.md"
+        codex_guide = root / "AGENTS.md"
+        if claude_guide.is_file() and (codex_guide.exists() or codex_guide.is_symlink()):
             try:
-                synced = link.is_symlink() and link.resolve() == source.resolve()
+                guides_linked = codex_guide.resolve() == claude_guide.resolve()
             except OSError:
-                synced = False
-            if not synced:
-                add(
-                    f"unsynced-{label}-{source.stem}",
-                    f"Unsynced {label}: {source.stem}",
-                    "warn",
-                    f"Custom {label} is not linked into Claude Code discovery.",
-                    source,
-                    "Run sync-skills.",
-                )
+                guides_linked = False
+            add(
+                f"guides-linked{id_suffix}",
+                "Linked workspace guides" + suffix,
+                "ok" if guides_linked else "warn",
+                "AGENTS.md links to CLAUDE.md, so Claude Code and Codex share one workspace guide."
+                if guides_linked
+                else "AGENTS.md is a separate file, so Claude Code and Codex read different workspace instructions.",
+                codex_guide,
+                "" if guides_linked else "Merge AGENTS.md into CLAUDE.md, delete AGENTS.md, then run sync-skills to relink.",
+            )
 
-    for link_dir, label in [
-        (root / ".claude" / "agents", "agent"),
-        (root / ".claude" / "commands", "command"),
-        (root / ".claude" / "skills", "skill"),
-        (root / ".agents" / "skills", "Codex skill"),
-    ]:
-        if not link_dir.exists():
-            continue
-        for path in link_dir.rglob("*"):
-            if path.is_symlink() and not path.exists():
-                add(
-                    f"broken-{label}-{path.name}",
-                    f"Broken generated {label} link",
-                    "error",
-                    "Generated provider asset points at a missing file.",
-                    path,
-                    "Run sync-skills.",
-                )
+        if claude_guide.is_file():
+            from ciao.memory_tool import diagnose_guide
+
+            region_diags = diagnose_guide(claude_guide)
+            add(
+                f"memory-regions{id_suffix}",
+                "Bounded memory regions" + suffix,
+                "ok" if not region_diags else "warn",
+                "The `ciao:memory` and `ciao:profile` regions are present and well-formed."
+                if not region_diags
+                else "; ".join(d.message for d in region_diags),
+                claude_guide,
+                "" if not region_diags else "Run sync-skills to add any missing region markers.",
+            )
+
+        for source_dir, link_dir, label in [
+            (root / "subagents", root / ".claude" / "agents", "subagent"),
+            (root / "commands", root / ".claude" / "commands", "command"),
+        ]:
+            for source in _iter_markdown_files(source_dir):
+                link = link_dir / source.name
+                try:
+                    synced = link.is_symlink() and link.resolve() == source.resolve()
+                except OSError:
+                    synced = False
+                if not synced:
+                    add(
+                        f"unsynced-{label}-{source.stem}{id_suffix}",
+                        f"Unsynced {label}: {source.stem}",
+                        "warn",
+                        f"Custom {label} is not linked into Claude Code discovery.",
+                        source,
+                        "Run sync-skills.",
+                    )
+
+        for link_dir, label in [
+            (root / ".claude" / "agents", "agent"),
+            (root / ".claude" / "commands", "command"),
+            (root / ".claude" / "skills", "skill"),
+            (root / ".agents" / "skills", "Codex skill"),
+        ]:
+            if not link_dir.exists():
+                continue
+            for path in link_dir.rglob("*"):
+                if path.is_symlink() and not path.exists():
+                    add(
+                        f"broken-{label}-{path.name}{id_suffix}",
+                        f"Broken generated {label} link",
+                        "error",
+                        "Generated provider asset points at a missing file.",
+                        path,
+                        "Run sync-skills.",
+                    )
 
     overall = "ok"
     if any(check.status == "error" for check in checks):

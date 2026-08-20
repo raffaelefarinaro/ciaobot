@@ -1070,6 +1070,9 @@ export interface OperatorAction {
   run_label: string
   chat_label: string
   chat_prompt: string
+  /** A purpose-built surface for this action, when one already exists. */
+  view_label: string
+  view_route: string
 }
 
 export interface HousekeepingResponse {

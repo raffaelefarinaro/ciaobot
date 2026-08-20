@@ -153,6 +153,8 @@ describe('ChatLayout', () => {
       run_label: '',
       chat_label: '',
       chat_prompt: '',
+      view_label: '',
+      view_route: '',
     }]
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')

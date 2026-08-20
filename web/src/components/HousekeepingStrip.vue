@@ -23,6 +23,14 @@ async function runAction(action: OperatorAction): Promise<void> {
   await housekeeping.run(action.id)
 }
 
+async function openView(action: OperatorAction): Promise<void> {
+  // The queue tiles name a surface that already has per-row accept/dismiss, a
+  // destination picker and batch operations. Sending the operator there beats
+  // asking them to work through a hundred items in prose.
+  const { router } = await import('../router')
+  await router.push(action.view_route)
+}
+
 async function openChat(action: OperatorAction): Promise<void> {
   if (chatBusy.value || !action.chat_prompt) return
   chatBusy.value = true
@@ -70,6 +78,14 @@ async function openChat(action: OperatorAction): Promise<void> {
           @click="runAction(action)"
         >
           {{ housekeeping.runningIds.has(action.id) ? 'Running…' : action.run_label }}
+        </button>
+        <button
+          v-if="action.view_route"
+          type="button"
+          class="btn-small btn-primary"
+          @click="openView(action)"
+        >
+          {{ action.view_label || 'Open' }}
         </button>
         <button
           v-if="action.chat_prompt"

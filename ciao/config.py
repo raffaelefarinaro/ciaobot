@@ -667,6 +667,26 @@ class CiaoConfig:
             self.workspace_root / "Logs" if self._rerooted() else self.vault_root / "Logs"
         )
 
+    def agent_root_targets(self) -> list[tuple[Path, str]]:
+        """Every agent root in this install, as ``(root, workspace name)``.
+
+        One target before the re-rooting — the install root itself, unnamed,
+        because that is where the single set of provider assets lives. One per
+        workspace afterwards, because each root then owns its own ``CLAUDE.md``,
+        ``.claude/``, ``skills/`` and mirrors.
+
+        The seam for anything inspecting or listing agent assets. Reading
+        ``workspace_root`` directly still finds the install root's stale
+        ``.claude/`` after the migration, whose links point at a catalog that
+        moved — which is why the health panel reported every custom skill as
+        broken on a correctly migrated install.
+        """
+        if not self._rerooted():
+            return [(self.workspace_root, "")]
+        return [
+            (self.agent_root(name), name) for name in self.workspace_names() if name
+        ]
+
     def vault_scan_targets(self) -> list[tuple[Path, str, Path]]:
         """Every vault in this install, as ``(root, workspace, path prefix)``.
 

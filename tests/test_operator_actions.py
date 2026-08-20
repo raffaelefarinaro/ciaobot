@@ -438,3 +438,102 @@ def test_unmigrated_links_tile_does_not_assert_wikilinks_it_cannot_verify(
     assert "still uses the retired" not in action.title
     assert "still contains" not in action.detail
 
+
+
+# -- the two queue tiles the operator saw on screen --------------------------
+
+
+def _rehome_receipt(tmp_path: Path, payload: dict) -> None:
+    import json
+
+    path = _runtime(tmp_path) / "migration" / "vault-rehome.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _rehome_actions(tmp_path: Path) -> list:
+    from ciao.operator_actions import _detect_unrehomed_people
+
+    # Two workspaces: with one, there is nowhere to re-home TO and the detector
+    # is silent by design (the single-workspace false positive fixed in P3).
+    return _detect_unrehomed_people(
+        _context(tmp_path, config=_FakeConfig(tmp_path, workspaces=("personal", "work")))
+    )
+
+
+def test_a_legacy_receipt_with_no_status_clears_the_tile(tmp_path: Path) -> None:
+    """`vault_rehome` only started writing `status` when its survey mode landed.
+
+    Every receipt written before that records a COMPLETED re-home with no status,
+    and reading those as unfinished made this a permanent false positive on
+    exactly the installs that had done the work. Seen on the reference install:
+    87 moves and 165 link rewrites recorded, no status, tile firing a day later.
+    """
+    _rehome_receipt(tmp_path, {"moves": [1] * 87, "needs_judgement": [], "proposals": []})
+
+    assert _rehome_actions(tmp_path) == []
+
+
+def test_an_applied_receipt_still_surfaces_what_needs_a_decision(tmp_path: Path) -> None:
+    """Treating "no status" as done must not hide outstanding judgement calls."""
+    _rehome_receipt(
+        tmp_path, {"moves": [1] * 87, "needs_judgement": [1] * 15, "proposals": [1]}
+    )
+
+    actions = _rehome_actions(tmp_path)
+
+    assert len(actions) == 1
+    detail = actions[0].detail
+    assert "87" in detail and "16" in detail
+    # The prose must read as prose, never as a dumped container.
+    assert "{" not in detail and "[" not in detail
+
+
+def test_the_tile_never_renders_a_container_into_its_prose(tmp_path: Path) -> None:
+    """It read keys this receipt has never had, and one that is a LIST, so it
+    said "the survey recorded 0 to move" while 87 were recorded as moved and
+    then printed a list of dicts on screen."""
+    _rehome_receipt(
+        tmp_path,
+        {
+            "status": "surveyed",
+            "moves": [{"path": "a"}] * 3,
+            "needs_judgement": [{"bucket": "needs_judgement", "path": "b"}] * 15,
+            "proposals": [],
+        },
+    )
+
+    detail = _rehome_actions(tmp_path)[0].detail
+
+    assert "bucket" not in detail and "{" not in detail
+    assert "3 to move" in detail and "15 needing a decision" in detail
+
+
+def test_a_detail_string_never_renders_a_container() -> None:
+    """The tile read keys this receipt has never had, and one that is a LIST.
+
+    So it told the operator "the survey recorded 0 to move" while 87 notes were
+    recorded as moved, and then interpolated a list of dicts straight into the
+    prose on screen.
+    """
+    from ciao.operator_actions import _count
+
+    assert _count([{"bucket": "needs_judgement"}] * 15) == 15
+    assert _count(15) == 15
+    assert _count(None) == 0
+    assert _count("nonsense") == 0
+    assert _count(True) == 0, "a bool is not a count"
+
+
+def test_both_queue_tiles_point_at_the_panel_that_has_the_buttons() -> None:
+    """They offered "Review in chat" alone, so the operator was asked to work
+    through 109 items in prose while the per-row accept/dismiss, the destination
+    picker and the batch operations sat one route away."""
+    import inspect
+
+    from ciao import operator_actions as oa
+
+    for detector in (oa._detect_unrehomed_people, oa._detect_review_queue):
+        source = inspect.getsource(detector)
+        assert 'view_route="/proposals"' in source, detector.__name__
+        assert "view_label=" in source, detector.__name__

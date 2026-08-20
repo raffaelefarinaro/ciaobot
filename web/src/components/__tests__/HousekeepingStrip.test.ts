@@ -17,6 +17,8 @@ function action(overrides: Partial<OperatorAction> = {}): OperatorAction {
     detail: 'It can be fixed.',
     glyph: '▲',
     workspace: 'personal',
+    view_label: '',
+    view_route: '',
     run_label: '',
     chat_label: '',
     chat_prompt: '',
@@ -96,5 +98,38 @@ describe('HousekeepingStrip', () => {
     await nextTick()
     expect(wrapper.find('.housekeeping').exists()).toBe(false)
     wrapper.unmount()
+  })
+})
+
+describe('a tile that names an existing surface', () => {
+  it('offers a button that navigates there, not only chat', async () => {
+    // The queue tiles offered "Review in chat" alone, so the operator was asked
+    // to work through 109 proposals in prose while the panel with per-row
+    // accept/dismiss, a destination picker and batch operations sat one route
+    // away, unreachable from the only place that mentions them.
+    const housekeeping = useHousekeepingStore()
+    housekeeping.actions = [action({
+      id: 'review-queue-depth',
+      title: '109 proposals are waiting for a review',
+      view_label: 'Open queue',
+      view_route: '/proposals',
+      chat_label: 'Review in chat',
+      chat_prompt: 'discuss it',
+    })]
+    const wrapper = mount(HousekeepingStrip)
+    await nextTick()
+
+    const labels = wrapper.findAll('button').map((b) => b.text())
+    expect(labels).toContain('Open queue')
+    expect(labels).toContain('Review in chat')
+  })
+
+  it('shows no view button when the action names no surface', async () => {
+    const housekeeping = useHousekeepingStore()
+    housekeeping.actions = [action({ chat_prompt: 'discuss it', chat_label: 'Discuss' })]
+    const wrapper = mount(HousekeepingStrip)
+    await nextTick()
+
+    expect(wrapper.findAll('button').map((b) => b.text())).toEqual(['Discuss'])
   })
 })
