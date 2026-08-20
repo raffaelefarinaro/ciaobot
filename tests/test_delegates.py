@@ -882,3 +882,182 @@ def test_create_chat_exempts_providers_that_serve_their_own_catalog(
             project.project_id, provider=provider, model=model
         )
         assert chat.model == model
+
+
+# ── stopping a delegate ──────────────────────────────────────────────────
+
+
+def test_wake_prompt_reports_a_stopped_delegate_as_stopped_not_failed(
+    tmp_path: Path,
+) -> None:
+    """A stop is not a failure, even though it arrives shaped like one.
+
+    ``stop_chat`` produces an error-shaped result, and the drive loop only
+    resets ``had_error`` when a follow-up message was queued — so stopping a
+    delegate with an empty queue reaches the wake with ``had_error=True``.
+    Reporting that as FAILED invites the supervisor to re-dispatch work the
+    operator deliberately interrupted.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Long migration")
+
+    prompt = manager._build_delegate_wake_prompt(
+        parent.chat_id,
+        [{
+            "chat_id": child.chat_id,
+            "title": "Long migration",
+            "delegation_id": "",
+            "reply": "Rewrote three of the seven call sites.",
+            "had_error": True,
+            "stopped": True,
+        }],
+    )
+
+    assert "STOPPED" in prompt
+    assert "FAILED" not in prompt
+    # And the supervisor must be told not to treat it as dead work.
+    assert "did not fail" in prompt
+    assert "do not report it as failed" in prompt
+
+
+async def test_a_human_stop_does_not_wake_the_supervisor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Stopping a delegate from the UI means the operator is taking it over.
+
+    Waking the supervisor would start a turn on top of the chat the user just
+    grabbed, and (before the STOPPED status existed) report it as FAILED, which
+    is what got briefs re-dispatched over an interrupted delegate.
+    """
+    manager, child, wakes = _delegate_stop_harness(tmp_path, monkeypatch, "user")
+
+    stream = manager.start_stream(child.chat_id, "start the migration")
+    async for _ in stream.subscribe():
+        pass
+
+    assert wakes == []
+
+
+async def test_an_agent_stop_still_wakes_the_supervisor_marked_stopped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A supervisor that called chat_stop itself must learn the outcome.
+
+    Suppressing this one would leave it waiting on a child it killed.
+    """
+    manager, child, wakes = _delegate_stop_harness(tmp_path, monkeypatch, "agent")
+
+    stream = manager.start_stream(child.chat_id, "start the migration")
+    async for _ in stream.subscribe():
+        pass
+
+    assert len(wakes) == 1
+    assert wakes[0]["stopped"] is True
+
+
+async def test_a_system_stop_before_archiving_is_silent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Archiving a delegate stops its turn; that is bookkeeping, not news."""
+    manager, child, wakes = _delegate_stop_harness(tmp_path, monkeypatch, "system")
+
+    stream = manager.start_stream(child.chat_id, "start the migration")
+    async for _ in stream.subscribe():
+        pass
+
+    assert wakes == []
+
+
+async def test_stop_chat_records_who_asked_and_the_flag_is_sticky(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``stopped_by`` must outlive ``user_stopped``.
+
+    The drive loop consumes and clears ``user_stopped`` so a queued follow-up
+    can start a new turn, which is why the wake decision cannot read it: by
+    teardown it is already False.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Long migration")
+    child.title = "Long migration"
+
+    held = asyncio.Event()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        await held.wait()
+        return
+        yield  # pragma: no cover — generator shape only
+
+    manager.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    # This test is about the flag, not the wake; keep the real coalescing
+    # window from outliving the test's event loop.
+    monkeypatch.setattr(manager, "_queue_delegate_wake", lambda *a, **k: None)
+    stream = manager.start_stream(child.chat_id, "start the migration")
+
+    # No provider is registered, so the stop cannot reach one — but it must
+    # still have recorded the caller on the stream.
+    assert await manager.stop_chat(child.chat_id, by="agent") is False
+    assert stream.stopped_by == "agent"
+
+    # Simulate the drive loop consuming the other flag; the sticky one stays.
+    stream.user_stopped = False
+    assert stream.stopped_by == "agent"
+
+    held.set()
+    async for _ in stream.subscribe():
+        pass
+
+
+def _delegate_stop_harness(tmp_path: Path, monkeypatch, by: str):
+    """A delegate whose turn is stopped by *by* partway through.
+
+    Returns (manager, delegate chat, captured wake calls).
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Long migration")
+    # Non-default title so auto-title doesn't spawn a side task.
+    child.title = "Long migration"
+    manager._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        from ciao.models import ResultEvent
+
+        # The stop lands mid-turn, exactly as stop_chat would set it.
+        live = manager._broker.get(chat_id)
+        assert live is not None
+        live.user_stopped = True
+        live.stopped_by = by
+        # A stop surfaces as an error-shaped result with no follow-up queued,
+        # so had_error stays True into teardown.
+        yield ResultEvent(
+            type="result",
+            result="Rewrote three of the seven call sites.",
+            session_id="sess-delegate",
+            is_error=True,
+            effective_model=child.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    manager.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    manager._push_delay_seconds = 0
+
+    wakes: list[dict] = []
+
+    monkeypatch.setattr(manager._events, "publish", lambda *_a, **_k: None)
+    monkeypatch.setattr(manager, "_schedule_push", lambda *a, **k: None)
+    monkeypatch.setattr(
+        manager,
+        "_queue_delegate_wake",
+        lambda parent_id, **kwargs: wakes.append(
+            {"parent_id": parent_id, **kwargs}
+        ),
+    )
+    return manager, child, wakes

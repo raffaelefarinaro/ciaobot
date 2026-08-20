@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optional, cast
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Literal, Optional, cast
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
@@ -3844,7 +3844,7 @@ class ProjectChatManager:
         if self._broker.get(chat_id) is None:
             return False
         try:
-            await self.stop_chat(chat_id)
+            await self.stop_chat(chat_id, by="system")
         except Exception:  # noqa: BLE001 — a failed stop must not block the archive
             logger.exception(
                 "Stopping delegate subchat %s before archive failed", chat_id
@@ -6654,8 +6654,22 @@ class ProjectChatManager:
                 # delegate that failed is exactly the news the parent needs,
                 # and staying silent would leave the supervisor waiting on a
                 # child that is never coming back.
+                #
+                # A stop is the exception. `stopped_by` says who asked, and
+                # only an agent-issued stop is reported: a human stopping a
+                # delegate is taking it over, so waking the supervisor would
+                # start a turn on top of the chat the user just grabbed, and a
+                # `system` stop (archiving the delegate) is bookkeeping the
+                # supervisor already knows about. `stopped_by` is read rather
+                # than `user_stopped` because the drive loop clears that one
+                # before we get here.
                 delegate = self._chats.get(chat_id)
-                if delegate is not None and delegate.spawned_from_chat_id:
+                stopped_by = stream.stopped_by
+                if (
+                    delegate is not None
+                    and delegate.spawned_from_chat_id
+                    and stopped_by in ("", "agent")
+                ):
                     self._queue_delegate_wake(
                         delegate.spawned_from_chat_id,
                         child_chat_id=chat_id,
@@ -6663,6 +6677,7 @@ class ProjectChatManager:
                         delegation_id=delegate.delegation_id,
                         reply=last_assistant_text,
                         had_error=had_error,
+                        stopped=bool(stopped_by),
                     )
 
         asyncio.create_task(_drive())
@@ -7145,6 +7160,7 @@ class ProjectChatManager:
         delegation_id: str,
         reply: str,
         had_error: bool,
+        stopped: bool = False,
     ) -> None:
         """Record a finished delegate and arm the coalescing window.
 
@@ -7168,6 +7184,7 @@ class ProjectChatManager:
             "delegation_id": delegation_id,
             "reply": reply or "",
             "had_error": had_error,
+            "stopped": stopped,
         })
         existing = self._delegate_wake_tasks.get(parent_chat_id)
         if existing is not None and not existing.done():
@@ -7421,6 +7438,7 @@ class ProjectChatManager:
                 f"{len(still_running)} still running: {', '.join(still_running)}."
             )
         deferred = False
+        stopped = False
         for entry in finished:
             child = self._chats.get(entry["chat_id"])
             # A provider quota rejection sets had_error AND arms a deferred
@@ -7434,6 +7452,13 @@ class ProjectChatManager:
                     else "DEFERRED, retry pending"
                 )
                 deferred = True
+            elif entry.get("stopped"):
+                # Ordered ahead of had_error on purpose: a stop produces an
+                # error-shaped result and the drive loop only resets had_error
+                # when a follow-up was queued, so a stop with an empty queue
+                # would otherwise report as FAILED.
+                status = "STOPPED"
+                stopped = True
             elif entry["had_error"]:
                 status = "FAILED"
             else:
@@ -7454,6 +7479,15 @@ class ProjectChatManager:
                 "its work or report it as failed; you will be woken again when "
                 "it finishes. Use chat_retry to run it sooner, or chat_stop to "
                 "abandon it."
+            )
+            lines.append("")
+        if stopped:
+            lines.append(
+                "A STOPPED delegate had its turn ended early by a chat_stop "
+                "you issued — it did not fail and it did not finish. Whatever "
+                "it had already written is still on disk. Decide explicitly "
+                "whether to re-dispatch the remainder; do not report it as "
+                "failed."
             )
             lines.append("")
         lines.append(
@@ -7780,13 +7814,26 @@ class ProjectChatManager:
             return False
         return stream.resolve_capability(request_id, action, model_id)
 
-    async def stop_chat(self, chat_id: str) -> bool:
+    async def stop_chat(
+        self, chat_id: str, *, by: Literal["user", "agent", "system"] = "user"
+    ) -> bool:
+        """End a chat's in-flight turn.
+
+        ``by`` records who asked, because a delegate's teardown treats the three
+        cases differently (see the wake decision in ``start_stream``): a human
+        stop means "I am taking over", so the supervisor is deliberately not
+        woken, while a stop the supervisor itself issued through ``chat_stop``
+        is reported back so it does not sit waiting on a child it killed.
+        Defaults to ``"user"`` so an un-updated caller stays silent rather than
+        waking a supervisor it did not mean to.
+        """
         # Mark the active stream as user-stopped so the drive loop flushes
         # any queued follow-up messages instead of dropping them. A stop is
         # intentional, not an error.
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
+            stream.stopped_by = by
             if stream.background:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream).

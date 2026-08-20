@@ -964,7 +964,10 @@ class CiaoControlPlane:
                 "self_stop_forbidden",
                 "The current turn cannot stop itself through MCP; use the PWA stop control.",
             )
-        return _ok({"chat_id": chat_id, "stopped": await self.pcm.stop_chat(chat_id)})
+        return _ok({
+            "chat_id": chat_id,
+            "stopped": await self.pcm.stop_chat(chat_id, by="agent"),
+        })
 
     # ---- delegates -----------------------------------------------------
 
