@@ -1310,8 +1310,52 @@ One message fix from reading the rehearsal output: the refusal listed every watc
 (`memory-vault, skills, skills-lock.json, commands, CLAUDE.md, AGENTS.md`) in front of the one fact
 that matters. It names the dirty file now — and the detector stopped appending it a second time.
 
+## THE LIVE INSTALL IS MIGRATED (2026-08-20, `2c94a473` in the vault repo)
+
+Performed by the upgrade trigger at startup, not by hand. Ten moves, and the conservation check was
+exact: all **8130** files hashed before and compared through the move table, **zero failed to
+arrive**, and the only content changes were the intended ones — the per-root INDEX.md and
+VOCABULARY.md rebuilt without a prefix (158 and 426 entries) and the 22 guide entries queued into
+work's proposal queue.
+
+Final layout: the install root holds `.env`, `.runtime/`, `Logs/`, `templates-src/`, `.obsidian/`,
+`skills-src/` and nothing agent-shaped — no vault, no guide, no `skills/`, no `commands/`.
+`personal/` has the 27606-byte guide with all 20 memory and 2 profile entries, 21 skills, 3
+customised commands, 55 catalog links and 161 notes. `work/` has the 23749-byte body with **empty**
+regions, 29 stock catalog links and 429 notes.
+
+### Four bugs the live run exposed, and what they have in common
+Every one fires on a WRITE driven by app or installer activity, which is why four clone rehearsals
+and every CLI probe missed all of them. Companion to the earlier lesson: the sweep covered readers;
+these are writers.
+
+1. **The config that ran the migration cannot be trusted afterwards** (`fa6696ef`). Loaded before the
+   move, so `workspace_vault_root("personal")` still said `memory-vault/personal` — and the
+   auto-project doc was written back into the emptied vault, recreating the tree the migration had
+   just removed. Startup now returns `config.restart_exit_code` after a successful migration and the
+   supervisor brings up a process that reads the new registry from disk. Once per install, ever.
+2. **The startup skill sync treated the install root as an agent root** (`fa6696ef`). It seeded a
+   stock CLAUDE.md beside the real per-root guides, re-seeded stock commands over the moved
+   customised ones, and pruned the 17 `.agents/skills` links pointing at the catalog it had just
+   moved. It walks `agent_root_targets()` now.
+3. **`ciao setup` died on the missing shared vault** (`cb36329d`). `ensure_vault_git` probed
+   `<install>/memory-vault` and fell through to writing a `.gitignore` inside it —
+   FileNotFoundError out of `setup --load-launchd`, which is what the installer runs, so the plist
+   re-render died halfway.
+4. **`ciao setup` scaffolded the install root as an agent root** (`cb36329d`). Stock agents, stock
+   commands, `subagents/` and the stock guide with `AGENTS.md` linked to it — correct on a fresh
+   install, debris on a migrated one, and it fired on every reinstall.
+
+Process note on my own conduct: I ran an `rm -rf` in the same command that printed the
+duplicate-comparison, so I deleted before reading that one of the pair DIFFERED. The outcome was
+fine — the survivor was the richer original — but the sequencing was wrong, and the remaining
+cleanups were done as check-then-act.
+
 ### Remaining
-0. ~~The mandatory upgrade trigger and the blocking gate~~ — done. — the shape is agreed above. Then migrate this
+0. ~~The mandatory upgrade trigger and the blocking gate~~ — done, and it performed the live
+   migration.
+1. `vault_rehome`'s APPLY path is still shared-layout only. Detection is per-root; moving a note
+   between roots is not. `ciao vault-rehome --apply` needs its own pass. — the shape is agreed above. Then migrate this
    install and exercise the routines and the Memory Map for real.
 1. `vault_rehome`'s APPLY path (the mover and link rewriter) is still shared-layout only. Detection is
    per-root; moving a note between roots is not. It refuses rather than misfiring, but
