@@ -105,7 +105,6 @@ def _runtime_dir() -> Path:
         return _runtime_dir_override
     raw = (
         os.environ.get("CIAO_RUNTIME_ROOT")
-        or os.environ.get("TELEGRAM_BRIDGE_RUNTIME_ROOT")
         or ".runtime"
     )
     return Path(raw).resolve()

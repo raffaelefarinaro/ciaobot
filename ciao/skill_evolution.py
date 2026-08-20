@@ -1053,7 +1053,6 @@ def _main(argv: list[str] | None = None) -> int:
 
     job_runs.configure(
         os.environ.get("CIAO_RUNTIME_ROOT")
-        or os.environ.get("TELEGRAM_BRIDGE_RUNTIME_ROOT")
         or (Path(__file__).resolve().parents[1] / ".runtime")
     )
     with job_runs.track_sync(

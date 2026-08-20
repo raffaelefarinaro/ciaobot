@@ -174,7 +174,7 @@ def apply_app_settings_overlay(config: CiaoConfig) -> None:
     """Overlay `.runtime/app_settings.json` onto ``config`` (Settings → Models)."""
     from ciao.app_settings import AppSettingsStore
 
-    runtime_env = os.environ.get("CIAO_RUNTIME_ROOT", os.environ.get("TELEGRAM_BRIDGE_RUNTIME_ROOT", "")).strip()
+    runtime_env = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
     runtime_root = Path(runtime_env) if runtime_env else config.state_path.parent
     AppSettingsStore(runtime_root / "app_settings.json").apply_to_config(config)
 
