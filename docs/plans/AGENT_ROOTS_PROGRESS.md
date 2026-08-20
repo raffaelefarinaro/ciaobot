@@ -42,7 +42,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | delegate | DONE | commit 001639e6 |
 | P9 Per-root memory + MCP allowlist | delegate | DONE | P9.1+P9.2 a0d55751; P9.3 beaeda6f |
-| P10 The cut | coordinator | IN PROGRESS | plan 970bd3d0, apply+undo 59dda6b0, guide split c70707f7; P10.5-P10.11 remain |
+| P10 The cut | coordinator | IN PROGRESS | 970bd3d0, 59dda6b0, c70707f7, 2895f1bd, ee6f85e0; **P10.9/P10.10 BLOCKED, see below** |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | coordinator | DONE | 14 tests, commit 970bd3d0 |
 | V3 Real-data rehearsal | coordinator | DONE | APFS clone, 2318 files, zero refusals |
@@ -692,3 +692,35 @@ P10.10 `_bootstrap_workspace` · P10.11 `--repair` · CLI wiring · V5 end-to-en
 - 2026-08-20 — `read_region_text` reuses `memory_tool`'s marker regexes on text instead of adding a
   second parser. One definition of where a region begins and ends is the entire point of this
   release, after three copies of one bullet regex drifted apart in P1.
+- 2026-08-20 — **Found and fixed the gap that would have broken the install (`2895f1bd`).**
+  `apply()` moved every vault into its agent root and left the registry naming the old location, so
+  the install it produced was broken: each entry still said `memory-vault/<name>` while the directory
+  now lived at `<name>/memory-vault`. The migration now repoints `vault_root` for every migrated
+  workspace and records an exact before-image, so undo restores the registry as well as the tree.
+  Raw-list rewrite, so an unknown key a future release adds survives a migration meant to change one
+  field.
+- 2026-08-20 — `CiaoConfig.agent_root` now flips per install, gated on the migration's own receipt
+  rather than on a release. An install that has not re-rooted resolves exactly as today, so a
+  half-flipped state cannot exist. Receipt lookup cached in a module-level map keyed by runtime dir
+  (CiaoConfig uses slots), with `reset_reroot_cache` called by apply and undo.
+- 2026-08-20 — **P10.6 + CLI landed (`ee6f85e0`)**, proved end to end on a fresh committed clone:
+  migrated with 5 moves and 4 stashed, registry repointed, indexes rebuilt at 157 and 426 entries
+  with **zero** occurrences of a workspace prefix, FTS rebuilt at 157 and 426 docs. The migrated
+  install then resolved correctly (`agent_root` returning `personal` / `work`, both vaults present,
+  shared vault gone, `Logs` and `templates-src` promoted). Undo restored everything including the
+  registry's exact previous values and all four stashed files.
+  `ciao workspace-reroot` prints the plan by default, `--rehearse` / `--apply` / `--undo`, exit 1 on
+  a refusal so a script can gate on it.
+
+### P10.9 and P10.10 are BLOCKED, and correctly so
+The eight deletions cannot land until the migration has actually RUN on an install. The work order
+says why: deleting `_entity_visible_in_workspace` while an un-rooted install exists leaves no filter
+over a still-prefixed index, so every entity becomes visible in every session. Fail-open, strictly
+worse than today. `agent_root` is now receipt-gated, so on this install it still returns the shared
+root, which means the filters are still load-bearing here.
+Sequence: commit the live vault (18 tracked files are dirty, so the gate refuses) → run
+`ciao workspace-reroot --apply` → THEN land the deletions and `_bootstrap_workspace`. Landing them
+before that order is complete would ship the fail-open state to a live install.
+
+### Remaining, unblocked
+P10.5 skills triage · P10.8 routines · P10.11 `--repair` · V5 end-to-end drain.
