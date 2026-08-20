@@ -662,3 +662,156 @@ def test_a_refusal_from_the_button_raises_with_the_reason(tmp_path: Path) -> Non
         _run_workspace_reroot(context)
 
     assert "personal" in str(excinfo.value)
+
+
+# -- post-migration drift detectors (§11.2) -----------------------------------
+
+
+class _RerootedConfig(_FakeConfig):
+    """A config whose workspaces have their own agent roots, as after re-rooting."""
+
+    def __init__(self, tmp_path: Path, *, workspaces: tuple[str, ...] = ("personal", "work")) -> None:
+        super().__init__(tmp_path, workspaces=workspaces)
+        self.env_source: dict[str, str] = {}
+
+    def agent_root(self, name: str) -> Path:
+        return self.workspace_root / name
+
+    def agent_root_targets(self) -> list[tuple[Path, str]]:
+        return [(self.agent_root(n), n) for n in self.workspace_names()]
+
+
+def _shared_layout_config(tmp_path: Path) -> _FakeConfig:
+    """Before the re-rooting every workspace resolves to the install root.
+
+    The target is NAMED, which is what makes this a real test of the gate: an
+    unnamed target is dropped by a later filter anyway, so a fixture using one
+    passes whether the gate exists or not.
+    """
+
+    class _Shared(_RerootedConfig):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path, workspaces=("personal",))
+
+        def agent_root(self, name: str) -> Path:
+            return self.workspace_root
+
+        def agent_root_targets(self) -> list[tuple[Path, str]]:
+            return [(self.workspace_root, "personal")]
+
+    return _Shared(tmp_path)
+
+
+def _kinds(context) -> set[str]:
+    return {a.kind for a in detect_actions(context)}
+
+
+def test_a_registered_workspace_with_no_folder_is_reported(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    (tmp_path / "personal").mkdir()
+    (tmp_path / "personal" / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    # 'work' has no directory at all.
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "workspace-root-missing"]
+
+    assert [a.workspace for a in actions] == ["work"]
+    assert actions[0].run_label   # a run button, because repair can fix it
+
+
+def test_generated_assets_missing_beside_a_catalog_are_reported(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path, workspaces=("personal",))
+    root = tmp_path / "personal"
+    (root / "skills" / "demo").mkdir(parents=True)
+    (root / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    # No .claude/skills, so the provider sees none of the catalog.
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "workspace-assets-stale"]
+
+    assert len(actions) == 1
+    assert ".claude/skills" in actions[0].detail
+
+
+def test_a_root_with_no_catalog_is_not_called_stale(tmp_path: Path) -> None:
+    """Nothing to generate from is not drift."""
+    config = _RerootedConfig(tmp_path, workspaces=("personal",))
+    root = tmp_path / "personal"
+    root.mkdir()
+    (root / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+
+    assert "workspace-assets-stale" not in _kinds(_context(tmp_path, config=config))
+
+
+def test_the_drift_detectors_are_silent_before_the_re_rooting(tmp_path: Path) -> None:
+    """One shared root, one guide, one catalog — 'this root has no assets' is the
+    layout, not a fault."""
+    config = _shared_layout_config(tmp_path)
+    # A catalog at the install root and no generated dirs: exactly the shape the
+    # stale-assets check looks for, which must NOT fire here.
+    (tmp_path / "skills" / "demo").mkdir(parents=True)
+
+    kinds = _kinds(_context(tmp_path, config=config))
+
+    assert "workspace-root-missing" not in kinds
+    assert "workspace-assets-stale" not in kinds
+
+
+def test_pending_skill_triage_is_chat_only(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    triage = tmp_path / ".runtime" / "migration" / "skills-triage.md"
+    triage.parent.mkdir(parents=True, exist_ok=True)
+    triage.write_text("# Triage\n\n- skills/alpha\n- skills/beta\n", encoding="utf-8")
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "skill-triage-pending"]
+
+    assert len(actions) == 1
+    assert "2 skill" in actions[0].title
+    # Moving someone's tooling between workspaces is a judgement, never a button.
+    assert not actions[0].run_label
+    assert actions[0].chat_prompt
+
+
+def test_an_empty_triage_file_is_silent(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    triage = tmp_path / ".runtime" / "migration" / "skills-triage.md"
+    triage.parent.mkdir(parents=True, exist_ok=True)
+    triage.write_text("# Triage\n\nNothing needed a decision.\n", encoding="utf-8")
+
+    assert "skill-triage-pending" not in _kinds(_context(tmp_path, config=config))
+
+
+def test_env_vars_the_engine_no_longer_reads_are_surfaced(tmp_path: Path) -> None:
+    """A setting that is set and silently ignored is worse than one that never
+    existed: the operator believes it is in effect."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"CLAUDE_DEFAULT_MODEL_WORK": "opus", "CIAO_VAULT_ROOT": "x"}
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "legacy-env-ignored"]
+
+    assert len(actions) == 1
+    assert "CLAUDE_DEFAULT_MODEL_WORK" in actions[0].detail
+    # A variable that IS still read must not be dragged in.
+    assert "CIAO_VAULT_ROOT" not in actions[0].detail
+    assert not actions[0].run_label
+
+
+def test_no_legacy_env_vars_means_no_tile(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"CIAO_VAULT_ROOT": "x"}
+
+    assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))

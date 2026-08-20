@@ -143,3 +143,41 @@ def test_format_census_renders(tmp_path: Path) -> None:
     assert "Notes per top-level directory" in text
     assert "personal: 2" in text
     assert "Registered workspaces: personal, work" in text
+
+
+def test_a_loose_non_markdown_file_at_the_vault_root_is_named(tmp_path: Path) -> None:
+    """It used to be counted nowhere.
+
+    The top-level loop branches on directory and on root `.md`; a loose `.zip`
+    matched neither, and `non_md_counts` is keyed by directory so it had no bucket
+    for the root. This is also the exact shape the re-rooting plan reports as
+    `unclassified` and refuses on, so a census that stays silent about it hides the
+    one thing most likely to block a migration.
+    """
+    vault = tmp_path / "memory-vault"
+    (vault / "personal" / "People").mkdir(parents=True)
+    (vault / "personal" / "People" / "Sam.md").write_text(
+        "---\ntype: person\n---\n# Sam\n", encoding="utf-8"
+    )
+    (vault / "INDEX.md").write_text("<!-- generated -->\n", encoding="utf-8")
+    (vault / "export.zip").write_bytes(b"PK\x03\x04")
+    (vault / "screenshot.png").write_bytes(b"\x89PNG")
+
+    census = survey_vault(vault, registered_workspaces=["personal"])
+
+    assert census.root_notes == 1
+    assert census.root_non_md == ["export.zip", "screenshot.png"]
+    assert census.as_dict()["root_non_md"] == ["export.zip", "screenshot.png"]
+    assert "(root): 2" in format_census(census)
+    assert "export.zip" in format_census(census)
+
+
+def test_a_clean_vault_root_reports_no_loose_files(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    (vault / "personal" / "People").mkdir(parents=True)
+    (vault / "INDEX.md").write_text("x\n", encoding="utf-8")
+
+    census = survey_vault(vault, registered_workspaces=["personal"])
+
+    assert census.root_non_md == []
+    assert "(root): 0" in format_census(census)

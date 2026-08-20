@@ -45,6 +45,16 @@ class WorkspaceCensus:
     ``{"path", "target"}`` pairs, vault-relative path and link target.
     ``duplicate_stems`` maps a filename stem to every vault-relative path that
     uses it, for stems that appear in more than one directory.
+
+    ``root_non_md`` NAMES the non-markdown files sitting directly in the vault
+    root. They used to be counted nowhere at all: the survey's top-level loop has
+    a branch for directories and a branch for root ``.md`` files, and a loose
+    ``.zip`` or ``.png`` at the root matched neither, while ``non_md_counts`` is
+    keyed by directory so it has no bucket for them. A census whose job is to turn
+    every real vault shape into a required fixture cannot be silent about one — and
+    this shape in particular is what the re-rooting plan reports as
+    ``unclassified`` and refuses on, so it is the shape most worth naming. Listed
+    rather than counted, because a fixture needs the extensions.
     """
 
     vault_root: str
@@ -57,6 +67,7 @@ class WorkspaceCensus:
     registered_workspaces: list[str] = field(default_factory=list)
     unregistered_dirs: list[str] = field(default_factory=list)
     root_notes: int = 0
+    root_non_md: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Render the census as a JSON-serialisable dict."""
@@ -74,6 +85,7 @@ class WorkspaceCensus:
             "registered_workspaces": sorted(self.registered_workspaces),
             "unregistered_dirs": sorted(self.unregistered_dirs),
             "root_notes": self.root_notes,
+            "root_non_md": sorted(self.root_non_md),
         }
 
 
@@ -180,6 +192,8 @@ def survey_vault(
         elif entry.is_file() and entry.name.lower().endswith(".md"):
             census.root_notes += 1
             md_paths.append(entry)
+        elif entry.is_file():
+            census.root_non_md.append(entry.name)
 
     census.unregistered_dirs = sorted(d for d in top_dirs if d not in registered)
 
@@ -216,6 +230,9 @@ def format_census(census: WorkspaceCensus) -> str:
     lines.append("Non-markdown files per top-level directory:")
     for name, count in sorted(census.non_md_counts.items()):
         lines.append(f"  {name}: {count}")
+    lines.append(f"  (root): {len(census.root_non_md)}")
+    for name in sorted(census.root_non_md):
+        lines.append(f"    {name}")
     lines.append("")
     lines.append(f"Max directory depth: {census.max_depth}")
     lines.append(f"Symlinks: {len(census.symlinks)}")

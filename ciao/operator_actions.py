@@ -32,6 +32,7 @@ Contract, enforced in tests
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -304,11 +305,17 @@ def _detect_workspace_unmigrated(context: DetectionContext) -> list[OperatorActi
 
     refusals = list((receipt or {}).get("refusals") or [])
     if refusals:
-        # The refusal already names the offending path, so nothing is appended:
-        # printing it twice was the first version of this string.
+        # Every refusal, not just the first. A run can be blocked by several
+        # things at once — two uncommitted files, or an unregistered directory
+        # AND a non-empty destination — and fixing the one shown leaves the tile
+        # exactly where it was, with no hint that anything else was wrong. Capped
+        # at three so the tile stays a tile; the count says how many are hidden.
+        shown = refusals[:3]
+        rest = len(refusals) - len(shown)
+        joined = "; ".join(shown) + (f"; and {rest} more" if rest > 0 else "")
         detail = (
             "Each workspace needs its own agent root, and the move refused: "
-            + refusals[0]
+            + joined
         )
     else:
         detail = (
@@ -330,11 +337,18 @@ def _detect_workspace_unmigrated(context: DetectionContext) -> list[OperatorActi
             chat_prompt=(
                 "This install still keeps every workspace in one shared vault, "
                 "and the automatic separation refused. Run "
-                "`ciao workspace-reroot --workspace . ` to print the plan and the "
-                "refusal, then fix the cause: commit any uncommitted vault "
-                "changes so `git checkout` stays a working undo, or empty a "
-                "destination directory that already exists. Do not pass --apply "
-                "yourself; report what is blocking it and I will press the button."
+                "`ciao workspace-reroot --workspace .` to print the plan and every "
+                "refusal, then clear the causes. You may: commit uncommitted vault "
+                "changes (git checkout has to stay a working undo, which is the "
+                "whole reason it refused); move or empty a destination directory "
+                "that already exists and is not empty; and for a vault directory "
+                "the plan calls unclassified, either register it as a workspace or "
+                "move it out of the vault — ask me which, because that one is a "
+                "decision about my notes, not a cleanup. Re-run the command after "
+                "each fix so the refusal list shrinks in front of you.\n\n"
+                "Do NOT pass --apply. When the command prints no refusals, say so "
+                "and tell me the button is ready; the migration itself is mine to "
+                "press."
             ),
         )
     ]
@@ -688,6 +702,203 @@ def _detect_review_queue(context: DetectionContext) -> list[OperatorAction]:
     ]
 
 
+# -- post-migration drift (§11.2) --------------------------------------------
+#
+# Four read-only detectors over the per-root layout, each mirroring a drift
+# `workspace_reroot.repair` already knows how to fix, so the tile gets a run
+# button instead of prose. Read-only on purpose: a detector runs on every strip
+# render, and one that repaired as a side effect of being looked at would make
+# "what is wrong" unanswerable.
+#
+# All four are silent before the re-rooting. Before it there is one agent root,
+# one guide and one catalog, so "this root has no assets" is not drift — it is
+# the layout.
+
+_DRIFT_SEVERITY = 15
+
+
+def _rerooted_targets(context: DetectionContext) -> list[tuple[str, Path]]:
+    """(workspace, agent root) per registered workspace, or [] before re-rooting."""
+    config = context.config
+    getter = getattr(config, "agent_root_targets", None)
+    install = getattr(config, "workspace_root", None)
+    if not callable(getter) or install is None:
+        return []
+    try:
+        targets = [(str(name), Path(root)) for root, name in getter()]
+    except Exception:  # noqa: BLE001 — advisory
+        return []
+    # One target whose root IS the install root means the shared layout.
+    if len(targets) <= 1 and any(root == Path(install) for _n, root in targets):
+        return []
+    return [(name, root) for name, root in targets if name]
+
+
+def _detect_workspace_root_missing(context: DetectionContext) -> list[OperatorAction]:
+    """A registered workspace with no directory on disk.
+
+    `repair` recreates the root and installs its assets, so this is a run button.
+    Reported per workspace rather than as one tile: the fix is per root, and a
+    count tells the operator nothing about which of their workspaces is gone.
+    """
+    actions: list[OperatorAction] = []
+    for name, root in _rerooted_targets(context):
+        if root.is_dir():
+            continue
+        actions.append(
+            OperatorAction(
+                id=f"workspace-root-missing:{name}",
+                kind="workspace-root-missing",
+                severity=_DRIFT_SEVERITY,
+                title=f"The {name} workspace has no folder",
+                detail=(
+                    f"'{name}' is registered but {root} does not exist, so its "
+                    "guide, skills and notes have nowhere to live."
+                ),
+                glyph="⌂",
+                workspace=name,
+                run_label="Recreate it",
+            )
+        )
+    return actions
+
+
+def _detect_workspace_assets_stale(context: DetectionContext) -> list[OperatorAction]:
+    """A root whose generated agent assets no longer match its catalog.
+
+    The catalog (`skills/`, `commands/`, `subagents/`) is the source; `.claude/`,
+    `.agents/` and friends are generated from it. A root holding a catalog but no
+    generated directory means the provider sees none of them.
+    """
+    actions: list[OperatorAction] = []
+    for name, root in _rerooted_targets(context):
+        if not root.is_dir():
+            continue   # the missing-root detector owns that case
+        missing: list[str] = []
+        if (root / "skills").is_dir() and not (root / ".claude" / "skills").exists():
+            missing.append(".claude/skills")
+        if (root / "commands").is_dir() and not (root / ".claude" / "commands").exists():
+            missing.append(".claude/commands")
+        if (root / "subagents").is_dir() and not (root / ".claude" / "agents").exists():
+            missing.append(".claude/agents")
+        if not (root / "CLAUDE.md").is_file():
+            missing.append("CLAUDE.md")
+        if not missing:
+            continue
+        actions.append(
+            OperatorAction(
+                id=f"workspace-assets-stale:{name}",
+                kind="workspace-assets-stale",
+                severity=_DRIFT_SEVERITY,
+                title=f"The {name} workspace is missing generated assets",
+                detail=(
+                    f"'{name}' has a catalog but no {', '.join(missing)}, so its "
+                    "agents cannot see its skills, commands or guide."
+                ),
+                glyph="⌗",
+                workspace=name,
+                run_label="Rebuild them",
+            )
+        )
+    return actions
+
+
+def _detect_skill_triage_pending(context: DetectionContext) -> list[OperatorAction]:
+    """Skills the migration could not attribute to one workspace.
+
+    The migration writes a triage file rather than guessing which root owns a
+    customised skill, because guessing hands one workspace's tooling to another.
+    Chat-only: every entry is a judgement about what the skill is for.
+    """
+    runtime = context.runtime
+    if runtime is None:
+        return []
+    triage = Path(runtime) / "migration" / "skills-triage.md"
+    if not triage.is_file():
+        return []
+    try:
+        lines = [
+            line for line in triage.read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith(("- ", "* "))
+        ]
+    except OSError:
+        return []
+    if not lines:
+        return []
+    return [
+        OperatorAction(
+            id="skill-triage-pending",
+            kind="skill-triage-pending",
+            severity=_DRIFT_SEVERITY,
+            title=f"{len(lines)} skill(s) need a workspace",
+            detail=(
+                "The separation could not tell which workspace these skills "
+                "belong to, so it left them for a decision rather than handing "
+                "one workspace's tooling to another."
+            ),
+            glyph="✦",
+            workspace="",
+            chat_label="Decide with me",
+            chat_prompt=(
+                f"Read `{triage}` and walk me through each skill it lists. For "
+                "each one, say what it does and which workspace it looks like it "
+                "belongs to, then ask me to confirm before moving anything. Move "
+                "an approved skill into that workspace's `skills/` directory and "
+                "run `ciao sync-skills` for that root. Leave anything I do not "
+                "confirm exactly where it is."
+            ),
+        )
+    ]
+
+
+_IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
+    ("CLAUDE_DEFAULT_MODEL_PERSONAL", "set a workspace's default_model in workspaces.json"),
+    ("CLAUDE_DEFAULT_MODEL_WORK", "set a workspace's default_model in workspaces.json"),
+    ("CIAO_DISALLOWED_TOOLS_PERSONAL", "set a workspace's disallowed_tools in workspaces.json"),
+    ("CIAO_DISALLOWED_TOOLS_WORK", "set a workspace's disallowed_tools in workspaces.json"),
+)
+
+
+def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction]:
+    """Environment variables the engine no longer reads.
+
+    These described the two hardcoded `personal`/`work` names and went with the
+    bootstrap registry that manufactured them. A variable that is set and silently
+    ignored is worse than one that never existed: the operator believes a setting
+    is in effect. Chat-only — the fix edits `.env`, which is theirs.
+    """
+    source = getattr(context.config, "env_source", None) or os.environ
+    stale = [(name, hint) for name, hint in _IGNORED_ENV_VARS if str(source.get(name, "")).strip()]
+    if not stale:
+        return []
+    names = ", ".join(name for name, _hint in stale)
+    return [
+        OperatorAction(
+            id="legacy-env-ignored",
+            kind="legacy-env-ignored",
+            severity=_DRIFT_SEVERITY,
+            title=f"{len(stale)} setting(s) in .env are no longer read",
+            detail=(
+                f"{names} described the old hardcoded personal/work pair and are "
+                "ignored now, so whatever they say is not in effect."
+            ),
+            glyph="⚑",
+            workspace="",
+            chat_label="Move them for me",
+            chat_prompt=(
+                f"These variables in my `.env` are no longer read by the engine: "
+                f"{names}. For each one, tell me its current value and the "
+                "workspace it was meant for, then move the setting onto that "
+                "workspace in `.runtime/workspaces.json` (`default_model` and "
+                "`disallowed_tools` are per-workspace fields there). Ask before "
+                "changing a value rather than assuming the old one still reflects "
+                "what I want, and comment the variable out of `.env` once its "
+                "setting has a new home."
+            ),
+        )
+    ]
+
+
 _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_workspace_unmigrated,
     _detect_package_update,
@@ -697,6 +908,10 @@ _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_unmigrated_links,
     _detect_missed_schedules,
     _detect_review_queue,
+    _detect_workspace_root_missing,
+    _detect_workspace_assets_stale,
+    _detect_skill_triage_pending,
+    _detect_legacy_env_ignored,
 ]
 
 
@@ -719,7 +934,43 @@ def run_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any
         return _run_missed_schedules(context)
     if action_id == "workspace-unmigrated":
         return _run_workspace_reroot(context)
+    if action_id.startswith(("workspace-root-missing:", "workspace-assets-stale:")):
+        return _run_workspace_repair(context)
     raise ValueError(f"unknown operator action id: {action_id}")
+
+
+def _run_workspace_repair(context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Reconcile every root to the registry — the `--repair` pass, as a button.
+
+    Not scoped to the one workspace the tile named. `repair` is idempotent and
+    whole-install by design, and a root that drifted is rarely the only one: the
+    same interrupted sync or hand-edit usually touched its siblings. Repairing
+    everything is also what makes a second press a no-op rather than a partial fix.
+    """
+    from ciao.workspace_reroot import repair
+
+    config = context.config
+    runtime = context.runtime
+    if runtime is None:
+        raise RuntimeError("no runtime directory, so there is no receipt to repair against")
+    result = repair(
+        Path(config.workspace_root),
+        Path(runtime),
+        list(config.workspace_names()),
+    )
+    status = str(result.get("status", ""))
+    if status == "not_rerooted":
+        raise RuntimeError(str(result.get("reason") or "this install has not re-rooted yet"))
+    errors = result.get("errors") or []
+    if errors:
+        raise RuntimeError(str(errors[0].get("error", errors[0])))
+    repaired = result.get("repaired") or []
+    reported = result.get("reported") or []
+    if not repaired:
+        return result, "Nothing needed repairing."
+    drifts = ", ".join(sorted({str(item.get("drift", "")) for item in repaired}))
+    tail = f"; {len(reported)} left for a decision" if reported else ""
+    return result, f"Repaired {len(repaired)} item(s): {drifts}{tail}."
 
 
 def _run_workspace_reroot(context: DetectionContext) -> tuple[dict[str, Any], str]:
