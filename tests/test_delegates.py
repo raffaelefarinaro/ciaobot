@@ -1207,3 +1207,142 @@ def _delegate_stop_harness(tmp_path: Path, monkeypatch, by: str):
         ),
     )
     return manager, child, wakes
+
+
+# ── tool-activity heartbeat ──────────────────────────────────────────────
+
+
+def test_tool_events_bump_the_heartbeat_and_classify_writes(tmp_path: Path) -> None:
+    """Counted from the tool stream, case-insensitively across providers.
+
+    Claude and Codex emit `Edit`/`Bash`; opencode emits `edit`/`bash`. Both
+    must land in the same bucket, and `todowrite` must not count as a file
+    write.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Worker")
+
+    for name in ("Bash", "bash", "Edit", "edit", "Write", "todowrite", "Read"):
+        manager._bump_tool_activity(chat, name)
+
+    live = manager.get_chat(chat.chat_id)
+    assert live.tool_event_count == 7
+    assert live.write_tool_count == 3  # Edit, edit, Write
+    assert live.bash_tool_count == 2
+    assert live.last_tool_at != ""
+
+
+async def test_a_new_turn_resets_the_tool_counters(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The counts describe this run, not the delegate's lifetime."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Worker")
+    chat.title = "Worker"
+    manager._bump_tool_activity(chat, "Edit")
+    assert manager.get_chat(chat.chat_id).tool_event_count == 1
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        return
+        yield  # pragma: no cover — generator shape only
+
+    manager.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    monkeypatch.setattr(manager._events, "publish", lambda *_a, **_k: None)
+
+    stream = manager.start_stream(chat.chat_id, "next task")
+    live = manager.get_chat(chat.chat_id)
+    assert live.tool_event_count == 0
+    assert live.write_tool_count == 0
+    assert live.last_tool_at == ""
+
+    async for _ in stream.subscribe():
+        pass
+
+
+def test_delegates_list_reports_activity_and_precomputed_ages(
+    tmp_path: Path,
+) -> None:
+    """Ages are computed server-side on purpose.
+
+    Handing an agent two bare ISO strings is what let a supervisor read UTC
+    against local time, believe three healthy delegates had been idle for
+    hours, and kill them.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Slow migration")
+    manager._bump_tool_activity(child, "Bash")
+    manager._bump_tool_activity(child, "Edit")
+    manager.active_chat_ids = lambda: [child.chat_id]  # type: ignore[method-assign]
+    plane = _control_plane(manager)
+
+    rows = plane.delegates_list(
+        _principal(parent.chat_id, project.project_id)
+    )["data"]["delegates"]
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["running"] is True
+    assert row["tool_event_count"] == 2
+    assert row["write_tool_count"] == 1
+    assert row["bash_tool_count"] == 1
+    # Numbers, not strings for the caller to diff against the wrong clock.
+    assert isinstance(row["age_seconds"], int)
+    assert isinstance(row["idle_seconds"], int)
+    assert row["idle_seconds"] < 5
+
+
+def test_delegates_list_ages_are_none_when_there_is_no_timestamp(
+    tmp_path: Path,
+) -> None:
+    """None means "never happened", which is not the same as zero seconds ago."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="A")
+    child.created_at = ""
+    child.last_activity_at = ""
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    plane = _control_plane(manager)
+
+    row = plane.delegates_list(
+        _principal(parent.chat_id, project.project_id)
+    )["data"]["delegates"][0]
+
+    assert row["age_seconds"] is None
+    assert row["idle_seconds"] is None
+    assert row["last_tool_at"] == ""
+
+
+def test_wake_prompt_carries_harness_counted_facts(tmp_path: Path) -> None:
+    """"Done" with zero tool calls must be visible without trusting the reply.
+
+    A delegate reported done twice having written nothing; the only way to
+    catch it was reading the raw transcript by hand.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Mount the strip")
+    for _ in range(76):
+        manager._bump_tool_activity(child, "Read")
+
+    prompt = manager._build_delegate_wake_prompt(
+        parent.chat_id,
+        [{
+            "chat_id": child.chat_id,
+            "title": "Mount the strip",
+            "delegation_id": "",
+            "reply": "Done — mounted the strip and wired the props.",
+            "had_error": False,
+        }],
+    )
+
+    assert "76 tool calls" in prompt
+    assert "0 file writes" in prompt
+    # And the supervisor must be told how much the numbers do and don't prove.
+    assert "no tool calls did" in prompt
+    assert "editing through bash is normal" in prompt

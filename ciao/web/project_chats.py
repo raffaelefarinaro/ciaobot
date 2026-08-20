@@ -187,6 +187,23 @@ _DELEGATE_WAKE_EXCERPT_CHARS = 600
 # Ceiling on live delegates per supervisor. A runaway fan-out spends real money
 # on provider turns, so the control plane refuses past this.
 _MAX_ACTIVE_DELEGATES = 6
+# File-writing tools, case-folded because the providers disagree on casing:
+# Claude and Codex emit `Edit`/`Write`, opencode emits `edit`/`write`. Verified
+# against the tool names actually recorded in agent_tool_calls.jsonl across all
+# three. `todowrite` is deliberately absent — it writes a task list, not a file.
+#
+# This UNDER-counts by design and cannot be fixed here: an agent editing with a
+# Bash heredoc, sed, or a script does real work that no write-tool name
+# captures, and Ciaobot's own auto mode tells agents to prefer Bash. A zero here
+# is a reason to look, never proof that nothing landed.
+_WRITE_TOOL_NAMES = frozenset({
+    "edit",
+    "write",
+    "multiedit",
+    "notebookedit",
+    "apply_patch",
+    "applypatch",
+})
 # Same coalescing idea for background command runs (ciao/background.py): a
 # batch of scripts that finishes together should produce one wake turn, not N.
 _BACKGROUND_WAKE_WINDOW_SECONDS = 5.0
@@ -865,6 +882,22 @@ class ChatInfo:
     # Transient UI flag: "pending" while an auto-title generation is in
     # flight, "ready" otherwise. Not persisted — reset to "ready" on load.
     title_status: str = "ready"
+    # Harness-observed tool activity for the current (or most recent) turn.
+    # Reset when a turn starts, bumped on every ToolUseEvent. Two jobs:
+    #
+    #   * liveness — `last_tool_at` is the only signal that separates a
+    #     delegate that is alive but slow from one that is dead. The turn-level
+    #     `last_activity_at` cannot: it is stamped at turn boundaries, so it
+    #     sits frozen at the start of a long run.
+    #   * completion — a count the delegate does not author. "Done" with zero
+    #     tool calls, or hundreds of calls and no writes, is worth seeing.
+    #
+    # Not persisted and deliberately absent from `to_dict`: they describe a
+    # live turn, so losing them on restart is correct.
+    tool_event_count: int = 0
+    write_tool_count: int = 0
+    bash_tool_count: int = 0
+    last_tool_at: str = ""
     # Deferred retry state for provider quota/session-limit failures. Pending
     # retries are replayed hourly until they succeed, the user stops them, or
     # the chat is archived/deleted.
@@ -5049,6 +5082,25 @@ class ProjectChatManager:
                     "input": {"summary": event.tool_input},
                 })
                 self._record_agent_tool_use(chat, request, event)
+                self._bump_tool_activity(chat, event.tool_name)
+
+    def _bump_tool_activity(self, chat: ChatInfo, tool_name: str) -> None:
+        """Record that *chat* just used a tool.
+
+        In memory only — no ``_save()``. This fires on every tool call of every
+        chat, and persisting each one would rewrite the state file thousands of
+        times per run to store something that is meaningless after a restart.
+        """
+        live = self._chats.get(chat.chat_id)
+        if live is None:
+            return
+        live.tool_event_count += 1
+        live.last_tool_at = _now_iso()
+        name = (tool_name or "").casefold()
+        if name in _WRITE_TOOL_NAMES:
+            live.write_tool_count += 1
+        elif name == "bash":
+            live.bash_tool_count += 1
 
     def _record_agent_tool_use(
         self,
@@ -6028,6 +6080,12 @@ class ProjectChatManager:
         sent_at_iso: str = ""
         if chat_meta is not None:
             self._invalidate_reentry_summary(chat_meta)
+            # Scope the tool counters to this turn: a supervisor reviewing a
+            # delegate wants "what did this run do", not a lifetime total.
+            chat_meta.tool_event_count = 0
+            chat_meta.write_tool_count = 0
+            chat_meta.bash_tool_count = 0
+            chat_meta.last_tool_at = ""
             # A new user turn answers (or supersedes) any paused question, so
             # the persisted picker state no longer applies.
             chat_meta.pending_question = ""
@@ -7471,6 +7529,16 @@ class ProjectChatManager:
                 entry["reply"], limit=_DELEGATE_WAKE_EXCERPT_CHARS
             ) if entry["reply"].strip() else "(no final message)"
             lines.append(excerpt)
+            if child is not None:
+                # Counted by the harness from the delegate's own tool stream,
+                # so unlike the excerpt above it is not the delegate's account
+                # of itself. A "done" with no tool calls at all is the case
+                # this exists for.
+                lines.append(
+                    f"  [observed: {child.tool_event_count} tool calls, "
+                    f"{child.write_tool_count} file writes, "
+                    f"{child.bash_tool_count} bash]"
+                )
         lines.append("")
         if deferred:
             lines.append(
@@ -7498,6 +7566,15 @@ class ProjectChatManager:
             "its session_id from chat_get and read that provider session's "
             "JSONL (chat_get returns metadata only, never messages). Report to "
             "the user only once you have checked."
+        )
+        lines.append("")
+        lines.append(
+            "The [observed: ...] counts come from the harness, not the "
+            "delegate. A delegate reporting success with no tool calls did "
+            "nothing; treat that as the claim being wrong, not the count. Low "
+            "file writes are weaker evidence — editing through bash is normal "
+            "here and does not show up as a write — so check the diff before "
+            "concluding either way."
         )
         return "\n".join(lines)
 

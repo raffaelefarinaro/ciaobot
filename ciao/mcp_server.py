@@ -1331,6 +1331,17 @@ class CiaoMcpService:
         async def delegates_list(chat_id: str = "") -> dict[str, Any]:
             """List delegates spawned by a chat and which are still running.
 
+            Each row carries harness-counted tool activity for the delegate's
+            current or most recent turn: `tool_event_count`, `write_tool_count`,
+            `bash_tool_count`, `last_tool_at`, plus `age_seconds` and
+            `idle_seconds` already computed against the server's clock.
+
+            Use `idle_seconds` — not `last_activity_at`, which is only stamped
+            at turn boundaries and stays frozen for the whole of a long run — to
+            judge whether a running delegate is alive. A rising
+            `tool_event_count` means it is working, however slowly; that is the
+            difference between a correct decision to stop one and a wrong one.
+
             To read a delegate's real transcript, take its session_id from
             chat_get and read that provider session's JSONL — chat_get itself
             returns metadata only, never messages. Stop a runaway delegate with

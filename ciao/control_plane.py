@@ -1013,7 +1013,8 @@ class CiaoControlPlane:
     # ---- delegates -----------------------------------------------------
 
     def _delegate_payload(self, chat: Any, *, streaming: bool) -> dict[str, Any]:
-        return {
+        last_tool_at = str(getattr(chat, "last_tool_at", "") or "")
+        payload = {
             "chat_id": chat.chat_id,
             "title": chat.title,
             "provider": chat.provider,
@@ -1023,7 +1024,39 @@ class CiaoControlPlane:
             "running": streaming,
             "created_at": chat.created_at,
             "last_activity_at": chat.last_activity_at,
+            # Harness-observed tool activity for the current or last turn. For a
+            # running delegate this is the liveness signal: last_activity_at is
+            # stamped at turn boundaries, so it stays frozen at the start of a
+            # long run and cannot separate alive-but-slow from dead.
+            "tool_event_count": int(getattr(chat, "tool_event_count", 0) or 0),
+            "write_tool_count": int(getattr(chat, "write_tool_count", 0) or 0),
+            "bash_tool_count": int(getattr(chat, "bash_tool_count", 0) or 0),
+            "last_tool_at": last_tool_at,
         }
+        # Ages are computed here rather than left to the caller. Handing an
+        # agent two bare ISO strings and expecting it to diff them against the
+        # right clock is how a supervisor once read UTC timestamps against local
+        # time, concluded three healthy delegates had been idle for hours, and
+        # killed them. `None` means "no such event yet", not "zero".
+        payload["age_seconds"] = self._seconds_since(chat.created_at)
+        payload["idle_seconds"] = self._seconds_since(
+            last_tool_at or chat.last_activity_at or chat.created_at
+        )
+        return payload
+
+    @staticmethod
+    def _seconds_since(stamp: str) -> int | None:
+        """Whole seconds between *stamp* and now, or None if unparseable."""
+        text = str(stamp or "").strip()
+        if not text:
+            return None
+        try:
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        return max(0, int((datetime.now(UTC) - moment).total_seconds()))
 
     def delegate_spawn(
         self,
