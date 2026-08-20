@@ -6880,22 +6880,69 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     "row": row,
                 }
         # Skill proposals are files, not bullets: no parse_bullet, no accept
-        # descriptor, and a whole file is the atomic unit. Surface them under
-        # their own key so the read surface exists without pretending a file is
-        # a bullet.
+        # descriptor, and a whole file is the atomic unit.
+        #
+        # They are registered in `by_id` all the same, with `file: True` so the
+        # handlers can tell a file from a bullet. Listing them without
+        # registering them left the read surface working and the write surface
+        # missing: the UI renders a dismiss button per row, and every one of the
+        # 49 skill rows on a real vault answered 404 "unknown proposal id" —
+        # from both the single-row and the batch endpoint. A row you cannot act
+        # on is a notification wearing a button.
         skill_dir = _skill_proposals_dir(config, workspace)
         if skill_dir.is_dir():
             for f in sorted(skill_dir.glob("*.md")):
-                rows.append({
-                    "id": _stable_proposal_id(workspace, rel_path, "skill", f.name, "", 0),
+                row_id = _stable_proposal_id(workspace, rel_path, "skill", f.name, "", 0)
+                row = {
+                    "id": row_id,
                     "kind": "skill",
                     "text": f.stem,
                     "source": "",
                     "workspace": workspace,
                     "path": Path(workspace).joinpath(*_SKILL_PROPOSALS_REL, f.name).as_posix(),
                     "line": -1,
-                })
+                }
+                rows.append(row)
+                by_id[row_id] = {
+                    "workspace": workspace,
+                    "path": str(f),
+                    "line": -1,
+                    "row": row,
+                    "file": True,
+                }
     return rows, by_id
+
+
+_SKILL_DISMISSED_DIR = "dismissed"
+
+
+def _dismiss_skill_proposal(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Take one skill-proposal FILE out of the queue, reversibly.
+
+    Moved into a ``dismissed/`` subfolder rather than deleted. The queue is
+    globbed one level deep, so moving it aside is enough to clear it, and a
+    proposal is the model's written suggestion — throwing it away on one click is
+    not recoverable, and "dismiss" nowhere else in this queue destroys content.
+    """
+    source = Path(ctx["path"])
+    if not source.is_file():
+        return {"ok": False, "error": f"skill proposal is gone: {source.name}"}
+    target_dir = source.parent / _SKILL_DISMISSED_DIR
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        destination = target_dir / source.name
+        if destination.exists():
+            # Same proposal dismissed twice: keep both rather than overwrite the
+            # earlier one, which the operator may still want to read.
+            stem, suffix = source.stem, source.suffix
+            n = 2
+            while (target_dir / f"{stem}-{n}{suffix}").exists():
+                n += 1
+            destination = target_dir / f"{stem}-{n}{suffix}"
+        source.replace(destination)
+    except OSError as exc:
+        return {"ok": False, "error": f"could not move {source.name}: {exc}"}
+    return {"ok": True, "moved_to": str(destination)}
 
 
 def _rehome_lookup(
@@ -7020,6 +7067,30 @@ async def proposals_batch(request: Request) -> JSONResponse:
     if error:
         return JSONResponse({"error": error}, status_code=404)
 
+    # Skill proposals are whole files, so they are handled before the grouping:
+    # the grouping below rewrites a queue file by dropping bullet lines, and a
+    # skill row has no line in any queue.
+    results = []
+    file_rows = [ctx for ctx in resolved if ctx.get("file")]
+    resolved = [ctx for ctx in resolved if not ctx.get("file")]
+    for ctx in file_rows:
+        row = ctx["row"]
+        # Same result shape a bullet dismiss returns, so the client needs no
+        # second contract for a row it renders identically.
+        if action != "dismiss":
+            results.append({
+                "id": row["id"],
+                "action": action,
+                "dismissed": False,
+                "error": "a skill proposal is a file; there is nothing to promote",
+            })
+            continue
+        outcome = _dismiss_skill_proposal(ctx)
+        entry = {"id": row["id"], "action": "dismiss", "dismissed": bool(outcome.get("ok"))}
+        if not outcome.get("ok"):
+            entry["error"] = outcome["error"]
+        results.append(entry)
+
     # Group by file so each affected file is rewritten exactly once.
     by_file: dict[str, dict[str, Any]] = {}
     for ctx in resolved:
@@ -7027,7 +7098,6 @@ async def proposals_batch(request: Request) -> JSONResponse:
         entry["lines"].add(ctx["line"])
         entry["rows"].append(ctx["row"])
 
-    results = []
     for path, entry in by_file.items():
         queue = Path(path)
         # Write every promotion BEFORE dropping any bullet, and only drop the
@@ -7138,6 +7208,23 @@ async def proposal_action(request: Request) -> JSONResponse:
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
     action = request.path_params.get("action", "").strip()
     row = ctx["row"]
+
+    if ctx.get("file"):
+        # A whole file, not a bullet in a queue: the line-removal path below
+        # would read it and delete line -1 of it.
+        if action != "dismiss":
+            return JSONResponse(
+                {
+                    "error": "a skill proposal is a file, so there is nothing to "
+                             "promote; open it and turn it into a skill, or dismiss it",
+                    "id": pid,
+                },
+                status_code=400,
+            )
+        outcome = _dismiss_skill_proposal(ctx)
+        if not outcome.get("ok"):
+            return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
+        return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
 
     promoted: dict[str, Any] = {}
     if action == "accept":

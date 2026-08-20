@@ -18,6 +18,7 @@ from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web.routes_api import (
+    _scan_proposal_rows,
     dismiss_older_than,
     list_proposals,
     proposal_action,
@@ -392,3 +393,96 @@ def test_dismiss_still_writes_nothing(tmp_path: Path) -> None:
 
     assert row["text"] not in _region_entries(config, row["workspace"], "memory")
     assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
+
+
+# -- a skill proposal is a row you can actually act on -------------------------
+
+
+def _write_skill_proposal(config: CiaoConfig, workspace: str, name: str) -> Path:
+    path = (
+        config.workspace_vault_root(workspace)
+        / "Workspace" / "Skill-Proposals" / f"{name}.md"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# {name}\n\nA proposed skill.\n", encoding="utf-8")
+    return path
+
+
+def test_a_skill_row_is_resolvable_by_id(tmp_path: Path) -> None:
+    """It was listed but never registered, so the dismiss button the UI renders
+    for every skill row answered 404 from BOTH endpoints. 49 dead buttons on a
+    real vault."""
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+
+    rows, by_id = _scan_proposal_rows(config)
+
+    skill = [r for r in rows if r["kind"] == "skill"]
+    assert len(skill) == 1
+    assert skill[0]["id"] in by_id
+
+
+def test_dismissing_a_skill_row_moves_the_file_aside(tmp_path: Path) -> None:
+    """Moved, not deleted: a proposal is the model's written suggestion, and
+    nothing else in this queue destroys content on one click."""
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+
+    response = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert response.status_code == 200, response.json()
+    assert not source.exists()
+    assert (source.parent / "dismissed" / source.name).is_file()
+    assert [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill"] == []
+
+
+def test_accepting_a_skill_row_is_refused_with_a_reason(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+
+    response = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert response.status_code == 400
+    assert "nothing to promote" in response.json()["error"]
+    assert source.is_file()   # untouched
+
+
+def test_a_batch_dismiss_covers_skill_rows_and_bullets_together(tmp_path: Path) -> None:
+    """The batch groups by queue file and drops bullet lines; a skill row has no
+    line in any queue, so it has to be handled before that grouping."""
+    config = _config(tmp_path)
+    _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    ids = [r["id"] for r in rows]
+    assert len(ids) == 2
+
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": ids})
+
+    assert response.status_code == 200, response.json()
+    assert all(r["dismissed"] for r in response.json()["results"]), response.json()
+    assert not source.exists()
+    assert (source.parent / "dismissed" / source.name).is_file()
+    assert client.get("/api/proposals").json()["rows"] == []
+
+
+def test_dismissing_the_same_skill_twice_keeps_both_files(tmp_path: Path) -> None:
+    """Two proposals can share a name across runs; the second must not silently
+    overwrite the first, which the operator may still want to read."""
+    config = _config(tmp_path)
+    client = _client(config)
+    for _ in range(2):
+        _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+        row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+        assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
+
+    dismissed = sorted(
+        p.name for p in
+        (config.workspace_vault_root("personal") / "Workspace" / "Skill-Proposals" / "dismissed").glob("*.md")
+    )
+    assert dismissed == ["2026-08-09-defuddle-2.md", "2026-08-09-defuddle.md"]

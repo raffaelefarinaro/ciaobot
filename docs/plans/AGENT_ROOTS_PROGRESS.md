@@ -1723,3 +1723,55 @@ documentation.
 Verified end to end on a sandbox: after migrating, `git reset --hard && git clean -fd` restores the
 pre-migration tree exactly. `--undo` remains the proper path because it also clears the receipt; this
 is the floor underneath it.
+
+
+## V5 end-to-end drain (2026-08-20)
+
+Run on an APFS clone of the real install with `.env`, `.env.example`, `secrets/`, `node_modules`,
+`.venv` and `.git` stripped and only `.runtime/workspaces.json` plus the migration receipt restored.
+Guarded: sandbox asserted not to be, and not to overlap, the live install; credentials asserted
+absent; live `git status` confirmed unchanged afterwards. Driven through
+`routes_api._scan_proposal_rows` and `proposals_batch` / `proposal_action` — the same functions the
+PWA calls, not a reimplementation.
+
+Queue: **130 rows** — 65 memory, 2 profile, 14 rehome, 49 skill.
+
+### Finding 1: 49 of 130 rows could not be acted on at all
+`_scan_proposal_rows` returns `(rows, by_id)`. Skill proposals were appended to `rows` and **never
+registered in `by_id`**, which is the map both write endpoints resolve against. Deliberately so — the
+comment said it surfaced the read surface "without pretending a file is a bullet" — but the UI
+renders a dismiss button for every row, so all 49 answered `404 unknown proposal id`, from the
+single-row endpoint and the batch alike. A row you cannot act on is a notification wearing a button.
+
+Skill rows are now registered with `file: True`, and both handlers branch on it before the
+line-removal path (which would otherwise read the file and delete "line -1"). Dismiss **moves the
+file into a `dismissed/` subfolder** rather than deleting it: the queue is globbed one level deep so
+moving it aside clears it, a proposal is the model's written suggestion, and nothing else in this
+queue destroys content on one click. A repeat dismissal of the same name suffixes rather than
+overwrites. Accept is refused with a reason, since a file has nothing to promote. Result shape matches
+a bullet dismiss exactly, so the client needs no second contract.
+
+After the fix: 130 of 130 resolvable, and dismiss cleared **63 rows** (49 skill + 14 rehome) with
+zero failures. All 49 files present under `dismissed/`, none deleted.
+
+### Finding 2: the remaining 67 rows cannot be accepted, and the queue does not say so
+Every memory and profile accept fails with **"memory region would exceed its 2200-character
+limit"**. The guard is correct — write-then-dismiss, so a refused write keeps the bullet and the fact
+is not lost — but the consequence is that 67 rows offer an accept button that can never succeed on
+this vault, and nothing in the queue says why or offers the remedy. The only route past it is memory
+curation consolidating the region, which is a scheduled routine the queue never mentions.
+
+**So the V5 verdict is: half a workflow.** Dismiss now works for every row. Accept is a dead button
+for 67 of them until the region is consolidated. That is the same defect as Finding 1 in a different
+place, and it is not fixed here — the fix is a capacity signal in the payload so the panel can
+disable accept and name the remedy, plus an operator tile for "the region is at cap and N proposals
+are waiting on it". Filed, not done.
+
+### Not attempted: `vault-rehome --apply` on a per-root install
+Detection is per-root; the mover is not, and porting it is not a path substitution. `plan_rehome`
+walks one `vault_root` with `rglob`, `rewrite_references` keys its moved-note table on the single
+`VAULT_PREFIX`, and `_build_filename_index` takes one prefix — which cannot serve two roots at once.
+Underneath that is a question that is the operator's, not mine: when a note moves from `personal` to
+`work`, every link to it from its old root becomes a cross-workspace ref, and those are deliberately
+**not** graph edges (see `related_external`). So a mechanical re-home silently drops the moved note
+out of its old root's graph. That needs deciding before it is built, not after.
