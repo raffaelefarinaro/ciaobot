@@ -60,6 +60,20 @@ _DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
 # value that does clear them drops the harness denies too.
 
 
+_REROOTED_CACHE: dict[str, bool] = {}
+
+
+def reset_reroot_cache() -> None:
+    """Forget whether an install has re-rooted.
+
+    Called by the migration after it writes its receipt, and by tests that build
+    several installs in one process. Without it, the first install's answer would
+    be reused for a later one that has a different runtime directory only if the
+    path matched, so this is mostly a same-path correctness hook.
+    """
+    _REROOTED_CACHE.clear()
+
+
 def _clean_relative_path(raw: str) -> str:
     """Normalize a safe relative path so equivalent spellings resolve alike.
 
@@ -585,7 +599,33 @@ class CiaoConfig:
             sep in name for sep in ("/", "\\")
         ):
             raise ValueError("workspace name must identify one folder")
+        # Flipped per install by the re-rooting migration, not by a release date.
+        # Gating on the migration's own receipt is what makes the change atomic:
+        # an install that has not re-rooted keeps resolving to workspace_root, so
+        # a half-flipped state cannot exist. Deleting the legacy filters before
+        # this returns a real subdirectory would leave no filter over a still
+        # prefixed index, which is fail-open and strictly worse than today.
+        if self._rerooted():
+            return self.workspace_root / name
         return self.workspace_root
+
+    def _rerooted(self) -> bool:
+        """Whether this install has completed the per-workspace re-rooting.
+
+        Cached in a module-level map keyed by runtime directory, because
+        ``CiaoConfig`` uses slots and ``agent_root`` is called on hot paths: a
+        stat per call would be wasteful for a value that changes exactly once in
+        an install's life. ``reset_reroot_cache`` clears it, which the migration
+        itself calls after writing its receipt.
+        """
+        key = str(self.state_path.parent)
+        cached = _REROOTED_CACHE.get(key)
+        if cached is None:
+            from ciao.workspace_reroot import read_receipt
+
+            cached = read_receipt(self.state_path.parent) is not None
+            _REROOTED_CACHE[key] = cached
+        return cached
 
     def _resolve_vault_root(self, raw_root: str) -> Path:
         cleaned = _clean_relative_path(raw_root)

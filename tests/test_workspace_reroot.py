@@ -487,3 +487,75 @@ def test_a_single_workspace_install_queues_nothing() -> None:
 
     assert split.per_root == {"personal": _GUIDE}
     assert split.queued == {}
+
+
+# -- registry and the agent_root flip ---------------------------------------
+
+
+def _registry(runtime: Path, entries: list[dict]) -> None:
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "workspaces.json").write_text(json.dumps(entries, indent=2), encoding="utf-8")
+
+
+def test_apply_repoints_the_registry_at_the_new_roots(tmp_path: Path) -> None:
+    """Without this the install is broken: the registry names a path that is gone."""
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [
+        {"name": "personal", "vault_root": "memory-vault/personal", "future_key": 1},
+        {"name": "work", "vault_root": "memory-vault/work"},
+    ])
+
+    apply(install, vault, ["personal", "work"], runtime)
+
+    after = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    roots = {e["name"]: e["vault_root"] for e in after}
+    assert roots == {"personal": "personal/memory-vault", "work": "work/memory-vault"}
+    # An unknown key a future release adds must survive a migration that only
+    # means to change one field.
+    assert after[0]["future_key"] == 1
+
+
+def test_undo_restores_the_previous_registry(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    original = [
+        {"name": "personal", "vault_root": "memory-vault/personal"},
+        {"name": "work", "vault_root": "memory-vault/work"},
+    ]
+    _registry(runtime, original)
+
+    apply(install, vault, ["personal", "work"], runtime)
+    undo(install, runtime)
+
+    after = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    assert after == original
+
+
+def test_agent_root_flips_only_after_a_migrated_receipt(tmp_path: Path) -> None:
+    """The flip is per install and atomic, gated on the receipt rather than a date.
+
+    Returning a real subdirectory before the files have moved, or keeping the old
+    answer after they have, is the half-rooted state the release must not allow.
+    """
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [
+        {"name": "personal", "vault_root": "memory-vault/personal"},
+        {"name": "work", "vault_root": "memory-vault/work"},
+    ])
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=install,
+        vault_root=vault,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+    )
+
+    reset_reroot_cache()
+    assert config.agent_root("work") == install, "flipped before migrating"
+
+    apply(install, vault, ["personal", "work"], runtime)
+    assert config.agent_root("work") == install / "work"
+
+    undo(install, runtime)
+    assert config.agent_root("work") == install, "stayed flipped after undo"

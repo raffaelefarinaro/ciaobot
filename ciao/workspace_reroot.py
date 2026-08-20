@@ -364,11 +364,24 @@ def apply(
         vault_root.rmdir()
         removed_vault = True
 
+    # Move the registry with the files. Without this the install is left broken:
+    # every entry still names memory-vault/<name> while the directory now lives
+    # at <name>/memory-vault, so the vault resolves to a path that is gone. The
+    # before-image goes in the receipt so undo restores it exactly.
+    registry_before, registry_after = _rewrite_registry(runtime_root, result)
+    payload["registry_before"] = registry_before
+    payload["registry_after"] = registry_after
+
     payload["status"] = "migrated"
     payload["applied"] = applied
     payload["stashed_files"] = stashed
     payload["removed_vault_dir"] = removed_vault
     payload["receipt_path"] = str(write_receipt(runtime_root, payload))
+    # The receipt is what flips CiaoConfig.agent_root, so the cached answer from
+    # before the migration is now stale in this process.
+    from ciao.config import reset_reroot_cache
+
+    reset_reroot_cache()
     return payload
 
 
@@ -415,7 +428,14 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         if parent != install_root and parent.is_dir() and not any(parent.iterdir()):
             parent.rmdir()
 
+    before = receipt.get("registry_before")
+    if before is not None:
+        _write_registry(runtime_root, before)
+
     remove_receipt(runtime_root)
+    from ciao.config import reset_reroot_cache
+
+    reset_reroot_cache()
     return {
         "status": "undone",
         "reversed": reversed_moves,
@@ -430,6 +450,51 @@ def remove_receipt(runtime_root: Path) -> bool:
         path.unlink()
         return True
     return False
+
+
+def registry_file(runtime_root: Path) -> Path:
+    return Path(runtime_root) / "workspaces.json"
+
+
+def _write_registry(runtime_root: Path, entries: list[dict[str, Any]]) -> None:
+    """Persist the registry atomically, preserving key order and unknown keys."""
+    path = registry_file(runtime_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _rewrite_registry(
+    runtime_root: Path, result: RerootPlan
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
+    """Point every migrated workspace's ``vault_root`` at its new agent root.
+
+    Returns ``(before, after)`` so the receipt carries an exact before-image for
+    undo. Reads and rewrites the raw list rather than round-tripping through
+    WorkspaceConfig, because an unknown key a future release adds must survive a
+    migration that only means to change one field.
+    """
+    path = registry_file(runtime_root)
+    if not path.is_file():
+        return None, None
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None, None
+    if not isinstance(entries, list):
+        return None, None
+
+    before = json.loads(json.dumps(entries))
+    destinations = {m.workspace: m.destination for m in result.moves if m.workspace}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        destination = destinations.get(str(entry.get("name", "")))
+        if destination:
+            entry["vault_root"] = destination
+    _write_registry(runtime_root, entries)
+    return before, entries
 
 
 # -- P10.4: splitting the shared guide --------------------------------------
