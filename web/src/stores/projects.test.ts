@@ -731,6 +731,40 @@ describe('chat closing and re-entry orientation', () => {
     localStorage.removeItem('ciao-chat-drafts')
   })
 
+  test('keeps a chat whose staged image is in the legacy array shape', async () => {
+    // Same coupling as the draft above, one storage key over. `normalizePendingBuckets`
+    // still accepts the pre-per-chat array shape; if it stopped, this chat would
+    // read as empty and be deleted with the screenshot in it.
+    // Both keys must be set BEFORE the store exists: `restoreState` runs once at
+    // creation, and it restores the active chat id before the buckets — which is
+    // what lets the legacy array be attributed to a chat at all.
+    const chatId = 'chat-legacy-image'
+    localStorage.setItem('ciao-active-chat', chatId)
+    localStorage.setItem('ciao-pending-images', JSON.stringify(['img-1']))
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'New Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    store.messages[chatId] = []
+    expect(store.activeChatId).toBe(chatId)
+    expect(store.pendingImages).toEqual(['img-1'])
+
+    await store.closeChat()
+
+    expect(apiDel).not.toHaveBeenCalled()
+    expect(store.chats).toHaveLength(1)
+    localStorage.removeItem('ciao-pending-images')
+    localStorage.removeItem('ciao-active-chat')
+  })
+
   test('keeps a chat holding only a staged image', async () => {
     // The server cannot see a staged attachment either, so if the client calls
     // the chat empty the delete goes through and the screenshot goes with it.

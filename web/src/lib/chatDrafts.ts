@@ -25,6 +25,13 @@ function defaultStorage(): DraftStorage | null {
   return localStorage
 }
 
+// NOTE: this read feeds `isEmptyDraft` in stores/projects, which DELETES the
+// chat when it finds nothing. So dropping a stored shape here does not merely
+// fail to restore a draft — it discards the draft and the chat holding it. The
+// object shape landed 2026-08-18, so a legacy entry from any earlier release is
+// still sitting in somebody's localStorage until they reopen that chat. Do not
+// remove the legacy branch until a legacy entry provably cannot exist.
+//
 // Accepts both the current object shape and the legacy plain-string shape
 // (pre-#277: `Record<chatId, string>`). A legacy string is stamped with the
 // current time on read — it gets one fair chance at the orphan-recovery TTL

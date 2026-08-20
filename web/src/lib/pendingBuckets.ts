@@ -1,5 +1,8 @@
 export type PendingBuckets<T> = Record<string, T[]>
 
+// The legacy branch below has the same constraint as `chatDrafts.readDrafts`:
+// `isEmptyDraft` treats a chat with no staged attachments as a discardable draft
+// and deletes it, so a dropped shape costs the user the attachment AND the chat.
 export function normalizePendingBuckets<T>(value: unknown, activeChatId?: string | null): PendingBuckets<T> {
   if (Array.isArray(value)) {
     return activeChatId && value.length ? { [activeChatId]: value as T[] } : {}
