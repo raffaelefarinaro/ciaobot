@@ -1084,3 +1084,60 @@ export interface HousekeepingRunResponse {
   result?: Record<string, unknown>
   actions: OperatorAction[]
 }
+
+// ── Proposal review (agent roots) ────────────────────────────────────────
+
+/** Live rehome signal for a `[rehome]` row, from `ciao/vault_rehome`. */
+export interface RehomeSignal {
+  /** The destination named in the bullet. A guess unless `justified`. */
+  destination: string
+  /** Every workspace the note's tags name. Empty when no tag backs it. */
+  candidates: string[]
+  /** True only when a single clean tag signal backs the destination. */
+  justified: boolean
+  reason: string
+}
+
+/**
+ * One queued proposal row from `GET /api/proposals`. Region kinds
+ * (`memory`/`profile`/`user`) carry `region` and `leak_warning`; `rehome`
+ * rows carry `rehome`; `skill` rows are files and carry neither.
+ */
+export interface ProposalRow {
+  id: string
+  kind: string
+  text: string
+  source: string
+  workspace: string
+  path: string
+  line: number
+  region?: string
+  leak_warning?: boolean
+  rehome?: RehomeSignal
+}
+
+export interface ProposalsResponse {
+  rows: ProposalRow[]
+}
+
+/** One per-row outcome from `POST /api/proposals/batch` or `/{id}/{action}`. */
+export interface ProposalActionResult {
+  id: string
+  action: string
+  dismissed: boolean
+  region?: string
+  leak_warning?: boolean
+  destination?: string
+  justified?: boolean
+}
+
+export interface ProposalBatchResponse {
+  ok: boolean
+  action: 'accept' | 'dismiss'
+  results: ProposalActionResult[]
+}
+
+export interface ProposalDismissOlderResponse {
+  ok: boolean
+  removed: number
+}

@@ -83,6 +83,23 @@
             </svg>
                       <span class="nav-item-label" aria-hidden="true">memory</span>
           </router-link>
+          <router-link
+            to="/proposals"
+            class="nav-item touch-hit"
+            :class="{ 'nav-item--active': mode === 'proposals' }"
+            title="proposals"
+            aria-label="proposals"
+          >
+            <!-- Inbox / queue: a tray with a pending marker, distinct from the
+                 memory brain and the settings sliders. -->
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
+              <path d="M4 4h16v12H4z" />
+              <path d="M4 16h16v4H4z" />
+              <line x1="8" y1="8" x2="16" y2="8" />
+            </svg>
+                      <span class="nav-item-label" aria-hidden="true">proposals</span>
+          </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/providers, /settings/models, ...) and none of them match
                the /settings record, so active-class left this item inactive on
@@ -899,7 +916,7 @@ import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { askPrompt } from '../lib/prompt'
 
-const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' }>()
+const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
 
 const store = useProjectStore()

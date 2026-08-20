@@ -52,6 +52,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/proposals',
+    name: 'proposals',
+    component: () => import('./components/ChatLayout.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/schedules/:scheduleId',
     name: 'schedule-detail',
     component: () => import('./components/ChatLayout.vue'),

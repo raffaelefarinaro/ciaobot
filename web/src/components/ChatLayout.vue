@@ -81,6 +81,7 @@
                   </button>
                 </div>
               </div>
+              <HousekeepingStrip />
               <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
               <div v-if="showGlobalNewChatActions" class="empty-actions">
                 <button
@@ -124,6 +125,7 @@
           @open-sidebar="sidebarCollapsed = false"
         />
         <MemoryMapView v-else-if="viewMode === 'memory'" @open-sidebar="sidebarCollapsed = false" />
+        <ProposalReviewPanel v-else-if="viewMode === 'proposals'" @open-sidebar="sidebarCollapsed = false" />
         <ProjectView
           v-else-if="projectIdParam"
           :project-id="projectIdParam"
@@ -174,6 +176,7 @@
                 </button>
               </div>
             </div>
+            <HousekeepingStrip />
             <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
             <div v-if="showGlobalNewChatActions" class="empty-actions">
               <button
@@ -205,6 +208,7 @@ import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
 import MemoryMapView from './MemoryMapView.vue'
+import ProposalReviewPanel from './ProposalReviewPanel.vue'
 import ProjectView from './ProjectView.vue'
 import SchedulePanel from './SchedulePanel.vue'
 import SettingsView from './SettingsView.vue'
@@ -212,6 +216,7 @@ import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
+import HousekeepingStrip from './HousekeepingStrip.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
@@ -427,11 +432,12 @@ const memoryMapStore = useMemoryMapStore()
 const route = useRoute()
 const router = useRouter()
 const projectIdParam = computed(() => (route.params.projectId as string) || '')
-const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings' | 'memory'>(() => {
+const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
   if (path.startsWith('/schedules')) return 'schedules'
   if (path.startsWith('/memory')) return 'memory'
+  if (path.startsWith('/proposals')) return 'proposals'
   if (projectIdParam.value) return 'project'
   return 'chat'
 })
@@ -454,7 +460,7 @@ const viewShortcutsActive = computed(() =>
   && !fileViewer.isOpen,
 )
 const shortcutsActive = computed(() =>
-  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'memory',
+  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
 )
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
@@ -552,6 +558,7 @@ const pageDocumentTitle = computed(() => {
     return 'automations'
   }
   if (viewMode.value === 'memory') return 'memory'
+  if (viewMode.value === 'proposals') return 'proposals'
   if (projectIdParam.value) {
     const project = store.projects.find(p => p.project_id === projectIdParam.value)
     return project?.name || 'project'
@@ -585,7 +592,7 @@ const pinnedFilePath = computed(() => {
   // those views entirely because the v-if="pinnedFilePath" branch only
   // renders ProjectView/ChatPanel. Hide the pin in those modes; the store
   // entry stays intact, so coming back restores it.
-  if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory') return ''
+  if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory' || viewMode.value === 'proposals') return ''
   return activePinKey.value ? store.pinnedFileFor(activePinKey.value) || '' : ''
 })
 function unpinCurrent(): void {
@@ -779,7 +786,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       memoryMapStore.selectNode(null)
       return
     }
-    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory') {
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory' || viewMode.value === 'proposals') {
       e.preventDefault()
       void router.push('/')
       return
