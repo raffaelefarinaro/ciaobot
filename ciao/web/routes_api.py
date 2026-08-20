@@ -6757,7 +6757,16 @@ def _rehome_signal(config) -> dict[str, dict[str, Any]]:
     """
     try:
         candidates = vault_rehome.detect_misfiled_people(
-            config.vault_root, workspaces=config.workspace_names()
+            config.vault_root,
+            workspaces=config.workspace_names(),
+            # Every vault in the install. Scanning `config.vault_root` returned
+            # zero candidates on a migrated install, so the proposals UI silently
+            # lost every re-home hint.
+            targets=(
+                config.vault_scan_targets()
+                if hasattr(config, "vault_scan_targets")
+                else None
+            ),
         )
     except Exception:  # noqa: BLE001 — a broken scan must not fail the list route
         logger.exception("proposal list: rehome signal scan failed")

@@ -272,3 +272,96 @@ def test_a_node_id_outside_every_vault_is_refused(tmp_path: Path) -> None:
                 continue
             matched.append(candidate)
         assert matched == [], (hostile, matched)
+
+
+# -- re-home detection, in both layouts --------------------------------------
+
+
+def _person(root: Path, rel: str, tags: list[str]) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tag_line = "tags: [" + ", ".join(tags) + "]\n" if tags else ""
+    path.write_text(
+        f"---\ntype: person\n{tag_line}---\n# {path.stem}\n", encoding="utf-8"
+    )
+
+
+def test_rehome_finds_the_same_candidates_in_both_layouts(tmp_path: Path) -> None:
+    """It returned ZERO candidates from every root after the migration.
+
+    Its predicate was `<workspace>/People/...` relative to `memory-vault`, and
+    inside a root's own vault there is no workspace segment — so the proposals UI
+    silently lost every re-home hint.
+    """
+    from ciao.vault_rehome import detect_misfiled_people
+
+    shared = _install(tmp_path / "a", migrated=False)
+    _person(tmp_path / "a" / "memory-vault" / "personal", "People/Mo.md", ["scandit"])
+    rooted = _install(tmp_path / "b", migrated=True)
+    _person(tmp_path / "b" / "personal" / "memory-vault", "People/Mo.md", ["scandit"])
+
+    before = detect_misfiled_people(
+        shared.vault_root, workspaces=["personal", "work"],
+        targets=shared.vault_scan_targets(),
+    )
+    reset_reroot_cache()
+    after = detect_misfiled_people(
+        rooted.vault_root, workspaces=["personal", "work"],
+        targets=rooted.vault_scan_targets(),
+    )
+
+    assert [c.path for c in before] == [c.path for c in after]
+    assert [c.destination for c in before] == [c.destination for c in after]
+    assert any(c.path == "personal/People/Mo.md" for c in after), [c.path for c in after]
+
+
+def test_the_candidate_identity_survives_the_migration(tmp_path: Path) -> None:
+    """The identity string is what queue bullets contain and `_rehome_signal`
+    joins on. Deriving it from the on-disk path would make every existing bullet
+    stop matching its own note the moment an install migrated — silently, because
+    a failed join renders as "no signal" rather than as an error."""
+    from ciao.vault_rehome import detect_misfiled_people
+
+    config = _install(tmp_path, migrated=True)
+    _person(tmp_path / "personal" / "memory-vault", "People/Mo.md", ["scandit"])
+
+    candidates = detect_misfiled_people(
+        config.vault_root, workspaces=["personal", "work"],
+        targets=config.vault_scan_targets(),
+    )
+
+    paths = [c.path for c in candidates]
+    # Workspace plus vault-relative, NOT the on-disk `personal/memory-vault/...`.
+    assert "personal/People/Mo.md" in paths
+    assert not any("memory-vault" in p for p in paths), paths
+    moved = next(c for c in candidates if c.path == "personal/People/Mo.md")
+    assert moved.destination == "work/People/Mo.md"
+
+
+def test_user_md_is_still_never_a_candidate_per_root(tmp_path: Path) -> None:
+    """P5.9's rule has to survive the new scan path."""
+    from ciao.vault_rehome import detect_misfiled_people
+
+    config = _install(tmp_path, migrated=True)
+    _person(tmp_path / "personal" / "memory-vault", "People/User.md", ["scandit"])
+
+    candidates = detect_misfiled_people(
+        config.vault_root, workspaces=["personal", "work"],
+        targets=config.vault_scan_targets(),
+    )
+
+    assert not any(c.path.endswith("User.md") for c in candidates), [c.path for c in candidates]
+
+
+def test_a_note_outside_a_people_directory_is_not_a_candidate(tmp_path: Path) -> None:
+    from ciao.vault_rehome import detect_misfiled_people
+
+    config = _install(tmp_path, migrated=True)
+    _person(tmp_path / "personal" / "memory-vault", "Ideas/Mo.md", ["scandit"])
+
+    candidates = detect_misfiled_people(
+        config.vault_root, workspaces=["personal", "work"],
+        targets=config.vault_scan_targets(),
+    )
+
+    assert not any("Ideas" in c.path for c in candidates), [c.path for c in candidates]

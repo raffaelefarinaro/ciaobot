@@ -449,11 +449,35 @@ def _counterpart(
     return others[0] if len(others) == 1 else ""
 
 
+def _scanned_people(
+    root: Path,
+    entries: list[Entry] | None,
+    targets: Sequence[tuple[Path, str, Path]] | None,
+) -> list[tuple[Entry, str, Path]]:
+    """(entry, workspace stamp, rendered prefix) for every note to consider.
+
+    ``targets`` comes from ``CiaoConfig.vault_scan_targets()``: one shared vault
+    before the re-rooting and one per agent root after. Without it, today's
+    single-vault behaviour, so every existing caller is unchanged.
+    """
+    if targets:
+        out: list[tuple[Entry, str, Path]] = []
+        for vault, stamp, prefix in targets:
+            if not Path(vault).is_dir():
+                continue
+            for entry in scan_vault(Path(vault), workspace=stamp, path_prefix=Path(prefix)):
+                out.append((entry, stamp, Path(prefix)))
+        return out
+    scanned = entries if entries is not None else scan_vault(root)
+    return [(entry, "", Path(VAULT_PREFIX)) for entry in scanned]
+
+
 def detect_misfiled_people(
     vault_root: Path,
     *,
     workspaces: Sequence[str] | None = None,
     entries: list[Entry] | None = None,
+    targets: Sequence[tuple[Path, str, Path]] | None = None,
 ) -> list[Candidate]:
     """Bucket every person note into mechanical, judgement, or correctly filed.
 
@@ -472,14 +496,31 @@ def detect_misfiled_people(
     registered = set(names)
 
     out: list[Candidate] = []
-    for entry in entries if entries is not None else scan_vault(root):
-        relative = entry.path.relative_to(VAULT_PREFIX)
-        parts = relative.parts
-        if len(parts) < 3 or parts[0] not in registered or parts[1] not in PEOPLE_DIRS:
+    for entry, stamp, prefix in _scanned_people(root, entries, targets):
+        try:
+            within = entry.path.relative_to(prefix)
+        except ValueError:
             continue
-        if parts[-1].casefold() in EXCLUDED_PERSON_FILENAMES:
+        if stamp:
+            # A root's vault holds exactly one workspace, so there is no
+            # workspace segment in the path — the scan stamped it instead.
+            workspace, tail = stamp, within.parts
+        else:
+            parts = within.parts
+            if len(parts) < 2 or parts[0] not in registered:
+                continue
+            workspace, tail = parts[0], parts[1:]
+        if len(tail) < 2 or tail[0] not in PEOPLE_DIRS:
             continue
-        workspace = parts[0]
+        if tail[-1].casefold() in EXCLUDED_PERSON_FILENAMES:
+            continue
+        # The IDENTITY, and it is deliberately the same string in both layouts:
+        # `<workspace>/People/Mo.md`. That string is written into the queue
+        # bullets and is what `_rehome_signal` joins on, so deriving it from the
+        # on-disk path would make every existing bullet stop matching its own
+        # note the moment an install migrated — silently, because a failed join
+        # renders as "no signal" rather than as an error.
+        relative = Path(workspace, *tail)
         tags = tuple(sorted({tag.strip().casefold() for tag in entry.tags if tag.strip()}))
         signals = {tag: TAG_WORKSPACE_ROLES[tag] for tag in tags if tag in TAG_WORKSPACE_ROLES}
         signalled_roles = set(signals.values())
