@@ -1075,8 +1075,64 @@ detectors reporting 2 actions, and `system-install-health` — the routine added
 schedule catch-up. So the schedule changes and the audit split are live and exercisable NOW, on the
 shared layout; only the per-root layout is gated.
 
+## The read sweep (2026-08-20, third session)
+
+Four passes landed. Each was probed against a migrated APFS clone BEFORE being written, because
+every one of these failures is a path that silently resolves somewhere else rather than an error.
+
+| Pass | Commit | What was broken |
+|---|---|---|
+| `Logs/` promotion | `74b29a20` | 5 sites derived the archive as `vault_root/"Logs"`, incl. the TranscriptStore root, so archiving would recreate an empty tree and split the archive in two. `cleanup_sdk_blobs` hardcoded the pre-migration path — and it DELETES blobs. Seam: `CiaoConfig.logs_root` / `config.logs_root_for`. |
+| Vault scanning | `e4f29851` | `scan_vault(config.vault_root)` returned **0 notes**, so the Memory Map was blank; `Entry.workspace` degraded to folder names; rendered paths collided across roots. Seams: `vault_scan_targets()`, `scan_vault(workspace=, path_prefix=)`, `scan_targets()`. |
+| Startup index, health panel, note delete | `b6586d04` | Startup wrote one index at the emptied root; Settings showed "Vault root is missing" on a CORRECTLY migrated install; the Memory Map could delete nothing because every node id failed a fixed `memory-vault/` prefix test. |
+| Entity index | `3ee1ea3b` | Chat entity hints resolved against a missing index (matching nothing, silently) and the `vault_index_refresh` MCP tool rebuilt an index nothing reads. Seam: `agent_vault_root(workspace)` + `_index_stamp`. |
+
+### What is left, classified
+Thirty `config.vault_root` reads remain. They are NOT all bugs — the classification matters more
+than the count:
+
+**Safe as they stand (4).** `agent_assets.py` 117, 340, 1289, 1295 are containment checks
+(`_is_editable_file`, `allowed_roots`). Agent roots live UNDER `workspace_root`, so the
+`workspace_root` arm already covers every per-root vault and the `vault_root` arm just stops
+matching. Leave them.
+
+**Prose, not code (3).** `routes_api.py` 4268, `control_plane.py` 603, `main.py` 112 are comments.
+
+**Correct by construction (1).** `control_plane.py` 610 (`_search_key_base`) wants the INSTALL root
+and takes `vault_root.parent`, which is the install root in both layouts.
+
+**Fallbacks that only fire when there is no workspace (3).** `agent_assets.py` 844,
+`project_chats.py` 1829, `control_plane.py` 342. Correct today; worth a per-root default later.
+
+**Genuinely still wrong (19), in impact order:**
+1. `routes_api.py:6719` — `detect_misfiled_people(config.vault_root, ...)` walks the shared vault,
+   so the proposals UI loses every re-home hint. `vault_rehome`'s whole model is prefix-based and
+   needs per-root targets; the largest single item left.
+2. `agent_assets.py` 465, 682, 732, 965, 1014, 1054, 1100, 1247 — the Settings asset listings and
+   `repair_workspace_health`. Nothing crashes (measured), but each lists only the shared vault, so
+   per-root workspace docs, subagents and commands are invisible.
+3. `agent_assets.py:155` — `_vault_mirror_path` writes `<vault>/Workspace/<cat>/<name>.md` into a
+   directory that no longer exists.
+4. `routes_api.py:6398` — the Settings skills page reads the install root. Measured on a migrated
+   clone: `{custom: 0, github: 0, stock: 29}` at the install root versus
+   `{custom: 19, github: 7, stock: 29}` at `personal/`. The page looks empty.
+5. `insights.py:1195`, `project_chats.py` 4174/4253 — the `vault_root` handed to insight writing.
+6. `routes_api.py:5430` — the informational `workspace_context` payload reports a stale path.
+
+### Why the auto-migration trigger is NOT wired yet
+The operator asked for the migration to run automatically on upgrade, or behind a button, as a
+mandatory step. Wiring that now would migrate every install on its next upgrade and expose all 19
+remaining defects at once — which is precisely the failure that had to be reverted this morning, at
+scale and on other people's machines instead of one. The trigger goes in AFTER the sweep, and it is
+the last thing to land before the release.
+
+Shape agreed for when it does: attempt `apply()` from `sync_workspace_skills` at upgrade,
+receipt-gated so it runs once; if it REFUSES (dirty tree, non-empty destination) the install must not
+continue quietly on the old layout, so §11.2's `workspace-unmigrated` action surfaces it with a run
+button that re-runs `--apply`. Automatic when it can be, blocking when it cannot.
+
 ### Remaining
-0. **The per-root read sweep**, items 1–3 above. Blocks everything else.
+0. **Finish the read sweep** — the 19 above. Then the trigger and the blocking gate. Blocks release.
 1. **Ship this work in a release, and let the upgrade run the migration.** Do NOT run `--apply` by
    hand from a dev checkout again — that is what broke the install today. Mechanics for whenever it
    does run: the app must be stopped, and `com.ciao.server` is a launchd agent with
