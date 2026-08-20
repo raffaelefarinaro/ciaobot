@@ -6994,3 +6994,90 @@ async def proposal_action(request: Request) -> JSONResponse:
             result["justified"] = row.get("rehome", {}).get("justified", False)
         return JSONResponse({"ok": True, "result": result})
     return JSONResponse({"ok": True, "result": {"id": pid, "action": "dismiss", "dismissed": True}})
+
+
+# ── Operator-action housekeeping strip ───────────────────────────────────
+
+
+def _housekeeping_context(request: Request) -> "operator_actions.DetectionContext":
+    """Build the cheap detection context from the request's app state.
+
+    The package-status fetcher is the cached one the app already owns (see
+    ``make_cached_package_status`` in ``app.py``), so detection never blocks
+    on GitHub. The schedule manager, when present, exposes the missed one-time
+    reminders.
+    """
+    from ciao import operator_actions
+
+    config = request.app.state.config
+    fetcher = getattr(request.app.state, "package_status_fetcher", None)
+    return operator_actions.DetectionContext(
+        config=config,
+        schedule_store=getattr(request.app.state, "schedule_manager", None),
+        package_status=fetcher if callable(fetcher) else None,
+    )
+
+
+async def list_housekeeping(request: Request) -> JSONResponse:
+    """Return every detectable operator action for the home strip.
+
+    This is the detector pass. Each action carries ``run_label``, ``chat_label``
+    and ``chat_prompt`` so the client can render the buttons it needs and seed
+    a chat without a second round-trip.
+    """
+    from ciao import operator_actions
+
+    actions = operator_actions.detect_actions(_housekeeping_context(request))
+    return JSONResponse({"actions": [action.as_dict() for action in actions]})
+
+
+async def run_housekeeping_action(request: Request) -> JSONResponse:
+    """Perform one action's mechanical work, then re-detect and return the list.
+
+    Re-running detection in the same response is what keeps the client from
+    rendering a stale strip: a condition that cleared is gone, and one that
+    persists returns with its detail replaced by the failure. Unknown id is
+    404, never 500.
+    """
+    from ciao import operator_actions
+
+    action_id = request.path_params["action_id"]
+    context = _housekeeping_context(request)
+    try:
+        result, summary = operator_actions.run_action(action_id, context)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:  # noqa: BLE001 — a failed run is a tile, not a crash
+        logger.exception("operator action %s failed", action_id)
+        actions = operator_actions.detect_actions(context)
+        # The condition persisted, so the same id is still detected. Replace its
+        # detail with the failure text so the client shows a failed tile rather
+        # than silently re-offering the button as though nothing happened.
+        failure = str(exc)
+        return JSONResponse(
+            {
+                "ok": False,
+                "action_id": action_id,
+                "error": failure,
+                "summary": f"Run failed: {failure}",
+                "actions": [
+                    action.as_dict()
+                    if action.id != action_id
+                    else {
+                        **action.as_dict(),
+                        "detail": f"Run failed: {failure}",
+                    }
+                    for action in actions
+                ],
+            }
+        )
+    actions = operator_actions.detect_actions(context)
+    return JSONResponse(
+        {
+            "ok": True,
+            "action_id": action_id,
+            "result": result,
+            "summary": summary,
+            "actions": [action.as_dict() for action in actions],
+        }
+    )

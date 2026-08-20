@@ -1057,3 +1057,30 @@ export interface PackageStatus {
   mode?: string
   error?: string
 }
+
+/** One home-screen operator action (see `ciao/operator_actions.py`). */
+export interface OperatorAction {
+  id: string
+  kind: string
+  severity: number
+  title: string
+  detail: string
+  glyph: string
+  workspace: string
+  run_label: string
+  chat_label: string
+  chat_prompt: string
+}
+
+export interface HousekeepingResponse {
+  actions: OperatorAction[]
+}
+
+export interface HousekeepingRunResponse {
+  ok: boolean
+  action_id: string
+  error?: string
+  summary: string
+  result?: Record<string, unknown>
+  actions: OperatorAction[]
+}

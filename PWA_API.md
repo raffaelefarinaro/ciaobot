@@ -93,6 +93,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror |
 | PATCH, DELETE | `/api/agent-assets/commands/{name}` | Update or delete a custom workspace-owned slash command |
 | GET | `/api/rate-limits` | Read Claude rate-limit snapshots |
+| GET | `/api/housekeeping` | List the home-screen operator actions (detector pass; each carries `run_label`, `chat_label`, `chat_prompt`) |
+| POST | `/api/housekeeping/{action_id}/run` | Perform one action's mechanical work, re-run detection, and return the fresh action list; unknown id is 404 |
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, project MCP servers (env-key status + observed tools), and active-session counts (no credentials) |
@@ -228,6 +230,18 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent
   -H 'content-type: application/json' \
   -d '{"description":"Turn notes into a decision record.","argument_hint":"<notes>","content":"# Decision Record: $ARGUMENTS\n\nConvert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record"
+```
+
+**Housekeeping (operator-action strip)**
+
+```bash
+# List the home-screen operator actions. Each carries run_label, chat_label,
+# and chat_prompt; the browser renders the buttons and seeds the chat itself.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/housekeeping"
+
+# Run one action's mechanical work. The response re-runs detection and returns
+# the fresh action list so the client cannot render a stale strip.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/housekeeping/vault-vocabulary/run"
 ```
 
 **Projects**

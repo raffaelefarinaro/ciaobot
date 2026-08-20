@@ -552,8 +552,12 @@ async def test_once_does_not_fire_at_wrong_time_same_day(store: ScheduleStore):
     assert store.get(entry.schedule_id) is not None
 
 
-async def test_once_catch_up_fires_past_due_from_yesterday(store: ScheduleStore):
-    # Server was down across the scheduled fire and is restarting now.
+async def test_once_catch_up_does_not_fire_past_due_from_yesterday(store: ScheduleStore):
+    # Server was down across the scheduled fire and is restarting now. A `once`
+    # reminder is stale by then, so catch-up must NOT fire it; the operator
+    # decides via the housekeeping strip instead. The entry stays in the store
+    # (still user-owned, still dismissable), and the regular tick fires it on
+    # its exact target date only.
     entry = store.create(
         daily_time_utc="10:00",
         prompt="one-off",
@@ -568,9 +572,9 @@ async def test_once_catch_up_fires_past_due_from_yesterday(store: ScheduleStore)
     now_utc = datetime(2026, 1, 19, 14, 0, tzinfo=UTC)
     fired = await mgr.catch_up(now=now_utc)
     await asyncio.sleep(0.05)
-    assert fired == [entry.schedule_id]
-    assert dispatched == [entry.schedule_id]
-    assert store.get(entry.schedule_id) is None
+    assert fired == []
+    assert dispatched == []
+    assert store.get(entry.schedule_id) is not None
 
 
 async def test_once_dispatch_now_deletes_entry(store: ScheduleStore):

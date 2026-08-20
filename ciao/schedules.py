@@ -899,50 +899,15 @@ class ScheduleManager:
             localized = current.astimezone(tz)
 
             if entry.frequency == "once":
-                # One-shot: catch up *across days* (not just today). If the
-                # server was down past run_at_date, fire now and consume
-                # the entry. If run_at_date is still in the future, skip.
-                # Also skip if the sentinel is set (already fired but deletion
-                # failed; prevents infinite refires on restart loops).
-                if entry.last_triggered_on:
-                    continue
-                if not entry.run_at_date:
-                    continue
-                try:
-                    target_date = datetime.fromisoformat(entry.run_at_date).date()
-                    hh, mm = entry.daily_time_utc.split(":")
-                    target_hour, target_minute = int(hh), int(mm)
-                except (ValueError, AttributeError):
-                    continue
-                target_dt = datetime(
-                    target_date.year, target_date.month, target_date.day,
-                    target_hour, target_minute, tzinfo=tz,
-                )
-                if localized < target_dt:
-                    continue  # not due yet; regular tick will handle it
-                _, model, mode, provider = (
-                    self._resolve_target(entry)
-                    if self._resolve_target is not None
-                    else ("claude", entry.model, entry.mode, entry.provider)
-                )
-                logger.info(
-                    "Schedule %s: catch-up fire (once @ %s %s, now %s)",
-                    entry.schedule_id, entry.run_at_date, entry.daily_time_utc,
-                    localized.isoformat(),
-                )
-                chat_id: str | None = None
-                if self._prepare_chat is not None:
-                    chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
-                await self._dispatch_entry(
-                    entry, model, mode, provider, target_chat_id=chat_id
-                )
-                if chat_id:
-                    entry.last_run_chat_id = chat_id
-                entry.last_triggered_on = "done"
-                entry.last_dispatched_at = localized.isoformat(timespec="seconds")
-                self._store.replace(entry)
-                self._store.delete(entry.schedule_id)
-                fired.append(entry.schedule_id)
+                # One-shot schedules do not catch up across days. A `once`
+                # reminder whose target time was missed while the server was
+                # down is stale by the time it would fire — dispatching it now
+                # un-backdated would tell the agent nothing is late. The
+                # operator-action strip surfaces these as a single collapsed
+                # tile (see `operator_actions.detect_actions`), where the
+                # operator decides whether the reminder is still relevant.
+                # The regular `tick()` still fires a `once` schedule on its
+                # exact target date; only the catch-up path is suppressed.
                 continue
 
             last_expected = compute_last_expected_run(entry, now=current)

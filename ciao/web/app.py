@@ -106,6 +106,8 @@ from ciao.web.routes_api import (
     list_completed_projects,
     list_projects,
     list_proposals,
+    list_housekeeping,
+    run_housekeeping_action,
     list_loops,
     list_schedules,
     list_workspaces,
@@ -301,6 +303,9 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
         Route("/api/workspace-health", workspace_health_endpoint, methods=["GET"]),
         Route("/api/workspace-health/fix", workspace_health_fix_endpoint, methods=["POST"]),
+        # Home-screen operator-action strip.
+        Route("/api/housekeeping", list_housekeeping, methods=["GET"]),
+        Route("/api/housekeeping/{action_id}/run", run_housekeeping_action, methods=["POST"]),
         Route("/api/agent-assets/subagents", create_subagent_endpoint, methods=["POST"]),
         Route("/api/agent-assets/subagents/{name}", update_subagent_endpoint, methods=["PATCH"]),
         Route("/api/agent-assets/subagents/{name}", delete_subagent_endpoint, methods=["DELETE"]),
