@@ -42,7 +42,7 @@ Re-verified by symbol against the working tree before any dispatch:
 | P7 Provider seam | delegate | DONE | commit 06b94e6c |
 | P8 Session paths | delegate | DONE | commit 001639e6 |
 | P9 Per-root memory + MCP allowlist | delegate | DONE | P9.1+P9.2 a0d55751; P9.3 beaeda6f |
-| P10 The cut | coordinator | IN PROGRESS | 970bd3d0, 59dda6b0, c70707f7, 2895f1bd, ee6f85e0, f9539770, b924e438, 0dda15a8; **P10.4 wired at apply time; P10.9/P10.10 BLOCKED on the migration running, see below** |
+| P10 The cut | coordinator | CODE COMPLETE, ships with the release | 970bd3d0, 59dda6b0, c70707f7, 2895f1bd, ee6f85e0, f9539770, b924e438, 0dda15a8; **P10.4 wired at apply time; P10.9/P10.10 BLOCKED on the migration running, see below** |
 | V1 workspace-census | delegate | DONE | commit 796d84af |
 | V2 Fixture assertions | coordinator | DONE | 14 tests, commit 970bd3d0 |
 | V3 Real-data rehearsal | coordinator | DONE | APFS clone, 2318 files, zero refusals |
@@ -828,7 +828,7 @@ search for each root returns nothing from the other.
 The receipt had been reporting the prune count under the key `"skipped"`, which is why the earlier
 P10.6 verification read "426 indexed, 155 skipped" as benign. Renamed to `removed`.
 
-### P10.11 `--repair` (commit pending in this session)
+### P10.11 `--repair` (commit `efb87da0`)
 - Idempotent reconciliation to the registry, implementing the design record's §11.1 table:
   a missing root is created with its agent assets; an `AGENTS.md` that does not resolve to its
   root's `CLAUDE.md` is re-linked; packaged, own and shared skills are re-mirrored; an `INDEX.md`
@@ -965,14 +965,67 @@ stashed: INDEX.md, MEMORY.md, VOCABULARY.md, .DS_Store
 skills to triage: 27
 ```
 
+## The live migration was RUN, and REVERTED. Read this before running it again.
+
+2026-08-20, with the operator's explicit approval. It worked mechanically and was wrong to run.
+
+**What happened.** Stopped the app (`launchctl bootout`, `KeepAlive = true` so a plain kill would
+have restarted it mid-flight), committed two memory writes the shutdown flushed into the migration's
+path, ran `--apply`. It migrated cleanly: 9 moves, the 27606-byte guide byte-identical at
+`personal/CLAUDE.md` with all 20 memory and 2 profile entries, `work/CLAUDE.md` at 23749 bytes with
+0 entries in both regions, 22 entries queued to work, 27 skills on the triage sheet, indexes rebuilt
+at 158/426, FTS at 158/426 with **0 removed**, 7 sessions flagged, `--repair` clean, and every one of
+8129 files accounted for with zero content changes and zero failures to arrive. Committed as
+`1564c77e`.
+
+**Then the app was restarted, and the app is the RELEASE.** It logged
+`Vault root /Users/.../memory-vault does not exist yet` and carried on: the installed engine has no
+`agent_root` flip, so it resolved the vault from `.env`'s relative `CIAO_VAULT_ROOT` to
+`<install>/memory-vault` — the directory the migration had just emptied. Its startup skill sync then
+pruned every `.agents/skills` symlink that now dangled and seeded a stock `CLAUDE.md` over the gap
+at the install root.
+
+**The rule this establishes, and it is the most important line in this file:** the receipt gating
+makes the flip atomic *for code that has the flip*. It cannot help code that predates it. **The
+migration must ship in the same release as the code that understands the layout, and must be run by
+that engine.** A version check cannot enforce it — the release and this develop checkout both report
+`0.9.1`. The design record already said this ("runs unattended at upgrade from
+`sync_workspace_skills`"); running it by hand from a dev checkout against an install served by an
+older app is the mistake, and it is mine.
+
+**The revert.** Reverted to `33be8b3f`, and the working tree is byte-identical to the pre-migration
+commit `332cddd2` — verified by diffing the whole tree against it: **zero differences**. Nothing was
+lost: the guide came back with all 22 entries, both vaults are back under `memory-vault/`, the
+catalog and lockfile are back at the install root, the four stashed aggregates were restored from
+the runtime stash, the registry from the receipt's before-image, and the 7 handover flags the
+migration set were cleared while the 4 that predated it were left alone. The app is up and healthy
+(`Vault index refreshed.`, endpoints 200, no dangling symlinks).
+
+**Two undo defects the revert exposed, both now fixed (`82383597`).**
+1. **Undo was not resumable.** It replayed its whole reverse list every time, so once the first
+   attempt stopped partway — blocked by the stock guide the old engine had recreated at the old path
+   — the second failed on the moves it had ALREADY reversed ("bad source", because the source was
+   back where it belonged). There was no way forward but hand-editing the tree, which is the
+   opposite of what an undo is for. Four reversals had to be completed by hand from the receipt.
+2. **Undo deleted created files and directories without staging the deletions.** Invisible until the
+   migration is COMMITTED, at which point those paths are tracked, the index claims files that are
+   gone, and `git mv` of any ancestor fails. The same defect existed on the forward path for the two
+   tracked stashed aggregates and was fixed separately (`a290c390`).
+
+**What this cost, and what it did not.** Roughly 40 minutes and one revert commit in the vault repo.
+It cost no data. And it bought the three fixes above plus the sequencing rule, none of which any
+sandbox rehearsal had surfaced in three separate clone runs — the clones have no installed app, so
+the one thing that broke was the one thing a clone cannot model. Worth stating plainly: **rehearsing
+on a copy of the data does not rehearse the software that will serve it.**
+
 ### Remaining
-1. Operator decision: run `ciao workspace-reroot --apply` on the live install. **The app must be
-   stopped first**, and `com.ciao.server` is a launchd agent with `KeepAlive = true`, so killing the
-   process restarts it — it needs `launchctl bootout gui/$(id -u)/com.ciao.server` and a
-   `bootstrap` afterwards. A restart mid-migration would race the vault move.
-   The two ungitignored state files (`workspaces.json`, `web_projects.json`) were copied to the
-   session scratchpad as a belt-and-braces net; `--undo` and `git checkout` cover everything else. The vault is
-   committed and the migration is now complete, so this is the next step and it is theirs to take.
+1. **Ship this work in a release, and let the upgrade run the migration.** Do NOT run `--apply` by
+   hand from a dev checkout again — that is what broke the install today. Mechanics for whenever it
+   does run: the app must be stopped, and `com.ciao.server` is a launchd agent with
+   `KeepAlive = true`, so killing the process restarts it and would race the vault move. Use
+   `launchctl bootout gui/$(id -u)/com.ciao.server`; `open -a Ciaobot.app` re-registers and starts it
+   again afterwards. Expect the shutdown to flush memory writes into the vault, which then have to be
+   committed before the clean-tree gate will pass.
 2. P10.9 the eight deletions and P10.10 `_bootstrap_workspace` — still gated on (1). Note
    `bootstrap_root` is NOT P10.10: that step is about `_legacy_workspaces()` manufacturing two
    phantom workspaces for an install that skipped setup, which is untouched.
