@@ -443,16 +443,19 @@ class CiaoControlPlane:
         principal: McpPrincipal,
         text: str,
         *,
-        action: Literal["accept", "reject"],
+        action: Literal["accept", "reject", "dismiss"],
     ) -> dict[str, Any]:
-        """Dismiss exactly one proposal from the queue.
+        """Dismiss a proposal from the queue.
 
         Promotion into a CLAUDE.md region is an explicit ``Edit`` by the
         agent — this tool never writes memory. Ordering: edit the region
-        first, then dismiss the proposal (the reverse loses the fact if the
-        turn dies between the two steps).
+        first, then dismiss the proposal (the reversal loses the fact if the
+        turn dies between the two steps). ``accept`` marks the fact as
+        promoted; ``reject`` and its synonym ``dismiss`` drop it.
         """
-        if action not in {"accept", "reject"}:
+        if action == "dismiss":
+            action = "reject"
+        elif action not in {"accept", "reject"}:
             raise ControlPlaneError("invalid_action", "action must be accept or reject.")
         path = self._memory_proposals_path(principal)
         if not path.exists():

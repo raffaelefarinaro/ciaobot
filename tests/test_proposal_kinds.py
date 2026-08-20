@@ -98,6 +98,22 @@ def test_all_former_call_sites_agree_on_one_fixture(tmp_path: Path) -> None:
     assert _count_proposal_bullets(path) == 4
 
 
+def test_proposal_resolve_accepts_dismiss_as_reject_synonym(tmp_path: Path) -> None:
+    """The curator-facing ``memory_proposal_resolve`` treats ``dismiss`` as the
+    ``reject`` action, matching the wording in the memory-curation schedule."""
+    path = _fixture_file(tmp_path)
+    plane, principal = _control_plane(tmp_path)
+
+    plane.memory_proposal_resolve(principal, "durable lesson", action="dismiss")
+
+    remaining = plane.memory_proposals_list(principal)["data"]
+    assert {row["text"] for row in remaining} == {
+        "prefers terse replies",
+        "legacy profile label",
+        "move this note to work",
+    }
+
+
 def test_unknown_kind_raises_never_silent_zero() -> None:
     with pytest.raises(pk.UnknownKindError) as excinfo:
         pk.accept_for("bogus")
