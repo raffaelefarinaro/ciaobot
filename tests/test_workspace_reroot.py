@@ -21,9 +21,11 @@ from ciao.workspace_reroot import (
     apply,
     dirty_tracked_paths,
     format_skill_triage,
+    index_workspace_prefixes,
     plan,
     plan_skills_triage,
     read_receipt,
+    rebuild_indexes,
     rehearse,
     split_guide,
     undo,
@@ -809,3 +811,286 @@ def test_apply_then_undo_restores_the_whole_install_byte_identical(tmp_path: Pat
     assert not (install / "skills-src").exists()
     assert not (install / "personal").exists()
     assert not (install / "memory-vault" / "personal" / "Workspace").exists()
+
+
+# -- P10.11: --repair -------------------------------------------------------
+
+
+def _migrated(tmp_path: Path, **kwargs) -> tuple[Path, Path]:
+    """A committed install that has completed the re-rooting."""
+    install, vault, runtime = _git_install(tmp_path, **kwargs)
+    _registry(
+        runtime,
+        [
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "work", "vault_root": "memory-vault/work"},
+        ],
+    )
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert result["status"] == "migrated", result.get("refusals")
+    return install, runtime
+
+
+def _repair(install: Path, runtime: Path, **kwargs) -> dict:
+    from ciao.workspace_reroot import repair
+
+    return repair(install, runtime, ["personal", "work"], **kwargs)
+
+
+def _drifts(result: dict, key: str = "repaired") -> set[str]:
+    return {item["drift"] for item in result[key]}
+
+
+def test_repair_refuses_on_an_install_that_has_not_re_rooted(tmp_path: Path) -> None:
+    """Not caution: a prefixed shared INDEX.md is CORRECT before the migration.
+
+    The prefix is what `_entity_visible_in_workspace` filters on, so stripping it
+    there would leave no filter over the index and make every entity visible in
+    every session — the same fail-open state the deletions are gated on, reached
+    from the other direction.
+    """
+    install, _vault, runtime = _git_install(tmp_path)
+    before = _install_hashes(install)
+
+    result = _repair(install, runtime)
+
+    assert result["status"] == "not_rerooted"
+    assert "--apply" in result["reason"]
+    assert _install_hashes(install) == before
+
+
+def test_repair_is_a_no_op_on_a_correct_install(tmp_path: Path) -> None:
+    install, runtime = _migrated(tmp_path)
+    rebuild_indexes(install, ["personal", "work"])
+    _repair(install, runtime)  # settle the first-run asset install
+
+    result = _repair(install, runtime)
+
+    assert result["status"] == "clean", result["repaired"]
+    assert result["repaired"] == []
+
+
+def test_repair_recreates_a_missing_root(tmp_path: Path) -> None:
+    import shutil
+
+    install, runtime = _migrated(tmp_path)
+    shutil.rmtree(install / "work")
+
+    result = _repair(install, runtime)
+
+    assert "root_missing" in _drifts(result)
+    assert (install / "work").is_dir()
+    assert (install / "work" / "CLAUDE.md").is_file()
+    assert (install / "work" / "AGENTS.md").is_symlink()
+
+
+def test_a_root_with_no_vault_is_reported_and_never_invented(tmp_path: Path) -> None:
+    """Which notes belong to a workspace is a question about the user's material."""
+    import shutil
+
+    install, runtime = _migrated(tmp_path)
+    shutil.rmtree(install / "work" / "memory-vault")
+
+    result = _repair(install, runtime)
+
+    assert "vault_missing" in _drifts(result, "reported")
+    assert "vault_missing" not in _drifts(result)
+    assert not (install / "work" / "memory-vault").exists()
+
+
+def test_repair_relinks_an_unlinked_agents_guide(tmp_path: Path) -> None:
+    install, runtime = _migrated(tmp_path)
+    _repair(install, runtime)
+    agents = install / "work" / "AGENTS.md"
+    agents.unlink()
+    agents.write_text("a hand-written copy\n", encoding="utf-8")
+
+    result = _repair(install, runtime)
+
+    assert "agents_unlinked" in _drifts(result)
+
+
+def test_repair_leaves_a_user_authored_agents_file_alone(tmp_path: Path) -> None:
+    """`_ensure_linked_workspace_guides` only replaces a missing file or the
+    packaged stock copy, and repair must not reach past that."""
+    install, runtime = _migrated(tmp_path)
+    _repair(install, runtime)
+    agents = install / "work" / "AGENTS.md"
+    agents.unlink()
+    agents.write_text("# my own AGENTS.md\n", encoding="utf-8")
+
+    _repair(install, runtime)
+
+    assert agents.read_text(encoding="utf-8") == "# my own AGENTS.md\n"
+
+
+def test_repair_rebuilds_an_index_that_still_carries_workspace_prefixes(
+    tmp_path: Path,
+) -> None:
+    install, runtime = _migrated(tmp_path)
+    _repair(install, runtime)
+    index = install / "personal" / "memory-vault" / "INDEX.md"
+    index.write_text(
+        "# Vault Index\n\n- [personal/People/Peter](./personal/People/Peter.md)\n",
+        encoding="utf-8",
+    )
+
+    result = _repair(install, runtime)
+
+    assert "index_prefixed" in _drifts(result)
+    assert index_workspace_prefixes(index, ["personal", "work"]) == []
+
+
+def test_repair_writes_a_missing_index(tmp_path: Path) -> None:
+    install, runtime = _migrated(tmp_path)
+    _repair(install, runtime)
+    (install / "work" / "memory-vault" / "INDEX.md").unlink()
+
+    result = _repair(install, runtime)
+
+    assert "index_missing" in _drifts(result)
+    assert (install / "work" / "memory-vault" / "INDEX.md").is_file()
+
+
+def test_a_shared_source_skill_is_linked_into_every_root(tmp_path: Path) -> None:
+    """`skills-src/` is a mirror source: one edit, N roots, no divergence."""
+    install, runtime = _migrated(tmp_path)
+    shared = install / "skills-src" / "web-research"
+    shared.mkdir(parents=True)
+    (shared / "SKILL.md").write_text(
+        "---\nname: web-research\ndescription: look things up\n---\n# Research\n",
+        encoding="utf-8",
+    )
+
+    result = _repair(install, runtime)
+
+    assert "skills_unmirrored" in _drifts(result)
+    for name in ("personal", "work"):
+        link = install / name / ".claude" / "skills" / "web-research"
+        assert link.is_symlink(), name
+        assert link.resolve() == shared.resolve()
+
+
+def test_a_roots_own_copy_of_a_shared_skill_wins(tmp_path: Path) -> None:
+    install, runtime = _migrated(tmp_path)
+    shared = install / "skills-src" / "web-research"
+    shared.mkdir(parents=True)
+    (shared / "SKILL.md").write_text("---\nname: web-research\n---\nshared\n", encoding="utf-8")
+    own = install / "work" / "skills" / "web-research"
+    own.mkdir(parents=True)
+    (own / "SKILL.md").write_text("---\nname: web-research\n---\nmine\n", encoding="utf-8")
+
+    _repair(install, runtime)
+
+    link = install / "work" / ".claude" / "skills" / "web-research"
+    assert link.resolve() == own.resolve()
+    assert (install / "personal" / ".claude" / "skills" / "web-research").resolve() == shared.resolve()
+
+
+def test_a_missing_mcp_file_is_reported_and_never_composed(tmp_path: Path) -> None:
+    """An MCP entry grants credentialed access. The earlier attempt at inferring
+    reachability silently removed two working integrations from a live install."""
+    install, runtime = _migrated(tmp_path)
+    (install / "skills-src").mkdir(exist_ok=True)
+    (install / "skills-src" / ".mcp.json").write_text(
+        '{"mcpServers": {"notion": {}}}\n', encoding="utf-8"
+    )
+
+    result = _repair(install, runtime)
+
+    assert "mcp_drift" in _drifts(result, "reported")
+    assert not (install / "work" / ".mcp.json").exists()
+
+
+def test_repair_rebuilds_a_search_index_pointing_at_moved_paths(tmp_path: Path) -> None:
+    import sqlite3
+
+    from ciao.fts_search import init_db
+
+    install, runtime = _migrated(tmp_path)
+    _repair(install, runtime)
+    db = runtime / "test-fts.db"
+    conn = sqlite3.connect(db)
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO vault_meta (path, mtime, indexed_at) VALUES "
+        "('memory-vault/personal/People/Peter.md', 1.0, 'x')"
+    )
+    conn.commit()
+    conn.close()
+
+    result = _repair(install, runtime, db_path=db)
+
+    assert "search_index_stale" in _drifts(result)
+    conn = sqlite3.connect(db)
+    paths = {row[0] for row in conn.execute("SELECT path FROM vault_meta")}
+    conn.close()
+    assert "memory-vault/personal/People/Peter.md" not in paths
+    assert any(p.startswith("personal/memory-vault/") for p in paths), paths
+
+
+def test_repair_is_idempotent(tmp_path: Path) -> None:
+    """Everything it fixes must be safe to run twice, or a tile's run button is
+    not safe to press without reading anything first."""
+    import shutil
+
+    install, runtime = _migrated(tmp_path)
+    shutil.rmtree(install / "work")
+    (install / "personal" / "memory-vault" / "INDEX.md").unlink(missing_ok=True)
+
+    first = _repair(install, runtime)
+    second = _repair(install, runtime)
+    third = _repair(install, runtime)
+
+    assert first["status"] == "repaired"
+    assert second["repaired"] == [], second["repaired"]
+    assert third["status"] == "clean"
+
+
+def test_index_prefix_detection_only_matches_registered_names(tmp_path: Path) -> None:
+    """A note genuinely filed under a folder called `Projects/` is not drift."""
+    index = tmp_path / "INDEX.md"
+    index.write_text(
+        "# Vault Index\n\n"
+        "- [personal/People/Peter](./personal/People/Peter.md)\n"
+        "- [Projects/active/thing](./Projects/active/thing.md)\n"
+        "- [People/Peter](./People/Peter.md)\n",
+        encoding="utf-8",
+    )
+
+    assert index_workspace_prefixes(index, ["personal", "work"]) == ["personal/People/Peter"]
+
+
+def test_repair_refuses_to_seed_a_stock_guide_over_an_unsplit_one(tmp_path: Path) -> None:
+    """The gap this guard exists for was measured, not imagined.
+
+    On the reference clone, `--apply` then `--repair` left each root holding the
+    2202-byte packaged stock guide with EMPTY memory regions, while the
+    operator's real 27377-byte CLAUDE.md sat at the install root, which no
+    session's cwd reads any more. Every remembered fact would have vanished from
+    every session, and the repair would have reported success.
+    """
+    install, runtime = _migrated(tmp_path)
+    (install / "CLAUDE.md").write_text(
+        "# The real guide\n\n<!-- ciao:memory:start -->\n- a fact\n"
+        "<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+
+    result = _repair(install, runtime)
+
+    assert "guide_unsplit" in _drifts(result, "reported")
+    assert not (install / "personal" / "CLAUDE.md").exists()
+    assert not (install / "work" / "CLAUDE.md").exists()
+
+
+def test_repair_still_relinks_once_a_root_has_its_own_guide(tmp_path: Path) -> None:
+    """The guard must not disable the repair it guards."""
+    install, runtime = _migrated(tmp_path)
+    (install / "CLAUDE.md").write_text("# The real guide\n", encoding="utf-8")
+    (install / "work" / "CLAUDE.md").write_text("# work's own guide\n", encoding="utf-8")
+
+    result = _repair(install, runtime)
+
+    assert "guide_unsplit" in _drifts(result, "reported")  # personal still lacks one
+    assert (install / "work" / "AGENTS.md").is_symlink()

@@ -28,7 +28,8 @@ file it did not recognise is how a vault loses notes.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import os
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1102,3 +1103,339 @@ def write_skills_triage(
             doc.write_text(format_skill_triage(triage, workspaces), encoding="utf-8")
             created.append(f"{primary_vault}/{_SKILL_TRIAGE_RELATIVE}")
     return created
+
+
+# -- P10.11: idempotent reconciliation to the registry -----------------------
+
+# The registry is the authority on which roots must exist and where each keeps
+# its vault. `repair` re-derives the intended layout from it and reconciles the
+# filesystem to it, changing nothing when already correct. Everything it fixes is
+# derived or structural: a missing directory, an unlinked guide, an un-mirrored
+# shared skill, a stale index. Nothing that carries the user's content or their
+# credentials is rewritten, which is why the two entries below are reported
+# rather than repaired.
+_REPAIR_REPORT_ONLY = (
+    # A root with no vault. Which notes belong to it is a question about the
+    # user's own material, so guessing would re-create the misfiling this
+    # release repairs.
+    "vault_missing",
+    # A root with no guide while the install root still holds the pre-migration
+    # one. Seeding the packaged stock guide there would replace the user's guide
+    # with empty memory regions; splitting it is P10.4's job, not a repair's.
+    "guide_unsplit",
+    # `.mcp.json` grants live credentialed access. Recomposing it from a shared
+    # source is a design decision with real blast radius, and per-root
+    # composition does not exist yet — the earlier attempt at inferring MCP
+    # reachability silently removed two working integrations from a live install.
+    "mcp_drift",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RepairItem:
+    """One piece of drift, and what was done about it."""
+
+    workspace: str
+    drift: str
+    detail: str
+    action: str
+
+
+def repair(
+    install_root: Path,
+    runtime_root: Path,
+    workspaces: list[str],
+    *,
+    shared_sources: Path | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Reconcile the filesystem to the registry. Idempotent; a no-op when correct.
+
+    Refuses on an install that has not re-rooted, and the reason is not caution:
+    before the migration the shared ``INDEX.md`` legitimately carries workspace
+    prefixes, and that prefix is what ``_entity_visible_in_workspace`` filters
+    on. "Repairing" it there would strip the prefixes and leave no filter over
+    the index, making every entity visible in every session. That is the same
+    fail-open state the deletions in P10.9 are gated on, reached from the other
+    direction.
+    """
+    install_root = Path(install_root).resolve()
+    runtime_root = Path(runtime_root)
+    if read_receipt(runtime_root) is None:
+        return {
+            "status": "not_rerooted",
+            "reason": (
+                "this install has not re-rooted, so there is no per-root layout to "
+                "reconcile; run `ciao workspace-reroot --apply` first"
+            ),
+            "repaired": [],
+            "reported": [],
+            "errors": [],
+        }
+
+    shared = Path(shared_sources) if shared_sources else install_root / _SKILLS_SRC
+    repaired: list[RepairItem] = []
+    reported: list[RepairItem] = []
+    errors: list[dict[str, str]] = []
+
+    def record(item: RepairItem) -> None:
+        (reported if item.drift in _REPAIR_REPORT_ONLY else repaired).append(item)
+
+    for name in sorted(workspaces):
+        root = install_root / name
+        try:
+            _repair_one_root(root, name, shared, record)
+        except Exception as exc:  # noqa: BLE001 — one bad root must not stop the rest
+            errors.append({"workspace": name, "error": str(exc)})
+
+    # The search index is derived and install-wide, so it is checked once. A row
+    # whose path no longer resolves is not stale, it is wrong: the note it points
+    # at moved when the vault did.
+    try:
+        stale = stale_search_rows(install_root, db_path=db_path)
+    except Exception as exc:  # noqa: BLE001
+        stale = []
+        errors.append({"workspace": "", "error": f"could not inspect the search index: {exc}"})
+    if stale:
+        rebuilt = rebuild_search_index(install_root, sorted(workspaces), db_path=db_path)
+        errors.extend(
+            {"workspace": e.get("workspace", ""), "error": e.get("error", "")}
+            for e in rebuilt.get("errors", [])
+        )
+        repaired.append(
+            RepairItem(
+                workspace="",
+                drift="search_index_stale",
+                detail=f"{len(stale)} indexed path(s) no longer resolve, e.g. {stale[0]}",
+                action="dropped and rebuilt the search index",
+            )
+        )
+
+    return {
+        "status": "repaired" if repaired else "clean",
+        "repaired": [asdict(item) for item in repaired],
+        "reported": [asdict(item) for item in reported],
+        "errors": errors,
+    }
+
+
+def _repair_one_root(root: Path, name: str, shared: Path, record: Any) -> None:
+    """Reconcile one agent root. Every branch is safe to run twice."""
+    from ciao.sync_skills import (  # noqa: PLC0415
+        _ensure_linked_workspace_guides,
+        _install_stock_skills,
+        _rebuild_custom_skill_links,
+        mirror_shared_skill_sources,
+    )
+
+    if not root.is_dir():
+        root.mkdir(parents=True, exist_ok=True)
+        _ensure_linked_workspace_guides(root)
+        _install_stock_skills(root)
+        _rebuild_custom_skill_links(root)
+        record(
+            RepairItem(
+                workspace=name,
+                drift="root_missing",
+                detail=f"registered workspace has no directory at {root}",
+                action="created the root and installed its agent assets",
+            )
+        )
+
+    vault = root / "memory-vault"
+    if not vault.is_dir():
+        record(
+            RepairItem(
+                workspace=name,
+                drift="vault_missing",
+                detail=f"the root exists but holds no vault at {vault}",
+                action=(
+                    "reported, not created: which notes belong to this workspace "
+                    "is a question about the user's own material"
+                ),
+            )
+        )
+
+    guide = root / "CLAUDE.md"
+    agents = root / "AGENTS.md"
+    shared_guide = root.parent / "CLAUDE.md"
+    if not guide.is_file() and shared_guide.is_file():
+        # Refuse to seed a stock guide over an unsplit one. This root has no
+        # guide and the install root still holds the pre-migration one, so
+        # `_ensure_linked_workspace_guides` would copy the ~2 KB packaged stock
+        # guide with EMPTY memory regions while the user's real guide sits
+        # orphaned at a path no session's cwd reads. That turns a missing step
+        # into silent loss of every remembered fact, so it is reported instead.
+        record(
+            RepairItem(
+                workspace=name,
+                drift="guide_unsplit",
+                detail=(
+                    f"{root} has no CLAUDE.md and {shared_guide} still holds the "
+                    "pre-migration guide, so the split has not run"
+                ),
+                action=(
+                    "reported, not seeded: writing the packaged stock guide here "
+                    "would replace the user's guide with empty memory regions"
+                ),
+            )
+        )
+    else:
+        linked = agents.is_symlink() and (root / os.readlink(agents)).resolve() == guide.resolve()
+        if not linked:
+            _ensure_linked_workspace_guides(root)
+            if agents.is_symlink() or agents.exists():
+                record(
+                    RepairItem(
+                        workspace=name,
+                        drift="agents_unlinked",
+                        detail=f"{agents} did not resolve to {guide}",
+                        action="re-linked AGENTS.md to this root's CLAUDE.md",
+                    )
+                )
+
+    # Read the drift BEFORE mirroring, or the report always comes back empty and
+    # a genuine repair looks like a no-op.
+    missing = _missing_skill_links(root, shared)
+    stock_installed, _stock_pruned = _install_stock_skills(root)
+    custom_installed, _custom_pruned = _rebuild_custom_skill_links(root)
+    shared_linked, _shared_pruned = mirror_shared_skill_sources(root, shared)
+    if missing:
+        record(
+            RepairItem(
+                workspace=name,
+                drift="skills_unmirrored",
+                detail=f"{len(missing)} skill(s) were not linked into the catalog: "
+                + ", ".join(missing[:5]),
+                action=(
+                    f"re-mirrored {stock_installed} stock, {custom_installed} own "
+                    f"and {shared_linked} shared skill(s)"
+                ),
+            )
+        )
+
+    if not (root / ".mcp.json").is_file() and (shared / ".mcp.json").is_file():
+        record(
+            RepairItem(
+                workspace=name,
+                drift="mcp_drift",
+                detail=f"a shared {shared / '.mcp.json'} exists and this root has none",
+                action=(
+                    "reported, not composed: an MCP entry grants credentialed "
+                    "access, and per-root composition is not built yet"
+                ),
+            )
+        )
+
+    index = vault / "INDEX.md"
+    prefixed = index_workspace_prefixes(index, [name])
+    if vault.is_dir() and (not index.is_file() or prefixed):
+        rebuild_indexes(root.parent, [name])
+        record(
+            RepairItem(
+                workspace=name,
+                drift="index_prefixed" if prefixed else "index_missing",
+                detail=(
+                    f"{index} still keys {len(prefixed)} entry path(s) under a "
+                    "workspace name" if prefixed else f"{index} is absent"
+                ),
+                action="rebuilt this root's INDEX.md and VOCABULARY.md",
+            )
+        )
+
+
+def _missing_skill_links(root: Path, shared: Path) -> list[str]:
+    """Skills that should be linked into this root's catalog and were not.
+
+    Checked BEFORE the mirroring functions run, so the report describes the drift
+    that was found rather than the state that was written. Reading it after would
+    always come back empty and the repair would look like a no-op.
+
+    A shared-source skill counts as drift when the catalog entry is not already a
+    link to it, not merely when the NAME is absent. Several shared skills carry
+    the same name as a packaged stock skill they are meant to override, so a
+    name-only check reported nothing while the repair silently replaced a stock
+    copy with the shared link.
+    """
+    claude_skills = root / ".claude" / "skills"
+    present = {entry.name for entry in _iter_dir(claude_skills)}
+    drift: set[str] = set()
+    for entry in _iter_dir(root / "skills"):
+        if entry.is_dir() and (entry / "SKILL.md").is_file() and entry.name not in present:
+            drift.add(entry.name)
+    own_names = {entry.name for entry in _iter_dir(root / "skills")}
+    for entry in _iter_dir(shared):
+        if not entry.is_dir() or not (entry / "SKILL.md").is_file():
+            continue
+        if entry.name in own_names:
+            continue  # the root's own copy wins, so the shared one is not drift
+        target = claude_skills / entry.name
+        try:
+            linked = target.is_symlink() and target.resolve() == entry.resolve()
+        except OSError:
+            linked = False
+        if not linked:
+            drift.add(entry.name)
+    return sorted(drift)
+
+
+def _iter_dir(directory: Path) -> list[Path]:
+    try:
+        return sorted(directory.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return []
+
+
+def index_workspace_prefixes(index: Path, workspaces: list[str]) -> list[str]:
+    """Entry paths in an INDEX.md that still start with a workspace name.
+
+    Before the migration every entry is keyed ``personal/People/Foo.md`` inside
+    one shared vault. After it, each root holds exactly one vault, so a prefix
+    has nothing left to disambiguate and its presence is a false statement about
+    where the note lives.
+    """
+    try:
+        text = index.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    names = {name for name in workspaces if name}
+    found: list[str] = []
+    for line in text.splitlines():
+        if not line.startswith("- ["):
+            continue
+        label = line[3 : line.find("]")] if "]" in line else ""
+        head = label.split("/", 1)[0]
+        if head in names:
+            found.append(label)
+    return found
+
+
+def stale_search_rows(
+    install_root: Path, *, db_path: Path | None = None, limit: int = 5
+) -> list[str]:
+    """Indexed paths that no longer resolve under the install root.
+
+    Read only, and bounded: it stops at ``limit`` because the repair only needs
+    to know whether a rebuild is due and one example to name, not the whole list.
+    """
+    import sqlite3
+
+    from ciao.fts_search import get_db_path
+
+    db = Path(db_path) if db_path is not None else get_db_path()
+    if not db.exists():
+        return []
+    install_root = Path(install_root).resolve()
+    conn = sqlite3.connect(db)
+    stale: list[str] = []
+    try:
+        for (path,) in conn.execute("SELECT path FROM vault_meta"):
+            if not (install_root / str(path)).exists():
+                stale.append(str(path))
+                if len(stale) >= limit:
+                    break
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        conn.close()
+    return stale

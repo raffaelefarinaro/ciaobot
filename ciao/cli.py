@@ -2790,8 +2790,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Prints the plan by default and changes nothing; --rehearse records a "
             "receipt without moving; --apply performs the migration, moves the "
             "skill catalog to the primary root with a blank triage sheet, and "
-            "rebuilds each root's index and search database; --undo restores the "
-            "layout exactly, leaving only the rebuilt per-root index and "
+            "rebuilds each root's index and search database; --repair reconciles "
+            "an already-migrated install back to the registry; --undo restores "
+            "the layout exactly, leaving only the rebuilt per-root index and "
             "vocabulary behind for git status to report."
         ),
     )
@@ -2800,6 +2801,17 @@ def build_parser() -> argparse.ArgumentParser:
     reroot_parser.add_argument("--rehearse", action="store_true", help="Record a survey receipt, move nothing.")
     reroot_parser.add_argument("--apply", action="store_true", help="Perform the migration.")
     reroot_parser.add_argument("--undo", action="store_true", help="Reverse a completed migration.")
+    reroot_parser.add_argument(
+        "--repair",
+        action="store_true",
+        help=(
+            "Reconcile the filesystem to the registry after a completed "
+            "migration: missing roots, an unlinked AGENTS.md, un-mirrored "
+            "skills, a prefixed INDEX.md, a search index at moved paths. "
+            "Idempotent. A root with no vault and a stale .mcp.json are reported, "
+            "never guessed, and make it exit 1."
+        ),
+    )
     reroot_parser.set_defaults(func=_workspace_reroot_command)
 
     census_parser = subparsers.add_parser(
