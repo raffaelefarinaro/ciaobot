@@ -595,6 +595,35 @@ class CiaoControlPlane:
 
     # ---- vault ---------------------------------------------------------
 
+    def _entity_index_root(self, principal: McpPrincipal) -> Path:
+        """The vault whose INDEX.md covers this chat. See vault_index_refresh."""
+        workspace = self._workspace(principal)
+        if workspace:
+            try:
+                return Path(self.config.agent_vault_root(workspace))
+            except (AttributeError, ValueError):
+                pass
+        return Path(self.config.vault_root)
+
+    def _index_stamp(self, principal: McpPrincipal) -> str:
+        """Workspace to stamp on scanned entries, or "" to infer from the path.
+
+        Empty before the re-rooting: the shared vault holds every workspace, so
+        the first-path-segment inference is what labels them. The workspace name
+        afterwards, because a root's vault holds exactly one workspace and its
+        first segment is a folder name.
+        """
+        workspace = self._workspace(principal)
+        if not workspace:
+            return ""
+        try:
+            rooted = Path(self.config.agent_vault_root(workspace)) != Path(
+                self.config.vault_root
+            )
+        except (AttributeError, ValueError):
+            return ""
+        return workspace if rooted else ""
+
     def _search_key_base(self) -> Path:
         """The install root, which every stored search key is relative to.
 
@@ -637,22 +666,27 @@ class CiaoControlPlane:
         return _ok(rows)
 
     def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
-        """Rebuild the shared entity index and this workspace's search index.
+        """Rebuild the entity index covering this chat, and its search index.
 
-        The two roots differ on purpose. ``INDEX.md`` is a single shared
-        artifact: entity lookup resolves ``<vault>/INDEX.md`` and applies its
-        own per-workspace visibility filter, which needs every workspace's
-        prefixed paths in one file — so it is written at the top-level root,
-        matching ``ciao vault-index --write`` and the startup refresh. Writing a
-        per-workspace subtree instead produced an index whose paths no filter
-        recognized, and left the real one stale.
+        The index root is ``agent_vault_root(workspace)``, which is correct in
+        both layouts and for the same reason each time: it is the vault whose
+        INDEX.md this chat's entity lookup reads. Before the re-rooting that is
+        the ONE shared index, holding every workspace's prefixed paths and
+        filtered per workspace at read time; after it, this root's own index,
+        which needs no prefix because the root holds one vault.
+
+        Deliberately not ``_workspace_vault_root``: before the migration that is
+        a subtree of the shared vault, and writing an index there produced one
+        whose paths no filter recognised while leaving the real one stale.
 
         The FTS index stays workspace-scoped: it backs ``vault_search``, whose
         isolation boundary is ``_vault_root(principal)``.
         """
         search_root = self._vault_root(principal)
-        index_root = Path(self.config.vault_root)
-        entries = vault_index.scan_vault(index_root)
+        index_root = self._entity_index_root(principal)
+        entries = vault_index.scan_vault(
+            index_root, workspace=self._index_stamp(principal)
+        )
         vault_index.write_index_file(entries, index_root / "INDEX.md")
         db_path = get_db_path()
         conn = sqlite3.connect(db_path)

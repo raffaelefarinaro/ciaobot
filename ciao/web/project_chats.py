@@ -1723,16 +1723,22 @@ class ProjectChatManager:
         except ValueError:
             return str(root)
 
-    def _entity_index_root(self) -> Path:
+    def _entity_index_root(self, workspace: str = "") -> Path:
         """Return the root that owns the vault entity index.
 
-        Entity hints resolve against ``<vault>/INDEX.md``, which exists only at
-        the top-level vault root — ``vault-index --write`` writes exactly one.
-        Passing a per-workspace subtree here reads a non-existent (or stale,
-        empty) index and silently matches nothing, so this is deliberately not
-        ``_workspace_vault_root``. Workspace scoping is applied inside
-        ``find_entities`` via its ``workspace`` argument.
+        Entity hints resolve against the INDEX.md that covers this chat, which
+        is ``agent_vault_root(workspace)``: the ONE shared index before the
+        re-rooting, and this root's own index after it. Deliberately not
+        ``_workspace_vault_root`` — before the migration that is a subtree of the
+        shared vault holding no index at all, which reads as "no entities" rather
+        than failing. Workspace scoping within a shared index is still applied
+        inside ``find_entities`` via its ``workspace`` argument.
         """
+        if workspace:
+            try:
+                return self._config.agent_vault_root(workspace)
+            except (AttributeError, ValueError):
+                logger.debug("could not resolve the agent vault root for %r", workspace)
         return Path(self._config.vault_root)
 
     def _ensure_defaults(self) -> None:
@@ -4434,7 +4440,7 @@ class ProjectChatManager:
             or chat.handover_context_pending
         )
         handover = self._format_handover_context(chat)
-        vault_root = self._entity_index_root()
+        vault_root = self._entity_index_root(workspace)
         capsule = build_context_capsule(
             prompt=prompt,
             workspace=workspace,
@@ -4481,7 +4487,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        vault_root = self._entity_index_root()
+        vault_root = self._entity_index_root(workspace)
         capsule = build_context_capsule(
             prompt="",
             workspace=workspace,
