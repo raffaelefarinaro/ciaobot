@@ -1131,8 +1131,65 @@ receipt-gated so it runs once; if it REFUSES (dirty tree, non-empty destination)
 continue quietly on the old layout, so §11.2's `workspace-unmigrated` action surfaces it with a run
 button that re-runs `--apply`. Automatic when it can be, blocking when it cannot.
 
+### Passes 5-7, and a correction to my own inventory
+| Pass | Commit | What was broken |
+|---|---|---|
+| Per-root asset checks | `25ee59a8` | `workspace_health` inspected only the install root, whose stale `.claude/` links point at a catalog that moved: **19 red "broken skill link" errors on a correctly migrated install**. Seam: `agent_root_targets()`. Also three tile bugs, below. |
+| Catalog + skills page | `4937685d` | `commands/` and `subagents/` were never moved, so no root saw them. The Settings skills page read the install root: measured `{custom: 0, github: 0, stock: 29}` while 19 custom and 7 upstream sat in the primary root. `_vault_mirror_path` wrote into the emptied vault. |
+| Backfill log + payload | `58833911` | `md.relative_to(vault_root)` inside a `logger.info` raises on the promoted archive, taking down a dry-run backfill from inside a log line. |
+
+**My inventory of "19 genuinely wrong" was too pessimistic, and measuring fixed it.**
+`_memory_proposal_paths` and `_workspace_memory_paths` already resolve correctly on a migrated
+install, because they go through `config.workspace_vault_root(name)` and the migration repoints the
+registry. Probing the agent-assets layer on a clone found nothing crashing and only the health panel
+red. Lesson repeated from earlier in this release: classify by measurement, not by reading.
+
+Two things the catalog pass turned up that no fixture had:
+- `git mv` refuses an empty directory ("fatal: source directory is empty") and that failed the whole
+  run. The reference install has an empty `subagents/`. The rollback worked — first time that path
+  has fired for real — and empty directories are now skipped.
+- `_seed_stock_commands` creates `<root>/commands/`, so the round trip left seeded stock commands
+  behind in roots that no longer existed. `bootstrap_root` reports every directory it creates now.
+
+### The one read-sweep item left, and why it needs a decision not a patch
+`vault_rehome.detect_misfiled_people` returns **0 candidates from every root** after the migration.
+Its predicate is `<workspace>/People/...` relative to `memory-vault`, and inside a root's own vault
+there is no workspace segment. The re-home hints vanish from the proposals UI.
+
+Fixing the predicate is easy. The problem is the IDENTITY STRING. `Candidate.path` is
+`personal/People/Mo.md` today, and that exact string is written into the queue bullets and is the key
+`_rehome_signal` joins on. Per-root it becomes `personal/memory-vault/People/Mo.md`, so every bullet
+already in the queue stops matching its own note — silently, because a failed join renders as "no
+signal" rather than as an error. The reference install has 16 such bullets. So this needs a decision
+(migrate the bullet strings, or match on a normalised form) rather than a path swap at the end of a
+long session, and it is the one place in the sweep where guessing breaks the link between a proposal
+and the note it is about.
+
+Good news that bounds it: there is **no mover to fix**. See below.
+
+### Discovered while scoping that: "Accept" does not write anything
+`proposals_batch`'s own docstring says it: *"it never performs the edit itself, matching the MCP
+resolve path where promotion is a separate explicit step."* Accepting a proposal **removes the
+bullet from the queue and returns a descriptor**. Nothing edits the region; nothing moves the file.
+`RehomeAccept.action == "move_file"` is declared in `proposal_kinds` and executed nowhere —
+`grep -rn move_file ciao/` returns exactly one hit, its own definition.
+
+For the MCP flow that is coherent and deliberate: the agent edits the region, then dismisses the
+bullet, and the tool never writes memory on its own. In a UI where a human clicks **Accept**, it is
+not: the fact leaves the queue and lands nowhere. On the reference install that is one click from
+losing any of 109 queued facts.
+
+This is a design decision for the operator, not a bug to patch quietly, and it matters more than the
+rest of this list because the proposal queue is the release's main new surface and its primary
+action does not do what its label says. Options, in the order I would consider them: have the server
+perform the region edit for `[memory]`/`[profile]` and the move for `[rehome]` (contradicts P5's
+"never writes memory" posture, which was chosen for good reasons); or rename the action to
+**Promote** and have it hand the row to a chat in that row's workspace, which is where the operator's
+own "chat for a specific one, in the workspace it was created in" idea lands.
+
 ### Remaining
-0. **Finish the read sweep** — the 19 above. Then the trigger and the blocking gate. Blocks release.
+0. **Decide what Accept means** (above). Then re-home detection per-root. Then the trigger and the
+   blocking gate. Blocks release.
 1. **Ship this work in a release, and let the upgrade run the migration.** Do NOT run `--apply` by
    hand from a dev checkout again — that is what broke the install today. Mechanics for whenever it
    does run: the app must be stopped, and `com.ciao.server` is a launchd agent with
