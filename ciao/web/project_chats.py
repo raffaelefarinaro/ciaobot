@@ -2263,7 +2263,7 @@ class ProjectChatManager:
 
     def _discover_archived_chats(self) -> None:
         """Scan the vault's archived transcripts and import missing chats."""
-        chats_root = self._config.vault_root / "Logs" / "Chats"
+        chats_root = self._config.logs_root / "Chats"
         if not chats_root.is_dir():
             return
 

@@ -416,7 +416,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         default_model=config.claude_default_model,
         default_mode=config.claude_mode,
     )
-    transcript_root = config.vault_root / "Logs" / "Chats"
+    transcript_root = config.logs_root / "Chats"
     transcripts = TranscriptStore(config.state_path.parent, transcript_root)
 
     # `workspace_names` is read on every list, not captured once, so adding a

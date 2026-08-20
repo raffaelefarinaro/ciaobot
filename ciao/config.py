@@ -74,6 +74,20 @@ def reset_reroot_cache() -> None:
     _REROOTED_CACHE.clear()
 
 
+def logs_root_for(workspace_root: Path, vault_root: Path, runtime_root: Path) -> Path:
+    """Where the derived transcript archive lives, from explicit paths.
+
+    The same receipt gate ``CiaoConfig.logs_root`` uses, exposed as a function so
+    a CLI holding only paths cannot end up with a second copy of the rule. One
+    definition of "has this install re-rooted" is the whole point of the seam.
+    """
+    from ciao.workspace_reroot import read_receipt  # noqa: PLC0415
+
+    if read_receipt(Path(runtime_root)) is not None:
+        return Path(workspace_root) / "Logs"
+    return Path(vault_root) / "Logs"
+
+
 def _clean_relative_path(raw: str) -> str:
     """Normalize a safe relative path so equivalent spellings resolve alike.
 
@@ -630,6 +644,28 @@ class CiaoConfig:
         to ``<name>/<vault dir name>``.
         """
         return self.agent_root(name) / self.vault_root.name
+
+    @property
+    def logs_root(self) -> Path:
+        """Where the derived transcript archive lives. See :func:`logs_root_for`.
+
+        D5: ``Logs/`` holds roughly 72% of the vault's notes, is derived output
+        rather than curated content, and its chat ids cannot each be resolved
+        back to one workspace, so the re-rooting PROMOTES it to
+        ``<install>/Logs/`` unmoved rather than splitting it per root. Before the
+        migration it is ``<vault>/Logs``; after, ``<install>/Logs``.
+
+        Receipt-gated through the same ``_rerooted`` check as
+        :meth:`agent_root`, so the two can never disagree about which layout the
+        install is on. Without this seam the readers keep computing
+        ``vault_root / "Logs"``, which after the migration is a path that does
+        not exist — so chat archiving would recreate it and write new
+        transcripts into a fresh empty tree, silently orphaning them from the
+        promoted archive and making the old ones invisible.
+        """
+        return (
+            self.workspace_root / "Logs" if self._rerooted() else self.vault_root / "Logs"
+        )
 
     def _rerooted(self) -> bool:
         """Whether this install has completed the per-workspace re-rooting.

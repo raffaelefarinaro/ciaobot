@@ -1187,6 +1187,11 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     key_base = Path(
         os.environ.get("CIAO_WORKSPACE", "").strip() or vault_root.parent
     ).expanduser().resolve()
+    # The re-rooting promotes Logs/ out of the vault, so the archive root cannot
+    # be derived from the vault root on a migrated install.
+    from ciao.config import logs_root_for
+
+    logs_root = logs_root_for(key_base, vault_root, key_base / ".runtime")
     db_path = fts_search.get_db_path()
 
     if args.rebuild and db_path.exists():
@@ -1201,7 +1206,7 @@ def _vault_search_command(args: argparse.Namespace) -> int:
         fts_search.init_db(conn)
         if not args.query:
             vault_indexed, vault_removed = fts_search.index_vault(conn, vault_root, path_base=key_base)
-            logs_indexed, logs_removed = fts_search.index_logs(conn, vault_root, path_base=key_base)
+            logs_indexed, logs_removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
             if vault_indexed or vault_removed or logs_indexed or logs_removed:
                 print(
                     "FTS Index updated: "
@@ -1213,7 +1218,7 @@ def _vault_search_command(args: argparse.Namespace) -> int:
 
         try:
             if args.logs:
-                indexed, removed = fts_search.index_logs(conn, vault_root, path_base=key_base)
+                indexed, removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
                 if indexed or removed:
                     print(
                         f"Transcripts index: {indexed} indexed, {removed} removed.",

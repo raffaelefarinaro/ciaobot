@@ -1083,11 +1083,10 @@ async def backfill_insights_task(
     nothing keep today's behaviour.
     """
     stats = _empty_backfill_stats()
-    vault_root = config.vault_root
-    # Archives live at <vault_root>/Logs/Chats (see main.py:transcript_root),
-    # NOT <vault_root>/memory-vault/Logs/Chats — vault_root is already the
-    # container that holds Logs/, MEMORY.md, etc.
-    base = vault_root / "Logs" / "Chats"
+    # Archives live under the promoted logs root (see main.py:transcript_root),
+    # which is <vault_root>/Logs before the re-rooting and <install>/Logs after
+    # it. `config.logs_root` is the one place that distinction is made.
+    base = config.logs_root / "Chats"
 
     root = agent_root if agent_root is not None else config.workspace_root
     project_dir = _claude_projects_dir(root)

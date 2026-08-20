@@ -278,10 +278,16 @@ def index_logs(
     conn: sqlite3.Connection,
     vault_root: Path,
     *,
+    logs_root: Path | None = None,
     path_base: Path | None = None,
 ) -> tuple[int, int]:
-    """Incremental indexer for conversation transcripts and meeting logs."""
-    logs_root = vault_root / "Logs"
+    """Incremental indexer for conversation transcripts and meeting logs.
+
+    ``logs_root`` names the archive explicitly. The re-rooting promotes it out of
+    the vault, so deriving it as ``vault_root / "Logs"`` indexes nothing on a
+    migrated install; callers holding a config pass ``config.logs_root``.
+    """
+    logs_root = Path(logs_root) if logs_root is not None else vault_root / "Logs"
     if not logs_root.exists():
         return 0, 0
     return _index_directory(
