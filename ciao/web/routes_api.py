@@ -6901,13 +6901,13 @@ def _rehome_target(row: dict[str, Any], requested: str) -> tuple[str, str]:
     move somebody's note on the strength of nothing.
     """
     signal = row.get("rehome") or {}
-    candidates = [str(c) for c in (signal.get("candidates") or [])]
     if requested:
-        if candidates and requested not in candidates:
-            return "", (
-                f"'{requested}' is not one of the workspaces this note's tags name "
-                f"({', '.join(candidates) or 'none'})"
-            )
+        # Any registered workspace, not only the ones the tags name. The tags are
+        # a hint; the operator asking is the authority, and most queued rows have
+        # no tag naming anywhere — restricting the choice to tag-named candidates
+        # left every one of the reference install's fourteen rows unmovable, which
+        # is the complaint that started this. `move_note_between_roots` still
+        # refuses an unregistered name.
         return requested, ""
     if not signal.get("justified"):
         return "", "no tag backs a destination for this note, so pick one explicitly"

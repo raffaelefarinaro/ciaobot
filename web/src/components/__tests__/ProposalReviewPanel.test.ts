@@ -452,18 +452,26 @@ describe('workspace scoping', () => {
     wrapper.unmount()
   })
 
-  it('offers no accept for a re-home row nothing backs', async () => {
-    // The old UI rendered "Move to a destination?" beside a confirm button that
-    // could not name one.
+  it('offers a destination picker for a re-home row nothing backs', async () => {
+    // Never a PRE-FILLED accept — the old UI rendered "Move to a destination?"
+    // beside a confirm button that could not name one. But it must offer the
+    // choice: accepting now performs a real move, and most queued rows have no
+    // tag naming anywhere, so offering them nothing left all fourteen unmovable.
     apiGet.mockResolvedValue({
       rows: [rehomeRow({ rehome: { note: 'personal/People/Mo.md', destination: '', candidates: [], justified: false, reason: 'no tag names a workspace' } })],
     })
+    const projects = useProjectStore()
+    projects.workspaces = [
+      { name: 'personal', vault_root: '/p', default_provider: 'claude', default_model: 'sonnet', gws_profile: '' },
+      { name: 'work', vault_root: '/w', default_provider: 'claude', default_model: 'sonnet', gws_profile: '' },
+    ] as never
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
     const rowEl = wrapper.find('.pr-row')
-    expect(rowEl.text()).toContain('needs a decision')
-    expect(rowEl.find('.pr-actions .btn-primary').exists()).toBe(false)
+    expect(rowEl.text()).toContain('Move to')
+    // Its own workspace is not a destination, and nothing is pre-selected.
+    expect(rowEl.findAll('.pr-actions .btn-primary').map(b => b.text())).toEqual(['work'])
     wrapper.unmount()
   })
 

@@ -223,6 +223,20 @@ function rehomeTarget(row: ProposalRow): string {
   return (row.rehome?.destination ?? '').split('/')[0]
 }
 
+/** Where this note could go: every registered workspace except its own.
+ *
+ * The tags' candidates are a hint, not the menu. Offering only tag-named
+ * candidates meant a row with no tag naming anywhere — which is most of them —
+ * had no destination to pick and therefore no way to move at all.
+ */
+function moveTargets(row: ProposalRow): string[] {
+  const own = row.workspace
+  const named = row.rehome?.candidates ?? []
+  const all = projectStore.workspaceOptions.map(w => w.name)
+  const ordered = [...named.filter(n => n !== own), ...all.filter(n => n !== own && !named.includes(n))]
+  return [...new Set(ordered)]
+}
+
 function cancelLeakConfirm() {
   confirmLeakId.value = ''
 }
@@ -492,11 +506,14 @@ onMounted(() => { void store.fetch() })
             <button type="button" class="btn-small btn-chip" @click="cancelLeakConfirm">cancel</button>
           </div>
 
-          <!-- A rehome row with several candidates: pick one, never pre-filled. -->
-          <div v-else-if="isRehome(row) && rehomeMode(row) === 'picker'" class="pr-actions">
-            <span class="pr-confirm-text">Which workspace?</span>
+          <!-- Any rehome row that is not a plain justified accept: pick the
+               destination, never pre-filled. Every registered workspace, not
+               just tag-named candidates — most rows have no tag naming anywhere,
+               and offering them nothing to pick is why they could not be moved. -->
+          <div v-else-if="isRehome(row) && rehomeMode(row) !== 'accept'" class="pr-actions">
+            <span class="pr-confirm-text">Move to…</span>
             <button
-              v-for="c in row.rehome!.candidates"
+              v-for="c in moveTargets(row)"
               :key="c"
               type="button"
               class="btn-small btn-primary"

@@ -237,12 +237,29 @@ def test_an_explicit_choice_moves_the_note(tmp_path: Path) -> None:
     assert not [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
 
 
-def test_a_choice_the_tags_do_not_name_is_refused(tmp_path: Path) -> None:
+def test_a_choice_the_tags_do_not_name_is_still_honoured(tmp_path: Path) -> None:
+    """The tags are a hint; the operator asking is the authority.
+
+    Restricting the choice to tag-named candidates left every queued row on the
+    reference install unmovable, because most have no tag naming anywhere.
+    """
+    config, client, row = _rehome_fixture(tmp_path, ["person"])
+    assert row["rehome"]["candidates"] == [], row["rehome"]
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept?workspace=work")
+
+    assert resp.status_code == 200, resp.json()
+    assert (config.workspace_vault_root("work") / "People" / "Mo.md").is_file()
+
+
+def test_an_unregistered_choice_is_still_refused(tmp_path: Path) -> None:
+    """Free choice among REGISTERED workspaces, not a free-text path."""
     config, client, row = _rehome_fixture(tmp_path, ["person", "friend", "colleague"])
 
     resp = client.post(f"/api/proposals/{row['id']}/accept?workspace=nowhere")
 
-    assert resp.status_code == 400
+    assert resp.status_code == 409
+    assert "not a registered workspace" in resp.json()["error"]
     assert (config.workspace_vault_root("personal") / "People" / "Mo.md").is_file()
 
 
