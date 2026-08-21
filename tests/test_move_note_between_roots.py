@@ -236,3 +236,66 @@ def test_both_roots_indexes_are_rebuilt(tmp_path: Path) -> None:
     assert {row["workspace"] for row in result["indexes"]["rebuilt"]} == {"personal", "work"}
     assert (root / "work/memory-vault/INDEX.md").is_file()
     assert "People/Mo" in (root / "work/memory-vault/INDEX.md").read_text()
+
+
+def test_a_note_already_at_the_destination_is_not_a_failure(tmp_path: Path) -> None:
+    """The state a cancelled handler leaves behind.
+
+    The sweep was 2s of synchronous work inside the event loop on the real vault,
+    so a request timed out after the `git mv` and before its queue row was
+    dropped. Reporting "no note at ..." then left the row permanently unclickable:
+    the operator could neither move it (gone) nor see that it had already moved.
+    """
+    root, targets = _install(tmp_path)
+    _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+
+    again = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+
+    assert again["refusals"] == []
+    assert again["already_moved"] is True
+    assert again["applied"] is True
+
+
+def test_a_missing_note_with_no_copy_anywhere_still_refuses(tmp_path: Path) -> None:
+    """Idempotence must not become "shrug at anything missing"."""
+    root, targets = _install(tmp_path)
+
+    result = _move(root, targets, "personal/memory-vault/People/Ghost.md", "work", apply=True)
+
+    assert any("no note at" in r for r in result["refusals"])
+
+
+def test_files_that_cannot_mention_the_note_are_not_parsed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Any ref carries the note's stem, whatever dialect it uses, so a file
+    without the stem cannot mention it.
+
+    Asserted on the PARSES, not on the result: skipping them changes no output, so
+    `files_rewritten` is identical either way. It is the work that matters — this
+    took the real-vault sweep from 2.03s to 0.35s, and that sweep running
+    synchronously inside the event loop is what let a request time out mid-move.
+    """
+    root, targets = _install(tmp_path)
+    for i in range(30):
+        _note(
+            root / "work" / "memory-vault" / "People" / f"Unrelated{i}.md",
+            f"---\ntype: person\n---\n# Unrelated{i}\n\nNothing to do with anyone.\n",
+        )
+
+    from ciao import vault_rehome
+
+    parsed: list[str] = []
+    real = vault_rehome.rewrite_references
+
+    def counting(text, before, after, *args, **kwargs):
+        parsed.append(before)
+        return real(text, before, after, *args, **kwargs)
+
+    monkeypatch.setattr(vault_rehome, "rewrite_references", counting)
+    result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+
+    # Mo itself, plus the two notes that name it. Not the 30 that cannot.
+    assert len(parsed) == 3, parsed
+    assert result["files_rewritten"] == 3
+    assert _broken(root) == []

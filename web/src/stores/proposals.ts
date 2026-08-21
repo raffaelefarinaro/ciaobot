@@ -102,12 +102,15 @@ export const useProposalsStore = defineStore('proposals', () => {
     }
   }
 
-  async function batch(ids: string[], action: 'accept' | 'dismiss') {
+  /** `workspace` names the destination for re-home rows in the selection. */
+  async function batch(ids: string[], action: 'accept' | 'dismiss', workspace = '') {
     if (!ids.length) return
     busy.value = true
     error.value = ''
     try {
-      await api.post<ProposalBatchResponse>('/api/proposals/batch', { action, ids })
+      await api.post<ProposalBatchResponse>('/api/proposals/batch', {
+        action, ids, ...(workspace ? { workspace } : {}),
+      })
       await fetch()
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Batch action failed'

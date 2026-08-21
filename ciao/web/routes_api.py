@@ -6888,6 +6888,7 @@ def _perform_rehome_move(config, row: dict[str, Any], target: str) -> dict[str, 
         "ok": True,
         "destination": result["destination"],
         "files_rewritten": result["files_rewritten"],
+        "already_moved": bool(result.get("already_moved")),
         "move": result,
     }
 
@@ -7171,14 +7172,56 @@ async def proposals_batch(request: Request) -> JSONResponse:
     if action not in {"accept", "dismiss"} or not isinstance(raw_ids, list) or not raw_ids:
         return JSONResponse({"error": "action must be accept|dismiss and ids[] is required"}, status_code=400)
     ids = [str(pid).strip() for pid in raw_ids]
+    requested_workspace = str(body.get("workspace", "") or "").strip()
     resolved, error = _resolve_batch(config, ids)
     if error:
         return JSONResponse({"error": error}, status_code=404)
 
+    # Re-home rows are MOVES, so they are handled before the queue-file grouping
+    # too, and one at a time: each move rewrites references across both vaults, so
+    # the second move has to see what the first one wrote. Off the event loop for
+    # the same reason as the single-row path — a sweep per row is real work, and a
+    # cancelled handler leaves notes moved with their rows still queued.
+    move_rows = [
+        ctx for ctx in resolved
+        if action == "accept" and ctx["row"].get("kind") == "rehome"
+    ]
+    results_moves: list[dict[str, Any]] = []
+    moved_ids: set[str] = set()
+    for ctx in move_rows:
+        row = ctx["row"]
+        target, target_error = _rehome_target(row, requested_workspace)
+        if target_error:
+            results_moves.append({
+                "id": row["id"], "action": "move_file", "dismissed": False,
+                "error": target_error,
+            })
+            continue
+        outcome = await asyncio.to_thread(_perform_rehome_move, config, row, target)
+        if not outcome.get("ok"):
+            results_moves.append({
+                "id": row["id"], "action": "move_file", "dismissed": False,
+                "error": outcome["error"],
+            })
+            continue
+        moved_ids.add(row["id"])
+        results_moves.append({
+            "id": row["id"], "action": "move_file", "dismissed": True,
+            "destination": outcome.get("destination", ""),
+            "already_moved": outcome.get("already_moved", False),
+        })
+    # Only the rows whose move landed may have their bullet dropped; a failed move
+    # keeps its row so the note is not left somewhere nobody asked for with
+    # nothing recording it.
+    resolved = [
+        ctx for ctx in resolved
+        if ctx not in move_rows or ctx["row"]["id"] in moved_ids
+    ]
+
     # Skill proposals are whole files, so they are handled before the grouping:
     # the grouping below rewrites a queue file by dropping bullet lines, and a
     # skill row has no line in any queue.
-    results = []
+    results = list(results_moves)
     file_rows = [ctx for ctx in resolved if ctx.get("file")]
     resolved = [ctx for ctx in resolved if not ctx.get("file")]
     for ctx in file_rows:
@@ -7341,7 +7384,11 @@ async def proposal_action(request: Request) -> JSONResponse:
             target, error = _rehome_target(row, request.query_params.get("workspace", "").strip())
             if error:
                 return JSONResponse({"error": error, "id": pid}, status_code=400)
-            outcome = _perform_rehome_move(config, row, target)
+            # Off the event loop: the sweep reads and rewrites notes across both
+            # vaults, and doing that inline blocked the loop long enough for the
+            # request to time out — after the git mv and before the queue row was
+            # dropped, so the note moved and its row stayed.
+            outcome = await asyncio.to_thread(_perform_rehome_move, config, row, target)
             if not outcome.get("ok"):
                 # Move-then-dismiss, the same order as a region write: the bullet
                 # survives a failed move so the note is not silently left where it

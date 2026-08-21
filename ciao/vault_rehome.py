@@ -1271,6 +1271,15 @@ def move_note_between_roots(
     source_file = install_root / source
     dest_file = install_root / destination
     if not source_file.is_file():
+        if dest_file.is_file():
+            # Already there. Reached when a previous attempt moved the note and
+            # then failed before its queue row was dropped — which a request
+            # timeout mid-handler does exactly. Reporting "no note at ..." left
+            # the row permanently unclickable: the operator could neither move it
+            # (gone) nor see that the move had in fact happened.
+            out["already_moved"] = True
+            out["applied"] = True
+            return out
         out["refusals"].append(f"no note at {source}")
         return out
     if dest_file.exists():
@@ -1303,6 +1312,14 @@ def move_note_between_roots(
     ]
     sweep.extend(extra)
 
+    # Any ref to the note contains its stem, whatever dialect it is written in:
+    # `[[Federica]]`, `People/Federica`, `./Federica.md`. So a file without the
+    # stem cannot mention it, and parsing it is wasted work. On the real vault
+    # this is the difference between reading 590 notes and parsing 590 of them —
+    # the sweep was 2s of synchronous work inside the event loop, which is what
+    # let a request time out and be cancelled between the move and the bullet
+    # removal, leaving the note moved and its row still queued.
+    stem = Path(source).stem
     for note, here in sweep:
         note_file = install_root / note
         if not note_file.is_file():
@@ -1312,6 +1329,8 @@ def move_note_between_roots(
         except (OSError, UnicodeDecodeError):
             continue
         is_moved = note == source
+        if not is_moved and stem not in text:
+            continue
         # Two different roots, and conflating them was a bug: a ref is RESOLVED
         # in the root the text was written in, and RE-SPELLED for the root the
         # note will be read from. They differ only for the note being moved —

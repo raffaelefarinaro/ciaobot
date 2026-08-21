@@ -663,3 +663,89 @@ def test_a_rehome_never_warns_in_either_layout(tmp_path: Path) -> None:
     assert routes_api._leak_warning(config, "rehome", "work") is False
     _rerooted(config, tmp_path)
     assert routes_api._leak_warning(config, "rehome", "work") is False
+
+
+def test_an_already_moved_row_clears_instead_of_erroring(tmp_path: Path) -> None:
+    """The stuck-row case, end to end: the note is at the destination and its
+    bullet is still queued, which is what a cancelled handler leaves. Accepting
+    must clear the row rather than answer "no note at ..." forever."""
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    # Simulate the interrupted attempt: note moved, bullet still there.
+    source = config.workspace_vault_root("personal") / "People" / "Mo.md"
+    destination = config.workspace_vault_root("work") / "People" / "Mo.md"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source.replace(destination)
+
+    # With the note gone from its source there is no live signal, so the row is
+    # unjustified and the operator names the destination — which is what the
+    # picker does. The point is that naming it CLEARS the row instead of
+    # answering "no note at ..." forever.
+    resp = client.post(f"/api/proposals/{row['id']}/accept?workspace=work")
+
+    assert resp.status_code == 200, resp.json()
+    assert not [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
+
+
+def test_a_batch_moves_every_selected_row_to_one_workspace(tmp_path: Path) -> None:
+    config = _per_root_config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "People").mkdir(parents=True, exist_ok=True)
+    _rerooted_vault(config, tmp_path)
+    for name in ("Mo", "Ida"):
+        (config.workspace_vault_root("personal") / "People" / f"{name}.md").write_text(
+            f"---\ntype: person\ntags:\n  - person\n---\n# {name}\n", encoding="utf-8"
+        )
+    _write_queue(config, "personal", (
+        "## curation pass\n\n"
+        "- [rehome] Re-home `personal/People/Mo.md` to `work/People/Mo.md`?  _(from: vault-rehome)_\n"
+        "- [rehome] Re-home `personal/People/Ida.md` to `work/People/Ida.md`?  _(from: vault-rehome)_\n"
+    ))
+    client = _client(config)
+    ids = [r["id"] for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
+    assert len(ids) == 2
+
+    resp = client.post(
+        "/api/proposals/batch", json={"action": "accept", "ids": ids, "workspace": "work"}
+    )
+
+    assert resp.status_code == 200, resp.json()
+    assert all(r["dismissed"] for r in resp.json()["results"]), resp.json()
+    for name in ("Mo", "Ida"):
+        assert (config.workspace_vault_root("work") / "People" / f"{name}.md").is_file()
+        assert not (config.workspace_vault_root("personal") / "People" / f"{name}.md").exists()
+    assert not [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
+
+
+def test_a_batch_keeps_the_rows_whose_move_failed(tmp_path: Path) -> None:
+    """One bad row must not drop the others' bullets, and must keep its own."""
+    config = _per_root_config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "People").mkdir(parents=True, exist_ok=True)
+    _rerooted_vault(config, tmp_path)
+    for name in ("Mo", "Ida"):
+        (config.workspace_vault_root("personal") / "People" / f"{name}.md").write_text(
+            f"---\ntype: person\ntags:\n  - person\n---\n# {name}\n", encoding="utf-8"
+        )
+    # Something already occupies Ida's destination, so her move refuses.
+    (config.workspace_vault_root("work") / "People" / "Ida.md").write_text(
+        "# A different Ida\n", encoding="utf-8"
+    )
+    _write_queue(config, "personal", (
+        "## curation pass\n\n"
+        "- [rehome] Re-home `personal/People/Mo.md` to `work/People/Mo.md`?  _(from: vault-rehome)_\n"
+        "- [rehome] Re-home `personal/People/Ida.md` to `work/People/Ida.md`?  _(from: vault-rehome)_\n"
+    ))
+    client = _client(config)
+    ids = [r["id"] for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
+
+    resp = client.post(
+        "/api/proposals/batch", json={"action": "accept", "ids": ids, "workspace": "work"}
+    )
+
+    results = {r["id"]: r for r in resp.json()["results"]}
+    assert sum(1 for r in results.values() if r["dismissed"]) == 1
+    assert any("already exists" in str(r.get("error", "")) for r in results.values())
+    left = [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
+    assert len(left) == 1
+    assert "Ida" in left[0]["rehome"]["note"]
+    assert (config.workspace_vault_root("personal") / "People" / "Ida.md").is_file()
