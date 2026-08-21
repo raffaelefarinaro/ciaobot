@@ -421,29 +421,37 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
         "PWA_AUTH_REQUIRED=true",
         "CIAO_PUSH_CONTACT=mailto:owner@example.com",
     ]
-    assert (workspace / ".claude" / "agents" / "memory.md").is_file()
-    assert (workspace / "commands" / "remember.md").is_file()
+    # Agent assets belong to the WORKSPACE root, not the install root: a fresh
+    # setup now builds the per-workspace layout directly instead of the shared one
+    # that then had to be migrated.
+    root = workspace / "research"
+    assert (root / ".claude" / "agents" / "memory.md").is_file()
+    assert (root / "commands" / "remember.md").is_file()
     assert "ciao:memory" in (
-        workspace / "commands" / "remember.md"
+        root / "commands" / "remember.md"
     ).read_text(encoding="utf-8")
-    assert (workspace / "CLAUDE.md").is_file()
-    assert (workspace / "AGENTS.md").is_symlink()
-    assert (workspace / "AGENTS.md").readlink() == Path("CLAUDE.md")
-    assert (workspace / "AGENTS.md").resolve() == (workspace / "CLAUDE.md").resolve()
-    customization = workspace / "CIAO_CUSTOMIZATION.md"
+    assert (root / "CLAUDE.md").is_file()
+    assert (root / "AGENTS.md").is_symlink()
+    assert (root / "AGENTS.md").readlink() == Path("CLAUDE.md")
+    assert (root / "AGENTS.md").resolve() == (root / "CLAUDE.md").resolve()
+    customization = root / "CIAO_CUSTOMIZATION.md"
     assert customization.is_file()
     assert "disallowed_tools" in customization.read_text(encoding="utf-8")
     assert (workspace / ".runtime" / "schedules.json").is_file()
     assert json.loads((workspace / ".runtime" / "schedules.json").read_text(encoding="utf-8")) == {"schedules": []}
     # Canonical user-asset sources exist so Workspace Health starts warning-free.
-    assert (workspace / "subagents").is_dir()
-    assert (workspace / "commands").is_dir()
-    assert (workspace / "memory-vault" / "research" / "MEMORY.md").is_file()
+    assert (root / "subagents").is_dir()
+    assert (root / "commands").is_dir()
+    # Nothing agent-shaped is left at the install root for the migration to move.
+    assert not (workspace / "CLAUDE.md").exists()
+    assert not (workspace / "subagents").exists()
+    assert (root / "memory-vault" / "MEMORY.md").is_file()
+    assert not (workspace / "memory-vault").exists()
     registry = json.loads(
         (workspace / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
     )
     assert registry[0]["name"] == "research"
-    assert registry[0]["vault_root"] == "memory-vault/research"
+    assert registry[0]["vault_root"] == "research/memory-vault"
     plist = launch_agents / "com.ciao.server.plist"
     assert plist.is_file()
     plist_text = plist.read_text(encoding="utf-8")

@@ -395,14 +395,17 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     assert resp.status_code == 200
     env_text = (ws / ".env").read_text(encoding="utf-8")
     assert "CIAO_VAULT_MODE=scratch" in env_text
-    assert (ws / "memory-vault" / "life" / "MEMORY.md").is_file()
+    # `<workspace>/memory-vault`: the wizard creates the per-workspace layout
+    # directly, so a new install never has a shared vault to migrate.
+    assert (ws / "life" / "memory-vault" / "MEMORY.md").is_file()
+    assert not (ws / "memory-vault").exists()
     # The wizard's first workspace replaces the legacy personal+work
     # fallback: a one-entry registry with the chosen name.
     import json as _json
 
     registry = _json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
     assert [w["name"] for w in registry] == ["life"]
-    assert registry[0]["vault_root"] == "memory-vault/life"
+    assert registry[0]["vault_root"] == "life/memory-vault"
     # Setup links no Google account: which accounts exist is the user's choice,
     # made in Settings → Workspaces after onboarding.
     assert registry[0]["gws_profile"] == ""
@@ -449,8 +452,10 @@ def test_setup_finish_persists_codex_as_first_workspace_provider(tmp_path) -> No
         (ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
     )
     assert registry[0]["default_provider"] == "codex"
-    assert (ws / "AGENTS.md").is_symlink()
-    assert (ws / "AGENTS.md").resolve() == (ws / "CLAUDE.md").resolve()
+    # The guide lives in the workspace root, and Codex reads AGENTS.md there.
+    root = ws / registry[0]["name"]
+    assert (root / "AGENTS.md").is_symlink()
+    assert (root / "AGENTS.md").resolve() == (root / "CLAUDE.md").resolve()
 
 
 def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
@@ -739,10 +744,10 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
     assert resp.json()["workspace"] == str(workspace.resolve())
     env_text = (workspace / ".env").read_text(encoding="utf-8")
     assert "CIAO_VAULT_ROOT=memory-vault" in env_text
-    assert (workspace / "memory-vault" / "personal" / "MEMORY.md").is_file()
-    # One repo at the workspace root; the nested vault is never double-inited.
+    assert (workspace / "personal" / "memory-vault" / "MEMORY.md").is_file()
+    # One repo at the install root; the nested vault is never double-inited.
     assert (workspace / ".git").is_dir()
-    assert not (workspace / "memory-vault" / ".git").exists()
+    assert not (workspace / "personal" / "memory-vault" / ".git").exists()
 
 
 def test_setup_finish_accepts_0000_host(tmp_path) -> None:

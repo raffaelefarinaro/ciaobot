@@ -197,6 +197,46 @@ def receipt_path(runtime_root: Path) -> Path:
     return Path(runtime_root) / "migration" / "workspace-rooting.json"
 
 
+def mark_born_per_root(
+    install_root: Path,
+    runtime_root: Path,
+    workspaces: list[str],
+    *,
+    origin: str = "born",
+) -> list[Path]:
+    """Record that this install was CREATED in the per-root layout.
+
+    A fresh install has nothing to migrate, but ``agent_root`` answers per-root
+    only when a receipt says the layout is per-root — the receipt is the layout
+    discriminator, not migration bookkeeping. Without one, a brand-new install
+    would have its files nested while every consumer still resolved the install
+    root, which is the one combination that breaks everything downstream.
+
+    ``status: "migrated"`` because that is what the gate reads, with no moves.
+    ``origin`` distinguishes the two ways an install arrives here without the
+    engine — ``"born"`` for a fresh setup, ``"hand"`` for a vault moved by hand or
+    by a model — so a later reader can tell them apart, and tell both from a real
+    migration, instead of inferring it from an empty move list.
+    """
+    payload = {
+        "schema_version": RECEIPT_VERSION,
+        "status": "migrated",
+        "born_per_root": origin == "born",
+        "origin": origin,
+        "install_root": str(Path(install_root).resolve()),
+        "vault_root": str(Path(install_root).resolve() / VAULT_DIR_NAME),
+        "workspaces": sorted(workspaces),
+        "moves": [],
+        "applied": [],
+        "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+    from ciao.config import reset_reroot_cache
+
+    path = write_receipt(runtime_root, payload)
+    reset_reroot_cache()
+    return [path]
+
+
 def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
     """The receipt of a COMPLETED re-rooting, or None.
 

@@ -1998,3 +1998,39 @@ def test_a_directory_with_content_is_still_moved_not_pruned(tmp_path: Path) -> N
 
     assert result["pruned_empty"] == []
     assert (install / "templates-src" / "person.md").is_file()
+
+
+def test_mark_migrated_records_a_hand_moved_install(tmp_path: Path) -> None:
+    """The prompt route needs this: a vault moved by hand has no receipt, and
+    `agent_root` answers per-root only when a receipt says so — so without it the
+    files are nested while every consumer still resolves the install root."""
+    from ciao.workspace_reroot import mark_born_per_root, read_receipt
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    for name in ("personal", "work"):
+        (tmp_path / name / "memory-vault").mkdir(parents=True)
+
+    mark_born_per_root(tmp_path, runtime, ["personal", "work"], origin="hand")
+
+    receipt = read_receipt(runtime)
+    assert receipt is not None
+    assert receipt["status"] == "migrated"
+    assert receipt["origin"] == "hand"
+    # Not "born": it did not start life this way, and a receipt that says so
+    # would claim a history the install does not have.
+    assert receipt["born_per_root"] is False
+    assert receipt["moves"] == []
+
+
+def test_a_fresh_install_receipt_says_born(tmp_path: Path) -> None:
+    from ciao.workspace_reroot import mark_born_per_root, read_receipt
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+
+    mark_born_per_root(tmp_path, runtime, ["personal"])
+
+    receipt = read_receipt(runtime)
+    assert receipt["origin"] == "born"
+    assert receipt["born_per_root"] is True

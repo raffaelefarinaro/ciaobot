@@ -1885,3 +1885,77 @@ those would invent a relationship. The path is now the button (the separate "vie
 spent an action slot saying what the path already said), showing only the leaf
 since every row in a group shares the folder. Actions stack vertically so the text
 column gets the width.
+
+
+## Strategy: the engine is now dated for retirement (2026-08-21)
+
+The operator asked whether the migration machinery is worth keeping or should be
+replaced by a prompt. The answer turned on evidence, and two checks changed it.
+
+**The audit already verifies what a prompt gets wrong.** A vault with an
+un-repointed inbound link and a duplicated `ciao:memory` region reports
+`vault_hygiene.broken_markdown_links` and `memory_hygiene.marker_errors`
+precisely, with `status: needs_attention`. (A first pass at this test printed
+`errors`/`notices` — keys this report does not have — and concluded the audit was
+blind. It is not. Worth remembering before trusting a decisive-looking negative
+result.) The one real gap was the **search index**, which nothing checked at all.
+Now closed: `search_index.missing` and `search_index.stale_rows`, both counted as
+defects so they move `status` rather than merely rendering.
+
+**The cost was attributed to the wrong thing.** Of roughly 25 defects fixed on
+2026-08-20/21, about three were in the engine (the empty-directory refusal, the
+hardcoded vault leaf in the rebuild helpers, undo resumability). The rest were in
+readers and surfaces of the per-root LAYOUT — entity visibility, the leak warning,
+canonical vault resolution, workspace health, repair, the note mover, chat session
+lookup, the bootstrap registry. A prompt-based migration keeps every one of those.
+Retiring the engine sheds maybe 10–15% of the surface, not the bulk of it.
+
+**The receipt is not migration bookkeeping.** `agent_root()` answers "per-root"
+only when a receipt says so, and at least eight paths branch on it. It is the
+layout discriminator and must outlive the engine — which is why
+`mark_born_per_root` exists and why `--mark-migrated` had to be added before the
+prompt route could work at all: step 6 of the prompt told the operator to run
+`--repair`, which refuses without a receipt.
+
+### The decision
+2–3 un-migrated mature vaults remain, so the engine ships once more and is then
+retired. Its audience no longer regenerates itself: a fresh install is now created
+in the per-root layout directly.
+
+**Retirement condition, to be checked before the release after this one:** every
+known install's receipt reads `status: migrated`. At that point delete
+`workspace_reroot.plan/apply/undo/rehearse`, `workspace_census`, and the
+`--apply/--undo/--rehearse` CLI verbs. **Keep** `read_receipt` / `write_receipt` /
+`mark_born_per_root` / `repair` / `rebuild_indexes` / `rebuild_search_index`, the
+`os_audit` scope split, `vault_rehome`, `proposal_kinds`, `operator_actions`, and
+per-root `scan_targets` — none of those are one-shot.
+
+### Case 1 was the real find
+`ciao setup` created the OLD shared layout — `memory-vault/personal` plus agent
+assets at the install root — so every new user was manufactured into exactly the
+state the re-rooting exists to fix, and met a blocking "migrate now" tile on first
+boot. The engine's audience regenerated itself.
+
+Fresh setup now builds `<workspace>/memory-vault`, writes the receipt (with
+`origin: born`, distinct from `origin: hand`), registers the workspace before the
+asset loop — `agent_roots_for` reads the registry for names, so without it the
+assets still landed at the install root — and runs a local skill sync so the
+install is healthy before its first boot rather than after it. Measured: a fresh
+install went from 1 operator tile, 9 health warnings, install-root litter and a
+pending migration, to **0 tiles, health ok, no litter, `already_migrated`**.
+
+Seven existing setup tests asserted the old layout and were updated. One of them
+(`test_ensure_workspace_git_initializes_fresh_dir`) does not call
+`setup_workspace` at all — I changed its assertion before noticing, which is a
+reminder that "this test mentions CLAUDE.md" is not the same as "this test is
+about setup".
+
+### The prompt
+`docs/VAULT_MIGRATION_PROMPT.md`, structured as a checklist because the model is
+weakest at the deterministic parts. Each step names the failure it prevents, and
+the ones that matter most came from this session's own bugs: `git mv` cannot move
+an empty directory; a cross-root reference needs the workspace prefix while a
+same-root one must stay root-relative; markdown links must be recomputed against
+real directories (one level deeper than expected); an unresolvable link must be
+left alone; `MEMORY.md` is not regenerated; duplicated region markers make a
+region unwritable. It ends with `ciao os-audit`, which is now the complete backstop.

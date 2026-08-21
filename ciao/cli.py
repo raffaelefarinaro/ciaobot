@@ -765,6 +765,51 @@ def setup_workspace(
     if not runtime_root.is_absolute():
         runtime_root = root / runtime_root
 
+    # A brand-new install is created in the PER-ROOT layout directly, rather than
+    # in the shared one and then migrated. Setup used to scaffold
+    # `memory-vault/personal` plus agent assets at the install root, so every new
+    # user was manufactured into exactly the state the re-rooting exists to fix —
+    # and met a blocking "migrate now" tile on first boot. The migration engine
+    # then had an audience that regenerated itself.
+    #
+    # The receipt is written here, before anything reads `agent_roots_for`, because
+    # it is what makes `agent_root()` answer per-root. Files in the nested layout
+    # with a gate that still says "shared" is the one combination that breaks
+    # everything downstream.
+    fresh_per_root = (
+        registered_vaults is None
+        and vault_mode != "existing"
+        and not setup_selected_vault
+        and not detect_nested_workspaces(vault_path)
+        and not vault_path.exists()
+    )
+    if fresh_per_root:
+        from ciao.workspace_reroot import mark_born_per_root
+
+        vault_path = root / name / vault_path.name
+        written.extend(mark_born_per_root(root, runtime_root, [name]))
+        # The registry has to exist before the asset loop too: `agent_roots_for`
+        # reads the receipt for the gate and the REGISTRY for the names, and with
+        # no registry it falls back to the install root — which is how the first
+        # attempt at this still put `.claude/`, `commands/` and a stock CLAUDE.md
+        # beside the nested vault instead of inside the workspace's own folder.
+        # The later branch is `_write_if_missing`, so this does not fight it.
+        _write_if_missing(
+            root / ".runtime" / "workspaces.json",
+            json.dumps(
+                [{
+                    "name": name,
+                    "vault_root": f"{name}/{vault_path.name}",
+                    "default_provider": default_provider,
+                    # No Google account is linked at scaffold time; the user
+                    # chooses in Settings → Workspaces after setup.
+                    "gws_profile": "",
+                }],
+                indent=2,
+            ) + "\n",
+        )
+        written.append(root / ".runtime" / "workspaces.json")
+
     stock = resources.files("ciao.stock")
     stock_commands = stock.joinpath("commands")
     stock_workspace = stock.joinpath("workspace")
@@ -773,7 +818,11 @@ def setup_workspace(
     # sync-skills). App plumbing, not vault content: pre-creating them keeps
     # the Workspace Health checks warning-free on a fresh or adopted setup.
     from ciao.config import agent_roots_for
-    from ciao.sync_skills import _ensure_linked_workspace_guides, _install_stock_agents
+    from ciao.sync_skills import (
+        _ensure_linked_workspace_guides,
+        _install_stock_agents,
+        sync_workspace_skills,
+    )
 
     # Agent assets go to the AGENT ROOTS, which is the install root before the
     # re-rooting and one directory per workspace after it. Scaffolding the
@@ -791,6 +840,16 @@ def setup_workspace(
         written.append(asset_root / "commands")
         written.extend(_copy_tree_if_missing(stock_workspace, asset_root))
         _ensure_linked_workspace_guides(asset_root)
+        # Build the generated catalogs too, so setup leaves a HEALTHY install
+        # rather than one that only becomes healthy after its first boot. Without
+        # this a brand-new install showed nine Workspace Health warnings and an
+        # operator tile about missing assets, on a install where nothing was
+        # wrong — it just had not synced yet. Local only: no upstream refresh, so
+        # setup still does not touch the network.
+        try:
+            sync_workspace_skills(asset_root, refresh_upstream=False)
+        except Exception as exc:  # noqa: BLE001 — a scaffold step, never fatal
+            print(f"skill sync failed for {asset_root}: {exc}", file=sys.stderr)
 
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(
@@ -854,7 +913,9 @@ def setup_workspace(
         # compatibility exception: keep the selected notes in place so the
         # onboarding chat can inspect them before proposing a migration.
         scaffold_vault_path = vault_path
-        if vault_mode != "existing" and not setup_selected_vault:
+        if vault_mode != "existing" and not setup_selected_vault and not fresh_per_root:
+            # `fresh_per_root` already resolved the vault to `<name>/<leaf>`;
+            # appending the name again would give `<name>/<leaf>/<name>`.
             scaffold_vault_path = vault_path / name
         scaffold_vaults.append((name, scaffold_vault_path))
         try:
@@ -1830,6 +1891,55 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         result = workspace_reroot.undo(workspace, runtime)
         print(json.dumps(result, indent=2))
         return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
+
+    if args.mark_migrated:
+        # For a vault migrated by hand or by a model. The receipt is what
+        # `agent_root` reads, so without it the install keeps resolving the shared
+        # layout while the files sit in the new one — the one combination that
+        # breaks every layout-dependent path. Verified, not asserted: the folders
+        # have to actually be there, or this would tell the app a comforting lie.
+        from ciao.workspace_reroot import mark_born_per_root, read_receipt
+
+        if read_receipt(runtime) is not None:
+            print("Already recorded as migrated; nothing to do.")
+            return 0
+        # Straight off the registry file, the way `agent_roots_for` does: this
+        # command runs before any config exists that would answer per-root.
+        try:
+            entries = json.loads(
+                (runtime / "workspaces.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            entries = []
+        names = [
+            str(e.get("name", "")).strip()
+            for e in entries
+            if isinstance(e, dict) and str(e.get("name", "")).strip()
+        ]
+        if not names:
+            print(
+                f"Refusing: no workspaces registered in {runtime / 'workspaces.json'}.",
+                file=sys.stderr,
+            )
+            return 1
+        missing = [
+            n for n in names
+            if not (workspace / n / vault.name).is_dir()
+        ]
+        if missing:
+            print(
+                "Refusing: these workspaces have no "
+                f"<workspace>/{vault.name} directory yet: {', '.join(missing)}.\n"
+                "Move the vaults first (see docs/VAULT_MIGRATION_PROMPT.md), then "
+                "re-run this.",
+                file=sys.stderr,
+            )
+            return 1
+        written = mark_born_per_root(workspace, runtime, names, origin="hand")
+        for path in written:
+            print(f"Recorded the per-workspace layout: {path}")
+        print("Run `ciao workspace-reroot --repair` next to rebuild the derived files.")
+        return 0
 
     if args.repair:
         result = workspace_reroot.repair(workspace, runtime, names)
@@ -3028,6 +3138,18 @@ def build_parser() -> argparse.ArgumentParser:
             "skills, a prefixed INDEX.md, a search index at moved paths. "
             "Idempotent. A root with no vault and a stale .mcp.json are reported, "
             "never guessed, and make it exit 1."
+        ),
+    )
+    reroot_parser.add_argument(
+        "--mark-migrated",
+        action="store_true",
+        help=(
+            "Record that this install is ALREADY in the per-workspace layout, "
+            "without moving anything. For a vault migrated by hand or by a model "
+            "following docs/VAULT_MIGRATION_PROMPT.md: `agent_root` answers "
+            "per-root only when a receipt says so, so without this the install "
+            "keeps resolving the old layout and --repair refuses. Verifies the "
+            "layout is actually in place first and refuses if it is not."
         ),
     )
     reroot_parser.set_defaults(func=_workspace_reroot_command)

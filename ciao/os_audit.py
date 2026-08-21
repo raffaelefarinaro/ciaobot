@@ -14,6 +14,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
@@ -942,6 +943,43 @@ def audit_job_runs(
     }
 
 
+def _search_index_audit(install_root: Path, workspaces: Sequence[str]) -> dict[str, Any]:
+    """Whether the full-text index still describes the vault on disk.
+
+    The audit checked notes, links, guides, regions and skills, but never the
+    search index — so a missing or stale index passed clean. That matters most for
+    the case the audit is the ONLY backstop: a vault reorganised by hand (or by a
+    model following a prompt) moves notes without rebuilding the index, and
+    nothing then reports that search is silently answering from the old paths.
+
+    Two findings, both cheap and read-only: the index is absent when notes exist,
+    and rows pointing at paths that no longer resolve. `ciao workspace-reroot
+    --repair` rebuilds it.
+    """
+    out: dict[str, Any] = {"missing": False, "stale_rows": [], "errors": []}
+    try:
+        from ciao.fts_search import get_db_path
+        from ciao.workspace_reroot import stale_search_rows
+    except ImportError as exc:  # noqa: BLE001 — advisory section
+        out["errors"].append({"type": "search_index_unavailable", "detail": str(exc)})
+        return out
+
+    root = Path(install_root)
+    try:
+        has_notes = any(
+            (root / name).is_dir() and any((root / name).rglob("*.md"))
+            for name in workspaces
+        ) if workspaces else False
+        db = get_db_path()
+        if not db.exists():
+            out["missing"] = bool(has_notes)
+            return out
+        out["stale_rows"] = stale_search_rows(root)
+    except OSError as exc:
+        out["errors"].append({"type": "search_index_unreadable", "detail": str(exc)})
+    return out
+
+
 def _vault_audit(vault_root: Path) -> dict[str, Any]:
     if not vault_root.is_dir():
         return {
@@ -1270,6 +1308,13 @@ def run_os_audit(
     )
     empty_errors: dict[str, Any] = {"errors": []}
     vault_result = _vault_audit(notes) if want_workspace else {**empty_errors}
+    # Install-wide, like the other global sections: one search database serves
+    # every root, so reporting it per workspace would say the same thing N times.
+    search_result = (
+        _search_index_audit(workspace, list(getattr(config, "workspace_names", lambda: [])()))
+        if want_global
+        else {"missing": False, "stale_rows": [], "errors": []}
+    )
     skill_result = (
         audit_skills(root) if want_workspace else {**empty_errors, "issues": []}
     )
@@ -1368,6 +1413,12 @@ def run_os_audit(
         + rule_result["rule_clashes_found"]
         + memory_actionable_count(memory_result)
         + job_result["failed_runs"]
+        # A search index that is absent or points at moved notes is a defect the
+        # operator can act on (`--repair` rebuilds it), so it counts. Left out of
+        # the count it would render in the report and never change `status`, which
+        # is the same as not reporting it for anyone reading the summary.
+        + (1 if search_result.get("missing") else 0)
+        + (1 if search_result.get("stale_rows") else 0)
     )
     pending_action_count = upgrade_result["notices_found"]
     has_pending_actions = pending_action_count > 0
@@ -1391,6 +1442,7 @@ def run_os_audit(
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "setup_audit": setup_result,
         "vault_hygiene": vault_result,
+        "search_index": search_result,
         "skill_audit": skill_result,
         "rule_audit": rule_result,
         "memory_hygiene": memory_result,
