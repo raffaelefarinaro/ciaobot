@@ -49,7 +49,6 @@ def test_capabilities_for_unknown_provider_is_all_false():
     """A stale chat record degrades to 'supports nothing', never a crash."""
     capabilities = capabilities_for("no-such-provider")
     assert not capabilities.resume
-    assert not capabilities.steer
     assert not capabilities.background_subagents
 
 

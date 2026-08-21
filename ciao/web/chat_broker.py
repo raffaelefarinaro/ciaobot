@@ -537,7 +537,7 @@ class ChatStream:
         self.user_stopped: bool = False
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
-        # queued/steered user messages — a user send while one is active
+        # queued user messages — a user send while one is active
         # starts a real turn instead (the drain is cancelled first).
         self.background: bool = background
         self.pending_capability: dict[str, dict] | None = None

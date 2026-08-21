@@ -880,7 +880,7 @@ export const useProjectStore = defineStore('projects', () => {
     }
     const chat = await createChat(general.project_id, opts.title || 'Fix error')
     const prompt = buildFixPrompt({ errorText: opts.errorText, context: opts.context })
-    await sendMessage(chat.chat_id, prompt, 'queue')
+    await sendMessage(chat.chat_id, prompt)
     return chat
   }
 
@@ -3324,7 +3324,6 @@ export const useProjectStore = defineStore('projects', () => {
   function sendMessage(
     chatId: string,
     text: string,
-    mode: 'queue' | 'steer' = 'queue',
     prepared?: PreparedMessage,
   ) {
     // A re-entry summary is a transient orientation aid, not a new chat
@@ -3356,24 +3355,20 @@ export const useProjectStore = defineStore('projects', () => {
     const ws = sockets.value[chatId]
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       connectWs(chatId)
-      setTimeout(() => sendMessage(chatId, text, mode, message), 500)
+      setTimeout(() => sendMessage(chatId, text, message), 500)
       return
     }
     const alreadyStreaming = isChatStreaming(chatId)
 
     if (alreadyStreaming) {
-      // Queue or steer: don't push to the main messages list yet. Queued
-      // messages live in queuedMessages until the server echoes them; steered
-      // ones arrive as a `steered` event which we fold into messages.
-      let queueId: string | undefined
-      if (mode === 'queue') {
-        if (!queuedMessages.value[chatId]) queuedMessages.value[chatId] = []
-        queueId = makeQueuedId()
-        queuedMessages.value[chatId].push({ id: queueId, text: composed, images: imageRefs })
-      }
-      const payload: Record<string, unknown> = { type: 'message', text: composed, mode }
+      // Queue: don't push to the main messages list yet. Queued messages live
+      // in queuedMessages until the server echoes them.
+      if (!queuedMessages.value[chatId]) queuedMessages.value[chatId] = []
+      const queueId = makeQueuedId()
+      queuedMessages.value[chatId].push({ id: queueId, text: composed, images: imageRefs })
+      const payload: Record<string, unknown> = { type: 'message', text: composed, mode: 'queue' }
       if (imageRefs) payload.images = imageRefs
-      if (queueId) payload.entry_id = queueId
+      payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
       return
     }
@@ -4014,16 +4009,15 @@ export const useProjectStore = defineStore('projects', () => {
     const msgs = messages.value[chatId] || []
 
     // A summary belongs only to the moment the user re-enters a quiet chat.
-    // `queued` and `steered` always represent new user activity (a new prompt
-    // is now waiting or has been redirected at the current turn), so they
-    // always invalidate the summary.
+    // `queued` always represents new user activity (a new prompt is now
+    // waiting), so it always invalidates the summary.
     //
     // `user_echo` and `result` are handled inside their switch cases below:
     // the broker replays them on every WS reconnect, and a no-op replay
     // (turn already rendered, or no final text on a result) must NOT clear
     // the summary. The user opens a chat, scrolls to re-orient, and the
     // summary disappearing on a broker replay is the wrong behavior.
-    if (event.type === 'queued' || event.type === 'steered') {
+    if (event.type === 'queued') {
       clearReentrySummary(chatId)
     }
 
@@ -4186,25 +4180,6 @@ export const useProjectStore = defineStore('projects', () => {
           text: (q.text || '').trim(),
           images: q.images?.length ? q.images : undefined,
         }))
-        break
-      }
-
-      case 'steered': {
-        // Steered messages enter the current turn immediately as a user bubble.
-        _commitStreamingTextToTimeline(chatId)
-        const trimmed = (event.text || '').trim()
-        if (!trimmed) break
-        const last = msgs[msgs.length - 1]
-        if (!(last && last.role === 'user' && last.content === trimmed)) {
-          msgs.push({
-            role: 'user',
-            content: trimmed,
-            timestamp: new Date().toISOString(),
-            images: event.images?.length ? event.images : undefined,
-          })
-          messages.value[chatId] = normalizeMessages([...msgs])
-          persistMessages()
-        }
         break
       }
 

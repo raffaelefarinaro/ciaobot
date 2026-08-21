@@ -403,7 +403,6 @@ class ClaudeProvider(BaseSDKProvider):
         fork=True,
         images=True,
         stop=True,
-        steer=True,
         permissions=True,
         structured_questions=True,
         thinking_levels=True,

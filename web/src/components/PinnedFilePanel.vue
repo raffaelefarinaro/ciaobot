@@ -918,7 +918,7 @@ watch(
 // closing this panel's hover-pin read popover when a compose opens.
 // Commenting stays available while the model works, matching FileViewerModal:
 // a comment is staged locally and rides along on the next message the user
-// sends (queued or steered), so there is nothing to wait for.
+// sends (queued), so there is nothing to wait for.
 // Artifacts are not commentable: a comment anchors to a markdown highlight or
 // a text line, and a rendered page in a sandboxed frame offers neither. This is
 // a real capability loss versus .md, which is why the html-artifact skill tells

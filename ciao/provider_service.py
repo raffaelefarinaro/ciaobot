@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 import logging
 from pathlib import Path
-from typing import cast
 
 from ciao import provider_registry
 from ciao.config import BridgeConfig
@@ -119,18 +118,6 @@ class ProviderService:
             return
         async for event in drain():
             yield event
-
-    async def steer(self, request: AgentRequest) -> bool:
-        """Inject a user message into the provider's active turn.
-
-        Returns True if accepted, False if no active client.
-        """
-        if self._provider is None:
-            return False
-        steer = getattr(self._provider, "steer", None)
-        if not callable(steer):
-            return False
-        return cast(bool, await steer(request))
 
     @property
     def provider(self) -> ProviderImpl | None:

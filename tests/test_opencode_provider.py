@@ -56,11 +56,6 @@ def _provider(tmp_path: Path) -> OpencodeProvider:
 # ── capabilities ────────────────────────────────────────────────────────
 
 
-def test_steer_is_unsupported():
-    """opencode has no API to inject into a running turn (see the plan doc)."""
-    assert OpencodeProvider.capabilities.steer is False
-
-
 def test_quota_is_unsupported():
     """Bring-your-own-provider: there is no unified quota snapshot to report."""
     assert OpencodeProvider.capabilities.quota is False
@@ -74,7 +69,7 @@ def test_background_subagents_are_supported():
 
 @pytest.mark.asyncio
 async def test_steer_never_sends_a_second_prompt(tmp_path):
-    """Returning False keeps the message in ProviderService's next-turn queue.
+    """Returning False keeps the message in the next-turn queue.
 
     Sending a second prompt instead would either queue it out of order or
     abort the active turn; neither is steering.
@@ -1688,8 +1683,7 @@ def test_live_fixture_carries_no_credentials(tmp_path):
 def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     """The PWA gates its UI on `providers[].capabilities`, not on provider ids.
 
-    In particular the composer's "this queues rather than steers" note keys off
-    `steer`, so the flag has to survive the round trip to the API.
+    Capabilities survive the round trip to the /api/models payload.
     """
     import asyncio
     from types import SimpleNamespace
@@ -1721,9 +1715,6 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     payload = json.loads(asyncio.run(list_models(_request())).body)
 
     by_id = {item["id"]: item for item in payload["providers"]}
-    assert by_id["opencode"]["capabilities"]["steer"] is False
-    assert by_id["claude"]["capabilities"]["steer"] is True
-    assert by_id["codex"]["capabilities"]["steer"] is True
     assert by_id["opencode"]["capabilities"]["background_subagents"] is True
     assert by_id["opencode"]["short_label"] == "opencode"
     assert payload["opencode_models"] == ["opencode/big-pickle"]

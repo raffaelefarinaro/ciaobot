@@ -5545,69 +5545,6 @@ class ProjectChatManager:
         })
         return True
 
-    async def steer_stream(
-        self,
-        chat_id: str,
-        text: str,
-        images: list[ImageAttachment] | None = None,
-    ) -> bool:
-        """Inject a user message into the active SDK turn.
-
-        Returns True if the message reached the live client, False otherwise
-        (caller should fall back to queuing).
-        """
-        stream = self._broker.get(chat_id)
-        if stream is None or stream.background:
-            # No live turn to steer into during a background drain; the
-            # caller falls through to queue → start_stream.
-            return False
-        provider = self._providers.get(chat_id)
-        if provider is None:
-            return False
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return False
-        prefix = self._build_prompt_prefix(chat)
-        full_prompt = prefix + text if prefix else text
-        request = AgentRequest(
-            prompt=full_prompt,
-            model=self._runtime_model_for_chat(chat),
-            provider=chat.provider,
-            mode=self._effective_mode_for_chat(chat),
-            resume_session=chat.session_id or None,
-            images=images or [],
-            extra_env=self._build_extra_env(chat),
-            disallowed_tools=self.disallowed_tools_for_chat(chat),
-            thinking_level=self._thinking_level_for_chat(chat),
-        )
-        ok = await provider.steer(request)
-        if not ok:
-            return False
-        dirty = self._invalidate_reentry_summary(chat)
-        image_refs: list[str] = []
-        for img in images or []:
-            ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
-            if ref:
-                image_refs.append(str(ref))
-        # Bump the chat's user-turn counter so image-replay for history lines up
-        # with the additional turn we just injected.
-        if image_refs:
-            turn_index = chat.user_turn_count
-            chat.user_turn_count = turn_index + 1
-            chat.user_turn_images[str(turn_index)] = list(image_refs)
-            now = _now_iso()
-            chat.last_activity_at = now
-            chat.last_read_at = now  # user sending = implicitly read
-            dirty = True
-        if dirty:
-            self._save()
-        stream.publish({
-            "type": "steered",
-            "text": text,
-            "images": image_refs,
-        })
-        return True
-
     def reorder_queue(
         self,
         chat_id: str,

@@ -18,9 +18,9 @@ The wire contract is verified against the server's own OpenAPI document at
 message rather than half-working.
 
 Capability note: opencode has no method that injects a message into a running
-turn, so ``steer`` is False and ``ProviderService`` keeps a mid-turn message in
-its next-turn queue. Everything else Ciaobot needs — fork, abort, permissions,
-structured questions, background subagents as child sessions — is native.
+turn; Ciaobot keeps a mid-turn message in the next-turn queue. Everything else
+Ciaobot needs — fork, abort, permissions, structured questions, background
+subagents as child sessions — is native.
 """
 
 from __future__ import annotations
@@ -692,9 +692,6 @@ class OpencodeProvider(BaseSDKProvider):
         fork=True,
         images=True,
         stop=True,
-        # No upstream method injects into a running turn; a mid-turn message
-        # queues for the next one instead.
-        steer=False,
         permissions=True,
         structured_questions=True,
         dynamic_models=True,
@@ -1262,8 +1259,8 @@ class OpencodeProvider(BaseSDKProvider):
 
         Returning False (rather than sending a second prompt) is deliberate —
         a second prompt would be queued or would abort the active turn, and
-        neither is what steering means. ``ProviderService`` keeps the message
-        for the next turn instead.
+        neither is what steering means. The caller keeps the message for the
+        next turn instead.
         """
         return False
 

@@ -11,15 +11,13 @@ export type RuntimeProvider = 'claude' | 'codex' | (string & {})
 /**
  * What a runtime provider supports, mirroring `ProviderCapabilities` in
  * `ciao/providers/base.py`. The PWA gates affordances on these rather than on
- * provider ids — e.g. no "steer" control renders for a provider that reports
- * `steer: false`.
+ * provider ids.
  */
 export interface ProviderCapabilities {
   resume: boolean
   fork: boolean
   images: boolean
   stop: boolean
-  steer: boolean
   permissions: boolean
   structured_questions: boolean
   dynamic_models: boolean
@@ -359,7 +357,6 @@ export type WsEvent =
   | { type: 'tool_denied'; tool_use_id: string }
   | { type: 'queued'; id?: string; text: string; images?: string[] }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
-  | { type: 'steered'; text: string; images?: string[] }
   | { type: 'error'; message: string }
   // The local client proxy could not open the remote host socket. This is a
   // connection state, not a chat/model failure, so the PWA renders one

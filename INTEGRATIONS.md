@@ -44,8 +44,10 @@ are pruned; `opencode.json` tracks Ciaobot-owned server names in
 `.opencode/.ciao-managed-mcps.json` because JSON has no comment syntax.
 
 opencode has no API for injecting a message into a running turn, so Ciaobot
-declares `steer=false` for it: a message sent mid-turn queues for the next turn
-instead of interrupting. Fork, abort, tool approvals, structured questions, and
+keeps a mid-turn message in the next-turn queue instead of interrupting. This
+is the same behavior every provider uses: Ciaobot buffers mid-turn messages and
+flushes them as a fresh turn when the active one finishes. Fork, abort, tool
+approvals, structured questions, and
 background subagents (real child sessions) are all native. When a chat is
 archived, deleted, or reset, Ciaobot disconnects its server and then calls
 `DELETE /session/{id}` to reclaim the persisted opencode session; cleanup is

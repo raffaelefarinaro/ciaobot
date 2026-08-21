@@ -2362,7 +2362,7 @@ function submitQuestionAnswers() {
   }
   const text = lines.join('\n')
   // sendMessage clears activeQuestions for this chat automatically.
-  store.sendMessage(chat.value.chat_id, text, 'queue')
+  store.sendMessage(chat.value.chat_id, text)
 }
 
 function dismissQuestions() {
@@ -3817,7 +3817,7 @@ function send() {
   // When any comments exist and there is no typed text, sendMessage builds
   // the composed content from the comment blocks, so we pass an empty string
   // here. The user sees the actual content in their bubble, not a placeholder.
-  store.sendMessage(chat.value.chat_id, sendText, 'queue')
+  store.sendMessage(chat.value.chat_id, sendText)
   writeChatDraft(chat.value.chat_id, '')
   inputText.value = ''
   // Sending implies following the reply: jump to the bottom even if the
@@ -3866,7 +3866,6 @@ function retryFromError(errorIdx: number) {
   store.sendMessage(
     chat.value.chat_id,
     prior.text,
-    'queue',
     { composed: prior.text, imageRefs: prior.images.length ? prior.images : undefined, fileComments: [], chatComments: [] },
   )
 }
