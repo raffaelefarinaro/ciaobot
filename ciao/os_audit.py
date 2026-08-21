@@ -956,10 +956,18 @@ def _search_index_audit(install_root: Path, workspaces: Sequence[str]) -> dict[s
     and rows pointing at paths that no longer resolve. `ciao workspace-reroot
     --repair` rebuilds it.
     """
-    out: dict[str, Any] = {"missing": False, "stale_rows": [], "errors": []}
+    out: dict[str, Any] = {
+        "missing": False,
+        "stale_rows": [],
+        "transcripts_unindexed": 0,
+        "errors": [],
+    }
     try:
         from ciao.fts_search import get_db_path
-        from ciao.workspace_reroot import stale_search_rows
+        from ciao.workspace_reroot import (
+            stale_search_rows,
+            unindexed_transcript_archive,
+        )
     except ImportError as exc:  # noqa: BLE001 — advisory section
         out["errors"].append({"type": "search_index_unavailable", "detail": str(exc)})
         return out
@@ -975,6 +983,7 @@ def _search_index_audit(install_root: Path, workspaces: Sequence[str]) -> dict[s
             out["missing"] = bool(has_notes)
             return out
         out["stale_rows"] = stale_search_rows(root)
+        out["transcripts_unindexed"] = unindexed_transcript_archive(root)
     except OSError as exc:
         out["errors"].append({"type": "search_index_unreadable", "detail": str(exc)})
     return out
@@ -1313,7 +1322,12 @@ def run_os_audit(
     search_result = (
         _search_index_audit(workspace, list(getattr(config, "workspace_names", lambda: [])()))
         if want_global
-        else {"missing": False, "stale_rows": [], "errors": []}
+        else {
+            "missing": False,
+            "stale_rows": [],
+            "transcripts_unindexed": 0,
+            "errors": [],
+        }
     )
     skill_result = (
         audit_skills(root) if want_workspace else {**empty_errors, "issues": []}
@@ -1419,6 +1433,7 @@ def run_os_audit(
         # is the same as not reporting it for anyone reading the summary.
         + (1 if search_result.get("missing") else 0)
         + (1 if search_result.get("stale_rows") else 0)
+        + (1 if search_result.get("transcripts_unindexed") else 0)
     )
     pending_action_count = upgrade_result["notices_found"]
     has_pending_actions = pending_action_count > 0

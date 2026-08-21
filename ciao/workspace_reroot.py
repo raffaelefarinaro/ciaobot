@@ -1967,7 +1967,14 @@ def repair(
     except Exception as exc:  # noqa: BLE001
         stale = []
         errors.append({"workspace": "", "error": f"could not inspect the search index: {exc}"})
-    if stale:
+    try:
+        unindexed = unindexed_transcript_archive(install_root, db_path=db_path)
+    except Exception as exc:  # noqa: BLE001
+        unindexed = 0
+        errors.append(
+            {"workspace": "", "error": f"could not inspect the transcript index: {exc}"}
+        )
+    if stale or unindexed:
         rebuilt = rebuild_search_index(
             install_root, sorted(workspaces), db_path=db_path, vault_name=leaf
         )
@@ -1975,14 +1982,27 @@ def repair(
             {"workspace": e.get("workspace", ""), "error": e.get("error", "")}
             for e in rebuilt.get("errors", [])
         )
-        repaired.append(
-            RepairItem(
-                workspace="",
-                drift="search_index_stale",
-                detail=f"{len(stale)} indexed path(s) no longer resolve, e.g. {stale[0]}",
-                action="dropped and rebuilt the search index",
+        if stale:
+            repaired.append(
+                RepairItem(
+                    workspace="",
+                    drift="search_index_stale",
+                    detail=(
+                        f"{len(stale)} indexed path(s) no longer resolve, "
+                        f"e.g. {stale[0]}"
+                    ),
+                    action="dropped and rebuilt the search index",
+                )
             )
-        )
+        if unindexed:
+            repaired.append(
+                RepairItem(
+                    workspace="",
+                    drift="transcript_index_empty",
+                    detail=f"{unindexed} transcript(s) in Logs/ were not indexed",
+                    action="dropped and rebuilt the search index",
+                )
+            )
 
     return {
         "status": "repaired" if repaired else "clean",
@@ -2176,6 +2196,40 @@ def index_workspace_prefixes(index: Path, workspaces: list[str]) -> list[str]:
         if head in names:
             found.append(label)
     return found
+
+
+def unindexed_transcript_archive(
+    install_root: Path, *, db_path: Path | None = None
+) -> int:
+    """Files in the promoted archive when the transcript index holds nothing.
+
+    `stale_search_rows` answers "do the indexed paths still resolve" — which a
+    table with no rows at all passes trivially. So a rebuild that dropped the
+    database and re-indexed only the vaults left transcript search empty and
+    every check downstream called it clean. The count of what should have been
+    indexed is the signal; zero archive files means there is nothing to report.
+    """
+    import sqlite3
+
+    from ciao.fts_search import get_db_path
+
+    install_root = Path(install_root).resolve()
+    logs = install_root / "Logs"
+    if not logs.is_dir():
+        return 0
+    db = Path(db_path) if db_path is not None else get_db_path()
+    if not db.exists():
+        return 0
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT count(*) FROM transcript_meta").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+    if rows:
+        return 0
+    return sum(1 for _ in logs.rglob("*.md"))
 
 
 def stale_search_rows(

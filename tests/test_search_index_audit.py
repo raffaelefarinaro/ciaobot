@@ -95,7 +95,12 @@ def test_a_current_index_is_silent(tmp_path: Path) -> None:
 
     report = _audit(tmp_path, config)
 
-    assert report["search_index"] == {"missing": False, "stale_rows": [], "errors": []}
+    assert report["search_index"] == {
+        "missing": False,
+        "stale_rows": [],
+        "transcripts_unindexed": 0,
+        "errors": [],
+    }
 
 
 def test_an_index_finding_counts_as_a_defect(tmp_path: Path) -> None:
@@ -195,3 +200,47 @@ def test_os_audit_defaults_its_vault_root_to_the_layout_on_disk(
     assert report["scan_errors"] == []
     assert [e for e in report["setup_audit"]["errors"]
             if e.get("type") == "missing_vault_root"] == []
+
+
+def test_an_empty_transcript_index_is_reported_and_repaired(tmp_path: Path) -> None:
+    """Zero transcript rows passes every "do the paths resolve" check.
+
+    `stale_search_rows` asks whether indexed paths still exist, so a table with
+    no rows is trivially healthy — which is exactly the state a vault-only
+    rebuild leaves behind. On the live install that was 1470 transcripts
+    unsearchable while `--repair` reported "clean".
+    """
+    from ciao.workspace_reroot import (
+        rebuild_search_index,
+        repair,
+        unindexed_transcript_archive,
+    )
+
+    config = _install(tmp_path)
+    archive = tmp_path / "Logs" / "Chats"
+    archive.mkdir(parents=True)
+    (archive / "chat-1.md").write_text("# Chat\nthe roof again\n", encoding="utf-8")
+
+    rebuild_search_index(tmp_path, ["personal", "work"])
+    assert unindexed_transcript_archive(tmp_path) == 0
+
+    # Simulate the vault-only rebuild this release shipped with.
+    import sqlite3
+
+    from ciao.fts_search import get_db_path
+
+    conn = sqlite3.connect(get_db_path())
+    conn.execute("DELETE FROM transcript_meta")
+    conn.commit()
+    conn.close()
+
+    assert unindexed_transcript_archive(tmp_path) == 1
+    report = _audit(tmp_path, config)
+    assert report["search_index"]["transcripts_unindexed"] == 1
+
+    result = repair(
+        tmp_path, tmp_path / ".runtime", ["personal", "work"]
+    )
+    drifts = [r["drift"] for r in result["repaired"]]
+    assert "transcript_index_empty" in drifts
+    assert unindexed_transcript_archive(tmp_path) == 0
