@@ -41,6 +41,7 @@
 import { ref } from 'vue'
 import qrcode from 'qrcode-generator'
 import { api } from '../lib/api'
+import { writeClipboard } from '../lib/codeCopy'
 
 interface AddressEntry {
   url: string
@@ -83,15 +84,12 @@ function toggle(entry: AddressEntry) {
 }
 
 async function copy(url: string) {
-  try {
-    await navigator.clipboard.writeText(url)
-    copied.value = url
-    setTimeout(() => {
-      if (copied.value === url) copied.value = null
-    }, 1500)
-  } catch {
-    // Clipboard access can be refused; the URL is on screen to read regardless.
-  }
+  const copiedOk = await writeClipboard(url)
+  if (!copiedOk) return
+  copied.value = url
+  setTimeout(() => {
+    if (copied.value === url) copied.value = null
+  }, 1500)
 }
 
 void load()

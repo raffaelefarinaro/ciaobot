@@ -416,6 +416,7 @@ import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } fr
 import { isCsvPath } from '../lib/csv'
 import { askConfirm } from '../lib/confirm'
 import { useFileComments } from '../composables/useFileComments'
+import { writeClipboard } from '../lib/codeCopy'
 import CommentComposePopover from './CommentComposePopover.vue'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
@@ -1263,11 +1264,10 @@ watch(
 )
 
 async function copyPath(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(store.path)
-    copyState.value = 'ok'
-    setTimeout(() => { copyState.value = '' }, 1200)
-  } catch { /* clipboard may be unavailable; silently ignore */ }
+  const copied = await writeClipboard(store.path)
+  if (!copied) return
+  copyState.value = 'ok'
+  setTimeout(() => { copyState.value = '' }, 1200)
 }
 
 async function openExternally(): Promise<void> {

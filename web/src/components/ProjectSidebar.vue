@@ -962,6 +962,7 @@ import { archiveMenuLabel as menuLabel, archiveConfirmMessage } from '../lib/arc
 import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { askPrompt } from '../lib/prompt'
+import { writeClipboard } from '../lib/codeCopy'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1447,7 +1448,8 @@ async function doRenameChat() {
 async function copyChatId(chatId: string) {
   closeChatMenus()
   try {
-    await navigator.clipboard.writeText(chatId)
+    const copied = await writeClipboard(chatId)
+    if (!copied) throw new Error('copy failed')
     store.pushToast({
       chat_id: chatId,
       title: 'Chat ID copied',

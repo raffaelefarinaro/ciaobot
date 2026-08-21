@@ -1244,7 +1244,7 @@ import {
   selectedModelEntry,
 } from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
-import { handleCodeCopyClick } from '../lib/codeCopy'
+import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
@@ -3299,15 +3299,12 @@ function activityLines(content: string): string[] {
 async function copyMessageText(text: string, key: string): Promise<void> {
   const trimmed = text.trim()
   if (!trimmed) return
-  try {
-    await navigator.clipboard.writeText(trimmed)
-    copiedMessageKey.value = key
-    setTimeout(() => {
-      if (copiedMessageKey.value === key) copiedMessageKey.value = null
-    }, 1500)
-  } catch {
-    // Clipboard can be unavailable in older standalone PWA contexts.
-  }
+  const copied = await writeClipboard(trimmed)
+  if (!copied) return
+  copiedMessageKey.value = key
+  setTimeout(() => {
+    if (copiedMessageKey.value === key) copiedMessageKey.value = null
+  }, 1500)
 }
 
 async function forkConversation(message: ChatMessage, key: string): Promise<void> {

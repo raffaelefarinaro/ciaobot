@@ -695,6 +695,7 @@ import ModelSelector from './ModelSelector.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
 import { isPerWorkspaceRoutine, loopInWorkspace, scheduleInWorkspace, workspaceForLoop } from '../lib/automationWorkspace'
 import { askConfirm } from '../lib/confirm'
+import { writeClipboard } from '../lib/codeCopy'
 
 const props = defineProps<{ showNew?: boolean }>()
 const emit = defineEmits<{ (e: 'created'): void; (e: 'open-sidebar'): void; (e: 'close'): void }>()
@@ -1175,20 +1176,20 @@ function contextUnavailable(s: Schedule): boolean {
 }
 
 async function copyPrompt(prompt: string, key: string) {
-  try {
-    await navigator.clipboard.writeText(prompt)
+  const copied = await writeClipboard(prompt)
+  if (copied) {
     copiedPromptKey.value = key
     if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
     copiedPromptTimer = window.setTimeout(() => {
       if (copiedPromptKey.value === key) copiedPromptKey.value = ''
     }, 1800)
-  } catch {
-    copiedPromptKey.value = `error:${key}`
-    if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
-    copiedPromptTimer = window.setTimeout(() => {
-      if (copiedPromptKey.value === `error:${key}`) copiedPromptKey.value = ''
-    }, 1800)
+    return
   }
+  copiedPromptKey.value = `error:${key}`
+  if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
+  copiedPromptTimer = window.setTimeout(() => {
+    if (copiedPromptKey.value === `error:${key}`) copiedPromptKey.value = ''
+  }, 1800)
 }
 
 function promptCopyLabel(key: string): string {

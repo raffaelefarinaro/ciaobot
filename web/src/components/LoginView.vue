@@ -424,6 +424,7 @@ import type { SetupStatus } from '../lib/types'
 import { errorMessage } from '../lib/errorMessage'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
+import { writeClipboard } from '../lib/codeCopy'
 
 const auth = useAuthStore()
 const token = ref('')
@@ -715,14 +716,9 @@ const canFinish = computed(() => {
 })
 
 async function copyCommand(text: string) {
-  try {
-    await navigator.clipboard.writeText(text)
-    copyStatus.value = 'Copied!'
-    setTimeout(() => { copyStatus.value = '' }, 2000)
-  } catch {
-    copyStatus.value = 'Failed'
-    setTimeout(() => { copyStatus.value = '' }, 2000)
-  }
+  const copied = await writeClipboard(text)
+  copyStatus.value = copied ? 'Copied!' : 'Failed'
+  setTimeout(() => { copyStatus.value = '' }, 2000)
 }
 
 async function doFinish() {
