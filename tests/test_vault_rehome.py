@@ -357,8 +357,8 @@ def test_judgement_cases_are_proposed_but_not_moved(tmp_path: Path) -> None:
 
 
 def test_the_queue_lives_in_the_workspace_holding_the_note(tmp_path: Path) -> None:
-    """`memory_proposal_resolve` dismisses an entry in a *workspace's* queue, and
-    the curator who can answer "is this person work or personal" is the one
+    """`ciao memory-proposal-dismiss` removes an entry in a *workspace's* queue,
+    and the curator who can answer "is this person work or personal" is the one
     reading that workspace."""
     vault = _vault(tmp_path)
 

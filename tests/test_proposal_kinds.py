@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -32,25 +31,6 @@ def _fixture_file(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return path
-
-
-def _control_plane(tmp_path: Path):
-    from ciao.control_plane import CiaoControlPlane, McpPrincipal
-
-    config = SimpleNamespace(
-        vault_root=str(tmp_path),
-        workspace=lambda name: object() if name == "personal" else None,
-    )
-    plane = CiaoControlPlane(
-        config,
-        project_chat_manager=SimpleNamespace(),
-        schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
-    )
-    principal = McpPrincipal(
-        token_id="t", chat_id="c", project_id="p", workspace="personal", provider="claude"
-    )
-    return plane, principal
 
 
 def test_rehome_and_profile_are_matched_by_the_shared_regex() -> None:
@@ -86,32 +66,27 @@ def test_all_former_call_sites_agree_on_one_fixture(tmp_path: Path) -> None:
     )
     assert report["pending_memory_proposals"] == 4
 
-    # control_plane lists the same bullets through its MCP surface.
-    plane, principal = _control_plane(tmp_path)
-    rows = plane.memory_proposals_list(principal)["data"]
-    assert len(rows) == 4
-    # The three memory/profile kinds normalize to regions; rehome keeps its raw
-    # kind because it is a file move, not a region edit.
-    assert {row["target"] for row in rows} == {"memory", "profile", "rehome"}
-
     # the web layer's counter sees every kind too.
     assert _count_proposal_bullets(path) == 4
 
 
-def test_proposal_resolve_accepts_dismiss_as_reject_synonym(tmp_path: Path) -> None:
-    """The curator-facing ``memory_proposal_resolve`` treats ``dismiss`` as the
-    ``reject`` action, matching the wording in the memory-curation schedule."""
+def test_resolve_removes_one_matched_bullet(tmp_path: Path) -> None:
+    """The queue resolver deletes exactly the matched bullet by unique text.
+
+    Memory proposals are listed and dismissed from the CLI
+    (``ciao memory-proposals`` / ``ciao memory-proposal-dismiss``) rather than
+    over MCP; this pins the core row-removal logic the CLI reuses.
+    """
+    from ciao.memory_proposals import dismiss_proposal_by_substring
+
     path = _fixture_file(tmp_path)
-    plane, principal = _control_plane(tmp_path)
+    assert dismiss_proposal_by_substring(path, "durable lesson") is True
 
-    plane.memory_proposal_resolve(principal, "durable lesson", action="dismiss")
-
-    remaining = plane.memory_proposals_list(principal)["data"]
-    assert {row["text"] for row in remaining} == {
-        "prefers terse replies",
-        "legacy profile label",
-        "move this note to work",
-    }
+    text = path.read_text(encoding="utf-8")
+    assert "durable lesson" not in text
+    assert "prefers terse replies" in text
+    assert "legacy profile label" in text
+    assert "move this note to work" in text
 
 
 def test_unknown_kind_raises_never_silent_zero() -> None:

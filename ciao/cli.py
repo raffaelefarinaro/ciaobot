@@ -1999,6 +1999,75 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
     return 1 if findings else 0
 
 
+def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
+    """Shared workspace/vault resolution for the memory-proposal commands."""
+    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    workspace = Path(workspace_raw).expanduser().resolve()
+    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault = Path(vault_raw).expanduser()
+    if not vault.is_absolute():
+        vault = workspace / vault
+    return workspace, vault.resolve()
+
+
+def _memory_proposals_command(args: argparse.Namespace) -> int:
+    """List pending memory proposals in a workspace's review queue.
+
+    Read-only. Each pending proposal bullet is emitted with its kind, text,
+    and optional source. The curation agent lists this queue, decides each
+    item (promote via a region Edit, or dismiss via ``memory-proposal-dismiss``),
+    and thereby keeps memory improving across sessions.
+    """
+    from ciao.memory_proposals import list_proposals
+
+    workspace, vault = _resolve_workspace_and_vault(args)
+    path = vault / "Workspace" / "Memory-Proposals.md"
+    rows = list_proposals(path)
+    if args.json:
+        json.dump(rows, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        if not rows:
+            print("No memory proposals are pending.")
+        for row in rows:
+            tag = f" [{row['source']}]" if row["source"] else ""
+            print(f"- [{row['kind']}] {row['text']}{tag}")
+    return 0
+
+
+def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
+    """Dismiss (delete) one memory proposal from the review queue.
+
+    Removing a proposal is a review decision, never a memory write: promotion
+    into a ``ciao:memory`` / ``ciao:profile`` region is an explicit ``Edit`` of
+    the workspace CLAUDE.md first, then this dismiss removes the resolved item
+    so the queue stops re-asking. TEXT matches one proposal by a unique
+    substring.
+    """
+    from ciao.memory_proposals import dismiss_proposal_by_substring
+
+    workspace, vault = _resolve_workspace_and_vault(args)
+    path = vault / "Workspace" / "Memory-Proposals.md"
+    needle = args.text.strip()
+    if not needle:
+        print("a proposal text or unique substring is required", file=sys.stderr)
+        return 2
+    removed = dismiss_proposal_by_substring(path, needle)
+    if not removed:
+        print(
+            f"No unique memory proposal matched {needle!r} "
+            "(the text may be ambiguous or absent).",
+            file=sys.stderr,
+        )
+        return 1
+    if args.json:
+        json.dump({"removed": True, "text": needle, "workspace": args.workspace or ""}, sys.stdout)
+        sys.stdout.write("\n")
+    else:
+        print(f"Dismissed memory proposal matching {needle!r}.")
+    return 0
+
+
 def _vault_index_command(args: argparse.Namespace) -> int:
     from ciao import vault_index
 
@@ -3015,6 +3084,71 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output raw JSON audit report.",
     )
     memory_audit_parser.set_defaults(func=_memory_audit_command)
+
+    memory_proposals_parser = subparsers.add_parser(
+        "memory-proposals",
+        help="List pending memory proposals in a workspace's review queue.",
+        description=(
+            "Lists the reviewable memory proposals produced from archived "
+            "chats. Read-only. Each pending bullet is emitted with its kind, "
+            "text, and source. Decide each item (promote via a region Edit, "
+            "or dismiss with `ciao memory-proposal-dismiss <text>`), keeping "
+            "the queue clean so the nightly curator has real signal to work "
+            "with."
+        ),
+    )
+    memory_proposals_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposals_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposals_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured rows as JSON instead of text.",
+    )
+    memory_proposals_parser.set_defaults(func=_memory_proposals_command)
+
+    memory_proposal_dismiss_parser = subparsers.add_parser(
+        "memory-proposal-dismiss",
+        help="Dismiss one memory proposal from the review queue.",
+        description=(
+            "Removes one pending memory proposal from a workspace's queue, "
+            "matched by a unique text substring. Removing is a review "
+            "decision, never a memory write: promote into a bounded region "
+            "with an explicit Edit first, then dismiss here so the queue "
+            "stops re-asking."
+        ),
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "text",
+        help="Proposal text or unique substring to dismiss.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
 
     skill_proposal_parser = subparsers.add_parser(
         "skill-proposal-remove",

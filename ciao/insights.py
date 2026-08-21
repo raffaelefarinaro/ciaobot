@@ -245,31 +245,40 @@ Cite the message index `[idx=N]` for every claim. Do not invent facts.
 Do not summarise the conversation - that is already saved.
 
 Rules:
+- Emit ONLY durable, cross-session facts. A fact is worth keeping only if it
+  will matter in a future session: a standing preference, a reusable lesson, a
+  real error pattern, a recurring tool, a new person/project. Omit a section
+  entirely rather than fill it with session-local noise — a one-off choice
+  about this one repo, a single loop, or a phrasing pushback that was only
+  about this session has no place here.
 - Skip routine successful tool calls.
 - Skip anything obvious from user/assistant text alone.
 - "Errors" = tool/model/system failure, not just things the user disliked.
-- "User corrections" = the user pushed back, redirected, or rejected an approach.
-  Append the "Durable rule:" sentence only when the correction implies a
-  preference that should hold in future sessions, phrased as a present-tense
-  standing rule; omit it for one-off fixes.
-- "New entities" = people/projects/places/products mentioned for the first time, not generic nouns.
-- When citing a vault note, use a relative Markdown link with the path from the vault root: [Mo](./People/Mo.md). Do NOT use [[wikilinks]] and do NOT wrap the link in backticks, quotes, or other formatting.
+- "User corrections" = a correction that implies a preference the user wants to
+  hold in future sessions. Drop corrections that only fixed this session's
+  output. Append the "Durable rule:" sentence ONLY when the user stated a
+  present-tense standing rule; if the correction has no durable rule, do NOT
+  write the bullet at all.
+- "New entities" = people, phrases, places, or products mentioned for the first
+  time that the user will keep dealing with — not generic nouns, not one-off
+  references to something in this transcript.
+- "Decisions" = choices that set a precedent for future sessions ("chose X over
+  Y, and we should keep doing X"). Drop one-off picks about this transcript.
+- When citing a vault link, use a relative Markdown link with the path from the
+  vault root: [Mo](./People/Mo.md). Do NOT use [[bracketed-wikilinks]] and do NOT wrap the link in backticks, quotes, or other formatting.
 - Be terse. One line per item where possible.
 
 ## Errors
-- <what failed> -> <how it was resolved, or "unresolved"> [idx=N]
-
-## Dead ends
-- Tried <approach>; blocked by <reason>; switched to <alternative>. [idx=N]
+- <what failed> -> <how it was resolved, or "unresolved">. Only a failure whose fix is worth remembering. [idx=N]
 
 ## User corrections
-- User said: "<short quote>" -> assistant changed <what>. Durable rule: <present-tense standing preference, if any>. [idx=N]
+- <the standing rule that holds in future sessions>, phrased as present-tense state. Durable rule: <the same rule, present tense>. Never "User said: <quote> -> assistant did <x>" alone. [idx=N]
 
 ## New entities
-- <type>: <name> - <one-line context>. [idx=N]
+- <type>: <name> - <one-line context>. Only recurring names. [idx=N]
 
 ## Decisions
-- Chose <X> over <Y> because <reason>. [idx=N]
+- Chose <X> over <Y> because <reason>; this governs future sessions. Only precedent-setting choices. [idx=N]
 
 ## Reusable snippets
 - <one-line description>:
@@ -1032,24 +1041,33 @@ Do not invent facts. Do not summarise the conversation - that is the
 transcript itself.
 
 Rules:
-- Skip anything obvious from the transcript prose alone.
-- "User corrections" = the user pushed back, redirected, or rejected an approach.
-  Append the "Durable rule:" sentence only when the correction implies a
-  present-tense standing preference; omit it for one-off fixes.
-- "New entities" = people/projects/places/products mentioned for the first time.
+- Emit ONLY durable, cross-session facts: a standing preference, a reusable
+  lesson, a real error pattern, a recurring name. Omit a section entirely
+  rather than fill it with session-local noise — a one-off choice about this
+  one repo, a single exchange, or a phrasing pushback that only fixed this
+  session has no place here.
+- "User corrections" = a correction that implies a preference the user wants to
+  hold in future sessions. Drop corrections that only fixed this session's
+  output. Append the "Durable rule:" sentence ONLY when the user stated a
+  present-tense standing rule; if there is no durable rule, do NOT write the
+  bullet at all.
+- "New entities" = people/projects/places/products the user will keep dealing
+  with, not one-off references in this transcript.
+- "Decisions" = choices that set a precedent for future sessions; drop one-off
+  picks about this transcript.
 - Be terse. One line per item where possible.
 
 Your entire response must be Markdown using only the section headers below. Never
 return JSON, a code-fenced transcript, session metadata, or a generic recap.
 
 ## User corrections
-- User said: "<short quote>" -> assistant changed <what>. Durable rule: <present-tense standing preference, if any>.
+- <the standing rule that holds in future sessions>, phrased as present-tense state. Durable rule: <the same rule, present tense>. Never "User said: <quote> -> assistant did <x>" alone.
 
 ## New entities
-- <type>: <name> - <one-line context>.
+- <type>: <name> - <one-line context>. Only recurring names.
 
 ## Decisions
-- Chose <X> over <Y> because <reason>.
+- Chose <X> over <Y> because <reason>; this governs future sessions. Only precedent-setting choices.
 
 ## Open loops
 - <thing left undone, with any deadline or condition>.

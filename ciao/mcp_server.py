@@ -930,28 +930,6 @@ class CiaoMcpService:
                 mutating=True,
             )
 
-        @tool(name="memory_proposals_list", annotations=_READ, structured_output=True)
-        async def memory_proposals_list() -> dict[str, Any]:
-            """List reviewable memory proposals produced from archived chats."""
-            return await self._invoke(
-                "memory_proposals_list", lambda cp, p: cp.memory_proposals_list(p)
-            )
-
-        @tool(name="memory_proposal_resolve", annotations=_WRITE, structured_output=True)
-        async def memory_proposal_resolve(text: str, action: str) -> dict[str, Any]:
-            """Dismiss one proposal selected by a unique text substring.
-
-            Never writes memory: Edit the matching CLAUDE.md region first, then
-            dismiss here (the reverse order can lose the fact).
-            """
-            return await self._invoke(
-                "memory_proposal_resolve",
-                lambda cp, p: cp.memory_proposal_resolve(
-                    p, text, action=action  # type: ignore[arg-type]
-                ),
-                mutating=True,
-            )
-
         @tool(name="vault_search", annotations=_READ, structured_output=True)
         async def vault_search(query: str, limit: int = 10) -> dict[str, Any]:
             """Full-text search the active workspace vault."""

@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from ciao import proposal_kinds, vault_index
+from ciao import vault_index
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import (
     get_db_path,
@@ -42,32 +42,6 @@ logger = logging.getLogger(__name__)
 # normal ``= None`` default loses information before the control plane sees
 # it.
 _UNSET = object()
-
-# One grammar for a proposal bullet, shared by the list and dismiss paths. The
-# kinds and the bullet shape are owned by ciao.proposal_kinds; this module
-# only re-exports the regex so it stays in sync with every other counter.
-_PROPOSAL_BULLET_RE = proposal_kinds.BULLET_RE
-
-
-def _proposal_row(match: re.Match[str]) -> dict[str, str]:
-    """One matched bullet as a row for the list/dismiss responses.
-
-    A rehome bullet is a file move, not a memory edit, so it has no region.
-    Resolving its kind to a region would raise on the shared registry's wider
-    kind set; the row carries the raw kind and only the region-edit kinds get
-    normalized. Callers that can only act on a region must branch on the kind.
-    """
-    kind = match.group(1)
-    if proposal_kinds.accept_for(kind).action == "edit_region":
-        target = resolve_region(kind)
-    else:
-        target = kind
-    return {
-        "target": target,
-        "text": match.group(2).strip(),
-        "source": (match.group(3) or "").strip(),
-    }
-
 
 @dataclass(frozen=True, slots=True)
 class McpPrincipal:
@@ -423,69 +397,13 @@ class CiaoControlPlane:
 
     # ---- memory proposals ----------------------------------------------
 
+    # Memory-proposal list/dismiss moved out of the MCP surface to the CLI
+    # (`ciao memory-proposals`, `ciao memory-proposal-dismiss`) so the nightly
+    # curation agent can review and resolve the queue through one tool instead
+    # of a synchronous MCP round-trip. The vault path resolution still lives on
+    # the control plane for any surface that needs it.
     def _memory_proposals_path(self, principal: McpPrincipal) -> Path:
         return self._vault_root(principal) / "Workspace" / "Memory-Proposals.md"
-
-    def memory_proposals_list(self, principal: McpPrincipal) -> dict[str, Any]:
-        """Return structured pending proposal bullets for the active workspace."""
-        path = self._memory_proposals_path(principal)
-        if not path.exists():
-            return _ok([])
-        rows: list[dict[str, str]] = []
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            match = _PROPOSAL_BULLET_RE.match(raw)
-            if match:
-                rows.append(_proposal_row(match))
-        return _ok(rows)
-
-    def memory_proposal_resolve(
-        self,
-        principal: McpPrincipal,
-        text: str,
-        *,
-        action: Literal["accept", "reject", "dismiss"],
-    ) -> dict[str, Any]:
-        """Dismiss a proposal from the queue.
-
-        Promotion into a CLAUDE.md region is an explicit ``Edit`` by the
-        agent — this tool never writes memory. Ordering: edit the region
-        first, then dismiss the proposal (the reversal loses the fact if the
-        turn dies between the two steps). ``accept`` marks the fact as
-        promoted; ``reject`` and its synonym ``dismiss`` drop it.
-        """
-        if action == "dismiss":
-            action = "reject"
-        elif action not in {"accept", "reject"}:
-            raise ControlPlaneError("invalid_action", "action must be accept or reject.")
-        path = self._memory_proposals_path(principal)
-        if not path.exists():
-            raise ControlPlaneError("proposal_not_found", "The proposal queue is empty.")
-        needle = text.strip()
-        if not needle:
-            raise ControlPlaneError("proposal_required", "A proposal text or unique substring is required.")
-        lines = path.read_text(encoding="utf-8").splitlines()
-        candidates = [
-            (index, line)
-            for index, line in enumerate(lines)
-            if line.lstrip().startswith("- [") and needle.casefold() in line.casefold()
-        ]
-        if not candidates:
-            raise ControlPlaneError("proposal_not_found", "No pending proposal matched that text.")
-        if len(candidates) > 1:
-            raise ControlPlaneError("proposal_ambiguous", "The text matched more than one proposal; use a longer substring.")
-        index, line = candidates[0]
-        match = _PROPOSAL_BULLET_RE.match(line)
-        if match is None:
-            raise ControlPlaneError("proposal_invalid", "The matching proposal has an unsupported format.")
-        proposal_row = _proposal_row(match)
-        del lines[index]
-        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-        return _ok({
-            "action": action,
-            "target": proposal_row["target"],
-            "text": proposal_row["text"],
-            "dismissed": True,
-        })
 
     # ---- workspaces ----------------------------------------------------
 

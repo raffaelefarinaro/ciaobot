@@ -3093,6 +3093,36 @@ def _messages_from_archived_transcript(
     return parsed
 
 
+def _read_session_segment(session_id: str, directories: list[str]) -> list:
+    """One session's messages, from whichever root recorded it.
+
+    The projects directory is slugged from the cwd the session ran in, so a chat's
+    own agent root is where to look first and the install root second — the latter
+    holds every session from before the re-rooting.
+
+    An EMPTY result counts as "not in this root", not as success. That is not a
+    detail: asked for a session it does not have, `get_session_messages_full`
+    returns `[]` rather than raising — which is exactly how the original bug hid.
+    Stopping at the first empty answer would have fixed today's chats by blanking
+    every chat from before the migration instead.
+
+    Raises when no root has it, so the caller's "skip this segment" path still
+    works and the archived-transcript fallback still gets its turn.
+    """
+    from ciao.transcripts import get_session_messages_full
+
+    for directory in directories:
+        try:
+            segment = get_session_messages_full(session_id, directory=directory)
+        except (FileNotFoundError, ValueError):
+            continue
+        if segment:
+            return segment
+    raise FileNotFoundError(
+        f"no session {session_id!r} under any of: {', '.join(directories)}"
+    )
+
+
 async def chat_messages(request: Request) -> JSONResponse:
     """Return conversation history for a chat.
 
@@ -3125,6 +3155,14 @@ async def chat_messages(request: Request) -> JSONResponse:
 
     config = request.app.state.config
     provider = getattr(chat, "provider", "claude")
+    # Every provider stores its sessions per-cwd, and a chat's cwd is its agent
+    # root. Reading with the install root found nothing for any chat created since
+    # the re-rooting — for Claude that rendered an empty conversation, and codex
+    # and opencode were reading from the wrong root for the same reason.
+    _resolver = getattr(pcm, "_agent_root_for_chat", None)
+    session_root = Path(
+        _resolver(chat_id) if _resolver is not None else config.workspace_root
+    )
     if provider in ("codex", "opencode"):
         if getattr(chat, "archived", False):
             # An archived chat is read-only and its provider-side session may
@@ -3135,14 +3173,12 @@ async def chat_messages(request: Request) -> JSONResponse:
                 return JSONResponse(handover_messages + archived)
         rendered: list[dict] = []
         if provider == "codex":
-            thread = await CodexProvider.read_thread(
-                config.workspace_root, chat.session_id
-            )
+            thread = await CodexProvider.read_thread(session_root, chat.session_id)
             if thread is not None:
                 rendered = _render_codex_thread(thread, chat)
         else:
             opencode_thread = await OpencodeProvider.read_thread(
-                config.workspace_root, chat.session_id
+                session_root, chat.session_id
             )
             if opencode_thread:
                 rendered = _render_opencode_thread(opencode_thread, chat)
@@ -3182,6 +3218,21 @@ async def chat_messages(request: Request) -> JSONResponse:
     # lineage (oldest first) so history renders continuously across the
     # rotation instead of only showing the newest segment.
     session_ids = [*chat.previous_session_ids, chat.session_id]
+    # A session's JSONL lives in a directory slugged from the CWD it was started
+    # in, and that is the chat's AGENT ROOT — `~/repos/ciao/work`, not the install
+    # root. Passing the install root looked up
+    # `~/.claude/projects/-Users-me-repos-ciao/<session>.jsonl`, which does not
+    # exist for any chat created since the re-rooting; the FileNotFoundError was
+    # swallowed as "this segment is missing" and every such chat rendered EMPTY.
+    #
+    # The install root is still tried, second: chats from before the migration
+    # have their transcripts under exactly that slug, and they must keep
+    # rendering.
+    session_dirs: list[str] = []
+    for candidate in (session_root, Path(config.workspace_root)):
+        text = str(candidate)
+        if text not in session_dirs:
+            session_dirs.append(text)
     msgs: list | None = None
     for sid in session_ids:
         if not sid:
@@ -3193,7 +3244,7 @@ async def chat_messages(request: Request) -> JSONResponse:
             # every other request on the node, including the 5s chat-socket
             # keepalives whose absence trips the PWA's half-open watchdog.
             segment = await asyncio.to_thread(
-                get_session_messages_full, sid, directory=str(config.workspace_root)
+                _read_session_segment, sid, session_dirs
             )
         except (FileNotFoundError, ValueError):
             # This segment's file doesn't exist on this machine (remote chat,

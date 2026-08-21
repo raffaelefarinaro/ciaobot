@@ -70,6 +70,29 @@ def test_propose_drops_dead_ends() -> None:
     assert all("tried" not in p.text.lower() for p in proposals)
 
 
+def test_propose_drops_event_shaped_bullets_without_a_rule() -> None:
+    """A transcript-event bullet is not durable state.
+
+    The extraction prompt asks for standing rules, not "User said X -> assistant
+    did Y" records; if one slips through, the heuristic drops it so the queue
+    does not fill with session noise the curator would only dismiss.
+    """
+    insights = (
+        "## User corrections\n"
+        '- User said: "revert that" -> assistant restored the file. [idx=4]\n'
+        '- User said: "use commas" -> assistant replaced the em dashes. '
+        "Durable rule: Avoid em dashes; use commas instead. [idx=5]\n"
+        "## Decisions\n"
+        '- Chose inline over split because it was quicker this once. [idx=6]\n'
+    )
+    proposals = mp.propose_from_insights(insights)
+    texts = [p.text for p in proposals]
+    # The rule-less event-shaped correction is dropped.
+    assert all("revert that" not in t for t in texts)
+    # The one carrying a real durable-rule clause survives.
+    assert any("use commas instead" in t for t in texts)
+
+
 def test_append_proposals_uses_the_resolved_workspace_vault(tmp_path: Path) -> None:
     """The caller supplies the registry-owned root; this module never guesses."""
     vault = tmp_path / "vault"
@@ -239,11 +262,14 @@ def test_promote_drops_exact_duplicates(tmp_path: Path) -> None:
 
 
 def test_promote_holds_back_event_shaped_corrections(tmp_path: Path) -> None:
-    """A correction with no durable rule never lands in a bounded region.
+    """A correction with no durable rule is never proposed at all.
 
     The regions are a state surface and memory-audit flags the
     "User said X -> assistant did Y" shape as rot; writing it verbatim just
-    paid a nightly curation run to undo the archive-time write.
+    paid a nightly curation run to undo the archive-time write. A bullet with
+    no ``Durable rule:`` clause that only records the exchange is the session
+    noise the extraction prompt and heuristic both filter, so it is dropped at
+    proposal time rather than queued for a curator to rephrase.
     """
     guide = write_guide(tmp_path / "CLAUDE.md")
     insights = (
@@ -254,11 +280,11 @@ def test_promote_holds_back_event_shaped_corrections(tmp_path: Path) -> None:
     proposals = mp.propose_from_insights(insights)
     remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
 
+    assert proposals == []
     assert promoted == []
     mem_entries, _diags = mt.read_region(guide, "memory")
     assert mem_entries == []
-    # Still reviewable: the curator rephrases it on the next pass.
-    assert any(p.source_section == "User corrections" for p in remaining)
+    assert remaining == []
 
 
 def test_promote_ignores_echoed_rule_placeholder(tmp_path: Path) -> None:
@@ -464,8 +490,10 @@ def test_promote_ignores_rule_label_quoted_inside_user_text(tmp_path: Path) -> N
     proposals = mp.propose_from_insights(insights)
     remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
 
+    # No real durable-rule clause and an event-shaped frame: not durable.
+    assert proposals == []
     assert promoted == []
-    assert any(p.source_section == "User corrections" for p in remaining)
+    assert remaining == []
 
 
 def test_durable_rule_label_matches_extraction_prompts() -> None:

@@ -35,7 +35,7 @@ Regions are char-capped (~2200 memory / ~1375 profile) because native provider g
 - At/above ~85%, consolidate BEFORE adding: merge related entries and drop stale one-off corrections with no reuse value.
 - Edit regions with `Edit`, or use the typed `memory_update` tool. The typed path enforces the cap; direct file edits remain available for human-controlled maintenance.
 - Never drop a durable fact because a region is full — make room by consolidating, or leave it in the proposals queue.
-- When promoting from proposals: edit the region first, then dismiss with `memory_proposal_resolve` (the reverse can lose the fact).
+- When promoting from proposals: edit the region first, then dismiss with `ciao memory-proposal-dismiss <text>` (the reverse can lose the fact). List the queue with `ciao memory-proposals`.
 - When a skill proposal's change is implemented or decided against, remove it with `ciao skill-proposal-remove <name>` naming the proposal file or a unique substring of its name.
 - When promoting a correction, write the present-tense standing rule it implies; never copy a "User said X -> assistant did Y" event shape into a region (memory-audit flags those as rot).
 

@@ -1565,8 +1565,8 @@ def _queue_judgement_cases(
     """File the judgement cases in each workspace's proposal queue.
 
     Per workspace, not one global file: that is where the user already reviews
-    that workspace's proposals, and `memory_proposal_resolve` already knows how
-    to dismiss an entry there. Grouped by the workspace the note is in *today*,
+    that workspace's proposals, and `ciao memory-proposal-dismiss` already knows
+    how to remove an entry there. Grouped by the workspace the note is in *today*,
     since that is the vault whose curator has to make the call.
     """
     written: list[str] = []

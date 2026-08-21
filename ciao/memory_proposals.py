@@ -15,9 +15,10 @@ heuristic pass over the existing section:
 
 The output is written as a Markdown bullet list to the archive owner's
 ``<workspace-vault>/Workspace/Memory-Proposals.md``. A human (or the agent
-via Edit on the CLAUDE.md regions, then ``memory_proposal_resolve`` to
-dismiss) reviews and promotes them. Auto-apply is intentionally NOT the
-default — the agent layer is the right place to make the consolidation call.
+via Edit on the CLAUDE.md regions, then the ``ciao memory-proposal-dismiss``
+CLI to remove the resolved item) reviews and promotes them. Auto-apply is
+intentionally NOT the default — the agent layer is the right place to make
+the consolidation call.
 
 One exception: "User corrections" are rare and highest-signal, so
 :func:`promote_user_corrections` promotes them straight to the matching
@@ -103,13 +104,47 @@ def _split_sections(insights_md: str) -> dict[str, list[str]]:
 
 
 def _is_durable(text: str) -> bool:
-    """Reject obvious per-session noise before proposing."""
+    """Reject obvious per-session noise before proposing.
+
+    This is the second line of defence behind the extraction prompt: bullets
+    that reach here are already terse, but the model still drifts toward the
+    "User said: X -> assistant did Y" event shape. A correction that only
+    records what happened in one chat is exactly the shape ``memory_audit``
+    flags as rot if it ever reaches a region, so it is stopped at the queue —
+    unless it carries a ``Durable rule:`` clause, which is the durable part
+    and survives regardless (a placeholder rule still stays pending for the
+    curator to judge rather than being auto-promoted).
+    """
+    from ciao.memory_audit import find_event_shaped
+
     lowered = text.lower()
     if any(lowered.startswith(p) for p in ("tried ", "asked ", "ran ")):
         return False
     if len(text) < 12 or len(text) > 400:
         return False
-    return True
+    if _durable_rule_of(text) is not None:
+        # Has a Durable rule clause (real or placeholder): keep it pending so
+        # the curator decides. A real clause is promoted; a placeholder stays
+        # queued rather than being silently proposed as durable.
+        return True
+    # No durable-rule clause: a bullet shaped like a transcript event is
+    # session noise, not state. `find_event_shaped` is the same detector
+    # memory_audit uses, so a bullet that would be flagged as rot on promotion
+    # is never proposed at all.
+    return not find_event_shaped("memory", [text])
+
+
+def _durable_rule_of(text: str) -> str | None:
+    """The standing rule a bullet asserts, or None when it carries no clause.
+
+    Returns ``None`` when there is no "Durable rule:" clause; otherwise the
+    clause text, which may be empty or a placeholder ("None"/"n/a"/an echoed
+    template). Callers decide what an empty/placeholder clause means.
+    """
+    matches = list(_DURABLE_RULE_RE.finditer(text))
+    if not matches:
+        return None
+    return matches[-1].group(1).strip().rstrip(".").strip()
 
 
 # ── Proposal generation ───────────────────────────────────────────────────
@@ -326,9 +361,9 @@ _STUB_HEADER = (
     "timestamped. Review and promote durable cross-session facts into the "
     "`ciao:memory` / `ciao:profile` regions of the workspace `CLAUDE.md` with "
     "Edit (edit the region first), then dismiss the proposal with "
-    "`memory_proposal_resolve`. Identity facts about the operator also belong "
-    "on `People/User.md`. Standing directives stay in the CLAUDE.md body "
-    "outside the fenced regions.\n"
+    "`ciao memory-proposal-dismiss <text>`. Identity facts about the operator "
+    "also belong on `People/User.md`. Standing directives stay in the CLAUDE.md "
+    "body outside the fenced regions.\n"
 )
 
 
@@ -451,3 +486,66 @@ def _extract_insights_section(archive_md: str) -> str:
     if location is None:
         return ""
     return archive_md[location[1]:].strip()
+
+
+# ── Review surface (CLI) ──────────────────────────────────────────────────
+
+
+def list_proposals(
+    proposals_path: Path,
+) -> list[dict[str, str]]:
+    """Structured pending proposal bullets from a workspace's queue.
+
+    Reuses the shared proposal-kind grammar so the CLI, the web layer, and the
+    audit always agree on what a bullet is. Each row carries the raw ``kind``,
+    the bullet ``text``, and the optional ``source`` tag.
+    """
+    from ciao.proposal_kinds import parse_bullet
+
+    if not proposals_path.exists():
+        return []
+    rows: list[dict[str, str]] = []
+    for raw in proposals_path.read_text(encoding="utf-8").splitlines():
+        bullet = parse_bullet(raw)
+        if bullet is not None:
+            rows.append(
+                {
+                    "kind": bullet.kind,
+                    "text": bullet.text,
+                    "source": bullet.source,
+                }
+            )
+    return rows
+
+
+def dismiss_proposal_by_substring(
+    proposals_path: Path,
+    needle: str,
+) -> bool:
+    """Remove the single proposal whose bullet matches ``needle``.
+
+    Matches a unique substring case-insensitively across the pending bullets
+    (the same contract the removed MCP resolve tool used). Returns True when
+    exactly one proposal was removed, False when the file is missing or no
+    match exists. An ambiguous match (more than one) is left unresolved and
+    returns False so the caller can ask for a longer substring.
+    """
+    from ciao.proposal_kinds import parse_bullet
+
+    if not proposals_path.exists():
+        return False
+    needle = needle.strip()
+    if not needle:
+        return False
+    lines = proposals_path.read_text(encoding="utf-8").splitlines()
+    candidates: list[int] = []
+    for index, line in enumerate(lines):
+        if parse_bullet(line) is None:
+            continue
+        if needle.casefold() in line.casefold():
+            candidates.append(index)
+    if len(candidates) != 1:
+        return False
+    del lines[candidates[0]]
+    proposals_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return True
