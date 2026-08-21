@@ -445,65 +445,6 @@ class CiaoControlPlane:
         self._refresh_workspace_registry()
         return _ok(workspace_to_dict(workspace, self.config))
 
-    def workspace_update(
-        self,
-        principal: McpPrincipal,
-        *,
-        name: str,
-        default_provider: str | None = None,
-        default_model: str | None = None,
-        gws_profile: str | None = None,
-        disallowed_tools: Any = _UNSET,
-        color: str = "",
-    ) -> dict[str, Any]:
-        """Update a registered workspace. Omitted fields keep their values."""
-        from ciao.workspaces import persist_workspaces, workspace_from_request, workspace_to_dict
-
-        existing = self.config.workspace(name)
-        if existing is None:
-            raise ControlPlaneError("workspace_not_found", f"Workspace '{name}' was not found.")
-        data: dict[str, Any] = {"name": name}
-        if default_provider is not None:
-            data["default_provider"] = default_provider
-        if default_model is not None:
-            data["default_model"] = default_model
-        if gws_profile is not None:
-            data["gws_profile"] = gws_profile
-        if disallowed_tools is not _UNSET:
-            data["disallowed_tools"] = disallowed_tools
-        if color:
-            data["color"] = color
-        workspace = workspace_from_request(data, config=self.config, existing=existing)
-        self.config.workspaces[workspace.name] = workspace
-        persist_workspaces(self.config)
-        self._refresh_workspace_registry()
-        return _ok(workspace_to_dict(workspace, self.config))
-
-    def workspace_delete(self, principal: McpPrincipal, *, name: str) -> dict[str, Any]:
-        """Delete a registered workspace. The last workspace cannot be deleted."""
-        if self.config.workspace(name) is None:
-            raise ControlPlaneError("workspace_not_found", f"Workspace '{name}' was not found.")
-        if len(self.config.workspaces) <= 1:
-            raise ControlPlaneError(
-                "last_workspace", "Cannot delete the last workspace."
-            )
-        if name == principal.workspace:
-            # The caller lives inside the workspace being deleted; dropping it
-            # mid-turn would invalidate the calling scope, so wait until idle.
-            return self._defer_until_chat_idle(
-                principal,
-                "workspace_delete",
-                lambda: self._delete_workspace(name),
-            )
-        return _ok(self._delete_workspace(name))
-
-    def _delete_workspace(self, name: str) -> dict[str, Any]:
-        from ciao.workspaces import persist_workspaces
-
-        self.config.workspaces.pop(name, None)
-        persist_workspaces(self.config)
-        self._refresh_workspace_registry()
-        return {"deleted": name}
 
     def _refresh_workspace_registry(self) -> None:
         """Notify the project-chat manager after a registry mutation."""
@@ -686,10 +627,6 @@ class CiaoControlPlane:
                 },
             )
         return _ok({"deleted": self.pcm.delete_project(pid), "project_id": pid})
-
-    def project_files_list(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
-        project = self._resolve_project(principal, project_id)
-        return _ok(self.pcm.list_project_files(project.project_id))
 
     def chats_list(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
         if project_id:
@@ -1554,54 +1491,6 @@ class CiaoControlPlane:
         })
 
     # ---- adversarial review ---------------------------------------------
-
-    async def adversarial_review(
-        self,
-        principal: McpPrincipal,
-        artifact: str,
-        *,
-        doc_type: str = "document",
-        focus: str = "",
-        context: str = "",
-        models: str = "",
-        format: str = "markdown",
-    ) -> dict[str, Any]:
-        self._workspace(principal)
-        text = artifact.strip()
-        if not text:
-            raise ControlPlaneError("empty_artifact", "Artifact text is required.")
-        from ciao.critique import (
-            USER_PROMPT_TEMPLATE,
-            aggregate,
-            render_markdown,
-            resolve_critique_panel,
-            run_panel,
-        )
-
-        panel = resolve_critique_panel(self.config, override=models)
-        if not panel:
-            raise ControlPlaneError(
-                "no_panel", "No critique models are configured (Settings → Models)."
-            )
-        user_prompt = USER_PROMPT_TEMPLATE.format(
-            doc_type=doc_type or "document",
-            focus_block=f"Focus area: {focus}\n" if focus else "",
-            context_block=f"Author context: {context}\n" if context else "",
-            artifact=text,
-        )
-        results = await run_panel(panel, text, user_prompt, self.config)
-        agg = aggregate(results)
-        if format == "json":
-            from dataclasses import asdict as _asdict
-
-            return _ok({"aggregate": agg, "results": [_asdict(r) for r in results]})
-        return _ok({
-            "markdown": render_markdown("artifact", results, agg),
-            "model_count": agg["model_count"],
-            "ok_count": agg["ok_count"],
-            "verdicts": agg["verdicts"],
-            "total_issues": agg["total_issues"],
-        })
 
     def agent_context_get(self, principal: McpPrincipal) -> dict[str, Any]:
         self._workspace(principal)

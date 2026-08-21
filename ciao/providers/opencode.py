@@ -152,10 +152,8 @@ _READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
 # command starts. Everything else on the control plane is allow-listed.
 _DESTRUCTIVE_MCP_TOOLS = (
     "chat_delete",
-    "project_delete",
-    "workspace_delete",
+    "project_action",
     "chat_stop",
-    "project_complete",
     "schedule_action",
     "loop_action",
     "background_run_start",
@@ -515,7 +513,7 @@ def control_plane_permission_rules() -> list[dict[str, str]]:
 
     Enumerated rather than globbed on purpose. ``ciaobot_*`` would also allow
     the destructive tools deliberately kept out of AUTO_APPROVED_MCP_TOOLS —
-    chat_delete, project_delete, chat_stop, background_run_start — which must
+    chat_delete, project_action, chat_stop, background_run_start — which must
     keep prompting. opencode names an MCP tool ``<server>_<tool>``.
     """
     return [

@@ -312,7 +312,7 @@ def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path:
     assert interrogation.is_file()
     assert "ciao:memory" in remember.read_text(encoding="utf-8")
     assert "1–3 targeted questions" in interrogation.read_text(encoding="utf-8")
-    assert "adversarial_review` MCP tool" in critique.read_text(encoding="utf-8")
+    assert "run_panel` engine" in critique.read_text(encoding="utf-8")
 
     link = workspace / ".claude" / "commands" / "remember.md"
     assert link.is_symlink()

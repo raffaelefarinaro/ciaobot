@@ -4173,12 +4173,12 @@ const inspectorEmbeddedTools = computed(() => {
     return mcpStatus.value.tools
   }
   return [
-    'context_get', 'vault_search', 'projects_list', 'project_get', 'project_create',
-    'project_update', 'chats_list', 'chat_get', 'chat_create', 'chat_send',
+    'context_get', 'vault_search', 'projects_list', 'project_get', 'project',
+    'chats_list', 'chat_get', 'chat_create', 'chat_send',
     'chat_continue', 'chat_retry', 'chat_handover', 'chat_archive', 'chat_delete',
-    'schedules_list', 'schedule_create', 'schedule_update', 'schedule_action',
-    'loops_list', 'loop_create', 'loop_update', 'loop_action', 'file_surface',
-    'delegate_spawn', 'delegates_list', 'adversarial_review',
+    'schedules_list', 'schedule', 'schedule_action',
+    'loops_list', 'loop', 'loop_action', 'file_surface',
+    'delegate_spawn', 'delegates_list', 'project_action',
   ]
 })
 

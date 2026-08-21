@@ -120,7 +120,7 @@ telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog contains 46 explicit tools. The MCP `tools/list` response is the
+The catalog contains 34 explicit tools. The MCP `tools/list` response is the
 live list, so clients do not need to infer it from documentation. The catalog
 holds *capabilities* — orchestration and search that a shell can't cheaply
 replicate. Plain plumbing that the managed Claude Code/Codex session can do
@@ -132,6 +132,12 @@ with its own shell and filesystem is not duplicated as an MCP tool:
   replicate.
 - **Workspace file** read/write and **file history/snapshots** → the model's
   native Read/Write/Glob tools and the workspace git repo.
+- **Workspace config** (update/delete) → the PWA Settings UI
+  (`PATCH/DELETE /api/workspaces/{name}`). Admin territory, not conversational.
+- **Project files list** → the model's native Glob/Read. The PWA REST route
+  (`GET /api/projects/{id}/files`) remains for the UI.
+- **Adversarial review** → the `/critique` command and `ciao-command-critique`
+  skill. The skill is the better mechanism: model-picked, not a flat tool call.
 - **Local session** status/preflight/handback/resync → the shell agent's own
   git; the PWA "Sync to Remote" feature drives the control plane over REST.
 - **Agent assets** → `ciao health get|fix` (workspace health) and
@@ -145,25 +151,29 @@ with its own shell and filesystem is not duplicated as an MCP tool:
 `lifecycle_*` tools were dropped as host/PWA concerns. Retry, new-session,
 and the schedule/loop lifecycle verbs are folded into parameterized tools
 (`chat_retry` with an `action`, `chat_handover` with empty provider/model for
-an in-place new session, `schedule_action`, `loop_action`).
+an in-place new session, `schedule_action`, `loop_action`). The
+schedule/loop/project create/update/restore verbs are folded into `schedule`,
+`loop`, and `project` tools with an `action` param; complete/delete are folded
+into `project_action`. `workspace_update`, `workspace_delete`,
+`project_files_list`, and `adversarial_review` were moved to the PWA / CLI /
+skill surface (admin or redundant with native tools).
 
 | Domain | Tools |
 |---|---|
 | Context | `context_get` (includes `system` status) |
 | Bounded memory | `memory_status`, `memory_update` (review proposals via the CLI: `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
 | Vault | `vault_search` |
-| Projects | `projects_list`, `project_get`, `project_create`, `project_update`, `project_complete`, `project_restore`, `project_delete`, `project_files_list` |
-| Workspaces | `workspaces_list`, `workspace_create`, `workspace_update`, `workspace_delete` |
+| Projects | `projects_list`, `project_get`, `project` (create/update/restore), `project_action` (complete/delete) |
+| Workspaces | `workspaces_list`, `workspace_create` (update/delete via PWA Settings) |
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
 | Delegates | `delegate_spawn`, `delegates_list` |
 | Background runs | `background_run_start`, `background_run_status`, `background_run_cancel` |
-| Adversarial review | `adversarial_review` |
-| Schedules | `schedules_list`, `schedule_preview`, `schedule_create`, `schedule_update`, `schedule_action` |
-| Loops | `loops_list`, `loop_create`, `loop_update`, `loop_action` |
+| Schedules | `schedules_list`, `schedule` (preview/create/update), `schedule_action` (pause/resume/run/delete) |
+| Loops | `loops_list`, `loop` (create/update), `loop_action` (start/stop/run/delete) |
 | Workspace files | `file_surface` |
 
-`loop_create` starts the cadence immediately (`start=true` by default) and
-returns the real `running` flag. `autostart` is a separate axis: it only decides
+`loop` with `action="create"` starts the cadence immediately (`start=true` by
+default) and returns the real `running` flag. `autostart` is a separate axis: it only decides
 whether the loop comes back up after a server restart. They were previously
 conflated, so a loop created with `autostart=true` reported as running while the
 PWA banner correctly said `stopped`.
@@ -173,9 +183,9 @@ SDK's `allowed_tools` (see `AUTO_APPROVED_MCP_TOOLS` in
 `ciao/execution_modes.py`), so Auto mode does not raise an approval card for the
 app's own control plane: these are the programmatic twins of PWA buttons, scoped
 by bearer token, and visible/reversible in the UI. The `_DESTRUCTIVE` tools
-(`project_complete`, `project_delete`, `chat_delete`, `chat_stop`,
+(`project_action`, `chat_delete`, `chat_stop`,
 `background_run_start`, `background_run_cancel`, `schedule_action`,
-`loop_action`, `workspace_delete`) are deliberately excluded and
+`loop_action`) are deliberately excluded and
 still prompt. Plan mode gets no allowlist at all. `tests/test_mcp_server.py`
 fails if a new tool is added without placing it on one side of that line.
 

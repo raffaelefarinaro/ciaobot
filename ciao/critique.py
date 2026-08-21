@@ -12,7 +12,7 @@ The artifact is inlined in the prompt (the one-shot call runs with no
 tools, ``max_turns=1``), so no file-read tool is needed.
 
 Exposed as a CLI (``python -m ciao.critique``) and, via :func:`run_panel`, as
-the ``adversarial_review`` MCP tool (``ciao/control_plane.py``) — both call
+the ``/critique`` command / ``ciao-command-critique`` skill — both call
 the same panel-running logic so they can't drift.
 """
 
@@ -303,7 +303,7 @@ async def run_panel(
 ) -> list[ModelResult]:
     """Run every model in ``panel`` concurrently and return results in panel order.
 
-    Shared by the CLI (``async_main``) and the ``adversarial_review`` MCP tool
+    Shared by the CLI (``async_main``) and the ``/critique`` command path
     so the two entrypoints can't drift on how the panel is actually run.
     """
     sem = asyncio.Semaphore(max_parallel)

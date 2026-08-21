@@ -85,13 +85,9 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "vault_search",
     "projects_list",
     "project_get",
-    "project_create",
-    "project_update",
-    "project_restore",
-    "project_files_list",
+    "project",
     "workspaces_list",
     "workspace_create",
-    "workspace_update",
     "chats_list",
     "chat_get",
     "chat_create",
@@ -110,14 +106,10 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     # plain Bash call has to pass.
     "background_run_status",
     "schedules_list",
-    "schedule_preview",
-    "schedule_create",
-    "schedule_update",
+    "schedule",
     "loops_list",
-    "loop_create",
-    "loop_update",
+    "loop",
     "file_surface",
-    "adversarial_review",
 )
 
 

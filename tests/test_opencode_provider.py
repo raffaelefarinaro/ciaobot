@@ -2043,7 +2043,7 @@ def test_control_plane_tools_do_not_prompt_outside_plan_mode():
             for rule in mode_settings(mode)[1]
             if rule["action"] == "allow"
         }
-        assert f"{MCP_SERVER_NAME}_project_files_list" in allowed, mode
+        assert f"{MCP_SERVER_NAME}_project" in allowed, mode
         assert f"{MCP_SERVER_NAME}_chat_send" in allowed, mode
 
 
@@ -2056,8 +2056,8 @@ def test_destructive_control_plane_tools_still_prompt():
     actions = _actions("auto")
     assert actions["*"] == "allow"
     for destructive in (
-        "chat_delete", "project_delete", "chat_stop",
-        "schedule_action", "loop_action", "project_complete",
+        "chat_delete", "project_action", "chat_stop",
+        "schedule_action", "loop_action",
         "background_run_start", "background_run_cancel",
     ):
         assert actions[f"{MCP_SERVER_NAME}_{destructive}"] == "ask", destructive

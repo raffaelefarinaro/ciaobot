@@ -204,7 +204,7 @@ def test_plan_mode_rejects_mutation_before_control_plane_call(tmp_path: Path) ->
             client,
             token,
             "tools/call",
-            {"name": "schedule_create", "arguments": {"prompt": "do a thing"}},
+            {"name": "schedule", "arguments": {"action": "create", "prompt": "do a thing"}},
         )
 
     assert called.status_code == 200
@@ -250,19 +250,18 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
         "memory_status",
         "memory_update",
         "vault_search",
-        "project_create",
+        "project",
+        "project_action",
         "workspace_create",
-        "workspace_delete",
         "chat_create",
-        "schedule_create",
+        "schedule",
         "schedule_action",
-        "loop_create",
+        "loop",
         "loop_action",
         "chat_handover",
-        "adversarial_review",
     } <= names
 
-    # Tools migrated to the ciao CLI or the provider's native tools are gone.
+    # Tools migrated to the ciao CLI, PWA, or the provider's native tools are gone.
     assert not (
         {
             "memory_read",
@@ -273,6 +272,22 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "capabilities_get",
             "chat_new_session",
             "chat_retry_update",
+            # Folded into `schedule` / `loop` / `project` / `project_action`.
+            "schedule_preview",
+            "schedule_create",
+            "schedule_update",
+            "loop_create",
+            "loop_update",
+            "project_create",
+            "project_update",
+            "project_complete",
+            "project_restore",
+            "project_delete",
+            # Moved to PWA Settings / skill / native Glob.
+            "workspace_update",
+            "workspace_delete",
+            "project_files_list",
+            "adversarial_review",
         }
         & names
     )
@@ -333,8 +348,9 @@ def test_schedule_handler_does_not_forward_closed_over_service(tmp_path: Path) -
             token,
             "tools/call",
             {
-                "name": "schedule_preview",
+                "name": "schedule",
                 "arguments": {
+                    "action": "preview",
                     "prompt": "test",
                     "frequency": "manual",
                     "timezone": "UTC",
@@ -690,49 +706,6 @@ def test_loop_create_defaults_to_caller_and_stamps_workspace(tmp_path: Path) -> 
     assert result["data"]["interval_minutes"] == 15
 
 
-def test_adversarial_review_synthesizes_panel_results(monkeypatch) -> None:
-    from ciao.config import CiaoConfig
-
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "OPENROUTER_API_KEY": "sk-or"})
-    control_plane = CiaoControlPlane(
-        config,
-        project_chat_manager=SimpleNamespace(),
-        schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
-    )
-    principal = _chat_create_principal(project_id=None, chat_id=None)
-
-    async def fake_oneshot(prompt, *, system_prompt, model, timeout_s=120.0, provider="claude", cwd=None):
-        return json.dumps({"verdict": "revise", "confidence": 4, "summary": "solid but needs work", "issues": []})
-
-    monkeypatch.setattr("ciao.critique.run_oneshot", fake_oneshot)
-
-    result = asyncio.run(control_plane.adversarial_review(principal, "Draft artifact text.", models="opus,fable"))
-
-    assert result["ok"] is True
-    assert result["data"]["model_count"] == 2
-    assert result["data"]["ok_count"] == 2
-    assert result["data"]["verdicts"] == {"revise": 2}
-    assert "Adversarial review" in result["data"]["markdown"]
-
-
-def test_adversarial_review_rejects_empty_artifact() -> None:
-    from ciao.config import CiaoConfig
-
-    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
-    control_plane = CiaoControlPlane(
-        config,
-        project_chat_manager=SimpleNamespace(),
-        schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
-    )
-    principal = _chat_create_principal(project_id=None, chat_id=None)
-
-    with pytest.raises(ControlPlaneError) as excinfo:
-        asyncio.run(control_plane.adversarial_review(principal, "   "))
-    assert excinfo.value.code == "empty_artifact"
-
-
 @pytest.mark.asyncio
 async def test_chat_archive_defaults_to_caller_chat() -> None:
     from ciao.config import CiaoConfig
@@ -796,7 +769,6 @@ def test_project_and_chat_resolution_defaults() -> None:
         get_chat=lambda cid: SimpleNamespace(chat_id=cid, project_id="proj-active-123", to_dict=lambda **k: {"chat_id": cid}),
         get_project=lambda pid: SimpleNamespace(project_id=pid, name="Active Project", workspace="personal", to_dict=lambda: {"project_id": pid}),
         list_projects=lambda ws: [SimpleNamespace(project_id="proj-active-123", name="Active Project", workspace="personal")],
-        list_project_files=lambda pid: ["file1.md"],
         is_session_local=lambda c: True,
     )
     control_plane = CiaoControlPlane(
@@ -830,11 +802,6 @@ def test_project_and_chat_resolution_defaults() -> None:
     c_res2 = control_plane.chat_get(principal, "self")
     assert c_res2["ok"] is True
     assert c_res2["data"]["chat_id"] == "chat-active-123"
-
-    # project_files_list defaults to active project
-    pf_res = control_plane.project_files_list(principal, "")
-    assert pf_res["ok"] is True
-    assert pf_res["data"] == ["file1.md"]
 
 
 # ── workspace registry tools ────────────────────────────────────────────
@@ -918,97 +885,6 @@ def test_workspace_create_rejects_conflicts_and_bad_provider(tmp_path: Path) -> 
         plane.workspace_create(principal, name="research", default_provider="ollama")
 
     assert config.workspace("research") is None
-
-
-def test_workspace_update_distinguishes_omitted_and_null_denylist(
-    tmp_path: Path,
-) -> None:
-    plane, config, _refreshes = _workspace_control_plane(tmp_path)
-    principal = _chat_create_principal()
-
-    plane.workspace_update(
-        principal,
-        name="work",
-        disallowed_tools=["Bash"],
-    )
-    assert config.workspace("work").disallowed_tools == ["Bash"]
-
-    # Omitted keeps the existing workspace-specific denylist.
-    plane.workspace_update(principal, name="work")
-    assert config.workspace("work").disallowed_tools == ["Bash"]
-
-    # Explicit null resets it so inherited defaults can apply again.
-    result = plane.workspace_update(
-        principal,
-        name="work",
-        disallowed_tools=None,
-    )
-    assert result["data"]["disallowed_tools"] is None
-    assert config.workspace("work").disallowed_tools is None
-
-
-def test_workspace_update_preserves_omitted_fields(tmp_path: Path) -> None:
-    plane, config, refreshes = _workspace_control_plane(tmp_path)
-    principal = _chat_create_principal()
-
-    result = plane.workspace_update(
-        principal, name="personal", default_model="sonnet", color="violet"
-    )
-
-    assert result["ok"] is True
-    updated = config.workspace("personal")
-    assert updated is not None
-    assert updated.default_model == "sonnet"
-    assert updated.color == "violet"
-    assert updated.default_provider == "claude"
-    assert updated.vault_root.endswith("memory-vault/personal")
-    assert refreshes == ["refresh"]
-
-
-def test_workspace_update_unknown_workspace_fails(tmp_path: Path) -> None:
-    plane, _config, _refreshes = _workspace_control_plane(tmp_path)
-    principal = _chat_create_principal()
-
-    with pytest.raises(ControlPlaneError, match="not found"):
-        plane.workspace_update(principal, name="research", default_model="sonnet")
-
-
-def test_workspace_delete_rejects_last_workspace(tmp_path: Path) -> None:
-    plane, _config, _refreshes = _workspace_control_plane(tmp_path, workspaces=("personal",))
-    principal = _chat_create_principal()
-
-    with pytest.raises(ControlPlaneError, match="last workspace"):
-        plane.workspace_delete(principal, name="personal")
-
-
-def test_workspace_delete_other_workspace_applies_immediately(tmp_path: Path) -> None:
-    plane, config, refreshes = _workspace_control_plane(tmp_path)
-    principal = _chat_create_principal(workspace="personal")
-
-    result = plane.workspace_delete(principal, name="work")
-
-    assert result["ok"] is True
-    assert result["data"]["deleted"] == "work"
-    assert config.workspace("work") is None
-    assert refreshes == ["refresh"]
-
-
-def test_workspace_delete_own_workspace_is_deferred_until_idle(tmp_path: Path) -> None:
-    asyncio.run(_assert_own_workspace_delete_is_deferred(tmp_path))
-
-
-async def _assert_own_workspace_delete_is_deferred(tmp_path: Path) -> None:
-    plane, config, _refreshes = _workspace_control_plane(tmp_path)
-    principal = _chat_create_principal(workspace="personal")
-
-    result = plane.workspace_delete(principal, name="personal")
-
-    assert result["data"]["deferred"] is True
-    assert config.workspace("personal") is not None
-    await asyncio.sleep(0)
-    assert config.workspace("personal") is None
-
-
 
 
 def test_collect_env_refs_from_headers_and_env_block() -> None:

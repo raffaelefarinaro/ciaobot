@@ -9,7 +9,7 @@ Run a full **adversarial review** of the target — do not just give your own op
 
 1. **Identify the artifact.** Use `$ARGUMENTS` as the target. If it's a file path (including a `memory-vault/...` vault path), review that file. If it names or references something in the current conversation (e.g. "the plan above", "this draft"), use that content. If `$ARGUMENTS` is empty, review the most recent substantive artifact in the conversation.
 
-2. **Call the `adversarial_review` MCP tool** with the artifact inlined and a sensible `doc_type`/`focus`. It resolves the panel from Settings → Models internally and returns a synthesized markdown report — no file-saving or script invocation needed.
+2. **Run the panel.** Call the critique engine directly with the artifact inlined and a sensible `doc_type`/`focus`. It resolves the panel from Settings → Models internally and returns a synthesized markdown report — no file-saving or script invocation needed. (The `/critique` command and the `ciao-command-critique` skill drive the same `run_panel` engine.)
 
 3. **Synthesize the panel's output yourself** — consensus issues first, then high-confidence idiosyncratic ones, call out any verdict disagreement, and end with a single recommendation: ship / revise / block.
 
