@@ -2046,6 +2046,79 @@ def _label_hygiene_command(args: argparse.Namespace) -> int:
     return label_hygiene.main(module_args)
 
 
+def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
+    """Delete a resolved skill proposal from a workspace's review queue.
+
+    The curation schedule reviews ``Workspace/Skill-Proposals/``; once a
+    proposal's decision is made (implemented, or decided against) it is removed
+    here so the queue stops re-asking. NAME matches the file's stem or a unique
+    substring of it.
+    """
+    from ciao.config import CiaoConfig
+
+    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    workspace = Path(workspace_raw).expanduser().resolve()
+    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault = Path(vault_raw).expanduser()
+    if not vault.is_absolute():
+        vault = workspace / vault
+    vault = vault.resolve()
+
+    config_source = dict(os.environ)
+    config_source.update({
+        "CIAO_WORKSPACE": str(workspace),
+        "CIAO_VAULT_ROOT": str(vault),
+        # Deleting a proposal file is a review decision, not a session write;
+        # loading config outside the server env must not mint a session secret.
+        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "skill-proposal-remove",
+    })
+    config = CiaoConfig.from_env(config_source)
+
+    # Which workspace the proposal lives in: the active one, falling back to the
+    # primary, matching skill_evolution's routing so evidence and queue stay
+    # aligned per workspace.
+    name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if config.workspace(name) is None:
+        name = config.primary_workspace()
+    queue = config.workspace_vault_root(name) / "Workspace" / "Skill-Proposals"
+
+    needle = args.name.strip()
+    if not needle:
+        print("a skill proposal name or substring is required", file=sys.stderr)
+        return 2
+
+    if not queue.is_dir():
+        print("No skill proposals are queued.", file=sys.stderr)
+        return 1
+
+    candidates = sorted(p for p in queue.iterdir() if p.is_file() and p.suffix == ".md")
+    matches = [p for p in candidates if needle.casefold() in p.stem.casefold()]
+    if not matches:
+        print(f"No skill proposal matched {needle!r}.", file=sys.stderr)
+        return 1
+    if len(matches) > 1:
+        print(
+            f"The name matched more than one skill proposal; use a longer substring: "
+            + ", ".join(p.stem for p in matches),
+            file=sys.stderr,
+        )
+        return 1
+
+    target = matches[0]
+    try:
+        target.unlink()
+    except OSError as exc:
+        print(f"could not delete {target.name}: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        json.dump({"removed": True, "name": target.stem, "workspace": name}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(f"Removed skill proposal {target.stem} from {name}.")
+    return 0
+
+
 def _skills_list_command(args: argparse.Namespace) -> int:
     from ciao.skills_inventory import build_skill_inventory
 
@@ -2942,6 +3015,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output raw JSON audit report.",
     )
     memory_audit_parser.set_defaults(func=_memory_audit_command)
+
+    skill_proposal_parser = subparsers.add_parser(
+        "skill-proposal-remove",
+        help="Remove a resolved skill proposal from the review queue.",
+        description=(
+            "Deletes one file from a workspace's Workspace/Skill-Proposals/ "
+            "after its decision is made (implemented, or decided against). "
+            "NAME matches the proposal file's stem or a unique substring of it."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "name",
+        help="Skill proposal file stem or unique substring to remove.",
+    )
+    skill_proposal_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    skill_proposal_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    skill_proposal_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    skill_proposal_parser.set_defaults(func=_skill_proposal_remove_command)
 
     chat_parser = subparsers.add_parser(
         "create-chat",

@@ -553,9 +553,10 @@ def test_a_skill_row_is_resolvable_by_id(tmp_path: Path) -> None:
     assert skill[0]["id"] in by_id
 
 
-def test_dismissing_a_skill_row_moves_the_file_aside(tmp_path: Path) -> None:
-    """Moved, not deleted: a proposal is the model's written suggestion, and
-    nothing else in this queue destroys content on one click."""
+def test_dismissing_a_skill_row_deletes_the_file(tmp_path: Path) -> None:
+    """A reviewed proposal is a resolved decision — implemented or disregarded —
+    so dismissing it deletes the file rather than moving it aside; re-reviewing
+    the same suggestion should not re-ask it."""
     config = _config(tmp_path)
     source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
     client = _client(config)
@@ -565,7 +566,7 @@ def test_dismissing_a_skill_row_moves_the_file_aside(tmp_path: Path) -> None:
 
     assert response.status_code == 200, response.json()
     assert not source.exists()
-    assert (source.parent / "dismissed" / source.name).is_file()
+    assert not source.parent.exists() or not list(source.parent.glob("dismissed/**/*"))
     assert [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill"] == []
 
 
@@ -598,13 +599,12 @@ def test_a_batch_dismiss_covers_skill_rows_and_bullets_together(tmp_path: Path) 
     assert response.status_code == 200, response.json()
     assert all(r["dismissed"] for r in response.json()["results"]), response.json()
     assert not source.exists()
-    assert (source.parent / "dismissed" / source.name).is_file()
     assert client.get("/api/proposals").json()["rows"] == []
 
 
-def test_dismissing_the_same_skill_twice_keeps_both_files(tmp_path: Path) -> None:
-    """Two proposals can share a name across runs; the second must not silently
-    overwrite the first, which the operator may still want to read."""
+def test_dismissing_the_same_skill_twice_deletes_both(tmp_path: Path) -> None:
+    """Two proposals can share a name across runs; each dismiss deletes its own
+    file, so dismissing the second run's copy is unaffected by the first."""
     config = _config(tmp_path)
     client = _client(config)
     for _ in range(2):
@@ -612,11 +612,9 @@ def test_dismissing_the_same_skill_twice_keeps_both_files(tmp_path: Path) -> Non
         row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
         assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
 
-    dismissed = sorted(
-        p.name for p in
-        (config.workspace_vault_root("personal") / "Workspace" / "Skill-Proposals" / "dismissed").glob("*.md")
-    )
-    assert dismissed == ["2026-08-09-defuddle-2.md", "2026-08-09-defuddle.md"]
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+    assert not (queue / "dismissed").is_dir()
 
 
 # -- the leak warning is about a SHARED guide, not about a workspace ----------

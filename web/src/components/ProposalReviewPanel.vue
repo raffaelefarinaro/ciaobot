@@ -291,8 +291,8 @@ function pathLeaf(path: string): string {
  * A skill proposal has nothing to promote into a region, so the server refuses
  * `accept` for it — but "there is nothing to do" was the wrong reading of what
  * accepting a proposed skill means. Accepting it means implementing it, and that
- * is a chat. The row stays queued until the skill actually exists, so this does
- * not lose the proposal if the implementation is abandoned halfway.
+ * is a chat. The row stays queued until the skill actually exists, then the
+ * implementation removes it — so nothing is lost if the work stops halfway.
  */
 async function implementSkill(row: ProposalRow) {
   if (chatBusy.value) return
@@ -317,8 +317,10 @@ function implementPrompt(row: ProposalRow): string {
     'as a `SKILL.md` with a name and description, then run `ciao sync-skills` for ' +
     'this root so the providers can see it. If it is not worth building, say so and ' +
     'why — a proposal is a suggestion, not an instruction.\n\n' +
-    'Leave the proposal file where it is. I will dismiss it from the review queue ' +
-    'once the skill exists, so nothing is lost if we stop halfway.'
+    'Once the skill is actually in place (or you have decided not to build it), ' +
+    `remove the proposal with \`ciao skill-proposal-remove <name>\` naming ` +
+    `\`${row.text}\`, so it stops re-asking in the review queue. If we stop halfway, ` +
+    'leave the proposal in place so the decision is not lost.'
   )
 }
 
@@ -441,8 +443,8 @@ onMounted(() => { void store.fetch() })
 
     <p class="pr-hint">
       Accepting a memory row writes it into that workspace’s bounded guide region.
-      Re-home rows are not moved here. Skill rows are files, so they can only be
-      dismissed or discussed.
+      Re-home rows are not moved here. Skill rows are files — dismiss removes them,
+      and implement builds the skill in a chat.
     </p>
 
 

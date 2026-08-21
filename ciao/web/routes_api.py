@@ -7015,36 +7015,23 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
     return rows, by_id
 
 
-_SKILL_DISMISSED_DIR = "dismissed"
-
-
 def _dismiss_skill_proposal(ctx: dict[str, Any]) -> dict[str, Any]:
-    """Take one skill-proposal FILE out of the queue, reversibly.
+    """Take one skill-proposal FILE out of the queue.
 
-    Moved into a ``dismissed/`` subfolder rather than deleted. The queue is
-    globbed one level deep, so moving it aside is enough to clear it, and a
-    proposal is the model's written suggestion — throwing it away on one click is
-    not recoverable, and "dismiss" nowhere else in this queue destroys content.
+    A reviewed proposal is a resolved decision: whether it was implemented or
+    disregarded, keeping the file in the queue re-asks the same question. So
+    dismiss deletes it rather than moving it aside — the queue is globbed one
+    level deep, so either clears it, and the decision is the operator's to keep
+    in the Curation-Log. A missing file is already gone, not an error.
     """
     source = Path(ctx["path"])
     if not source.is_file():
-        return {"ok": False, "error": f"skill proposal is gone: {source.name}"}
-    target_dir = source.parent / _SKILL_DISMISSED_DIR
+        return {"ok": True, "deleted": True}
     try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        destination = target_dir / source.name
-        if destination.exists():
-            # Same proposal dismissed twice: keep both rather than overwrite the
-            # earlier one, which the operator may still want to read.
-            stem, suffix = source.stem, source.suffix
-            n = 2
-            while (target_dir / f"{stem}-{n}{suffix}").exists():
-                n += 1
-            destination = target_dir / f"{stem}-{n}{suffix}"
-        source.replace(destination)
+        source.unlink()
     except OSError as exc:
-        return {"ok": False, "error": f"could not move {source.name}: {exc}"}
-    return {"ok": True, "moved_to": str(destination)}
+        return {"ok": False, "error": f"could not delete {source.name}: {exc}"}
+    return {"ok": True, "deleted": True}
 
 
 def _rehome_lookup(

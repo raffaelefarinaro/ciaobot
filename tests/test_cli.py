@@ -1127,3 +1127,68 @@ def test_setup_does_not_download_or_install_the_desktop_app(
     assert written
     assert not (apps / "Ciaobot.app").exists()
     assert not (apps / "Ciaobot Server.app").exists()
+
+
+# -- skill-proposal-remove --------------------------------------------------
+
+
+def _skill_proposal_workspace(root: Path, name: str = "2026-08-09-defuddle") -> Path:
+    """A workspace whose vault holds one skill proposal in the personal queue."""
+    vault = root / "memory-vault"
+    personal = vault / "personal"
+    # A workspace evidence dir so the bootstrap registry sees a `personal` vault.
+    (personal / "Workspace").mkdir(parents=True, exist_ok=True)
+    source = personal / "Workspace" / "Skill-Proposals" / f"{name}.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(f"# {name}\n\nA proposed skill.\n", encoding="utf-8")
+    return source
+
+
+def test_cli_skill_proposal_remove_deletes_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = _skill_proposal_workspace(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "defuddle"]) == 0
+
+    assert not source.exists()
+    assert "Removed skill proposal 2026-08-09-defuddle" in capsys.readouterr().out
+
+
+def test_cli_skill_proposal_remove_json_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = _skill_proposal_workspace(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "2026-08-09-defuddle", "--json"]) == 0
+
+    assert not source.exists()
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"removed": True, "name": "2026-08-09-defuddle", "workspace": "personal"}
+
+
+def test_cli_skill_proposal_remove_refuses_ambiguous_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "workspace"
+    _skill_proposal_workspace(workspace, "2026-08-09-defuddle")
+    _skill_proposal_workspace(workspace, "2026-08-16-defuddle")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "defuddle"]) == 1
+
+    err = capsys.readouterr().err
+    assert "more than one" in err
+    # Nothing was deleted.
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert len(list(queue.glob("*.md"))) == 2
