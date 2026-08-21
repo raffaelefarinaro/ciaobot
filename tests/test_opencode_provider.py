@@ -1260,9 +1260,9 @@ class _FakeEventStream:
     def raise_for_status(self) -> None:
         return None
 
-    async def aiter_lines(self):
+    async def aiter_bytes(self):
         for line in self._lines:
-            yield line
+            yield line.encode("utf-8")
 
     async def __aenter__(self):
         return self
@@ -1302,7 +1302,7 @@ async def _run_fixture_turn(provider, monkeypatch, name: str, session_id: str):
     from ciao.models import AgentRequest
 
     lines = [
-        f"data: {line}"
+        f"data: {line}\n\n"
         for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
@@ -1342,7 +1342,7 @@ async def test_current_mode_is_set_before_session_setup(tmp_path, monkeypatch):
     """A resumed session must classify setup-time permission events by this turn."""
     provider = _provider(tmp_path)
     lines = [
-        f"data: {line}"
+        f"data: {line}\n\n"
         for line in (FIXTURES / "turn_with_tool.jsonl").read_text(
             encoding="utf-8"
         ).splitlines()

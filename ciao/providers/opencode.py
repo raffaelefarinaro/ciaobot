@@ -62,6 +62,7 @@ from ciao.providers.base import (
     prepend_stable_context,
 )
 from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
+from ciao.providers._sse import SSEDecoder
 from ciao.providers.safe_commands import is_destructive_command
 from ciao.tool_path import resolve_tool
 
@@ -1794,11 +1795,10 @@ class OpencodeProvider(BaseSDKProvider):
                 # can still recover the old conversation.
                 self._session_handover_context = ""
 
-                async for raw in stream.aiter_lines():
-                    if not raw.startswith("data: "):
-                        continue
+                decoder = SSEDecoder()
+                async for sse in decoder.aiter_bytes(stream.aiter_bytes()):
                     try:
-                        event = json.loads(raw[6:])
+                        event = sse.json()
                     except ValueError:
                         continue
                     if not isinstance(event, Mapping):
