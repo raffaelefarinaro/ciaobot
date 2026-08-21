@@ -448,10 +448,29 @@ def apply(
     # rolls back the whole run and one receipt reverses it. A catalog left behind
     # by a successful vault migration would be a half-rooted install by another
     # name: the primary root would load no custom skill at all.
+    pruned_empty: list[str] = []
     for move in [*result.moves, *triage.moves, *guides]:
         source = install_root / move.source
         destination = install_root / move.destination
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir() and not any(source.iterdir()):
+            # `git mv` fails on an empty directory ("source directory is empty")
+            # and one failure refuses the whole run — so a vault holding an empty
+            # `Templates/`, which is an ordinary thing for someone who never used
+            # templates, could not migrate at all. Found by booting a released
+            # bundle against a synthetic pre-migration install, which is the path
+            # a real upgrade takes.
+            #
+            # There is nothing to move: git cannot track an empty directory, so it
+            # holds no content and no history. It is removed instead, which also
+            # lets the vault directory itself be pruned afterwards, and recorded
+            # so the receipt still accounts for every path.
+            try:
+                source.rmdir()
+            except OSError:
+                pass
+            pruned_empty.append(move.source)
+            continue
         code, out = _run_git(install_root, "mv", move.source, move.destination)
         if code != 0:
             # Roll back what this run already moved, so the install is never left
@@ -545,6 +564,7 @@ def apply(
 
     payload["status"] = "migrated"
     payload["applied"] = applied
+    payload["pruned_empty"] = pruned_empty
     payload["stashed_files"] = stashed
     payload["removed_vault_dir"] = removed_vault
     payload["receipt_path"] = str(write_receipt(runtime_root, payload))

@@ -1957,3 +1957,44 @@ def test_a_repository_with_no_commits_gets_the_snapshot(tmp_path: Path) -> None:
     assert history["status"] == "seeded_empty_repo"
     assert history["created_repo"] is False
     assert history["commit"]
+
+
+def test_an_empty_directory_does_not_refuse_the_migration(tmp_path: Path) -> None:
+    """`git mv` fails on an empty directory and one failure refuses the whole run.
+
+    So a vault holding an empty `Templates/` — an ordinary thing for someone who
+    never used templates — could not migrate at all. Found by booting a released
+    bundle against a synthetic pre-migration install, which is the path a real
+    upgrade takes and the one no test covered.
+
+    Nothing is moved because there is nothing to move: git cannot track an empty
+    directory, so it carries no content and no history. It is removed and recorded,
+    which also lets the vault directory itself be pruned afterwards.
+    """
+    install, vault, runtime = _git_install(tmp_path)
+    empty = vault / "Templates"
+    for child in list(empty.iterdir()):
+        child.unlink()
+    # Committed, because the clean-tree gate refuses on an uncommitted deletion —
+    # correctly. The real shape is a directory git tracks nothing in, which is the
+    # only shape an empty directory can have.
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "drop the templates")
+    assert not any(empty.iterdir())
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "migrated", result.get("refusals")
+    assert "memory-vault/Templates" in result["pruned_empty"]
+    assert not (install / "memory-vault").exists()
+    assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
+
+
+def test_a_directory_with_content_is_still_moved_not_pruned(tmp_path: Path) -> None:
+    """The skip must not become "delete anything that looks inconvenient"."""
+    install, vault, runtime = _git_install(tmp_path)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["pruned_empty"] == []
+    assert (install / "templates-src" / "person.md").is_file()
