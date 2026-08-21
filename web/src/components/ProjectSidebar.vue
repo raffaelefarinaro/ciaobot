@@ -387,6 +387,33 @@
         </button>
       </div>
 
+      <!-- The Graph/List/Review switcher lives here rather than in the pane
+           header: picking what the memory page shows is the same act as
+           scoping it to a workspace, and this keeps every memory control in
+           one column. -->
+      <div class="workspace-toggle view-toggle">
+        <button
+          type="button"
+          :class="{ active: mm.view === 'graph' }"
+          :aria-pressed="mm.view === 'graph'"
+          @click="setMemoryView('graph')"
+        >Graph</button>
+        <button
+          type="button"
+          :class="{ active: mm.view === 'list' }"
+          :aria-pressed="mm.view === 'list'"
+          @click="setMemoryView('list')"
+        >List</button>
+        <button
+          type="button"
+          :class="{ active: mm.view === 'review' }"
+          :aria-pressed="mm.view === 'review'"
+          @click="setMemoryView('review')"
+        >
+          Review<span v-if="proposals.rows.length" class="view-count">{{ proposals.rows.length }}</span>
+        </button>
+      </div>
+
       <!-- Review: the same shape as the memory map's sidebar — stats, a search,
            then chips that both report and filter. The kind filter used to be a
            segmented control in the panel header while this column sat empty,
@@ -548,7 +575,7 @@
               :key="c.id"
               class="mm-link-item"
               :title="`${c.size} notes — centre on this cluster`"
-              @click="mm.setLocalRoot(c.memberIds[0])"
+              @click="mm.requestFocus(c.memberIds[0])"
             >
               <span class="dot" :style="{ background: clusterColorFor(c.slot, isLightTheme) }" />
               <span class="label">{{ c.label }}</span>
@@ -619,8 +646,8 @@
           >show {{ Math.min(20, mm.orphanNotes.length - orphanLimit) }} more</button>
         </template>
 
-        <!-- Entry points for the local view: the note you last touched is
-             almost always the one you opened the map about. -->
+        <!-- Entry points into the graph: the note you last touched is almost
+             always the one you opened the map about. -->
         <template v-if="mm.recentNotes.length">
           <h3>Recently written</h3>
           <div class="mm-link-list">
@@ -628,9 +655,9 @@
               v-for="n in mm.recentNotes"
               :key="n.id"
               class="mm-link-item"
-              :class="{ current: mm.localRoot === n.id }"
-              title="Centre the local view here"
-              @click="mm.setLocalRoot(n.id)"
+              :class="{ current: mm.selectedId === n.id }"
+              title="Centre the map here"
+              @click="mm.requestFocus(n.id)"
             >
               <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
               <span class="label">{{ n.title }}</span>
@@ -1074,6 +1101,14 @@ function reviewKindLabel(kind: string): string {
 const orphanLimit = ref(8)
 const route = useRoute()
 const router = useRouter()
+
+/** The memory page's Graph/List/Review switcher. Review is the /proposals
+ * route; graph and list are both /memory, so only those two need a push. */
+function setMemoryView(next: 'graph' | 'list' | 'review') {
+  mm.view = next
+  const target = next === 'review' ? '/proposals' : '/memory'
+  if (route.path !== target) void router.push(target)
+}
 
 function promptTitle(prompt: string): string {
   const first = prompt.split('\n')[0].trim()
@@ -2105,6 +2140,24 @@ async function confirmDeleteChat(chatId: string) {
   background: color-mix(in srgb, var(--accent) 18%, var(--bg3));
 }
 
+/* Pending-proposal count inside the view switcher's Review segment. Same
+   treatment as the workspace shortcut chip: small, bordered, quiet. */
+.view-toggle .view-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg2);
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+}
+
 /* Keep workspace status markers visually separate from the workspace name,
    matching the spacing used by project-level state dots. */
 .workspace-toggle button .workspace-status-dot,
@@ -2928,7 +2981,7 @@ async function confirmDeleteChat(chatId: string) {
 .mm-link-item:hover { background: var(--bg3); }
 .mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
-/* Marks which note the local view is currently centred on, so the recent list
+/* Marks which note the map is currently centred on, so the recent list
    doubles as a "you are here" indicator rather than just a jump list. */
 .mm-link-item.current { background: var(--bg3); color: var(--fg); }
 /* The review queue's kind rows are a filter, so the SELECTED one is the solid

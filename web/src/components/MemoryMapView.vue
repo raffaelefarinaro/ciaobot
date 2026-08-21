@@ -1,23 +1,13 @@
 <template>
   <div class="memory-map">
-    <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')">
-      <template #actions>
-        <div class="mm-seg">
-          <button type="button" :class="{ active: view === 'graph' }" @click="setView('graph')">Graph</button>
-          <button type="button" :class="{ active: view === 'list' }" @click="setView('list')">List</button>
-          <button type="button" :class="{ active: view === 'review' }" @click="setView('review')">
-            Review<span v-if="proposals.rows.length" class="mm-seg-count">{{ proposals.rows.length }}</span>
-          </button>
-        </div>
-      </template>
-    </PaneHeader>
+    <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')" />
 
-    <ProposalReviewPanel v-if="view === 'review'" />
+    <ProposalReviewPanel v-if="mm.view === 'review'" />
 
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode }">
       <div v-if="mm.loading" class="mm-empty">Loading vault graph…</div>
       <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
-      <div v-else-if="view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
+      <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
         <canvas
           ref="canvasEl"
           @mousedown="onMouseDown"
@@ -29,42 +19,6 @@
           <button type="button" class="btn-icon touch-hit" @click="resetCamera">⤢</button>
         </div>
         <div class="mm-toolbar">
-          <div class="mm-seg mm-seg--sm" role="group" aria-label="Graph scope">
-            <button
-              type="button"
-              :class="{ active: mm.scope === 'local' }"
-              :aria-pressed="mm.scope === 'local'"
-              title="Show a neighbourhood around one note"
-              @click="mm.setScope('local')"
-            >Local</button>
-            <button
-              type="button"
-              :class="{ active: mm.scope === 'overview' }"
-              :aria-pressed="mm.scope === 'overview'"
-              title="Show the whole filtered vault"
-              @click="mm.setScope('overview')"
-            >Overview</button>
-          </div>
-
-          <div v-if="mm.scope === 'local'" class="mm-toolbar-group">
-            <span class="mm-toolbar-label">depth</span>
-            <button
-              type="button"
-              class="mm-step"
-              aria-label="Decrease depth"
-              :disabled="mm.localDepth <= 1"
-              @click="mm.setLocalDepth(mm.localDepth - 1)"
-            >−</button>
-            <span class="mm-toolbar-value">{{ mm.localDepth }}</span>
-            <button
-              type="button"
-              class="mm-step"
-              aria-label="Increase depth"
-              :disabled="mm.localDepth >= 4"
-              @click="mm.setLocalDepth(mm.localDepth + 1)"
-            >+</button>
-          </div>
-
           <div class="mm-seg mm-seg--sm" role="group" aria-label="Colour by">
             <button
               type="button"
@@ -93,14 +47,10 @@
         </div>
 
         <div class="mm-hint-overlay">
-          <span v-if="mm.scope === 'local' && localRootNode">
-            Around <strong>{{ localRootNode.title }}</strong> · {{ mm.visibleNodes.length }} of {{ mm.nodes.length }} notes ·
-            click a note to walk there
-          </span>
-          <span v-else>
+          <span>
             {{ mm.visibleNodes.length }} notes ·
             <template v-if="zoomedOut">zoom in for note titles</template>
-            <template v-else>shift-click two notes to trace a path</template>
+            <template v-else>click a note to light up its links · shift-click two to trace a path</template>
           </span>
         </div>
       </div>
@@ -233,7 +183,6 @@ function colorForNode(n: MemoryGraphNode): string {
   return categoryColorFor(catKeyFor(n))
 }
 
-const localRootNode = computed(() => (mm.localRoot ? mm.nodesById.get(mm.localRoot) || null : null))
 // Mirrors the canvas's own cluster-label threshold so the hint can tell the
 // user why they are looking at cluster names rather than note titles.
 const zoomedOut = computed(() => zoomRatio() < CLUSTER_LABEL_MAX_RATIO)
@@ -456,10 +405,10 @@ watch(() => mm.visibleIds, () => wakeSimulation())
 watch(() => [mm.selectedId, mm.pathStart, mm.pathEnd], () => wakeSimulation())
 // Colour mode changes nothing about positions, so it needs a paint, not physics.
 watch(() => mm.colorMode, () => requestRedraw())
-// Scope and depth change *which* nodes exist in the layout, so the graph has to
-// be re-framed as well as re-settled — otherwise switching from a 12-note
-// neighbourhood to the full vault leaves the camera zoomed into empty space.
-watch(() => [mm.scope, mm.localRoot, mm.localDepth, mm.hideOrphans], async () => {
+// Hiding orphans changes *which* nodes exist in the layout, so the graph has
+// to be re-framed as well as re-settled — otherwise hiding them leaves the
+// camera zoomed into empty space.
+watch(() => mm.hideOrphans, async () => {
   await nextTick()
   warmupSimulation(warmupStepsFor(mm.visibleNodes.length))
   fitCamera()
@@ -743,9 +692,9 @@ const LABEL_CELL = 96
 const CLUSTER_LABEL_MAX_RATIO = 1.6
 /**
  * Cluster labels are a response to label *pressure*, not to zoom on its own.
- * A 4-note local neighbourhood framed at fit scale has a low zoom ratio but
- * acres of free space, and summarising it as "single-barcode-ai-value · 4
- * notes" hides the only four titles the user came to read. Below this many
+ * A small filtered view framed at fit scale has a low zoom ratio but acres of
+ * free space, and summarising four visible notes as "single-barcode-ai-value ·
+ * 4 notes" hides the only four titles the user came to read. Below this many
  * visible notes, every label goes to a note.
  */
 const CLUSTER_LABEL_MIN_NODES = 40
@@ -940,22 +889,14 @@ function onWheel(e: WheelEvent) {
 }
 
 // ---------- list view ----------
-type MemoryView = 'graph' | 'list' | 'review'
-
 // Review is a segment of this view rather than its own rail entry: the proposal
 // queue IS the memory system's inbox, so it belongs where you go to think about
 // what Ciaobot knows. `/proposals` still routes here (the housekeeping tiles link
-// to it), it just selects this segment instead of a separate page.
+// to it), it just selects this segment instead of a separate page. The switcher
+// itself lives in the sidebar next to the workspace toggle; this component only
+// mirrors the shared `mm.view` state, seeding it from the URL on mount.
 const proposals = useProposalsStore()
-const view = ref<MemoryView>(
-  router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph',
-)
-
-function setView(next: MemoryView) {
-  view.value = next
-  const target = next === 'review' ? '/proposals' : '/memory'
-  if (router.currentRoute.value.path !== target) void router.push(target)
-}
+mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph'
 const sortKey = ref<'title' | 'type' | 'degree'>('title')
 const sortDir = ref(1)
 function setSort(key: 'title' | 'type' | 'degree') {
@@ -1106,14 +1047,6 @@ onBeforeUnmount(() => {
 .mm-delete-btn:disabled { opacity: 0.6; cursor: default; }
 .pill { display: inline-block; background: var(--bg3); border-radius: var(--radius-pill); padding: 2px 9px; font-size: var(--text-xs); margin: 0 4px 4px 0; color: var(--fg2); }
 
-.mm-seg-count {
-  margin-left: 0.35rem;
-  padding: 0 0.3rem;
-  border-radius: 999px;
-  background: var(--bg3);
-  font-size: 0.7rem;
-}
-
 .mm-seg { display: flex; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
 .mm-seg button {
   background: transparent; border: none; color: var(--fg2); padding: 6px 12px; font-size: var(--text-sm); cursor: pointer; font-family: var(--font);
@@ -1129,22 +1062,9 @@ onBeforeUnmount(() => {
   max-width: calc(100% - 96px);
 }
 .mm-seg--sm button { padding: 4px 10px; font-size: var(--text-xs); }
-.mm-toolbar-group {
-  display: flex; align-items: center; gap: 4px;
-  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 2px 6px;
-}
-.mm-toolbar-label { color: var(--fg3); font-size: var(--text-xs); }
-.mm-toolbar-value { color: var(--fg); font-size: var(--text-xs); min-width: 10px; text-align: center; }
-.mm-step {
-  background: transparent; border: none; color: var(--fg2); cursor: pointer;
-  font-family: var(--font); font-size: var(--text-sm); line-height: 1; padding: 2px 4px;
-}
-.mm-step:disabled { color: var(--fg3); cursor: default; }
 .mm-toggle {
   background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--fg2); font-family: var(--font); font-size: var(--text-xs); padding: 4px 10px; cursor: pointer;
 }
 .mm-toggle.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-.mm-hint-overlay strong { color: var(--fg2); font-weight: 600; }
 </style>

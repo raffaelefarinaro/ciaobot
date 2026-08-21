@@ -46,69 +46,42 @@ function seedChain() {
   return mm
 }
 
-describe('local scope', () => {
-  test('depth 1 shows only the root and its direct neighbours', () => {
+describe('visibility', () => {
+  test('the whole vault is visible by default — there is no local scope', () => {
     const mm = seedChain()
-    mm.setLocalRoot('b')
-    mm.setLocalDepth(1)
-    expect([...mm.visibleNodes.map(n => n.id)].sort()).toEqual(['a', 'b', 'c'])
-  })
-
-  test('depth 2 reaches two hops out', () => {
-    const mm = seedChain()
-    mm.setLocalRoot('a')
-    mm.setLocalDepth(2)
-    expect([...mm.visibleNodes.map(n => n.id)].sort()).toEqual(['a', 'b', 'c'])
-  })
-
-  test('overview scope ignores the root entirely', () => {
-    const mm = seedChain()
-    mm.setLocalRoot('a')
-    mm.setScope('overview')
     expect(mm.visibleNodes).toHaveLength(5)
   })
 
-  test('depth is clamped to a usable range', () => {
+  test('selecting a node never hides the rest of the vault', () => {
+    // Connectivity to the selection is shown by highlighting, not filtering:
+    // the canvas dims everything that is not the selected note or its direct
+    // neighbours, but the nodes stay in the layout.
     const mm = seedChain()
-    mm.setLocalDepth(99)
-    expect(mm.localDepth).toBe(4)
-    mm.setLocalDepth(0)
-    expect(mm.localDepth).toBe(1)
+    mm.handleNodeClick('b', false)
+    expect(mm.selectedId).toBe('b')
+    expect(mm.visibleNodes).toHaveLength(5)
   })
 
-  test('the root stays visible even when its category is filtered out', () => {
-    // Otherwise the view can end up empty while still claiming to be centred
-    // on a real note, which reads as a broken graph.
+  test('clicking a node selects it and asks the canvas to focus it', () => {
     const mm = seedChain()
-    mm.setLocalRoot('a')
-    mm.activeCats.clear()
-    expect(mm.visibleNodes.map(n => n.id)).toEqual(['a'])
-  })
-
-  test('clicking a node re-roots the local view but not the overview', () => {
-    const mm = seedChain()
-    mm.setLocalRoot('a')
     mm.handleNodeClick('c', false)
-    expect(mm.localRoot).toBe('c')
-
-    mm.setScope('overview')
-    mm.handleNodeClick('a', false)
-    expect(mm.localRoot).toBe('c')
+    expect(mm.selectedId).toBe('c')
+    expect(mm.focusSignal.id).toBe('c')
+    expect(mm.focusSignal.seq).toBe(1)
   })
 
-  test('shift-click still builds a path instead of re-rooting', () => {
+  test('shift-click builds a path instead of changing the selection', () => {
     const mm = seedChain()
-    mm.setLocalRoot('a')
+    mm.handleNodeClick('a', false)
     mm.handleNodeClick('d', true)
-    expect(mm.localRoot).toBe('a')
     expect(mm.pathStart).toBe('d')
+    expect(mm.selectedId).toBe('a')
   })
 })
 
 describe('orphans', () => {
   test('hideOrphans drops unlinked notes from the graph', () => {
     const mm = seedChain()
-    mm.setScope('overview')
     expect(mm.visibleNodes.map(n => n.id)).toContain('orphan')
     mm.toggleHideOrphans()
     expect(mm.visibleNodes.map(n => n.id)).not.toContain('orphan')

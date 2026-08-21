@@ -13,7 +13,7 @@ export interface MemoryGraphNode {
   description: string
   workspace: string
   degree: number
-  /** Epoch seconds from the server, used to seed the local view. */
+  /** Epoch seconds from the server, ordering the recently-written entry points. */
   mtime: number
   // simulation state, owned by the canvas but persisted here so the graph
   // does not re-scatter every time the sidebar touches the store.
@@ -136,13 +136,11 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   /** 'category' is the note's own type; 'cluster' is detected community. */
   const colorMode = ref<'category' | 'cluster'>('category')
   /**
-   * 'overview' is the whole (filtered) vault; 'local' is a neighbourhood
-   * around one note. Local is the default because a 300-node global view is a
-   * hairball, while a depth-2 neighbourhood is the thing people actually read.
+   * Which surface the memory page shows. The switcher itself lives in the
+   * sidebar next to the workspace toggle, so this state is shared between
+   * `ProjectSidebar` (the buttons) and `MemoryMapView` (the surfaces).
    */
-  const scope = ref<'overview' | 'local'>('local')
-  const localRoot = ref<string | null>(null)
-  const localDepth = ref(2)
+  const view = ref<'graph' | 'list' | 'review'>('graph')
   // Bumped whenever something outside the canvas (the sidebar's "most
   // connected" list, a neighbor link) asks the canvas to pan/zoom onto a
   // node. The canvas owns camera state and only needs to watch this signal.
@@ -192,31 +190,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     return clusterOf(id)?.slot
   }
 
-  /**
-   * Notes within `localDepth` hops of the local root. The root is always
-   * included even when a category filter would exclude it, so the view can
-   * never end up empty while pointing at a real note.
-   */
-  const localIds = computed<Set<string>>(() => {
-    const root = localRoot.value
-    if (!root || !nodesById.value.has(root)) return new Set()
-    const seen = new Set([root])
-    let frontier = [root]
-    for (let d = 0; d < localDepth.value; d++) {
-      const next: string[] = []
-      for (const id of frontier) {
-        for (const nb of adjacency.value.get(id) || []) {
-          if (seen.has(nb)) continue
-          seen.add(nb)
-          next.push(nb)
-        }
-      }
-      if (!next.length) break
-      frontier = next
-    }
-    return seen
-  })
-
   function passesFilters(n: MemoryGraphNode): boolean {
     if (!activeCats.has(catKeyFor(n))) return false
     if (search.value.trim() && !matchesSearch(n, search.value)) return false
@@ -224,13 +197,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     return true
   }
 
-  const visibleNodes = computed(() => {
-    if (scope.value === 'local' && localRoot.value) {
-      const ids = localIds.value
-      return nodes.value.filter(n => ids.has(n.id) && (n.id === localRoot.value || passesFilters(n)))
-    }
-    return nodes.value.filter(passesFilters)
-  })
+  const visibleNodes = computed(() => nodes.value.filter(passesFilters))
   const visibleIds = computed(() => new Set(visibleNodes.value.map(n => n.id)))
   const visibleEdgeCount = computed(
     () => edges.value.filter(e => visibleIds.value.has(e.source) && visibleIds.value.has(e.target)).length,
@@ -326,7 +293,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       selectedId.value = null
       pathStart.value = null
       pathEnd.value = null
-      localRoot.value = defaultLocalRoot()
     } catch (err) {
       loadError.value = err instanceof Error ? err.message : 'Failed to load the vault graph.'
     } finally {
@@ -342,38 +308,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   const projectStore = useProjectStore()
   watch(() => projectStore.activeWorkspace, (ws) => { void loadGraph(ws) })
 
-  /**
-   * How many recent notes to consider when picking an entry point. Pure
-   * recency picks dead ends: on a real vault the newest note was a
-   * single-link log entry, so the opening view was four nodes and told the
-   * user nothing. Taking the best-connected note out of a recent window keeps
-   * the "where I was working" intent while landing somewhere with structure
-   * around it.
-   */
-  const ROOT_RECENCY_WINDOW = 15
-  /**
-   * Falls back to the biggest hub overall when the server sent no mtimes
-   * (older backend), and to nothing at all for an empty vault.
-   */
-  function defaultLocalRoot(): string | null {
-    if (!nodes.value.length) return null
-    const byRecency = [...nodes.value].sort((a, b) => b.mtime - a.mtime)
-    const window = byRecency[0]?.mtime ? byRecency.slice(0, ROOT_RECENCY_WINDOW) : nodes.value
-    const best = [...window].sort((a, b) => b.degree - a.degree || b.mtime - a.mtime)[0]
-    return best?.id || null
-  }
-  function setScope(next: 'overview' | 'local') {
-    scope.value = next
-    if (next === 'local' && !localRoot.value) localRoot.value = selectedId.value || defaultLocalRoot()
-  }
-  /** Re-root the local view, switching into it if the user was in overview. */
-  function setLocalRoot(id: string) {
-    localRoot.value = id
-    scope.value = 'local'
-  }
-  function setLocalDepth(depth: number) {
-    localDepth.value = Math.max(1, Math.min(4, Math.round(depth)))
-  }
   function setColorMode(mode: 'category' | 'cluster') {
     colorMode.value = mode
   }
@@ -384,7 +318,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   function isolateCluster(clusterId: number) {
     const cluster = clusterById.value.get(clusterId)
     if (!cluster) return
-    scope.value = 'overview'
     search.value = ''
     activeCats.clear()
     for (const id of cluster.memberIds) {
@@ -452,22 +385,18 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     // Clicking a node directly on the canvas should feel the same as
     // clicking it from the sidebar or a linked-note link: it becomes
     // selected AND the camera centers on it, not just a highlight in place.
-    // In local scope a click also walks the view to that note, which is what
-    // makes the neighbourhood browsable instead of a dead end.
-    if (scope.value === 'local') localRoot.value = id
     requestFocus(id)
   }
 
   return {
     nodes, edges, loading, loadError, search, activeCats, selectedId, pathStart, pathEnd, focusSignal,
-    hideOrphans, colorMode, scope, localRoot, localDepth,
+    hideOrphans, colorMode, view,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode, pathIds, pathHint,
-    clusters, clusterById, localIds, orphanNotes, bridgeNotes, recentNotes,
+    clusters, clusterById, orphanNotes, bridgeNotes, recentNotes,
     clusterOf, clusterSlotOf, betweennessOf,
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
-    setScope, setLocalRoot, setLocalDepth, setColorMode, toggleHideOrphans, isolateCluster,
-    defaultLocalRoot,
+    setColorMode, toggleHideOrphans, isolateCluster,
     selectNode, requestFocus, resetPath, handleNodeClick, deleteNote,
   }
 })
