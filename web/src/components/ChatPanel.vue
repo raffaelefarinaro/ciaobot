@@ -133,22 +133,10 @@
           <span class="bg-agents-dot" aria-hidden="true"></span>
           {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
         </span>
-        <button
-          v-if="chat.mode === 'plan'"
-          type="button"
-          class="plan-mode-chip touch-hit"
-          :disabled="planModeSaving"
-          title="Leave plan mode"
-          aria-label="Leave plan mode"
-          aria-pressed="true"
-          @click.stop="leavePlanMode"
-        >
-          plan
-        </button>
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn touch-hit mobile-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
@@ -158,9 +146,9 @@
             v-if="chat.provider"
             type="button"
             class="model-picker-summary desktop-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
-          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ chipModelLabel }} · {{ chipModeLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
+          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ chipModelLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
@@ -173,23 +161,6 @@
             @select="selectModel"
             @close="showModelPicker = false"
           >
-            <template #header>
-              <div class="mode-picker-row">
-                <span class="mode-picker-row__label">Mode</span>
-                <div class="mode-picker-row__chips">
-                  <button
-                    v-for="opt in modePickerOptions"
-                    :key="opt.value"
-                    type="button"
-                    class="mode-row-chip"
-                    :class="{ 'mode-row-chip--active': chat.mode === opt.value }"
-                    :disabled="modeChipSaving"
-                    :title="opt.description"
-                    @click="selectMode(opt.value)"
-                  >{{ opt.label }}</button>
-                </div>
-              </div>
-            </template>
             <template #footer>
               <div
                 v-if="showThinkingLevels"
@@ -1266,11 +1237,6 @@ import {
 } from '../composables/useMentionPicker'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
-import {
-  clearPlanReturnMode,
-  rememberPlanReturnMode,
-  restorePlanReturnMode,
-} from '../lib/planCommand'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 
@@ -1585,102 +1551,6 @@ const archiveTidyFailed = computed(() => postprocessFailed(archivePostprocess.va
 watch(() => chat.value.provider, () => {
   void loadSlashCommands()
 })
-const planModeSaving = ref(false)
-
-async function togglePlanMode(
-  action: 'enter' | 'exit',
-  originChatId = chat.value.chat_id,
-  returnMode = chat.value.mode,
-): Promise<boolean> {
-  if (planModeSaving.value || chat.value.archived) return false
-  const targetMode = action === 'enter' ? 'plan' : restorePlanReturnMode(originChatId)
-  if (action === 'enter') rememberPlanReturnMode(originChatId, returnMode)
-  planModeSaving.value = true
-  try {
-    await store.updateChat(originChatId, { mode: targetMode })
-    if (action === 'exit') clearPlanReturnMode(originChatId)
-    return true
-  } catch (e) {
-    if (action === 'enter') clearPlanReturnMode(originChatId)
-    store.pushErrorToast('Could not change plan mode', errorMessage(e, 'Could not change plan mode'))
-    return false
-  } finally {
-    planModeSaving.value = false
-  }
-}
-
-function leavePlanMode(): void {
-  void togglePlanMode('exit')
-}
-
-// Mode row, rendered inside the model picker popover's header slot (see
-// ``modePickerOptions`` usage in the template). Plan has its own chip above
-// because leaving plan mid-session has different UX implications (the chat
-// returns to the previous mode, not a chosen one) and its own disabled state
-// while toggling.
-//
-// The four modes here mirror ``BridgeMode`` in ciao.models. We treat
-// ``"normal"`` as the SDK's default ("Manual" in Claude Code terms): every
-// tool call prompts. ``"auto"`` is the classifier-backed mode that auto-
-// approves most calls and only escalates risky ones — the mode Sebastien
-// was asking about. ``"bypass"`` is ``bypassPermissions``: every tool runs
-// without a prompt, use only in containers.
-//
-// ``modeChipSaving`` is intentionally separate from ``planModeSaving`` so a
-// stuck plan switch doesn't lock the row — they're independent paths.
-
-const MODE_PICKER_OPTIONS: ReadonlyArray<{ value: string; label: string; description: string }> = [
-  { value: 'auto', label: 'Auto', description: 'Fewer prompts, classifier approves safe actions' },
-  { value: 'bypass', label: 'Bypass', description: 'Skip all checks (use in containers only)' },
-  { value: 'normal', label: 'Manual', description: 'Approve each tool call' },
-  { value: 'plan', label: 'Plan', description: 'Read-only — propose, do not act' },
-]
-// opencode has no native "auto" concept — only default-mostly-ask and
-// --auto (allow everything not explicitly denied). Ciaobot's Auto tier for
-// it is a synthetic middle ground (ciao/providers/opencode.py:519,
-// auto_approves_permission): edits are allowed outright, but shell stays
-// gated behind a read-only classifier. The generic description above reads
-// like CLI-auto parity, which it isn't — say so for this provider so Bypass
-// (opencode's real --auto equivalent) isn't a surprise.
-const OPENCODE_AUTO_DESCRIPTION = 'Fewer prompts; shell commands still ask unless read-only'
-const modePickerOptions = computed(() => {
-  if (chat.value?.provider !== 'opencode') return MODE_PICKER_OPTIONS
-  return MODE_PICKER_OPTIONS.map(opt =>
-    opt.value === 'auto' ? { ...opt, description: OPENCODE_AUTO_DESCRIPTION } : opt,
-  )
-})
-
-const modeChipSaving = ref(false)
-
-async function selectMode(target: string): Promise<void> {
-  if (modeChipSaving.value || chat.value.archived) return
-  if (target === chat.value.mode) {
-    showModelPicker.value = false
-    return
-  }
-  // Route plan mode through the existing togglePlanMode path so the
-  // rememberPlanReturnMode bookkeeping still applies when leaving a mode
-  // that the user might want to come back to.
-  if (target === 'plan') {
-    showModelPicker.value = false
-    void togglePlanMode('enter')
-    return
-  }
-  // Leaving plan for any other mode: clear the stored return-to mode so
-  // a later plan entry doesn't snap back to a stale value.
-  if (chat.value.mode === 'plan') {
-    clearPlanReturnMode(chat.value.chat_id)
-  }
-  modeChipSaving.value = true
-  try {
-    await store.updateChat(chat.value.chat_id, { mode: target })
-    showModelPicker.value = false
-  } catch (e) {
-    store.pushErrorToast('Could not change mode', errorMessage(e, 'Could not change mode'))
-  } finally {
-    modeChipSaving.value = false
-  }
-}
 
 // Inline editing state for queued messages. Keyed by queue entry id.
 const editingQueueId = ref<string | null>(null)
@@ -2662,14 +2532,9 @@ const chipThinkingLabel = computed(() => {
   return level && level !== 'auto' ? `think:${level}` : ''
 })
 
-// The permission mode (auto/bypass/manual/plan) decides whether tool calls
-// run silently or raise approval cards, so the chip names it next to the
-// model instead of leaving it discoverable only inside the picker.
-const chipModeLabel = computed(() => chat.value?.mode || 'auto')
-
 // The provider is already the chip's first segment, so a model id that
-// repeats it as a prefix ("opencode/deepseek-...") wastes the width budget
-// that now also carries the mode segment. The tooltip keeps the full id.
+// repeats it as a prefix ("opencode/deepseek-...") wastes the width budget.
+// The tooltip keeps the full id.
 const chipModelLabel = computed(() => {
   const model = activeModelId.value || ''
   const provider = chat.value?.provider || ''
@@ -5760,90 +5625,6 @@ details[open] > .activity-summary::before {
   background: var(--accent2);
   animation: bg-agents-pulse 1.6s ease-in-out infinite;
 }
-
-.plan-mode-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: content-box;
-  min-width: 30px;
-  min-height: 30px;
-  padding: 7px 10px;
-  margin: -7px;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 120ms var(--ease), color 120ms var(--ease), transform 120ms var(--ease);
-}
-
-.plan-mode-chip::before {
-  inset: 7px;
-  border: 1px solid var(--accent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-}
-
-.plan-mode-chip:hover { background: transparent; }
-.plan-mode-chip:hover::before { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-.plan-mode-chip:active { transform: scale(0.96); }
-.plan-mode-chip:disabled { opacity: 0.55; cursor: wait; transform: none; }
-
-/* Mode row, rendered in the model picker popover's header slot. Mirrors
-   .thinking-levels below it in the footer slot: same label treatment, same
-   pill-chip row, so the popover reads as one cohesive "chat behavior"
-   picker instead of two different widgets glued together. */
-.mode-picker-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.mode-picker-row__label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--fg2);
-}
-
-.mode-picker-row__chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.mode-row-chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-elev);
-  color: var(--fg);
-  font: inherit;
-  font-size: 11px;
-  line-height: 1.4;
-  cursor: pointer;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
-}
-
-.mode-row-chip:hover {
-  background: var(--bg3);
-}
-
-.mode-row-chip--active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: white;
-}
-
-.mode-row-chip:disabled { opacity: 0.55; cursor: wait; }
 
 @keyframes bg-agents-pulse {
   0%, 100% { opacity: 1; }

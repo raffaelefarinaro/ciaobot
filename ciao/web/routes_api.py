@@ -5435,13 +5435,6 @@ def _routines_payload(config, app_settings) -> dict:
         "provider_default_thinking": s.provider_default_thinking or {},
         # Per-provider routine models, as stored (missing = provider default).
         "provider_insights_models": s.provider_insights_models or {},
-        # Per-provider default execution mode for new chats, as stored
-        # (missing = built-in default). Effective defaults below.
-        "provider_default_modes": s.provider_default_modes or {},
-        "provider_default_modes_effective": {
-            item.id: config.default_mode_for_provider(item.id)
-            for item in provider_registry.descriptors()
-        },
         # What actually runs right now, after defaults.
         "insights_model_effective": insights_effective,
         # Per-workspace resolution for the Automatic case; empty when overridden.

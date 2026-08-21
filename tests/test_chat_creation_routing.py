@@ -95,19 +95,6 @@ def test_new_chat_uses_app_default_mode_on_every_provider(tmp_path: Path) -> Non
         assert chat.mode == "auto", provider
 
 
-def test_per_provider_default_mode_overrides_builtin(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        provider_default_modes={"opencode": "normal", "claude": "plan"},
-    )
-    manager = _make_manager(tmp_path, config)
-    project = manager.create_project("Overrides", workspace="work")
-
-    assert manager.create_chat(project.project_id, provider="opencode").mode == "normal"
-    assert manager.create_chat(project.project_id, provider="codex").mode == "auto"
-    assert manager.create_chat(project.project_id, provider="claude").mode == "plan"
-
-
 def test_opencode_default_model_applies_at_creation(tmp_path: Path) -> None:
     config = _config(
         tmp_path,

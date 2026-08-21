@@ -20,8 +20,6 @@ class FakeConfig:
         self.transcription_locale = "en-US"
         self.tts_local_voice = "af_heart"
         self.critique_models = ""
-        # Per-provider default modes; no env-backed default.
-        self.provider_default_modes: dict[str, str] = {}
         # Per-provider default models / thinking / routine models; no
         # env-backed defaults.
         self.provider_default_models: dict[str, str] = {}
@@ -189,54 +187,6 @@ def test_provider_maps_load_ignores_junk(tmp_path):
     assert store.settings.provider_insights_models == {"opencode": "anthropic/claude-sonnet-4-6"}
 
 
-def test_provider_default_modes_persist_and_apply(tmp_path):
-    store = AppSettingsStore(tmp_path / "app_settings.json")
-    config = FakeConfig()
-
-    store.update({"provider_default_modes": {"opencode": "bypass", "codex": "plan"}})
-    store.apply_to_config(config)
-    assert config.provider_default_modes == {"opencode": "bypass", "codex": "plan"}
-    path = tmp_path / "app_settings.json"
-    assert json.loads(path.read_text()) == {
-        "provider_default_modes": {"opencode": "bypass", "codex": "plan"}
-    }
-    # Fresh instance sees the persisted map.
-    assert AppSettingsStore(path).settings.provider_default_modes == {
-        "opencode": "bypass",
-        "codex": "plan",
-    }
-
-    # Clearing a provider's entry (empty string) removes the override.
-    store.update({"provider_default_modes": {"opencode": "bypass", "codex": ""}})
-    store.apply_to_config(config)
-    assert config.provider_default_modes == {"opencode": "bypass"}
-
-
-def test_provider_default_modes_reject_bad_mode_and_non_objects(tmp_path):
-    store = AppSettingsStore(tmp_path / "app_settings.json")
-    with pytest.raises(ValueError, match="auto, bypass, normal, plan"):
-        store.update({"provider_default_modes": {"opencode": "nope"}})
-    with pytest.raises(ValueError, match="must be an object"):
-        store.update({"provider_default_modes": "bypass"})
-
-
-def test_provider_default_modes_load_ignores_junk(tmp_path):
-    path = tmp_path / "app_settings.json"
-    path.write_text(
-        json.dumps(
-            {
-                "provider_default_modes": {
-                    "opencode": "bypass",
-                    "codex": "sideways",
-                    "bogus": "auto",
-                }
-            }
-        )
-    )
-    store = AppSettingsStore(path)
-    assert store.settings.provider_default_modes == {"opencode": "bypass"}
-
-
 def test_default_mode_for_provider_builtin_defaults(tmp_path):
     from ciao.config import CiaoConfig
 
@@ -246,19 +196,9 @@ def test_default_mode_for_provider_builtin_defaults(tmp_path):
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
     )
-    # Every provider starts on the app-wide default; no per-provider exception.
+    # Every provider always starts on the app-wide auto default; there is no
+    # per-provider override surface anymore.
     assert config.default_mode_for_provider("opencode") == "auto"
     assert config.default_mode_for_provider("codex") == "auto"
     assert config.default_mode_for_provider("claude") == "auto"
-
-    # An operator pin wins over the built-in default.
-    config.provider_default_modes = {"opencode": "normal", "claude": "plan"}
-    assert config.default_mode_for_provider("opencode") == "normal"
-    assert config.default_mode_for_provider("codex") == "auto"
-    assert config.default_mode_for_provider("claude") == "plan"
-
-    # The app-wide default still moves every unpinned provider together.
-    config.provider_default_modes = {}
-    config.claude_mode = "plan"
-    assert config.default_mode_for_provider("opencode") == "plan"
-    assert config.default_mode_for_provider("codex") == "plan"
+    assert not hasattr(config, "provider_default_modes")

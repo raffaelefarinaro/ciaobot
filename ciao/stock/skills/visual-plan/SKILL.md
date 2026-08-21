@@ -25,7 +25,7 @@ Also skip it for a routine working doc: notes, an analysis, a draft with no appr
 
 ## Required workflow
 
-1. **Check the chat's execution mode.** If the chat is in Plan mode, say plainly that Plan mode cannot write the plan file, offer either an in-chat proposal with no files or a switch out of Plan mode with the `plan` chip, and wait. Do not attempt the write first and report a failure afterwards.
+1. **Proceed to write the plan file.** Execution mode is fixed at auto: file writes run silently, and a destructive or system-level step asks for approval. Do not gate the plan on a mode that no longer exists — just create the file.
 2. Read the project canonical document, relevant files, current implementation patterns, and recent changes.
 3. State the outcome, scope, non-goals, and the files or areas that may change.
 4. Record hard-to-reverse decisions and their recommended defaults.

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from ciao.providers.safe_commands import is_read_only_command
+from ciao.providers.safe_commands import is_destructive_command, is_read_only_command
 
 
 @pytest.mark.parametrize("command", [
@@ -116,3 +116,85 @@ def test_read_only_commands_are_safe(command):
 ])
 def test_write_capable_or_unverifiable_commands_are_unsafe(command):
     assert is_read_only_command(command) is False
+
+
+# ── Destructive-command classifier (the permissive auto default) ─────────
+# The contract here is the mirror image of the read-only one: a false positive
+# costs an approval card, a false negative auto-runs a removal. The bias leans
+# toward "not destructive" when in doubt, because the whole point of the
+# permissive default is to stop asking on ordinary writes.
+
+
+@pytest.mark.parametrize("command", [
+    "rm file.txt",
+    "rm -rf /tmp/cache",
+    "rmdir emptydir",
+    "rmdir -p a/b/c",
+    "unlink file",
+    "shred -u secret.txt",
+    "truncate -s 0 data.log",
+    "wipefs /dev/sdb",
+    "mkfs.ext4 /dev/sdb1",
+    "fdisk /dev/sdb",
+    "parted /dev/sdb mklabel gpt",
+    "dd if=/dev/zero of=/dev/sdb",
+    "blkdiscard /dev/sdb",
+    "pvremove /dev/sdb1",
+    "vgremove vgdata",
+    "lvremove vg/lv",
+    "shutdown now",
+    "reboot",
+    "poweroff",
+    "halt",
+    "userdel bob",
+    "groupdel devs",
+    "sudo rm -rf /tmp/cache",
+    # A destructive segment poisons the whole chain.
+    "ls; rm -rf /tmp/x",
+    "git status && rm file.txt",
+    "find . -delete",
+    "find . -exec rm {} ;",
+    "find . -name '*.log' -delete",
+    # Git's own destructive verbs.
+    "git clean -fd",
+    "git reset --hard HEAD",
+    "git restore src/app.py",
+    "git rm old.py",
+    "git push --force origin main",
+    "git push -f origin main",
+    "git prune",
+])
+def test_destructive_commands_are_destructive(command):
+    assert is_destructive_command(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    "",
+    "ls",
+    "cat README.md",
+    "rmx tool",
+    "rm -h",
+    "echo hello",
+    "pwd",
+    "mkdir -p out",          # creates, does not remove
+    "cp a b",
+    "mv a b",
+    "touch file",
+    "cat a > b",
+    "git status",
+    "git push origin main",  # non-force push
+    "git add .",
+    "git commit -m 'x'",
+    "npm install",
+    "pip install foo",
+    "brew update",
+    # A non-destructive segment does not poison; only removal does.
+    "git status && git push",
+    "ls -la | grep foo",
+    "cat a.txt > b.txt",
+    "find . -name '*.log'",
+    "sed -i 's/a/b/' f",     # edits in place but does not remove
+    "rmdir --help",
+])
+def test_non_destructive_commands_are_not_destructive(command):
+    assert is_destructive_command(command) is False

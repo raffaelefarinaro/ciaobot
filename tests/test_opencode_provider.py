@@ -44,6 +44,7 @@ from ciao.providers.opencode import (
     usage_payload,
     workspace_config_placeholder_problems,
 )
+from ciao.execution_modes import MCP_SERVER_NAME
 
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
 
@@ -198,12 +199,16 @@ def test_bypass_allows_everything_and_normal_asks():
     assert "edit" not in _actions("normal")
 
 
-def test_auto_allows_edits_but_still_gates_shell():
-    """Auto mode applies edits automatically; bash stays behind the wildcard."""
+def test_auto_allows_everything_but_keeps_shell_and_destructive_mcp_gated():
+    """Auto's permissive default allows every tool outright; only bash and the
+    destructive control-plane tools stay behind an ask so their events reach
+    the classifier/operator."""
     actions = _actions("auto")
-    assert actions["edit"] == "allow"
-    assert actions["*"] == "ask"
-    assert "bash" not in actions
+    assert actions["*"] == "allow"
+    assert actions["bash"] == "ask"
+    assert "edit" not in actions
+    assert actions[f"{MCP_SERVER_NAME}_chat_delete"] == "ask"
+    assert actions[f"{MCP_SERVER_NAME}_background_run_start"] == "ask"
 
 
 def test_plan_mode_is_read_only():
@@ -909,23 +914,23 @@ async def test_bypass_mode_approves_without_a_card(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_approves_a_read_only_bash_command(tmp_path, caplog):
-    provider, client = _armed_provider(tmp_path, "auto")
-    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
-        events = _convert(provider, "permission.asked", LIVE_PERMISSION)
-    assert events == []
-    await _drain_tasks()
-    # "once", never "always": the "always" reply whitelists opencode's
-    # suggested pattern for the session, which could over-approve.
-    assert client.calls == [("/permission/per_live1/reply", {"reply": "once"})]
-    # Each decision is auditable in the log.
-    logged = [record.getMessage() for record in caplog.records]
-    assert any("auto-approved bash" in line and "echo approved-ok" in line for line in logged)
-
-
-def test_auto_mode_surfaces_an_unsafe_bash_command(tmp_path):
+async def test_auto_mode_approves_any_non_destructive_bash_command(tmp_path, caplog):
+    """The permissive auto default allows any non-destructive shell command,
+    not just read-only ones."""
     provider, client = _armed_provider(tmp_path, "auto")
     payload = {**LIVE_PERMISSION, "metadata": {"command": "git status && git push"}}
+    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
+        events = _convert(provider, "permission.asked", payload)
+    assert events == []
+    await _drain_tasks()
+    assert client.calls == [("/permission/per_live1/reply", {"reply": "once"})]
+    logged = [record.getMessage() for record in caplog.records]
+    assert any("auto-approved bash" in line and "git push" in line for line in logged)
+
+
+def test_auto_mode_surfaces_a_destructive_bash_command(tmp_path):
+    provider, client = _armed_provider(tmp_path, "auto")
+    payload = {**LIVE_PERMISSION, "metadata": {"command": "rm -rf /tmp/cache"}}
     events = _convert(provider, "permission.asked", payload)
     assert isinstance(events[0], PermissionRequestEvent)
     assert "per_live1" in provider._permission_requests
@@ -955,10 +960,9 @@ async def test_auto_mode_approves_a_read_only_tool_from_a_stale_ruleset(tmp_path
     assert client.calls == [("/permission/perm_ls/reply", {"reply": "once"})]
 
 
-def test_auto_mode_still_surfaces_non_read_only_tools(tmp_path):
-    """`edit` is allowed by a fresh auto ruleset, but an *ask* for it (stale
-    session, or an opencode judgment call) is not verifiably read-only, so it
-    keeps the card."""
+def test_auto_mode_surfaces_a_non_read_only_tool_ask(tmp_path):
+    """A stale session can still raise an *ask* for an already-allowed tool; a
+    non-read-only tool ask is not auto-approved, so it keeps the card."""
     provider, client = _armed_provider(tmp_path, "auto")
     events = _convert(
         provider,
@@ -2053,25 +2057,19 @@ def test_control_plane_tools_do_not_prompt_outside_plan_mode():
 
 
 def test_destructive_control_plane_tools_still_prompt():
-    """The allow list is enumerated, not globbed. A `ciaobot_*` rule would also
-    wave through the deletes and lifecycle actions deliberately kept out of
-    AUTO_APPROVED_MCP_TOOLS."""
+    """In the permissive auto default the wildcard is allow, so the destructive
+    control-plane tools must be pinned to `ask` explicitly (a later, more
+    specific rule wins) to keep surfacing an approval card."""
     from ciao.execution_modes import MCP_SERVER_NAME
 
-    allowed = {
-        rule["permission"]
-        for rule in mode_settings("auto")[1]
-        if rule["action"] == "allow"
-    }
+    actions = _actions("auto")
+    assert actions["*"] == "allow"
     for destructive in (
         "chat_delete", "project_delete", "chat_stop",
         "schedule_action", "loop_action", "project_complete",
         "background_run_start", "background_run_cancel",
     ):
-        assert f"{MCP_SERVER_NAME}_{destructive}" not in allowed, destructive
-    # And no wildcard snuck in that would cover them.
-    assert not any(r["permission"].endswith("*") and r["action"] == "allow"
-                   for r in mode_settings("auto")[1])
+        assert actions[f"{MCP_SERVER_NAME}_{destructive}"] == "ask", destructive
 
 
 def test_plan_mode_grants_no_control_plane_allowance():

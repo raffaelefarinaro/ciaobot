@@ -21,8 +21,6 @@ from ciao import provider_registry
 
 logger = logging.getLogger(__name__)
 
-_MODES = ("auto", "bypass", "normal", "plan")
-
 
 def _clean_provider_map(raw: object) -> dict[str, str]:
     """Normalize a ``{provider: value}`` map, dropping junk."""
@@ -33,20 +31,6 @@ def _clean_provider_map(raw: object) -> dict[str, str]:
         str(provider_id): str(value).strip()
         for provider_id, value in raw.items()
         if str(provider_id) in known and isinstance(value, str) and value.strip()
-    }
-
-
-def _clean_default_modes(raw: object) -> dict[str, str]:
-    """Normalize a ``{provider: mode}`` map, dropping junk and bad modes."""
-    if not isinstance(raw, dict):
-        return {}
-    known = set(provider_registry.provider_ids())
-    return {
-        str(provider_id): str(mode).strip()
-        for provider_id, mode in raw.items()
-        if str(provider_id) in known
-        and isinstance(mode, str)
-        and mode.strip() in _MODES
     }
 
 
@@ -93,11 +77,6 @@ class AppSettings:
     # the PWA.
     provider_default_models: dict[str, str] | None = None
 
-    # Per-provider default execution mode for new chats. Missing entry = the
-    # env-backed ``claude_mode``, for every provider. Same nested-map rationale
-    # as ``provider_default_models``.
-    provider_default_modes: dict[str, str] | None = None
-
     # Per-provider default thinking level for new chats. Missing entry = the
     # provider's own default ("auto").
     provider_default_thinking: dict[str, str] | None = None
@@ -127,7 +106,6 @@ class AppSettingsStore:
             return AppSettings()
         nested_fields = {
             "provider_default_models",
-            "provider_default_modes",
             "provider_default_thinking",
             "provider_insights_models",
         }
@@ -148,9 +126,6 @@ class AppSettingsStore:
             cleaned = _clean_provider_map(raw.get(key))
             if cleaned:
                 setattr(settings, key, cleaned)
-        provider_default_modes = _clean_default_modes(raw.get("provider_default_modes"))
-        if provider_default_modes:
-            settings.provider_default_modes = provider_default_modes
         return settings
 
     def _save(self) -> None:
@@ -181,21 +156,6 @@ class AppSettingsStore:
                 if not isinstance(value, dict):
                     raise ValueError(f"{key} must be an object")
                 setattr(self.settings, key, _clean_provider_map(value))
-                continue
-            if key == "provider_default_modes":
-                if not isinstance(value, dict):
-                    raise ValueError(f"{key} must be an object")
-                unknown = sorted(
-                    str(mode)
-                    for mode in value.values()
-                    if not isinstance(mode, str)
-                    or (mode.strip() and mode.strip() not in _MODES)
-                )
-                if unknown:
-                    raise ValueError(
-                        f"{key} entries must be one of {', '.join(_MODES)}"
-                    )
-                setattr(self.settings, key, _clean_default_modes(value))
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
@@ -236,9 +196,6 @@ class AppSettingsStore:
         )
         config.tts_local_voice = s.tts_local_voice or d["tts_local_voice"]
         config.critique_models = s.critique_models or d["critique_models"]
-        # Per-provider default modes have no env-backed default; absence means
-        # "use the built-in default" (opencode -> normal, else claude_mode).
-        config.provider_default_modes = dict(s.provider_default_modes or {})
         # Per-provider default models / thinking / routine models have no
         # env-backed default; absence means "use the provider's own default".
         config.provider_default_models = dict(s.provider_default_models or {})

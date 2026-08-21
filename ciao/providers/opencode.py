@@ -62,7 +62,7 @@ from ciao.providers.base import (
     prepend_stable_context,
 )
 from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
-from ciao.providers.safe_commands import is_read_only_command
+from ciao.providers.safe_commands import is_destructive_command
 from ciao.tool_path import resolve_tool
 
 logger = logging.getLogger(__name__)
@@ -139,11 +139,28 @@ _MODE_AGENTS: dict[str, str] = {
 # with a bare 400, so keep this in rule form.
 #
 # Resolution is last-match-wins, so the wildcard goes first and the specific
-# grants follow. Read-only tools are always allowed; `edit` is what separates
-# auto from normal. Shell stays on the wildcard in every non-bypass mode, so a
-# command reaches `_permission_event` even in auto, where the read-only
-# classifier decides whether the operator has to see it.
+# grants follow. ``auto`` is the permissive default: every tool is allowed
+# outright except ``bash`` and Ciaobot's destructive control-plane tools,
+# which stay on the wildcard so ``_permission_event`` can classify each call
+# (see ``auto_approves_permission``). Every other mode keeps its old
+# narrower ruleset for compatibility.
 _READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
+
+# Ciaobot's control-plane mutations that must keep prompting even in the
+# permissive auto default. Mirrors the ``_DESTRUCTIVE`` annotation on the MCP
+# tools in ``ciao/mcp_server.py``: deletes, lifecycle teardown, and arbitrary
+# command starts. Everything else on the control plane is allow-listed.
+_DESTRUCTIVE_MCP_TOOLS = (
+    "chat_delete",
+    "project_delete",
+    "workspace_delete",
+    "chat_stop",
+    "project_complete",
+    "schedule_action",
+    "loop_action",
+    "background_run_start",
+    "background_run_cancel",
+)
 
 # Permission changes cannot be patched onto an existing opencode session.
 # Keep the replacement-session handover bounded so a long-running chat does
@@ -159,14 +176,26 @@ def _rules(*entries: tuple[str, str]) -> list[dict[str, str]]:
     ]
 
 
+def _permissive_auto_rules() -> list[dict[str, str]]:
+    """The auto-mode ruleset: allow everything except removals.
+
+    A leading wildcard ``allow`` makes opencode run without an approval card
+    for almost every tool. ``bash`` and the destructive control-plane tools
+    are pinned to ``ask`` so their permission events reach
+    ``_permission_event``, where ``auto_approves_permission`` lets safe
+    commands through and surfaces only destructive ones to the operator.
+    """
+    return _rules(
+        ("*", "allow"),
+        ("bash", "ask"),
+        *((f"{MCP_SERVER_NAME}_{tool}", "ask") for tool in _DESTRUCTIVE_MCP_TOOLS),
+    )
+
+
 _MODE_PERMISSIONS: dict[str, list[dict[str, str]]] = {
     "plan": _rules(("*", "ask"), *((tool, "allow") for tool in _READ_ONLY_TOOLS)),
     "normal": _rules(("*", "ask")),
-    "auto": _rules(
-        ("*", "ask"),
-        *((tool, "allow") for tool in _READ_ONLY_TOOLS),
-        ("edit", "allow"),
-    ),
+    "auto": _permissive_auto_rules(),
     "bypass": _rules(("*", "allow")),
 }
 
@@ -585,18 +614,22 @@ def auto_approves_permission(mode: BridgeMode, permission: str, command: str) ->
 
     A session's permission ruleset is fixed at creation and `PATCH` does not
     apply (see ``_ensure_session``); mode changes rotate the session before the
-    prompt runs. Even a fresh auto session deliberately keeps shell on the
-    wildcard. Deciding here, on the *current* mode of the turn, is what makes
-    Auto automatic: bypass approves everything, auto approves verifiably
-    read-only work, and every other mode (or anything the classifier cannot
-    verify) still puts a card in front of the operator.
+    prompt runs. In the permissive auto default the ruleset already allows
+    every tool, so the only permission events that surface are ``bash`` and the
+    destructive control-plane tools. Deciding here, on the *current* mode of
+    the turn, is what makes Auto automatic: bypass approves everything, auto
+    approves any non-destructive bash command, and every other mode (or a
+    command the classifier cannot verify) still puts a card in front of the
+    operator.
     """
     if mode == "bypass":
         return True
     if mode != "auto":
         return False
     if permission == "bash":
-        return bool(command) and is_read_only_command(command)
+        # A command we cannot see cannot be verified as non-destructive, so it
+        # keeps the card rather than being waved through blind.
+        return bool(command) and not is_destructive_command(command)
     return permission in _READ_ONLY_TOOLS
 
 

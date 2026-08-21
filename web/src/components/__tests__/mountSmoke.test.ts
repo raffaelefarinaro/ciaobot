@@ -28,12 +28,6 @@ vi.mock('../../lib/api', () => {
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
-    // Built-in default: every provider starts on the app-wide mode.
-    provider_default_modes_effective: {
-      claude: 'auto',
-      codex: 'auto',
-      opencode: 'auto',
-    },
 
     transcription: {
       engine: 'local',
@@ -1048,7 +1042,7 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView saves a per-provider default mode', async () => {
+  it('SettingsView no longer offers a per-provider default mode', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -1059,19 +1053,11 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // The defaults card carries a "Default mode" row per provider. Target the
-    // provider by data-provider rather than by the "Automatic (...)" label:
-    // every provider now resolves to the same app-wide default, so the label
-    // no longer identifies one.
+    // The default execution mode is fixed at auto for every provider; the
+    // per-provider "Default mode" selector is gone.
     const modeSelect = wrapper.find('.routine-select[data-provider="codex"]')
-    expect(modeSelect.exists()).toBe(true)
-    expect(modeSelect.findAll('option').map((o) => o.text())).toContain('Automatic (Auto)')
-
-    await modeSelect.setValue('bypass')
-    await flushPromises()
-    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      provider_default_modes: { codex: 'bypass' },
-    })
+    expect(modeSelect.exists()).toBe(false)
+    expect(wrapper.findAll('span.ws-label').some((el) => el.text() === 'Default mode')).toBe(false)
 
     wrapper.unmount()
   })

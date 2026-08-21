@@ -1,11 +1,18 @@
-"""Conservative classifier for read-only shell commands.
+"""Conservative classifiers for shell command safety.
 
 Used where a provider must decide, per permission request, whether a shell
 command can run without the operator's approval (opencode's auto mode — see
-``OpencodeProvider._permission_event``). The bias is firmly toward "not
-safe": anything multi-line, carrying a construct that could write or execute
-(redirection, command substitution, subshells, background jobs), or simply
-unrecognized surfaces an approval card instead of being approved.
+``OpencodeProvider._permission_event``).
+
+``is_read_only_command`` answers "is this verifiably read-only?" and is
+firmly biased toward "not safe": anything multi-line, carrying a construct
+that could write or execute (redirection, command substitution, subshells,
+background jobs), or simply unrecognized surfaces an approval prompt instead
+of being approved.
+
+``is_destructive_command`` answers "does this risk deleting, destroying, or
+irreversibly changing data or system state?" — the complement used by the
+permissive opencode default (allow every tool except destructive shell).
 """
 
 from __future__ import annotations
@@ -176,3 +183,105 @@ def is_read_only_command(command: str) -> bool:
             segments[-1].append(token)
     filled = [segment for segment in segments if segment]
     return bool(filled) and all(_segment_is_safe(s) for s in filled)
+
+
+# ── Destructive-command classifier ──────────────────────────────────────
+# Shell verbs that remove, truncate, or otherwise destroy data / system
+# state, without a clear read-write intent that leaves the data intact. This
+# is the narrow complement to ``is_read_only_command``: the permissive
+# opencode default allows every tool except commands that reach one of these,
+# which still surface an approval prompt.
+#
+# The set is deliberately small. Plain file writes (``cat > f``, ``tee``,
+# ``cp``, ``mv``), package managers, and normal ``git`` use are *not* listed:
+# they mutate but do not remove, and flagging them would turn the default into
+# the old ask-everything behavior the operator asked to drop. Git's own
+# destructive verbs (``clean``, ``reset``, ``restore`` with a target, ``rm``,
+# ``push --force``) are handled in ``_git_is_destructive``.
+_DESTRUCTIVE_COMMANDS = frozenset({
+    # File/dir removal and truncation.
+    "rm", "rmdir", "rmt", "unlink", "shred", "truncate", "wipefs",
+    # Filesystem/block-device destruction.
+    "mkfs", "mkfs.ext4", "mkfs.xfs", "mkswap", "fdisk", "parted",
+    "dd", "blkdiscard", "pvremove", "vgremove", "lvremove",
+    # System state teardown.
+    "shutdown", "reboot", "poweroff", "halt", "init", "telinit",
+    "userdel", "groupdel", "visudo",
+})
+
+# ``find -delete`` and ``find -exec rm`` delete without naming rm as the
+# leading verb, so the same prefixes as ``_UNSAFE_FIND_PREFIXES`` apply.
+_DESTRUCTIVE_GIT_SUBCOMMANDS = frozenset({"clean", "reset", "restore", "rm", "prune"})
+_DESTRUCTIVE_GIT_PUSH_FLAGS = frozenset({
+    "-f", "--force", "--force-with-lease",
+})
+
+# Wrappers that merely elevate or prefix; the destructive verb follows them.
+_DESTRUCTIVE_WRAPPERS = frozenset({"sudo", "command", "env", "time"})
+
+# A destructive verb run with only query flags is a help/version request, not
+# a removal. Anything else (including a bare `rm file`) stays destructive.
+_DESTRUCTIVE_QUERY_FLAGS = frozenset({"-h", "--help", "-V", "--version"})
+
+
+def _git_is_destructive(args: list[str]) -> bool:
+    if not args:
+        return False
+    subcommand, *rest = args
+    if subcommand == "push":
+        return any(a.startswith(f) for a in rest for f in _DESTRUCTIVE_GIT_PUSH_FLAGS)
+    if subcommand in _DESTRUCTIVE_GIT_SUBCOMMANDS:
+        return True
+    return False
+
+
+def _segment_is_destructive(name: str, args: list[str]) -> bool:
+    """Whether one command segment removes, truncates, or destroys data."""
+    if name in _DESTRUCTIVE_WRAPPERS:
+        # `sudo <destructive>` still destroys; drop wrappers and re-look.
+        if args and args[0] not in _DESTRUCTIVE_WRAPPERS:
+            return _segment_is_destructive(args[0], args[1:])
+        return False
+    if name == "git":
+        return _git_is_destructive(args)
+    if name == "find":
+        return any(arg.startswith(_UNSAFE_FIND_PREFIXES) for arg in args)
+    if name not in _DESTRUCTIVE_COMMANDS:
+        return False
+    # A help/version-only invocation of a destructive verb is a query.
+    if args and all(arg in _DESTRUCTIVE_QUERY_FLAGS for arg in args):
+        return False
+    return True
+
+
+def is_destructive_command(command: str) -> bool:
+    """True when *command* can remove, truncate, or destroy data/state.
+
+    A pipeline or `;`/`&&`/`||` chain is destructive when any segment is. A
+    ``find`` invocation whose action deletes is destructive. A query flag on a
+    destructive verb (`rm --help`) is not. Anything that cannot be tokenized
+    cleanly is treated as *not* destructive: the permissive default leans
+    toward allowing when in doubt, which is the intended flip from the
+    read-only classifier's conservative bias.
+    """
+    text = (command or "").strip()
+    if not text:
+        return False
+    tokens = _tokens(text)
+    if not tokens:
+        return False
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _CONNECTORS:
+            segments.append([])
+        elif all(char in _PUNCTUATION for char in token):
+            # Redirection, background `&`, subshells: unknown but not removal.
+            continue
+        else:
+            segments[-1].append(token)
+    for segment in segments:
+        if not segment:
+            continue
+        if _segment_is_destructive(segment[0], segment[1:]):
+            return True
+    return False

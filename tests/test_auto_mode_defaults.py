@@ -43,7 +43,7 @@ def test_schedule_default_mode_is_auto() -> None:
 
 
 def test_bridge_config_default_claude_mode_is_auto() -> None:
-    """When no env override is set, CiaoConfig.from_env selects auto."""
+    """CiaoConfig.from_env always selects auto; there is no env override."""
     config = BridgeConfig.from_env({"PWA_AUTH_TOKEN": "x"})
     assert config.claude_mode == "auto"
 
@@ -54,10 +54,11 @@ def test_state_store_default_mode_is_auto(tmp_path: Path) -> None:
     assert store._default_mode == "auto"
 
 
-def test_config_env_override_still_wins() -> None:
-    """Explicit CLAUDE_PERMISSION_MODE env still takes precedence."""
+def test_config_ignores_legacy_mode_env() -> None:
+    """Legacy CLAUDE_EXECUTION_MODE / CLAUDE_PERMISSION_MODE env is ignored."""
     config = BridgeConfig.from_env({
         "PWA_AUTH_TOKEN": "x",
+        "CLAUDE_EXECUTION_MODE": "bypassPermissions",
         "CLAUDE_PERMISSION_MODE": "bypassPermissions",
     })
-    assert config.claude_mode == "bypass"
+    assert config.claude_mode == "auto"

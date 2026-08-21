@@ -556,11 +556,6 @@ export interface RoutineSettings {
   provider_default_thinking?: Record<string, string>
   // Per-provider session-insights models; missing = provider default.
   provider_insights_models?: Record<string, string>
-  // Per-provider default execution mode for new chats (Settings → Providers).
-  // Missing entry = the app-wide default mode.
-  provider_default_modes?: Record<string, string>
-  // Resolved effective default mode per provider, after built-in defaults.
-  provider_default_modes_effective?: Record<string, string>
   // What actually runs right now, after defaults.
   insights_model_effective: string
   // On Automatic this resolves from the chat's workspace, so *_effective above

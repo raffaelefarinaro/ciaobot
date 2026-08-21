@@ -9,9 +9,9 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from ciao.execution_modes import HARNESS_DISABLED_SKILLS, normalize_claude_mode
+from ciao.execution_modes import HARNESS_DISABLED_SKILLS
 from ciao.models import BridgeMode
 from ciao.providers.codex import CodexSettings
 from ciao.providers.opencode import OpencodeSettings
@@ -461,10 +461,6 @@ class CiaoConfig:
         init=False, default=False, repr=False
     )
     claude_mode: BridgeMode = "auto"
-    # Per-provider default execution mode for new chats, set from the PWA
-    # Settings → Providers tab (runtime settings store). A missing entry uses
-    # ``claude_mode`` for every provider.
-    provider_default_modes: dict[str, str] = field(default_factory=dict)
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab (runtime settings store). A missing entry uses the provider's
     # own catalog default.
@@ -1077,17 +1073,11 @@ class CiaoConfig:
     def default_mode_for_provider(self, provider: str) -> BridgeMode:
         """The default execution mode for new chats on ``provider``.
 
-        An operator pin (Settings → Providers → default mode) wins; otherwise
-        every provider falls back to ``claude_mode``. opencode used to be
-        pinned to normal here, but its auto ruleset is as tight as the other
-        adapters' (read-only tools plus ``edit`` allowed outright, shell left
-        on the wildcard so ``auto_approves_permission`` still classifies each
-        command), so there is no reason for it to be the one backend that
-        starts stricter than the app-wide default.
+        Every provider runs in auto mode by default. Auto's classifier gates
+        risky actions (destructive shell, unapproved control-plane mutations)
+        while allowing safe reads and edits, so there is no safer default and
+        no per-provider override.
         """
-        mode = (self.provider_default_modes or {}).get(provider, "")
-        if mode in {"normal", "plan", "auto", "bypass"}:
-            return cast(BridgeMode, mode)
         return self.claude_mode
 
     def _declared_mcp_server_names(self) -> list[str] | None:
@@ -1378,10 +1368,7 @@ class CiaoConfig:
             tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
             claude_models=list(claude_models or ["opus", "sonnet", "haiku", "fable"]),
             claude_default_model=claude_default_model,
-            claude_mode=normalize_claude_mode(
-                source.get("CLAUDE_EXECUTION_MODE", "")
-                or source.get("CLAUDE_PERMISSION_MODE", "auto")
-            ),
+            claude_mode="auto",
             restart_exit_code=int(
                 source.get("CIAO_RESTART_EXIT_CODE", "75")
             ),

@@ -968,14 +968,18 @@ _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
     ("CLAUDE_DEFAULT_MODEL_WORK", "set a workspace's default_model in workspaces.json"),
     ("CIAO_DISALLOWED_TOOLS_PERSONAL", "set a workspace's disallowed_tools in workspaces.json"),
     ("CIAO_DISALLOWED_TOOLS_WORK", "set a workspace's disallowed_tools in workspaces.json"),
+    # Execution mode is fixed at auto for every provider; there is no override.
+    ("CLAUDE_EXECUTION_MODE", "remove it: execution mode is always auto"),
+    ("CLAUDE_PERMISSION_MODE", "remove it: execution mode is always auto"),
 )
 
 
 def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction]:
     """Environment variables the engine no longer reads.
 
-    These described the two hardcoded `personal`/`work` names and went with the
-    bootstrap registry that manufactured them. A variable that is set and silently
+    Some described the two hardcoded `personal`/`work` names and went with the
+    bootstrap registry that manufactured them; the execution-mode vars were
+    retired when auto became the only mode. A variable that is set and silently
     ignored is worse than one that never existed: the operator believes a setting
     is in effect. Chat-only — the fix edits `.env`, which is theirs.
     """

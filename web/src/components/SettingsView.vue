@@ -850,24 +850,6 @@
                     </option>
                   </select>
                 </label>
-                <label class="settings-field">
-                  <span class="ws-label">Default mode</span>
-                  <select
-                    class="routine-select"
-                    :data-provider="section.key"
-                    :value="providerModeSelectorValue(section.key)"
-                    :disabled="routinesSaving"
-                    @change="saveProviderMode(section.key, ($event.target as HTMLSelectElement).value)"
-                  >
-                    <option
-                      v-for="option in providerModeOptions(section.key)"
-                      :key="option.value"
-                      :value="option.value"
-                    >
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
               </div>
             </div>
           </div>
@@ -2902,56 +2884,6 @@ async function saveProviderDefaultThinking(provider: AliasProviderKey, value: st
   if (selected) defaults[provider] = selected
   else delete defaults[provider]
   await saveRoutines({ provider_default_thinking: defaults })
-}
-
-// Per-provider default execution mode for new chats. The stored override
-// lives in RoutineSettings.provider_default_modes; a missing entry falls back
-// to the effective default reported by the backend, which is the app-wide
-// mode for every provider. The local fallback below only covers a routines
-// payload that predates provider_default_modes_effective.
-const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
-
-const MODE_LABELS: Record<string, string> = {
-  auto: 'Auto',
-  bypass: 'Bypass',
-  normal: 'Manual',
-  plan: 'Plan',
-}
-
-function providerModeOverride(provider: AliasProviderKey): string {
-  return routines.value?.provider_default_modes?.[provider] || ''
-}
-
-function providerModeEffective(provider: AliasProviderKey): string {
-  return routines.value?.provider_default_modes_effective?.[provider] || 'auto'
-}
-
-function providerModeSelectorValue(provider: AliasProviderKey): string {
-  return providerModeOverride(provider) || DEFAULT_MODE_SELECTION
-}
-
-function providerModeOptions(provider: AliasProviderKey): { value: string; label: string }[] {
-  const effective = providerModeEffective(provider)
-  return [
-    {
-      value: DEFAULT_MODE_SELECTION,
-      label: `Automatic (${MODE_LABELS[effective] || effective})`,
-    },
-    { value: 'auto', label: 'Auto — fewer prompts, classifier approves safe actions' },
-    { value: 'bypass', label: 'Bypass — skip all checks (use in containers only)' },
-    { value: 'normal', label: 'Manual — approve each tool call' },
-    { value: 'plan', label: 'Plan — read-only, propose without acting' },
-  ]
-}
-
-async function saveProviderMode(provider: AliasProviderKey, value: string) {
-  const selected = value === DEFAULT_MODE_SELECTION ? '' : value
-  const modes = JSON.parse(
-    JSON.stringify(routines.value?.provider_default_modes || {}),
-  ) as Record<string, string>
-  if (selected) modes[provider] = selected
-  else delete modes[provider]
-  await saveRoutines({ provider_default_modes: modes })
 }
 
 function serializeRoutineModel(provider: RoutineProviderValue, model: string): string {
