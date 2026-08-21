@@ -1696,6 +1696,23 @@ def _vault_export_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _install_root_for_vault(vault_root: Path) -> Path | None:
+    """The install a vault belongs to, for cross-root link validation.
+
+    Per-root layout puts a vault at ``<install>/<workspace>/memory-vault``, so
+    the install is two levels up — and only when the receipt says this install
+    re-rooted. Guessing on a shared-layout install would excuse links that
+    really do escape the vault.
+    """
+    from ciao.workspace_reroot import read_receipt  # noqa: PLC0415
+
+    candidate = vault_root.parent.parent
+    runtime = candidate / ".runtime"
+    if read_receipt(runtime) is None:
+        return None
+    return candidate
+
+
 def _vault_lint_command(args: argparse.Namespace) -> int:
     from ciao.vault_lint import VaultTraversalError, run_validation
 
@@ -1721,7 +1738,9 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
         )
         return 1
     try:
-        issues = run_validation(vault_root)
+        issues = run_validation(
+            vault_root, install_root=_install_root_for_vault(vault_root)
+        )
     except VaultTraversalError as exc:
         print(f"Vault inspection failed: {exc}", file=sys.stderr)
         return 1

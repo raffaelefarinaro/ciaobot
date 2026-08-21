@@ -737,3 +737,45 @@ def test_leftover_wikilink_is_neither_a_link_nor_a_finding(tmp_path: Path) -> No
 
     assert issues["broken_markdown_links"] == []
     assert "People/Bob.md" in issues["orphans"]
+
+
+def test_a_resolving_cross_root_link_is_not_a_broken_link(tmp_path: Path) -> None:
+    """After the re-rooting, linking another workspace MUST leave the vault.
+
+    Judged lexically against one vault, every cross-root link came back
+    `outside_vault`, so a correctly migrated install carried a standing count of
+    "broken" links that all resolved — 20 of them on the first real migration.
+    """
+    for name in ("personal", "work"):
+        (tmp_path / name / "memory-vault" / "People").mkdir(parents=True)
+    (tmp_path / "work" / "memory-vault" / "People" / "Colleague.md").write_text(
+        "---\ntype: person\n---\n# Colleague\n", encoding="utf-8"
+    )
+    source = tmp_path / "personal" / "memory-vault" / "People" / "User.md"
+    source.write_text(
+        "---\ntype: person\n---\n"
+        "# User\n"
+        "- [Colleague](../../../work/memory-vault/People/Colleague.md)\n"
+        "- [Ghost](../../../work/memory-vault/People/Ghost.md)\n"
+        "- [Escapee](../../../../outside-install/Secret.md)\n",
+        encoding="utf-8",
+    )
+    # A real file OUTSIDE the install. Existence must not rescue it: leaving the
+    # install is the thing being rejected, and a lexical-containment check that
+    # answered "yes" to everything would otherwise pass this test unnoticed.
+    outside = tmp_path.parent / "outside-install"
+    outside.mkdir(exist_ok=True)
+    (outside / "Secret.md").write_text("private\n", encoding="utf-8")
+    vault = tmp_path / "personal" / "memory-vault"
+
+    without = vault_lint.run_validation(vault)["broken_markdown_links"]
+    with_install = vault_lint.run_validation(vault, install_root=tmp_path)[
+        "broken_markdown_links"
+    ]
+
+    # Without the install root nothing can be judged, so all three are flagged.
+    assert len(without) == 3
+    flagged = {item["target"] for item in with_install}
+    assert "../../../work/memory-vault/People/Colleague.md" not in flagged
+    assert "../../../work/memory-vault/People/Ghost.md" in flagged
+    assert "../../../../outside-install/Secret.md" in flagged

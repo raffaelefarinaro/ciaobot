@@ -989,7 +989,7 @@ def _search_index_audit(install_root: Path, workspaces: Sequence[str]) -> dict[s
     return out
 
 
-def _vault_audit(vault_root: Path) -> dict[str, Any]:
+def _vault_audit(vault_root: Path, install_root: Path | None = None) -> dict[str, Any]:
     if not vault_root.is_dir():
         return {
             "orphans": [],
@@ -1011,7 +1011,7 @@ def _vault_audit(vault_root: Path) -> dict[str, Any]:
                         f"failed to read vault markdown: {exc}",
                     )
                 )
-        result = run_vault_validation(vault_root)
+        result = run_vault_validation(vault_root, install_root=install_root)
     except Exception as exc:  # noqa: BLE001
         logger.exception("OS audit: vault validation failed")
         return {
@@ -1316,7 +1316,9 @@ def run_os_audit(
         runtime,
     )
     empty_errors: dict[str, Any] = {"errors": []}
-    vault_result = _vault_audit(notes) if want_workspace else {**empty_errors}
+    vault_result = (
+        _vault_audit(notes, workspace) if want_workspace else {**empty_errors}
+    )
     # Install-wide, like the other global sections: one search database serves
     # every root, so reporting it per workspace would say the same thing N times.
     search_result = (
