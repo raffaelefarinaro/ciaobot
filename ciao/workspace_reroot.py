@@ -1408,7 +1408,7 @@ def rebuild_search_index(
     """
     import sqlite3
 
-    from ciao.fts_search import get_db_path, index_vault, init_db
+    from ciao.fts_search import get_db_path, index_logs, index_vault, init_db
 
     install_root = Path(install_root).resolve()
     db = Path(db_path) if db_path is not None else get_db_path()
@@ -1446,6 +1446,20 @@ def rebuild_search_index(
                 )
             except Exception as exc:  # noqa: BLE001
                 result["errors"].append({"workspace": name, "error": str(exc)})
+        # The transcript archive is dropped along with everything else, so
+        # rebuilding only the vaults left `transcript_meta` empty and every
+        # transcript search silently answering nothing. It is not per-root: D5
+        # PROMOTES `Logs/` to the install root unsplit, so it indexes once,
+        # keyed against the same base as the vault rows.
+        logs = Path(install_root) / "Logs"
+        if logs.is_dir():
+            try:
+                indexed, removed = index_logs(
+                    conn, logs.parent, logs_root=logs, path_base=install_root
+                )
+                result["logs"] = {"indexed": indexed, "removed": removed}
+            except Exception as exc:  # noqa: BLE001
+                result["errors"].append({"workspace": "", "error": str(exc)})
     finally:
         conn.close()
     return result

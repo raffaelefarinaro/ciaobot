@@ -23,6 +23,22 @@ def _isolate_ciao_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_launch_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let a test write the developer's own `~/Library/LaunchAgents`.
+
+    `setup_workspace()` defaults `launch_agents_dir` to the real one, so every
+    test that called it rewrote `com.ciao.server.plist` — repointing the live
+    LaunchAgent at a pytest tmpdir. It was silent: the suite passed while the
+    operator's engine was relaunched against a temp workspace and reindexed
+    their vault database with fixture notes.
+
+    Autouse and unconditional, for the same reason as `_isolate_ciao_home`:
+    passing the argument per test is precisely the step that gets forgotten.
+    """
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(tmp_path / "LaunchAgents"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_job_runs(tmp_path: Path) -> None:
     """Isolate job runs recording by pointing to a temp directory for every test.
 

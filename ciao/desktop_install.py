@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao import desktop_build
+from ciao.macos_service import default_launch_agents_dir
 
 
 APP_BUNDLE_NAME = desktop_build.APP_BUNDLE_NAME
@@ -52,7 +53,7 @@ def _remove_installer_launch_agents(
 ) -> list[str]:
     """Boot out and delete agents whose executables belong to this bundle."""
     launch_dir = (
-        launch_agents_dir or Path.home() / "Library" / "LaunchAgents"
+        launch_agents_dir or default_launch_agents_dir()
     ).expanduser()
     resolved_uid = getattr(os, "getuid", lambda: 0)() if uid is None else uid
     specs = (

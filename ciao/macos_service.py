@@ -26,6 +26,26 @@ LEGACY_EXECUTABLE = "CiaobotServer"
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def default_launch_agents_dir() -> Path:
+    """Where LaunchAgent plists are written, honouring ``CIAO_LAUNCH_AGENTS_DIR``.
+
+    Defaults to the user's real ``~/Library/LaunchAgents``. The override exists
+    because the default is the operator's live install: `setup_workspace` writes
+    `com.ciao.server.plist` there, so any test calling it repointed the real
+    agent at a pytest tmpdir. The suite stayed green while the engine was
+    relaunched against a temp workspace — and indexed that fixture vault over
+    the operator's own search database.
+
+    Same shape and same reason as ``CIAO_MEMORY_DIR`` in `fts_search`: the thing
+    that failed was remembering to pass the argument, so the default itself is
+    what has to be redirectable.
+    """
+    override = os.environ.get("CIAO_LAUNCH_AGENTS_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "Library" / "LaunchAgents"
+
+
 @dataclass(frozen=True, slots=True)
 class DesktopRuntime:
     workspace: str
@@ -75,7 +95,7 @@ def discover_runtime(
 
     env = os.environ if environ is None else environ
     agents = (
-        Path.home() / "Library" / "LaunchAgents"
+        default_launch_agents_dir()
         if launch_agents_dir is None
         else Path(launch_agents_dir).expanduser()
     )
@@ -493,7 +513,7 @@ def migrate_legacy_companion(
     migration_dir = runtime_root / "migration"
     migration_dir.mkdir(parents=True, exist_ok=True)
     agents = (
-        Path.home() / "Library" / "LaunchAgents"
+        default_launch_agents_dir()
         if launch_agents_dir is None
         else Path(launch_agents_dir)
     )

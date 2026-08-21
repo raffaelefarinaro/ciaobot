@@ -568,6 +568,12 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # `_isolate_launch_agents` redirects the default away from the real
+    # ~/Library/LaunchAgents; re-point it at this test's faked home so the
+    # assertion still exercises per-user default resolution.
+    monkeypatch.setenv(
+        "CIAO_LAUNCH_AGENTS_DIR", str(home / "Library" / "LaunchAgents")
+    )
     monkeypatch.setenv("CIAO_WORKSPACE", "")
     monkeypatch.setenv("PWA_PORT", "")
     monkeypatch.setattr(routes_api, "_interactive_foreground_run", lambda: True)

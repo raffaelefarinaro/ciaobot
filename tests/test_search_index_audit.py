@@ -128,3 +128,70 @@ def test_an_empty_install_is_not_told_its_index_is_missing(tmp_path: Path) -> No
     )
 
     assert _audit(tmp_path, config)["search_index"]["missing"] is False
+
+
+def test_the_rebuild_also_indexes_the_promoted_transcript_archive(
+    tmp_path: Path,
+) -> None:
+    """A rebuild that skips `Logs/` empties transcript search without saying so.
+
+    `rebuild_search_index` deletes the whole database — rows for transcripts
+    included — then re-indexed only the per-root vaults. On the live install
+    that turned 400+ indexed transcripts into zero, and nothing reported it:
+    the audit only counts vault rows, so the run looked clean.
+    """
+    import sqlite3
+
+    from ciao.workspace_reroot import rebuild_search_index
+
+    _install(tmp_path)
+    archive = tmp_path / "Logs" / "Chats"
+    archive.mkdir(parents=True)
+    (archive / "chat-1.md").write_text("# Chat\nwe discussed the roof\n", encoding="utf-8")
+
+    result = rebuild_search_index(tmp_path, ["personal", "work"])
+
+    assert result["errors"] == []
+    assert result.get("logs", {}).get("indexed") == 1
+    conn = sqlite3.connect(result["database"])
+    try:
+        rows = [r[0] for r in conn.execute("SELECT path FROM transcript_meta")]
+    finally:
+        conn.close()
+    assert rows == ["Logs/Chats/chat-1.md"]
+
+
+def test_os_audit_defaults_its_vault_root_to_the_layout_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ciao os-audit` with no flags must not invent a shared-layout vault.
+
+    The default was the literal `memory-vault`, which is where the vault lived
+    BEFORE the re-rooting. After it, that path is absent, so the audit opened
+    with `missing_vault_root` and a defect count that could never reach zero —
+    on a healthy install. A backstop that always cries is not a backstop.
+    """
+    import argparse
+
+    from ciao.cli import _os_audit_command
+
+    _install(tmp_path)
+    (tmp_path / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "personal"}, {"name": "work"}]), encoding="utf-8"
+    )
+    for name in ("CIAO_VAULT_ROOT", "CIAO_RUNTIME_ROOT", "CIAO_WORKSPACE"):
+        monkeypatch.delenv(name, raising=False)
+
+    printed: list[str] = []
+    monkeypatch.setattr("builtins.print", lambda *a, **k: printed.append(" ".join(map(str, a))))
+    _os_audit_command(
+        argparse.Namespace(
+            workspace=tmp_path, vault_root=None, runtime_root=None,
+            workspace_name="", scope="all", json=True,
+        )
+    )
+
+    report = json.loads("\n".join(printed))
+    assert report["scan_errors"] == []
+    assert [e for e in report["setup_audit"]["errors"]
+            if e.get("type") == "missing_vault_root"] == []

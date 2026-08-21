@@ -24,6 +24,7 @@ import urllib.request
 
 from ciao import dev, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
+from ciao.macos_service import default_launch_agents_dir
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -399,13 +400,13 @@ def _disable_legacy_menubar_agent(launch_agents_dir: Path | None = None) -> bool
     the user's real launchd domain.
     """
 
-    default_launch_dir = Path.home() / "Library" / "LaunchAgents"
-    launch_dir = (launch_agents_dir or default_launch_dir).expanduser()
+    real_launch_dir = Path.home() / "Library" / "LaunchAgents"
+    launch_dir = (launch_agents_dir or default_launch_agents_dir()).expanduser()
     plist_path = launch_dir / "com.ciao.menubar.plist"
     if not plist_path.exists():
         return False
 
-    if sys.platform == "darwin" and launch_dir == default_launch_dir:
+    if sys.platform == "darwin" and launch_dir == real_launch_dir:
         label = f"gui/{os.getuid()}/com.ciao.menubar"
         try:
             subprocess.run(
@@ -975,7 +976,11 @@ def setup_workspace(
                     "      It is reversible: `ciao vault-unmigrate-links --apply`.",
                 )
 
-    launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
+    launch_dir = (
+        Path(launch_agents_dir)
+        if launch_agents_dir is not None
+        else default_launch_agents_dir()
+    )
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
     # The bundled launcher exports its own entrypoint so onboarding does not
     # write the embedded interpreter directly into launchd as ``python run``.
@@ -1791,15 +1796,26 @@ def _os_audit_command(args: argparse.Namespace) -> int:
             path = workspace / path
         return path.resolve()
 
-    vault = resolve_under_workspace(
-        args.vault_root,
-        "CIAO_VAULT_ROOT",
-        "memory-vault",
-    )
     runtime = resolve_under_workspace(
         args.runtime_root,
         "CIAO_RUNTIME_ROOT",
         ".runtime",
+    )
+    # `memory-vault` is the SHARED layout's answer. Post-migration there is no
+    # vault at the install root, so a plain `ciao os-audit` resolved a path that
+    # does not exist and reported `missing_vault_root` — on every correctly
+    # migrated install, permanently. The audit is the release backstop; a
+    # standing false error in it is how real findings stop being read.
+    from ciao.config import agent_roots_for  # noqa: PLC0415
+
+    roots = agent_roots_for(workspace, runtime)
+    default_vault = "memory-vault"
+    if roots and roots[0][1]:
+        default_vault = str(Path(roots[0][1]) / "memory-vault")
+    vault = resolve_under_workspace(
+        args.vault_root,
+        "CIAO_VAULT_ROOT",
+        default_vault,
     )
     from ciao.config import CiaoConfig
 
@@ -2691,7 +2707,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument(
         "--launch-agents-dir",
         type=Path,
-        default=Path.home() / "Library" / "LaunchAgents",
+        default=default_launch_agents_dir(),
         help="Directory where com.ciao.server.plist is written.",
     )
     setup_parser.add_argument(
