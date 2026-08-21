@@ -1959,3 +1959,40 @@ same-root one must stay root-relative; markdown links must be recomputed against
 real directories (one level deeper than expected); an unresolvable link must be
 left alone; `MEMORY.md` is not regenerated; duplicated region markers make a
 region unwritable. It ends with `ciao os-audit`, which is now the complete backstop.
+
+## Install pass: four defects the install itself found (2026-08-21)
+
+Verifying the build on this machine surfaced four defects, all the same shape —
+a default that was correct before the re-rooting, left pointing at the old
+world. All four are fixed, shipped, and the live install is clean.
+
+1. **The test suite hijacked the live install.** `setup_workspace` defaulted
+   `launch_agents_dir` to the real `~/Library/LaunchAgents`, so any test calling
+   it rewrote `com.ciao.server.plist` to a pytest tmpdir. Silent: the suite
+   passed while the operator's engine relaunched against a temp workspace and
+   reindexed their vault database with fixture notes (543 notes → 2 rows, twice
+   in one afternoon). Fixed with `CIAO_LAUNCH_AGENTS_DIR` plus an autouse
+   fixture — the same shape as `CIAO_MEMORY_DIR`, because what fails is
+   remembering to pass the argument.
+
+2. **Every migration emptied transcript search.** `rebuild_search_index`
+   dropped the whole database and re-indexed only the per-root vaults, never
+   the promoted `Logs/`. 1470 transcripts unsearchable.
+
+3. **An empty transcript index read as healthy.** `stale_search_rows` asks
+   whether indexed paths still resolve, which zero rows passes trivially — so
+   `--repair` printed "clean" over defect 2. `unindexed_transcript_archive`
+   closes it.
+
+4. **The audit's own defaults assumed the shared layout.** `ciao os-audit` with
+   no flags resolved `<install>/memory-vault` and opened with
+   `missing_vault_root`; the vault linter judged every cross-root link
+   `outside_vault`, so 20 links that all resolved counted as broken, forever. A
+   backstop that always cries stops being read.
+
+Plus one data defect, repaired in the vault: 19 markdown links written by the
+migration in the pre-move namespace (`../../work/People/X.md`) pointed at paths
+that never existed post-migration. The correct form needs both an extra `..`
+and the `memory-vault` segment. Worth noting the shape for the retirement
+decision: this is precisely the arithmetic a prompt-driven migration would also
+have to get right.
