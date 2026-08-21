@@ -150,7 +150,7 @@ an in-place new session, `schedule_action`, `loop_action`).
 | Domain | Tools |
 |---|---|
 | Context | `context_get` (includes `system` status) |
-| Bounded memory | `memory_status`, `memory_update`, `memory_proposals_list`, `memory_proposal_resolve` |
+| Bounded memory | `memory_status`, `memory_update` (review proposals via the CLI: `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
 | Vault | `vault_search` |
 | Projects | `projects_list`, `project_get`, `project_create`, `project_update`, `project_complete`, `project_restore`, `project_delete`, `project_files_list` |
 | Workspaces | `workspaces_list`, `workspace_create`, `workspace_update`, `workspace_delete` |
