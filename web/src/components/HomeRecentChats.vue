@@ -1,5 +1,15 @@
 <template>
-  <div v-if="hasHomeActivity" class="home-recent">
+  <div v-if="!store.bootstrapped && store.projects.length === 0" class="home-recent home-recent--loading" aria-hidden="true">
+    <div class="home-lanes">
+      <section v-for="i in 2" :key="i" class="home-lane-skeleton">
+        <div class="mm-shimmer-line" style="width: 36%; height: 14px; margin-bottom: 14px;"></div>
+        <div class="mm-shimmer-line" style="width: 100%; height: 56px; margin-bottom: 10px;"></div>
+        <div class="mm-shimmer-line" style="width: 92%; height: 56px; margin-bottom: 10px;"></div>
+        <div class="mm-shimmer-line" style="width: 88%; height: 56px;"></div>
+      </section>
+    </div>
+  </div>
+  <div v-else-if="hasHomeActivity" class="home-recent">
     <h2 class="home-recent-label">jump back in</h2>
     <div ref="lanesEl" class="home-lanes">
       <section
@@ -1272,6 +1282,15 @@ watch(() => store.activeWorkspace, async () => {
   flex: 1;
   border-radius: 4px;
   background: linear-gradient(90deg, var(--border) 25%, var(--bg3) 50%, var(--border) 75%);
+  background-size: 200% 100%;
+  animation: home-shimmer 1.2s ease-in-out infinite;
+}
+
+.mm-shimmer-line {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
   background-size: 200% 100%;
   animation: home-shimmer 1.2s ease-in-out infinite;
 }

@@ -144,9 +144,21 @@
         </button>
       </div>
       <div class="schedules-list">
-        <div v-if="workspaceSchedules.length === 0 && workspaceLoops.length === 0" class="empty-hint">// no automations in this workspace</div>
+        <template v-if="taskStore.loading">
+          <div class="mm-loading-heading" role="status" aria-live="polite">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading automations…</span>
+          </div>
+          <div aria-hidden="true" class="mm-skeleton-block">
+            <span class="mm-shimmer-line" style="width: 100%; height: 36px; margin-bottom: 8px;"></span>
+            <span class="mm-shimmer-line" style="width: 92%; height: 36px; margin-bottom: 8px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 36px;"></span>
+          </div>
+        </template>
+        <template v-else>
+          <div v-if="workspaceSchedules.length === 0 && workspaceLoops.length === 0" class="empty-hint">// no automations in this workspace</div>
 
-        <template v-if="oneOffSchedules.length">
+          <template v-if="oneOffSchedules.length">
           <div class="schedule-group schedule-group--once">
             <div class="schedule-group-header">
               <span>One-offs <span class="schedule-group-hint">delete after run</span></span>
@@ -268,6 +280,7 @@
             </div>
           </div>
         </template>
+        </template>
       </div>
 
       <div class="sidebar-footer">
@@ -380,30 +393,52 @@
            which put the queue's controls somewhere different from every other
            memory view's. -->
       <div v-if="mode === 'proposals'" class="mm-sidebar-scroll">
-        <h3>Queue</h3>
-        <div class="mm-stat-grid mm-stat-grid--3">
-          <div class="mm-stat">
-            <div class="n">{{ reviewVisible }}</div>
-            <div class="l">of {{ reviewScoped }} shown</div>
+        <template v-if="proposals.loading">
+          <h3>Queue</h3>
+          <div class="mm-loading-heading" role="status" aria-live="polite">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading proposals…</span>
           </div>
-          <div class="mm-stat">
-            <div class="n">{{ proposals.selected.size }}</div>
-            <div class="l">selected</div>
+          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
           </div>
-          <div class="mm-stat">
-            <div class="n">{{ reviewElsewhere }}</div>
-            <div class="l">other workspaces</div>
+          <div class="mm-search">
+            <input type="text" placeholder="Search proposals…" autocomplete="off" disabled />
           </div>
-        </div>
+          <div class="mm-skeleton-block" aria-hidden="true">
+            <span class="mm-shimmer-line" style="width: 40%; margin-bottom: 10px;"></span>
+            <span class="mm-shimmer-line" style="width: 100%; height: 28px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 92%; height: 28px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 28px;"></span>
+          </div>
+        </template>
+        <template v-else>
+          <h3>Queue</h3>
+          <div class="mm-stat-grid mm-stat-grid--3">
+            <div class="mm-stat">
+              <div class="n">{{ reviewVisible }}</div>
+              <div class="l">of {{ reviewScoped }} shown</div>
+            </div>
+            <div class="mm-stat">
+              <div class="n">{{ proposals.selected.size }}</div>
+              <div class="l">selected</div>
+            </div>
+            <div class="mm-stat">
+              <div class="n">{{ reviewElsewhere }}</div>
+              <div class="l">other workspaces</div>
+            </div>
+          </div>
 
-        <div class="mm-search">
-          <input
-            v-model="proposals.search"
-            type="text"
-            placeholder="Search proposals…"
-            autocomplete="off"
-          />
-        </div>
+          <div class="mm-search">
+            <input
+              v-model="proposals.search"
+              type="text"
+              placeholder="Search proposals…"
+              autocomplete="off"
+            />
+          </div>
 
         <div class="mm-row-between">
           <h3>Kinds</h3>
@@ -430,27 +465,50 @@
             <span class="cnt">{{ k.count }}</span>
           </div>
         </div>
+        </template>
       </div>
 
       <div v-if="mode === 'memory'" class="mm-sidebar-scroll">
-        <h3>Vault</h3>
-        <!-- Three tiles, not four: "notes shown" and "total" were separate
-             tiles showing the same number whenever nothing was filtered, so the
-             total moved into the sublabel and the freed slot went to cluster
-             count, which nothing else reported. Orphans left the grid entirely
-             — as a bare number it was not actionable, and it is now a list. -->
-        <div class="mm-stat-grid mm-stat-grid--3">
-          <div class="mm-stat">
-            <div class="n">{{ mm.visibleNodes.length }}</div>
-            <div class="l">of {{ mm.nodes.length }} shown</div>
+        <template v-if="mm.loading">
+          <h3>Vault</h3>
+          <div class="mm-loading-heading" role="status" aria-live="polite">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading vault graph…</span>
           </div>
-          <div class="mm-stat"><div class="n">{{ mm.visibleEdgeCount }}</div><div class="l">links</div></div>
-          <div class="mm-stat"><div class="n">{{ mm.clusters.length }}</div><div class="l">clusters</div></div>
-        </div>
+          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+          </div>
+          <div class="mm-search">
+            <input type="text" placeholder="Search notes, tags…" autocomplete="off" disabled />
+          </div>
+          <div class="mm-skeleton-block" aria-hidden="true">
+            <span class="mm-shimmer-line" style="width: 40%; margin-bottom: 10px;"></span>
+            <span class="mm-shimmer-line" style="width: 100%; height: 28px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 92%; height: 28px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 28px;"></span>
+          </div>
+        </template>
+        <template v-else>
+          <h3>Vault</h3>
+          <!-- Three tiles, not four: "notes shown" and "total" were separate
+               tiles showing the same number whenever nothing was filtered, so the
+               total moved into the sublabel and the freed slot went to cluster
+               count, which nothing else reported. Orphans left the grid entirely
+               — as a bare number it was not actionable, and it is now a list. -->
+          <div class="mm-stat-grid mm-stat-grid--3">
+            <div class="mm-stat">
+              <div class="n">{{ mm.visibleNodes.length }}</div>
+              <div class="l">of {{ mm.nodes.length }} shown</div>
+            </div>
+            <div class="mm-stat"><div class="n">{{ mm.visibleEdgeCount }}</div><div class="l">links</div></div>
+            <div class="mm-stat"><div class="n">{{ mm.clusters.length }}</div><div class="l">clusters</div></div>
+          </div>
 
-        <div class="mm-search">
-          <input v-model="mm.search" type="text" placeholder="Search notes, tags…" autocomplete="off" />
-        </div>
+          <div class="mm-search">
+            <input v-model="mm.search" type="text" placeholder="Search notes, tags…" autocomplete="off" />
+          </div>
 
         <div class="mm-row-between">
           <h3>Categories</h3>
@@ -583,6 +641,7 @@
         <h3>Path finder</h3>
         <p class="mm-hint">{{ mm.pathHint }}</p>
         <button v-if="mm.pathStart || mm.pathEnd" type="button" class="mm-link" @click="mm.resetPath()">clear path</button>
+        </template>
       </div>
     </template>
 
@@ -628,8 +687,24 @@
 
       <!-- Scrollable area for chats/projects -->
       <div class="chats-scroll-area">
-        <!-- Recent chats (max 5) -->
-        <!-- Recent moved to the home-screen "jump back in" grid (HomeRecentChats). -->
+        <template v-if="!store.bootstrapped && store.projects.length === 0">
+          <div class="mm-loading-heading" role="status" aria-live="polite" style="padding: 12px 16px 0;">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading chats…</span>
+          </div>
+          <div class="project-list" aria-hidden="true">
+            <div v-for="i in 3" :key="i" class="project-group">
+              <div class="project-header"><span class="mm-shimmer-line" style="width: 46%; height: 11px;"></span></div>
+              <div class="chat-list">
+                <div class="chat-item" style="pointer-events: none;"><span class="mm-shimmer-line" style="width: 68%; height: 10px;"></span></div>
+                <div class="chat-item" style="pointer-events: none;"><span class="mm-shimmer-line" style="width: 58%; height: 10px;"></span></div>
+              </div>
+            </div>
+          </div>
+        </template>
+        <template v-else>
+          <!-- Recent chats (max 5) -->
+          <!-- Recent moved to the home-screen "jump back in" grid (HomeRecentChats). -->
         <div v-if="false" class="recent-section">
           <div class="recent-label">recent</div>
           <div class="recent-items">
@@ -874,6 +949,7 @@
             </div>
           </div>
         </div>
+        </template>
       </div>
 
       <!-- Add project button + archived-projects entry point -->
@@ -2788,6 +2864,42 @@ async function confirmDeleteChat(chatId: string) {
 .mm-stat { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; }
 .mm-stat .n { font-size: var(--text-lg); font-weight: 600; }
 .mm-stat .l { font-size: var(--text-xs); color: var(--fg3); }
+.mm-stat--skeleton { display: flex; flex-direction: column; justify-content: center; gap: 0; min-height: 52px; }
+
+.mm-loading-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-3);
+}
+.mm-shimmer-line {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+}
+.mm-shimmer-line--n { width: 56%; height: 16px; margin-bottom: 8px; }
+.mm-shimmer-line--l { width: 78%; height: 8px; }
+.mm-skeleton-block { margin-top: var(--space-3); }
+@media (prefers-reduced-motion: reduce) {
+  .mm-shimmer-line { animation: title-shimmer-pulse 1.8s ease-in-out infinite; }
+}
+.history-loading-spinner {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: history-loading-spin 0.8s linear infinite;
+}
+@keyframes history-loading-spin {
+  to { transform: rotate(360deg); }
+}
 
 .mm-search { margin-top: var(--space-3); }
 .mm-search input { width: 100%; font-size: var(--text-sm); }
