@@ -162,7 +162,10 @@ async def test_auto_title_if_default_skips_without_session(monkeypatch) -> None:
         return {"info": {"title": "Native Title"}, "messages": []}
 
     monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
-    assert await manager.auto_title_if_default("chat-1", "hello") is None
+    # No session_id throughout the poll window -> native never reachable, so
+    # the deterministic fallback is used instead of leaving "New Chat".
+    assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
+    assert manager._chats["chat-1"].title == "hello"
 
 
 @pytest.mark.asyncio
@@ -175,8 +178,10 @@ async def test_auto_title_if_default_skips_when_native_missing(monkeypatch) -> N
         return {"info": {"title": ""}, "messages": []}
 
     monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
-    assert await manager.auto_title_if_default("chat-1", "hello") is None
-    assert manager._chats["chat-1"].title == "New Chat"
+    # Native title never arrives within the poll window -> fallback from the
+    # prompt so the sidebar doesn't stay stuck on "New Chat".
+    assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
+    assert manager._chats["chat-1"].title == "hello"
 
 
 @pytest.mark.asyncio

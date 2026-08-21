@@ -6540,7 +6540,14 @@ class ProjectChatManager:
                 # this only fires a second chat_title event when the late title
                 # actually differs from the early one. An empty reply (error /
                 # abort) falls back to the user-only prompt path.
-                if prompt and chat_meta and chat_meta.title == "New Chat":
+                # Also re-run when the early poll fell back to the deterministic
+                # truncation — the late poll can then upgrade that fallback to
+                # the provider's native title once it finally lands.
+                _late_fallback = _fallback_title(prompt) if prompt else None
+                if prompt and chat_meta and (
+                    chat_meta.title == "New Chat"
+                    or (_late_fallback is not None and chat_meta.title == _late_fallback)
+                ):
                     asyncio.create_task(
                         self._auto_title_and_publish(
                             chat_id, prompt, last_assistant_text
@@ -7771,8 +7778,10 @@ class ProjectChatManager:
     # lands, Claude Code writes `aiTitle` after the turn is persisted, and
     # Codex names the thread on its own schedule. A single read at turn end
     # therefore almost always finds nothing, which left every chat stuck on
-    # "New Chat". Poll instead, with a bounded backoff, and give up quietly.
-    _TITLE_POLL_DELAYS: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
+    # "New Chat". Poll instead, with a bounded backoff, and fall back to a
+    # deterministic truncation so the sidebar never stays on "New Chat".
+    # Total budget ~120s covers long Opus turns (e.g. 2m33s in the Wild).
+    _TITLE_POLL_DELAYS: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0)
 
     async def auto_title_if_default(
         self, chat_id: str, user_text: str, assistant_text: str = ""
@@ -7787,18 +7796,33 @@ class ProjectChatManager:
         The provider publishes that title some time after the turn, so this
         polls ``_TITLE_POLL_DELAYS`` rather than reading once. Every wait
         re-checks the chat, so a manual rename or a delete during the poll
-        stops it instead of overwriting the user.
+        stops it instead of overwriting the user. When the provider never
+        publishes a title within the poll window the deterministic
+        ``_fallback_title`` (first 6 words of the prompt) is returned so the
+        sidebar never stays stuck on "New Chat"; the late-turn poll can still
+        overwrite that fallback with the provider's native title when it
+        finally lands.
 
-        ``user_text`` / ``assistant_text`` are accepted for call-site
-        compatibility but unused: the native title is authoritative.
+        ``assistant_text`` is accepted for call-site compatibility but unused:
+        the native title is authoritative.
         """
+        fallback = _fallback_title(user_text)
+
+        def _is_titling_target(title: str) -> bool:
+            # "New Chat" is always a target; the deterministic fallback is also
+            # considered a target so a late poll can upgrade it to the native
+            # title once the provider finally publishes one.
+            return title == "New Chat" or (fallback is not None and title == fallback)
+
         for delay in self._TITLE_POLL_DELAYS:
             if delay:
                 await asyncio.sleep(delay)
             chat = self._chats.get(chat_id)
             # Bail on rename/delete, but not on a missing session: the turn
             # may still be creating it, and a later poll will find it.
-            if chat is None or chat.title != "New Chat":
+            # The fallback title is still considered title-able so the late
+            # poll (fired after the turn) can upgrade it to the native title.
+            if chat is None or not _is_titling_target(chat.title):
                 return None
             if not chat.session_id:
                 continue
@@ -7809,12 +7833,23 @@ class ProjectChatManager:
 
             # Re-check: user may have renamed while we were reading.
             chat = self._chats.get(chat_id)
-            if chat is None or chat.title != "New Chat":
+            if chat is None or not _is_titling_target(chat.title):
                 return None
             chat.title = title
             self._save()
             return title
-        return None
+        # Native title never arrived within the window — use the deterministic
+        # fallback so the sidebar leaves "New Chat". The late-turn poll
+        # (fired from _drive's finally) will still attempt to overwrite this
+        # with the native title when it lands.
+        if fallback is None:
+            return None
+        chat = self._chats.get(chat_id)
+        if chat is None or not _is_titling_target(chat.title):
+            return None
+        chat.title = fallback
+        self._save()
+        return fallback
 
     async def _native_chat_title(self, chat: ChatInfo) -> str | None:
         """Read the provider's own session title for a chat.
