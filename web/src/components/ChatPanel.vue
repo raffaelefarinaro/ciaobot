@@ -3817,9 +3817,13 @@ function send() {
   // When any comments exist and there is no typed text, sendMessage builds
   // the composed content from the comment blocks, so we pass an empty string
   // here. The user sees the actual content in their bubble, not a placeholder.
-  store.sendMessage(chat.value.chat_id, sendText)
-  writeChatDraft(chat.value.chat_id, '')
-  inputText.value = ''
+  const sent = store.sendMessage(chat.value.chat_id, sendText, undefined, () => {
+    writeChatDraft(chat.value.chat_id, '')
+    inputText.value = ''
+  })
+  // If the send was deferred (chat WS is down), keep the text in the composer
+  // and draft so the user doesn't lose it when the page updates/reloads.
+  if (!sent) return
   // Sending implies following the reply: jump to the bottom even if the
   // user had scrolled up, so their bubble and the response are in view.
   // Double nextTick + rAF: the user bubble and streaming row render after

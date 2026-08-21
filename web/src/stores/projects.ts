@@ -3321,11 +3321,20 @@ export const useProjectStore = defineStore('projects', () => {
     persistPendingChatComments()
   }
 
+  // Deferred-send retry limit. When the chat WS is down, sendMessage defers
+  // the actual WS send by 500ms and retries. Without a cap this loops forever
+  // when the server is unreachable, keeping the composer frozen and never
+  // surfacing an error. After this many attempts the deferred send is
+  // abandoned and a system error bubble tells the user the message didn't go.
+  const DEFERRED_SEND_MAX_RETRIES = 20
+
   function sendMessage(
     chatId: string,
     text: string,
     prepared?: PreparedMessage,
-  ) {
+    onSent?: () => void,
+    _deferredAttempt = 0,
+  ): boolean {
     // A re-entry summary is a transient orientation aid, not a new chat
     // message. The first send is the user's signal that it has done its job.
     clearReentrySummary(chatId)
@@ -3354,9 +3363,29 @@ export const useProjectStore = defineStore('projects', () => {
     const { composed, imageRefs } = message
     const ws = sockets.value[chatId]
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      // Retry limit: if the socket stays down, abandon the deferred send and
+      // surface a system error bubble so the user knows the message didn't
+      // go through. Only fire on the original call (attempt 0) — the retry
+      // branches just stop re-scheduling.
+      if (_deferredAttempt >= DEFERRED_SEND_MAX_RETRIES) {
+        const errorMsgs = messages.value[chatId] || []
+        errorMsgs.push({
+          role: 'system',
+          content: 'Error: Could not send — chat connection is down. Please retry.',
+          timestamp: new Date().toISOString(),
+        })
+        messages.value[chatId] = errorMsgs
+        streaming.value[chatId] = false
+        delete streamStartedAt.value[chatId]
+        persistStreamStartedAt()
+        return false
+      }
       connectWs(chatId)
-      setTimeout(() => sendMessage(chatId, text, message), 500)
-      return
+      setTimeout(
+        () => sendMessage(chatId, text, message, onSent, _deferredAttempt + 1),
+        500,
+      )
+      return false
     }
     const alreadyStreaming = isChatStreaming(chatId)
 
@@ -3370,7 +3399,8 @@ export const useProjectStore = defineStore('projects', () => {
       if (imageRefs) payload.images = imageRefs
       payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
-      return
+      onSent?.()
+      return true
     }
 
     const msgs = messages.value[chatId] || []
@@ -3395,6 +3425,8 @@ export const useProjectStore = defineStore('projects', () => {
     const payload: Record<string, unknown> = { type: 'message', text: composed }
     if (imageRefs) payload.images = imageRefs
     ws.send(JSON.stringify(payload))
+    onSent?.()
+    return true
   }
 
   function removeQueued(chatId: string, index: number) {

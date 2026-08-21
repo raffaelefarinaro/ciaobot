@@ -340,6 +340,81 @@ describe('deferred message sends', () => {
     expect(sent).toMatchObject({ type: 'message', text: 'continue' })
     expect(sent.images).toBeUndefined()
   })
+
+  test('returns false and does not push a user bubble when the WS is down', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-no-socket'
+    store.activeChatId = chatId
+    // No connectWs — socket is absent.
+
+    const result = store.sendMessage(chatId, 'lost prompt')
+
+    expect(result).toBe(false)
+    expect(store.messages[chatId]).toBeUndefined()
+  })
+
+  test('fires onSent only when the message actually goes out', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-onsent'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    let onSentFired = false
+    const result = store.sendMessage(chatId, 'hello', undefined, () => { onSentFired = true })
+
+    expect(result).toBe(true)
+    expect(onSentFired).toBe(true)
+  })
+
+  test('does not fire onSent when the send is deferred', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-onsent-deferred'
+    store.activeChatId = chatId
+    // No connectWs — socket is absent.
+
+    let onSentFired = false
+    store.sendMessage(chatId, 'deferred prompt', undefined, () => { onSentFired = true })
+
+    expect(onSentFired).toBe(false)
+  })
+
+  test('surfaces a system error bubble after exhausting deferred retries', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-deferred-exhausted'
+    store.activeChatId = chatId
+    // A WebSocket that never leaves CONNECTING: connectWs creates it, but the
+    // readyState check in sendMessage always defers since onopen never fires.
+    class StuckWebSocket {
+      static CONNECTING = 0
+      static OPEN = 1
+      static CLOSING = 2
+      static CLOSED = 3
+      readyState = StuckWebSocket.CONNECTING
+      onopen: (() => void) | null = null
+      onmessage: ((e: { data: string }) => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+      send = vi.fn()
+      close() { this.readyState = StuckWebSocket.CLOSED; this.onclose?.() }
+      constructor(public url: string) {}
+    }
+    vi.stubGlobal('WebSocket', StuckWebSocket)
+
+    vi.useFakeTimers()
+    try {
+      const result = store.sendMessage(chatId, 'doomed prompt')
+      expect(result).toBe(false)
+      // Advance past all 20 retry attempts (20 * 500ms = 10s).
+      await vi.advanceTimersByTimeAsync(11000)
+
+      const msgs = store.messages[chatId] || []
+      expect(msgs.some(m => m.role === 'system' && m.content.includes('Could not send'))).toBe(true)
+      expect(store.streaming[chatId]).toBe(false)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
 })
 
 describe('client host connection failures', () => {

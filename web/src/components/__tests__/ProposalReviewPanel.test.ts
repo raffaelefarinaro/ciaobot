@@ -250,7 +250,7 @@ describe('ProposalReviewPanel', () => {
       created_at: '', order: 0, vault_folder: 'general', is_auto: true,
     } as never]
     vi.spyOn(projects, 'createChat').mockResolvedValue({ chat_id: 'chat-x' } as never)
-    const send = vi.spyOn(projects, 'sendMessage').mockImplementation(() => undefined as never)
+    const send = vi.spyOn(projects, 'sendMessage').mockImplementation(() => true as never)
     const proposals = useProposalsStore()
     const act = vi.spyOn(proposals, 'act')
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })

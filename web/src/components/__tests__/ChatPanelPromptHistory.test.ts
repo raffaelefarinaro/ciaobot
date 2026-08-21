@@ -182,7 +182,7 @@ describe('ChatPanel sent-prompt history', () => {
 
   it('records a trimmed prompt when the composer sends', async () => {
     const { wrapper, sendMessage } = await mountPanel()
-    sendMessage.mockImplementation(() => undefined)
+    sendMessage.mockImplementation(() => true)
 
     await wrapper.get('textarea.chat-input').setValue('  sent prompt  ')
     await wrapper.get('button.send-btn').trigger('click')
