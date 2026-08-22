@@ -1513,7 +1513,7 @@ class CiaoMcpService:
                 }
                 values = {
                     key: value for key, value in locals().items()
-                    if key not in {"self", "action", "schedule_id"}
+                    if key not in {"self", "action", "schedule_id", "_defaults"}
                     and value != _defaults.get(key)
                 }
                 return await self._invoke(
@@ -1620,7 +1620,7 @@ class CiaoMcpService:
                 }
                 values = {
                     key: value for key, value in locals().items()
-                    if key not in {"self", "action", "loop_id"}
+                    if key not in {"self", "action", "loop_id", "_defaults"}
                     and value != _defaults.get(key)
                 }
                 return await self._invoke(
