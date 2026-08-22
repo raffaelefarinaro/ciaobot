@@ -8,7 +8,7 @@
 // optional quotes). A hand-rolled parser keeps the bundle small and avoids
 // surprises from a fuller library.
 
-export type FrontmatterValue = string | string[] | null
+type FrontmatterValue = string | string[] | null
 
 export interface FrontmatterResult {
   frontmatter: Record<string, FrontmatterValue> | null

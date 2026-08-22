@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optio
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
-    from ciao.web.push import PushManager
 
 RESTART_DRAIN_MESSAGE = (
     "Ciaobot is waiting for active chats to finish before restarting"
@@ -53,7 +52,7 @@ except ImportError:  # pragma: no cover
 
 import yaml
 
-from ciao import job_runs, native_sidecar, provider_registry, subagent_tracking
+from ciao import job_runs, provider_registry, subagent_tracking
 from ciao.config import BridgeConfig
 from ciao.context.capsule import (
     build_context_capsule,
@@ -386,15 +385,6 @@ def _is_retryable_quota_error(text: str) -> bool:
     if "429" not in low and "too many requests" not in low:
         return False
     return any(needle in low for needle in ("usage limit", "rate limit", "quota", "session"))
-
-
-def _is_billing_or_spend_limit_error(text: str) -> bool:
-    low = (text or "").lower()
-    if "reached your session usage limit" in low:
-        return True
-    if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
-        return True
-    return False
 
 
 
@@ -748,18 +738,6 @@ def _set_frontmatter_description(text: str, description: str) -> str | None:
     return "\n".join(lines[:start] + [quoted] + lines[end:])
 
 
-def _safe_validate(path: Path, root: Path, allowed_ext: set[str], max_bytes: int) -> None:
-    """Validate a file path is safe to use."""
-    resolved = path.resolve()
-    if root.resolve() not in resolved.parents and resolved != root.resolve():
-        raise ValueError("File path escaped media root")
-    if path.suffix.lower() not in allowed_ext:
-        raise ValueError(f"Unsupported extension: {path.suffix}")
-    if path.exists() and path.is_symlink():
-        raise ValueError("Symlinks not allowed")
-    if path.exists() and path.stat().st_size > max_bytes:
-        path.unlink(missing_ok=True)
-        raise ValueError("File too large")
 
 
 # ── Data models ──────────────────────────────────────────────────────────
@@ -1172,8 +1150,6 @@ class ProjectChatManager:
         # Bound by main.py when the embedded MCP control plane is enabled.
         # Tests and legacy-only instances intentionally leave it unset.
         self._mcp_service: Optional["CiaoMcpService"] = None
-        # Bound by main.py; unset on tests and legacy-only instances.
-        self._push_manager: Optional["PushManager"] = None
         self._broker = ChatStreamBroker()
         self._events = EventsHub()
         # Per-(chat, file) content snapshots taken on Write/Edit/MultiEdit/
@@ -3225,15 +3201,6 @@ class ProjectChatManager:
         if empty_ids:
             self._save()
         return empty_ids
-
-    def rename_chat(self, chat_id: str, title: str) -> ChatInfo | None:
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return None
-        chat.title = title
-        self._save()
-        return chat
-
     def update_chat(
         self,
         chat_id: str,
@@ -5314,7 +5281,7 @@ class ProjectChatManager:
         if chat.archived:
             raise ValueError("Cannot send messages to an archived chat")
 
-        provider = self._get_provider(chat_id)
+        self._get_provider(chat_id)
         handover_context_sent = bool(
             chat.handover_context_pending and chat.handover_messages
         )

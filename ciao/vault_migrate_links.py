@@ -72,11 +72,8 @@ from ciao.vault_index import (
     FRONTMATTER_RE,
     INLINE_CODE_RE,
     _build_filename_index,
-    _FM_LIST_ITEM_RE,
-    _FM_RELATED_KEY_RE,
     _is_excluded,
     _resolve_related,
-    is_generated_vault_file,
     markdown_destination,
     scan_vault,
 )

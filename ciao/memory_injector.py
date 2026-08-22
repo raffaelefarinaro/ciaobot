@@ -27,8 +27,6 @@ from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
     DEFAULT_USER_CHAR_LIMIT,
     SECTION_SEP,
-    entry_expiration_date,
-    expiration_tag_error,
     is_entry_expired,
     read_region,
     serialize_entries,

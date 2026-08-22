@@ -95,7 +95,7 @@ def test_concurrent_field_updates_to_one_chat_are_merged(tmp_path: Path) -> None
     chat = first.create_chat(project.project_id, title="Original")
     stale = _make_manager(tmp_path)
 
-    first.rename_chat(chat.chat_id, "Renamed")
+    first.update_chat(chat.chat_id, title="Renamed")
     stale_chat = stale.get_chat(chat.chat_id)
     assert stale_chat is not None
     stale_chat.last_read_at = "2026-07-14T12:00:00Z"
@@ -114,7 +114,7 @@ def test_stale_manager_does_not_resurrect_concurrently_deleted_chat(tmp_path: Pa
     stale = _make_manager(tmp_path)
 
     assert first.delete_chat(deleted.chat_id) is True
-    stale.rename_chat(survivor.chat_id, "Still here")
+    stale.update_chat(survivor.chat_id, title="Still here")
 
     chats = _persisted_chats(tmp_path)
     assert deleted.chat_id not in chats

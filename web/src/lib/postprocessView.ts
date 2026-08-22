@@ -14,7 +14,7 @@
 import type { ChatPostprocess, ChatPostprocessStep } from './types'
 
 /** Execution order, matching REGISTRY order in ciao/job_runs.py. */
-export const POSTPROCESS_STEPS = [
+const POSTPROCESS_STEPS = [
   'insights',
   'project_doc_update',
   'trajectory',

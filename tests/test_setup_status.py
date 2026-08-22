@@ -506,7 +506,7 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
     the login view, where the first-run wizard renders — even for a caller that
     already carries a valid session cookie for the throwaway workspace."""
     from ciao.web.auth import SESSION_COOKIE
-    from ciao.web.routes_api import auth_check
+    from ciao.web.routes_auth import auth_check
 
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
@@ -535,7 +535,7 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
 def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
     """Host auth_check must mirror AuthMiddleware when PWA_AUTH_REQUIRED is on."""
     from ciao.web.auth import SESSION_COOKIE
-    from ciao.web.routes_api import auth_check
+    from ciao.web.routes_auth import auth_check
 
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(

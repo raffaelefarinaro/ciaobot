@@ -8,18 +8,9 @@ from typing import Literal
 
 from ciao import provider_registry
 
-ExecutionMode = Literal["provider_prompt", "provider_cli_arg", "bot_handler"]
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
 ControlSurface = Literal["legacy", "mcp", "auto"]
 MessagePhase = Literal["commentary", "final_answer"]
-
-
-@dataclass(frozen=True, slots=True)
-class ModelOption:
-    """One selectable model."""
-
-    value: str
-    label: str
 
 
 @dataclass(slots=True)

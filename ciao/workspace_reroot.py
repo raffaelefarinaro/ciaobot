@@ -36,7 +36,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ciao.vault_index import EXCLUDED_TOP_DIRS
 
 logger = logging.getLogger(__name__)
 
@@ -861,7 +860,7 @@ def split_guide(guide_text: str, workspaces: list[str], primary: str) -> GuideSp
     proposal queue, where a human accepts the ones that belong. Nothing is lost
     and nothing is guessed.
     """
-    from ciao.memory_tool import REGIONS, _REGION_META, parse_entries, read_region  # noqa: PLC0415
+    from ciao.memory_tool import REGIONS, _REGION_META  # noqa: PLC0415
 
     body = strip_region_blocks_text(guide_text)
     region_entries: dict[str, list[str]] = {}

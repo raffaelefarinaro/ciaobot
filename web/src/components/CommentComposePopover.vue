@@ -75,7 +75,7 @@ import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import VoiceRecorder from './VoiceRecorder.vue'
 
-export type ComposeAnchor = { top: number; left: number }
+type ComposeAnchor = { top: number; left: number }
 
 // Pre-measurement fallback: the width is fixed in this component's CSS, and the
 // height covers a 3-row textarea plus the action row.

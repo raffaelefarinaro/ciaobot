@@ -340,7 +340,6 @@ def test_explicit_delete_removes_recovery_signals(tmp_path: Path) -> None:
     assert pcm.delete_chat(chat.chat_id) is True
     assert not transcript_path.exists()
     assert pcm._state.peek_context(ctx) is None
-    assert pcm._state.peek_session_id(ctx) == ""
     assert pcm._audited_chat_status(chat.chat_id) == "deleted"
 
     restarted = _make_manager(tmp_path)

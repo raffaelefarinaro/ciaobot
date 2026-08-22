@@ -44,8 +44,6 @@ from typing import Any, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
-BUILTIN_PROFILES = ("personal", "work")
-
 # OAuth scopes granted per profile. Both profiles request the full set of core
 # Workspace services gws supports, so the in-process re-login flow can mint
 # tokens that cover any feature the user turns on later (Forms, Contacts, etc.)

@@ -32,7 +32,7 @@ ciao/                          Python backend (Starlette).
   sessions.py                  Session state, auth, signed cookies, JSON-backed StateStore for `.runtime/state.json`.
   jsonio.py                    Small JSON I/O helpers.
   transcripts.py               Provider-neutral live transcripts and archives under memory-vault/Logs/Chats/.
-  upgrade.py                   Self-update / deploy flow.
+  upgrade.py                   LibreOffice install probe (Settings) and the packaged skill install/update helpers used at boot. Production app updates go through the Tauri updater/installer, not this module.
   voice.py                     Voice transcription and read-aloud, on-device only: Apple dictation (macOS 26+) and AVSpeechSynthesizer, both through the `ciaobot-native` sidecar bundled in Ciaobot.app. No engine setting, no API key, no model downloads — the OpenAI cloud pair was removed along with the `openai` dependency.
   native_sidecar.py            Shared bridge to the `ciaobot-native` sidecar bundled in Ciaobot.app: locating the binary, the periodically refreshed capability probe, and running one subcommand. Also owns `respond()`, one-shot generation with Apple's on-device Foundation Model (chat titles, Session insights, and re-entry summaries) — it calls FoundationModels directly rather than Apple's `fm` CLI, which only ships with macOS 27. Availability is hardware-gated (macOS 26+, the app bundle, Apple Intelligence on in System Settings, model downloaded); there is no app-side opt-in flag, so `respond()` and the availability checks expose the machine's actual capability.
   app_settings.py              Runtime-mutable app settings (title, insights, and critique models, per-provider default model/thinking and routine models, transcription locale, local TTS voice), persisted at `.runtime/app_settings.json` and overlaid on CiaoConfig. Edited via Settings → Models.
@@ -42,7 +42,7 @@ ciao/                          Python backend (Starlette).
   job_runs.py                  Fail-open recorder for background-job runs. Appends one JSON record per run to `.runtime/job_runs.jsonl` (size-trimmed like `error_log.py`). Background tasks wrap their work in `track()`/`track_sync()`; `automation_summary()` feeds the Settings → Automation page. Also holds the live view: an in-memory in-flight registry (`inflight_runs()`) plus an optional publisher (`set_publisher()`, attached at startup to the chat manager's event bus) so a job can be shown as running, not only after it lands. `JobSpec.step_of` marks a step that runs inside another job's task on that job's trigger, reported as the owner's `steps` rather than as a peer automation.
   models.py                    Shared data models (ChatContext, AgentRequest, etc.).
   model_tiers.py               Claude's tier vocabulary (haiku / sonnet / opus / fable) recognized as bare model aliases; no cross-provider mapping tables.
-  provider_registry.py         Single enumeration of the runtime providers (id, labels, capabilities, auth/status/upgrade hooks).
+  provider_registry.py         Single enumeration of the runtime providers (id, labels, capabilities, auth/status hooks).
   provider_service.py          Provider request builder and execution wrapper.
   control_plane.py             Provider-neutral, scope-enforcing application operations shared by MCP and PWA-owned managers.
   workspaces.py                Shared logical-workspace registry rules (validation, serialization, persistence) used by the PWA routes and the control-plane workspace tools.

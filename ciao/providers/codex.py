@@ -100,14 +100,6 @@ def is_codex_fable(provider: str, model: str) -> bool:
     return provider == "codex" and canonical_tier(model) == "fable"
 
 
-def codex_default_model(config: object) -> str:
-    """The operator's Codex default model, or ``""`` when there is none."""
-    codex = getattr(config, "codex", None)
-    if codex is None:
-        return ""
-    return str(getattr(codex, "default_model", "") or "")
-
-
 def codex_protocol_status(
     binary: str,
     env: Mapping[str, str] | None = None,
@@ -233,15 +225,6 @@ def _agent_message_phase(item: Mapping[str, Any]) -> str | None:
     """Return a valid Codex assistant-message phase, if the item declares one."""
     phase = str(item.get("phase") or "")
     return phase if phase in _MESSAGE_PHASES else None
-
-
-def codex_running_subagents(thread: Mapping[str, Any]) -> tuple[int, bool]:
-    """Return ``(running_count, had_subagents)`` for a Codex thread."""
-    agents = codex_collab_agents(thread)
-    return (
-        sum(1 for agent in agents.values() if agent.get("status") in _ACTIVE_COLLAB_STATES),
-        bool(agents),
-    )
 
 
 def _thread_lifecycle_status(

@@ -50,10 +50,6 @@ PREFIX_LABELS: dict[str, str] = {
 HUMAN_PREFIXES: frozenset[str] = frozenset({"agent"})
 RETIRED_PREFIXES: frozenset[str] = frozenset({"report"})
 
-# The full set of classification labels the convention knows about. Used
-# only to describe issue state in the report, never to remove labels.
-CLASSIFICATION_LABELS: frozenset[str] = frozenset(PREFIX_LABELS.values())
-
 # Matches a leading "[token]" prefix. Tolerant of surrounding whitespace
 # and lowercase/odd spacing: "[Bug]", "[ bug ]", "[BUG]foo" all parse to
 # "bug". Only the first bracket group is considered.
@@ -120,14 +116,6 @@ class LabelHygieneReport:
     additions: tuple[LabelAddition, ...] = field(default_factory=tuple)
     needs_human: tuple[HumanReview, ...] = field(default_factory=tuple)
     no_prefix: tuple[TriageCandidate, ...] = field(default_factory=tuple)
-
-    @property
-    def has_actions(self) -> bool:
-        return bool(self.additions)
-
-    @property
-    def has_findings(self) -> bool:
-        return bool(self.additions or self.needs_human or self.no_prefix)
 
     def to_dict(self) -> dict[str, Any]:
         return {

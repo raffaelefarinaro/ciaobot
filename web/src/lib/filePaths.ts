@@ -29,7 +29,7 @@ const EXTS = [
 // segment ending with an allow-listed extension, with an optional ":line".
 // The non-capturing outer group rules out word-breaks inside extensions.
 const EXT_ALT = EXTS.join('|')
-export const FILE_PATH_RE = new RegExp(
+const FILE_PATH_RE = new RegExp(
   `(?<![\\w.])((?:\\/)?(?:[\\w.+-]+\\/)+[\\w.+-]+\\.(?:${EXT_ALT}))(?::(\\d+))?(?!\\w)`,
   'g',
 )

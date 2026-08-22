@@ -42,7 +42,6 @@ export type CommentDraft = {
   lines: LineRange
   cell: CellRef
 }
-
 export type UseFileCommentsOptions = {
   /** Clean workspace path of the current file (no `:line` suffix). */
   path: () => string

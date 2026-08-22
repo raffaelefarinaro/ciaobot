@@ -89,18 +89,6 @@ def test_find_underperforming_handles_missing_fields() -> None:
 # ── skill file resolution ───────────────────────────────────────────────
 
 
-def test_find_skill_file_prefers_skill_md(tmp_path: Path) -> None:
-    root = tmp_path / "skills"
-    (root / "web-research").mkdir(parents=True)
-    (root / "web-research" / "SKILL.md").write_text("content")
-    assert se.find_skill_file("web-research", root) == root / "web-research" / "SKILL.md"
-
-
-def test_find_skill_file_returns_none_when_missing(tmp_path: Path) -> None:
-    assert se.find_skill_file("nope", tmp_path) is None
-    assert se.find_skill_file("", tmp_path) is None
-
-
 def test_passes_size_check() -> None:
     assert se.passes_size_check("hello")
     assert not se.passes_size_check("x" * (se.MAX_SKILL_BYTES + 1))

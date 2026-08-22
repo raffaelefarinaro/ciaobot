@@ -11,7 +11,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
-from ciao.web.routes_api import auth_login, auth_logout
+from ciao.web.routes_auth import auth_login, auth_logout
 
 
 async def _ok(_request):

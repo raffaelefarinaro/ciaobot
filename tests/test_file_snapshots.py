@@ -120,25 +120,6 @@ def test_oversized_file_records_truncated_marker(tmp_path: Path, store: Snapshot
     assert content == b""
 
 
-def test_list_files_for_chat_sorts_by_recent(tmp_path: Path, store: SnapshotStore) -> None:
-    a = tmp_path / "a.md"
-    b = tmp_path / "b.md"
-    a.write_text("a1")
-    b.write_text("b1")
-    _run(store.capture(chat_id="c", file_path=str(a), action="written", tool="Write"))
-    _run(store.capture(chat_id="c", file_path=str(b), action="written", tool="Write"))
-    b.write_text("b2")
-    _run(store.capture(chat_id="c", file_path=str(b), action="edited", tool="Edit"))
-
-    files = store.list_files_for_chat("c")
-    assert len(files) == 2
-    # `b` was touched most recently, so it sorts first.
-    assert files[0]["file_path"] == str(b)
-    assert files[0]["snapshots"] == 2
-    assert files[1]["file_path"] == str(a)
-    assert files[1]["snapshots"] == 1
-
-
 def test_delete_chat_removes_all_snapshots(tmp_path: Path, store: SnapshotStore) -> None:
     target = tmp_path / "note.md"
     target.write_text("v1")
@@ -147,7 +128,6 @@ def test_delete_chat_removes_all_snapshots(tmp_path: Path, store: SnapshotStore)
 
     store.delete_chat("c")
     assert store.list_snapshots(chat_id="c", file_path=str(target)) == []
-    assert store.list_files_for_chat("c") == []
 
 
 def test_quoted_path_stays_in_single_directory(tmp_path: Path, store: SnapshotStore) -> None:
@@ -167,6 +147,5 @@ def test_quoted_path_stays_in_single_directory(tmp_path: Path, store: SnapshotSt
     assert len(children) == 1
     assert children[0].is_dir()
     assert "/" not in children[0].name  # encoded form
-    # And the file path round-trips on the listing.
-    files = store.list_files_for_chat("c")
-    assert files[0]["file_path"] == str(target)
+    # And the quoted name maps back to the file on the listing.
+    assert store.list_snapshots(chat_id="c", file_path=str(target))

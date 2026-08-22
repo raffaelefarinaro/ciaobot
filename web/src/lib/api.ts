@@ -1,13 +1,13 @@
 const BASE = ''
 
 /** The JSON body an error response may carry. Every field is best-effort. */
-export interface ApiErrorBody {
+interface ApiErrorBody {
   error?: string
   steps?: Array<{ step?: string; ok?: boolean; output?: string }>
   [key: string]: unknown
 }
 
-export class ApiError extends Error {
+class ApiError extends Error {
   status?: number
   payload?: unknown
 

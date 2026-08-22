@@ -19,22 +19,7 @@ def test_state_store_updates_model_and_sessions(tmp_path: Path) -> None:
     ctx_state = reloaded.get_context(CTX)
     assert ctx_state.active_model == "opus"
     assert reloaded.get_mode(CTX) == "auto"
-    assert reloaded.get_session_id(CTX) == "sess-1"
-
-
-def test_state_store_reload_refreshes_in_memory_state(tmp_path: Path) -> None:
-    store = StateStore(tmp_path / "state.json", tmp_path, tmp_path / ".runtime")
-    store.set_active_model("sonnet", CTX)
-
-    external = StateStore(tmp_path / "state.json", tmp_path, tmp_path / ".runtime")
-    external.set_active_model("opus", CTX)
-    external.set_mode("auto", CTX)
-
-    assert store.get_context(CTX).active_model == "sonnet"
-    store.reload()
-    assert store.get_context(CTX).active_model == "opus"
-    assert store.get_selected_model(CTX) == "opus"
-    assert store.get_mode(CTX) == "auto"
+    assert ctx_state.session.session_id == "sess-1"
 
 
 def test_context_isolation(tmp_path: Path) -> None:
@@ -47,9 +32,9 @@ def test_context_isolation(tmp_path: Path) -> None:
     store.update_session("sess-2", CTX2)
 
     assert store.get_context(CTX).active_model == "haiku"
+    assert store.get_context(CTX).session.session_id == "sess-1"
     assert store.get_context(CTX2).active_model == "opus"
-    assert store.get_session_id(CTX) == "sess-1"
-    assert store.get_session_id(CTX2) == "sess-2"
+    assert store.get_context(CTX2).session.session_id == "sess-2"
 
 
 def test_v1_migration(tmp_path: Path) -> None:

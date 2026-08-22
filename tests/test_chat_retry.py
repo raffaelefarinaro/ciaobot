@@ -371,7 +371,6 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
         _is_retryable_connection_error,
         _is_retryable_provider_startup_error,
         _is_retryable_quota_error,
-        _is_billing_or_spend_limit_error,
     )
 
     banner = (
@@ -395,10 +394,6 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     assert _is_retryable_quota_error(credits_err) is True
     assert _is_retryable_quota_error(spend_limit_err) is True
     assert _is_retryable_quota_error(rate_limit_err) is True
-
-    assert _is_billing_or_spend_limit_error(credits_err) is True
-    assert _is_billing_or_spend_limit_error(spend_limit_err) is True
-    assert _is_billing_or_spend_limit_error(rate_limit_err) is False
 
 
 async def test_opencode_startup_error_is_persisted_and_retried(tmp_path: Path) -> None:

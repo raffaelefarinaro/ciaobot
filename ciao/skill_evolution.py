@@ -370,15 +370,6 @@ def find_underperforming_skills(
 # ── Skill file resolution + guardrails ──────────────────────────────────
 
 
-def find_skill_file(skill_name: str, skills_root: Path) -> Path | None:
-    """Locate the SKILL.md (or <name>.md) for a skill name.
-
-    Single-root form: searches ``skills_root`` only. Kept for callers
-    and tests that explicitly pin a root.
-    """
-    return find_skill_file_in_roots(skill_name, [skills_root])
-
-
 def find_skill_file_in_roots(
     skill_name: str,
     skills_roots: Iterable[Path],
@@ -811,7 +802,7 @@ async def _process_skill_dag(
     ]
 
     label = f"skillevo:{skill_name}"
-    ctx = run_dag(dag, edges, job="skill_evolution", label=label)
+    run_dag(dag, edges, job="skill_evolution", label=label)
 
     if written_path["value"]:
         return Path(written_path["value"])

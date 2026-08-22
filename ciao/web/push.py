@@ -123,9 +123,6 @@ class PushManager:
             self._subs.append({**subscription, "local": bool(local)})
             self._save_subs()
 
-    def local_count(self) -> int:
-        return sum(1 for s in self._subs if s.get("local"))
-
     def remove(self, endpoint: str) -> None:
         with self._lock:
             before = len(self._subs)
@@ -214,15 +211,6 @@ class PushManager:
         self._log_notification(payload)
         remote = [s for s in self._subs if not s.get("local")]
         self._deliver(remote, payload)
-
-    def send_test(self, payload: dict[str, Any]) -> dict[str, int]:
-        """Push a test notification to *local* subscriptions so the user can
-        confirm the browser actually displays it — the one thing neither the
-        server nor the Web Notification API can detect (see ``send``). Returns
-        the local subscription count and how many the push service accepted."""
-        local = [s for s in self._subs if s.get("local")]
-        accepted = self._deliver(local, payload)
-        return {"local_subscriptions": len(local), "accepted": accepted}
 
     def clear_chat(self, chat_id: str) -> None:
         """Clear delivered notifications for ``chat_id`` on every channel.

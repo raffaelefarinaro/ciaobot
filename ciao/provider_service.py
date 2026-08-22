@@ -63,9 +63,6 @@ class ProviderService:
             self._provider = factory(root, config=self._config)
         return self._provider
 
-    def has_active_process(self) -> bool:
-        return self._active_handle is not None
-
     def _register_handle(self, handle: ActiveHandle | None) -> None:
         self._active_handle = handle
 

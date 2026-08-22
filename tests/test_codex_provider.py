@@ -26,7 +26,6 @@ from ciao.providers.codex import (
     codex_collab_agents,
     codex_collab_tree_counts,
     codex_protocol_status,
-    codex_running_subagents,
 )
 
 
@@ -309,7 +308,6 @@ def test_codex_collab_state_tracks_child_lifecycle_not_spawn_status() -> None:
     agents = codex_collab_agents(thread)
     assert agents["child-1"]["status"] == "completed"
     assert agents["child-1"]["description"] == "Research"
-    assert codex_running_subagents(thread) == (0, True)
 
 
 def test_codex_protocol_status_requires_complete_schema(

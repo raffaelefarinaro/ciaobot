@@ -289,12 +289,6 @@ def extract_file_touches(tool_name: str, tool_input: object) -> list[dict]:
     return []
 
 
-def extract_file_touch(tool_name: str, tool_input: object) -> dict | None:
-    """If this tool mutates a file, return `{file_path, action}`, else None."""
-    touches = extract_file_touches(tool_name, tool_input)
-    return touches[0] if touches else None
-
-
 def normalize_file_touch_paths(
     touches: list[dict],
     workspace_root: Path | None = None,
@@ -607,10 +601,6 @@ class ChatStream:
     @property
     def done(self) -> bool:
         return self._done
-
-    @property
-    def event_count(self) -> int:
-        return len(self._events)
 
     def buffered_events(self) -> list[dict]:
         """Return a shallow copy of currently buffered events."""

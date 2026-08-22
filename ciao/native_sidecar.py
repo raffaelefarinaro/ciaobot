@@ -42,7 +42,6 @@ SIDECAR_NAME = "ciaobot-native"
 
 # Exit codes, mirrored from desktop/native/main.swift so a failure can be
 # reported as something the user can act on.
-EXIT_USAGE = 64
 EXIT_UNSUPPORTED_OS = 65
 EXIT_LOCALE_UNAVAILABLE = 66
 EXIT_AUDIO_UNREADABLE = 67

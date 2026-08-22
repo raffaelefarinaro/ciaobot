@@ -77,7 +77,6 @@ from ciao.providers.base import (
     ProviderCapabilities,
     build_claude_message_stream,
     rate_limit_quota_payload,
-    rate_limit_status_text,
 )
 from ciao.rate_limits import RateLimitStore, default_store_path, is_rate_limit_telemetry
 

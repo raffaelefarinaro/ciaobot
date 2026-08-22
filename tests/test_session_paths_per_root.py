@@ -15,10 +15,9 @@ import json
 from pathlib import Path
 
 import pytest
-from claude_agent_sdk import SDKSessionInfo, SessionMessage
 
 from ciao import insights, subagent_tracking
-from ciao.transcripts import _claude_projects_dir, extract_cli_transcripts
+from ciao.transcripts import _claude_projects_dir
 from ciao.web import routes_api
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
 
@@ -125,96 +124,6 @@ def test_local_session_jsonl_paths_defaults_to_workspace_root(fake_home: Path) -
     path = _write_session(_projects_dir_for(root), session)
 
     assert routes_api._local_session_jsonl_paths(session, root) == [path]
-
-
-def test_extract_cli_transcripts_reads_own_root(
-    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root_a = fake_home / "a"
-    root_b = fake_home / "b"
-    session = "77777777-7777-7777-7777-777777777777"
-    _write_session(_projects_dir_for(root_a), session)
-
-    archive_root = tmp_path / "archive"
-    tracking = tmp_path / "tracking.json"
-
-    sessions = [
-        SDKSessionInfo(
-            session_id=session,
-            summary="hi",
-            last_modified=1_711_968_001_000,
-            created_at=1_711_968_000_000,
-            cwd=str(root_a),
-            git_branch="main",
-        )
-    ]
-    messages = [
-        SessionMessage(
-            type="user",
-            uuid="u1",
-            session_id=session,
-            message={"role": "user", "content": "hi"},
-        )
-    ]
-    monkeypatch.setattr("ciao.transcripts.list_sessions", lambda **_kw: sessions)
-    monkeypatch.setattr(
-        "ciao.transcripts.get_session_messages",
-        lambda session_id, **_kw: messages,
-    )
-    monkeypatch.setattr("ciao.transcripts.list_subagents", lambda *_a, **_kw: [])
-    monkeypatch.setattr("ciao.transcripts.get_subagent_messages", lambda *_a, **_kw: [])
-
-    created = extract_cli_transcripts(
-        workspace_root=root_b,
-        archive_root=archive_root,
-        tracking_path=tracking,
-        agent_root=root_a,
-    )
-    assert len(created) == 1
-
-
-def test_extract_cli_transcripts_defaults_to_workspace_root(
-    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = fake_home / "a"
-    session = "88888888-8888-8888-8888-888888888888"
-    _write_session(_projects_dir_for(root), session)
-
-    archive_root = tmp_path / "archive"
-    tracking = tmp_path / "tracking.json"
-
-    sessions = [
-        SDKSessionInfo(
-            session_id=session,
-            summary="hi",
-            last_modified=1_711_968_001_000,
-            created_at=1_711_968_000_000,
-            cwd=str(root),
-            git_branch="main",
-        )
-    ]
-    messages = [
-        SessionMessage(
-            type="user",
-            uuid="u1",
-            session_id=session,
-            message={"role": "user", "content": "hi"},
-        )
-    ]
-    monkeypatch.setattr("ciao.transcripts.list_sessions", lambda **_kw: sessions)
-    monkeypatch.setattr(
-        "ciao.transcripts.get_session_messages",
-        lambda session_id, **_kw: messages,
-    )
-    monkeypatch.setattr("ciao.transcripts.list_subagents", lambda *_a, **_kw: [])
-    monkeypatch.setattr("ciao.transcripts.get_subagent_messages", lambda *_a, **_kw: [])
-
-    created = extract_cli_transcripts(
-        workspace_root=root,
-        archive_root=archive_root,
-        tracking_path=tracking,
-    )
-    assert len(created) == 1
 
 
 def test_claude_session_exists_reads_own_root(

@@ -10,7 +10,7 @@
  */
 
 export const CODE_BLOCK_CLASS = 'code-block'
-export const CODE_COPY_CLASS = 'code-copy-btn'
+const CODE_COPY_CLASS = 'code-copy-btn'
 
 type CopyState = 'idle' | 'copied' | 'failed'
 
@@ -38,7 +38,7 @@ export function codeCopyButtonHtml(): string {
  * The block's raw text: `textContent` deliberately, so syntax markup (and the
  * language, which lives in a `class`, never in the text) stays out of it.
  */
-export function codeBlockText(block: Element | null | undefined): string {
+function codeBlockText(block: Element | null | undefined): string {
   const source = block?.querySelector('pre code') ?? block?.querySelector('pre')
   // marked always terminates a fenced block with a newline; the user did not
   // select it, so do not paste it either.
@@ -101,7 +101,7 @@ export async function writeClipboard(text: string): Promise<boolean> {
 }
 
 /** Copy one block's text and flash the result on its button. */
-export async function copyCodeBlock(button: HTMLButtonElement): Promise<boolean> {
+async function copyCodeBlock(button: HTMLButtonElement): Promise<boolean> {
   const text = codeBlockText(button.closest(`.${CODE_BLOCK_CLASS}`))
   if (!text) return false
   const copied = await writeClipboard(text)

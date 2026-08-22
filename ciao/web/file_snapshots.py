@@ -34,11 +34,10 @@ import hashlib
 import json
 import logging
 import shutil
-import time
 from dataclasses import dataclass
 from datetime import datetime, UTC
 from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -243,32 +242,6 @@ class SnapshotStore:
         if not snap_path.is_file():
             return None
         return snap_path.read_bytes(), self._normalize_meta(match)
-
-    def list_files_for_chat(self, chat_id: str) -> list[dict]:
-        """Return one entry per file ever touched in this chat, with the most
-        recent snapshot metadata. Drives the chat-level "N files touched"
-        chip's deduped panel when the frontend wants server-authoritative
-        listings instead of relying on its in-memory message history.
-        """
-        chat_dir = self._base / chat_id
-        if not chat_dir.is_dir():
-            return []
-        out: list[dict] = []
-        for fdir in chat_dir.iterdir():
-            if not fdir.is_dir():
-                continue
-            file_path = unquote(fdir.name)
-            metas = self._load_meta(fdir / "meta.json")
-            if not metas:
-                continue
-            latest = self._normalize_meta(metas[-1])
-            out.append({
-                "file_path": file_path,
-                "snapshots": len(metas),
-                "latest": latest,
-            })
-        out.sort(key=lambda d: d["latest"]["ts"], reverse=True)
-        return out
 
     def delete_chat(self, chat_id: str) -> None:
         """Drop all snapshots for a chat. Called when a chat is archived or

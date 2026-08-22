@@ -56,7 +56,7 @@ export type TurnPart =
 
 /** Assistant prose step (not an Activity marker). Ignores `phase` so Claude
  *  mid-turn narration can still be found before we classify it. */
-export function isAssistantTextStep(
+function isAssistantTextStep(
   m: Pick<ChatMessage, 'role' | 'tool_name'>,
 ): boolean {
   return (
@@ -129,7 +129,7 @@ export function findFinalAnswerIndex(
 
 /** True when this assistant text should render as its own bubble (given it is
  *  not the turn-final index, which the caller always keeps). */
-export function shouldRenderAnswerBubble(
+function shouldRenderAnswerBubble(
   m: Pick<ChatMessage, 'role' | 'tool_name' | 'phase' | 'content'>,
 ): boolean {
   if (!isAssistantTextStep(m)) return false

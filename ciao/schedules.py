@@ -83,22 +83,6 @@ def normalize_archive_policy(value: str | None) -> str:
     return normalized
 
 
-def parse_days_of_week(raw: str) -> list[str]:
-    """Parse a comma-separated days string into sorted weekday abbreviations.
-
-    Accepts: "mon,wed,fri", "Sun", "monday", etc.  Returns [] for empty/invalid.
-    """
-    if not raw or not raw.strip():
-        return []
-    result: list[str] = []
-    for token in raw.lower().replace(" ", "").split(","):
-        token = token.strip()[:3]
-        if token in WEEKDAY_NAMES:
-            result.append(token)
-    # Sort by weekday order
-    return sorted(set(result), key=WEEKDAY_NAMES.index)
-
-
 def _matches_frequency(entry: "ScheduleEntry", dt_local: datetime) -> bool:
     if entry.frequency == "manual":
         return False  # manual schedules never auto-fire
@@ -749,23 +733,6 @@ class ScheduleManager:
                     entry, model, mode, provider, target_chat_id=target_chat_id
                 )
             )
-
-    async def _dispatch_entry_and_wait(
-        self,
-        entry: ScheduleEntry,
-        model: str,
-        mode: BridgeMode,
-        provider: str,
-        *,
-        target_chat_id: str | None = None,
-    ) -> dict:
-        """Dispatch a schedule entry and await the result (manual run)."""
-        if self._dispatch_to_web is None:
-            return {}
-        result = await self._dispatch_to_web(
-            entry, model, mode, provider, target_chat_id=target_chat_id
-        )
-        return result or {}
 
     async def dispatch_now(self, schedule_id: str) -> dict:
         """Trigger a schedule immediately through the chat pipeline.

@@ -16,8 +16,6 @@ import json
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from functools import lru_cache
 from pathlib import Path
 from typing import Mapping, Any

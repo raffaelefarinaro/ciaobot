@@ -6,7 +6,7 @@ import { computed, ref, type ComputedRef, type Ref } from 'vue'
 // the pointer moves into the popover itself, and pin it on click until dismissed.
 // Only the element lookup and the clamp math differ, so those are injected.
 
-export type PopoverAnchor = { top: number; left: number }
+type PopoverAnchor = { top: number; left: number }
 
 export type HoverPinPopover = {
   id: string

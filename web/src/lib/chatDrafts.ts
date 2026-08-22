@@ -1,6 +1,6 @@
 const CHAT_DRAFTS_STORAGE_KEY = 'ciao-chat-drafts'
 const CHAT_SENT_PROMPTS_STORAGE_KEY = 'ciao-chat-sent-prompts'
-export const SENT_PROMPT_HISTORY_LIMIT = 50
+const SENT_PROMPT_HISTORY_LIMIT = 50
 // A draft this old is no longer offered for recovery when its chat is gone.
 const ORPHAN_DRAFT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000
 

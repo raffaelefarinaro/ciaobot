@@ -15,22 +15,6 @@ export interface ModelSection {
   hint?: string
 }
 
-export function parseModelList(raw: string): string[] {
-  const seen = new Set<string>()
-  const models: string[] = []
-  for (const item of raw.split(',')) {
-    const model = item.trim()
-    if (!model || seen.has(model)) continue
-    seen.add(model)
-    models.push(model)
-  }
-  return models
-}
-
-export function serializeModelList(models: string[]): string {
-  return parseModelList(models.join(',')).join(',')
-}
-
 function orderedUnique(models: string[]): string[] {
   const seen = new Set<string>()
   const result: string[] = []

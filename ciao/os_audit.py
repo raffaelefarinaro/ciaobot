@@ -19,13 +19,14 @@ from typing import Any
 
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
 from ciao.memory_audit import audit_entries
-from ciao.memory_injector import expiration_tag_error, is_entry_expired
 from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
     DEFAULT_USER_CHAR_LIMIT,
     MAX_ENTRY_CHARS,
     REGIONS,
     contains_invisible_unicode,
+    expiration_tag_error,
+    is_entry_expired,
     read_region,
     region_usage,
     strip_region_blocks,

@@ -6,7 +6,7 @@
 // instead (per the repo contributor guide).
 
 // GitHub repo used for the product-bug fallback. Keep in sync with CLAUDE.md.
-export const CIAOBOT_REPO = 'raffaelefarinaro/ciaobot'
+const CIAOBOT_REPO = 'raffaelefarinaro/ciaobot'
 export const CIAOBOT_ISSUES_URL = `https://github.com/${CIAOBOT_REPO}/issues/new`
 
 export interface FixPromptInput {

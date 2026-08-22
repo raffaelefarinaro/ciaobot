@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import sqlite3
 import uuid
 from collections.abc import Callable
@@ -117,10 +116,8 @@ class CiaoControlPlane:
         project_chat_manager: Any,
         schedule_manager: Any,
         loop_manager: Any,
-        local_session_manager: Any | None = None,
         app_settings: Any | None = None,
         startup_tracker: Any | None = None,
-        lifecycle_callback: Callable[[int], Any] | None = None,
         connection_tracker: Any | None = None,
         background_runner: Any | None = None,
     ) -> None:
@@ -128,10 +125,8 @@ class CiaoControlPlane:
         self.pcm = project_chat_manager
         self.schedules = schedule_manager
         self.loops = loop_manager
-        self.local_sessions = local_session_manager
         self.app_settings = app_settings
         self.startup_tracker = startup_tracker
-        self._lifecycle_callback = lifecycle_callback
         self._deferred_actions: dict[str, dict[str, Any]] = {}
         # Optional: the app-wide ConnectionTracker, used by file_surface to
         # report real connected clients instead of a per-turn stream proxy.
@@ -139,10 +134,6 @@ class CiaoControlPlane:
         # Optional: the BackgroundRunner backing the background_run_* tools.
         # Unset on legacy-only instances and in most tests.
         self.background = background_runner
-
-    def set_lifecycle_callback(self, callback: Callable[[int], Any]) -> None:
-        """Attach the server restart callback after uvicorn is constructed."""
-        self._lifecycle_callback = callback
 
     def _defer_until_chat_idle(
         self,
@@ -400,10 +391,7 @@ class CiaoControlPlane:
     # Memory-proposal list/dismiss moved out of the MCP surface to the CLI
     # (`ciao memory-proposals`, `ciao memory-proposal-dismiss`) so the nightly
     # curation agent can review and resolve the queue through one tool instead
-    # of a synchronous MCP round-trip. The vault path resolution still lives on
-    # the control plane for any surface that needs it.
-    def _memory_proposals_path(self, principal: McpPrincipal) -> Path:
-        return self._vault_root(principal) / "Workspace" / "Memory-Proposals.md"
+    # of a synchronous MCP round-trip.
 
     # ---- workspaces ----------------------------------------------------
 
@@ -1435,78 +1423,7 @@ class CiaoControlPlane:
                 stream_state = "active"
         return viewers, stream_state
 
-    def file_history_list(
-        self, principal: McpPrincipal, chat_id: str, file_path: str
-    ) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        return _ok(self.pcm.snapshots.list_snapshots(chat_id=chat.chat_id, file_path=file_path))
-
-    def file_snapshot_read(
-        self, principal: McpPrincipal, chat_id: str, file_path: str, seq: int
-    ) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        result = self.pcm.snapshots.read_snapshot(
-            chat_id=chat.chat_id, file_path=file_path, seq=max(1, int(seq))
-        )
-        if result is None:
-            raise ControlPlaneError("snapshot_not_found", "The requested snapshot was not found.")
-        content, meta = result
-        if meta.get("truncated"):
-            raise ControlPlaneError("snapshot_truncated", "The snapshot was too large to capture.")
-        try:
-            text = content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ControlPlaneError("binary_snapshot", "Binary snapshots are not returned through MCP.") from exc
-        return _ok({"content": text, "meta": meta})
-
-    async def file_snapshot_restore(
-        self, principal: McpPrincipal, chat_id: str, file_path: str, seq: int
-    ) -> dict[str, Any]:
-        chat_id = self._chat_id(principal, chat_id)
-        root = Path(self.config.workspace_root).resolve()
-        raw = Path(file_path)
-        target = raw.resolve() if raw.is_absolute() else self._safe_relative(root, file_path)
-        if not target.is_relative_to(root):
-            raise ControlPlaneError("path_forbidden", "Snapshots can only be restored inside the workspace root.")
-        result = self.pcm.snapshots.read_snapshot(
-            chat_id=chat_id, file_path=file_path, seq=max(1, int(seq))
-        )
-        if result is None:
-            raise ControlPlaneError("snapshot_not_found", "The requested snapshot was not found.")
-        content, meta = result
-        if meta.get("truncated"):
-            raise ControlPlaneError("snapshot_truncated", "A truncated snapshot cannot be restored.")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-        new_meta = await self.pcm.snapshots.capture(
-            chat_id=chat_id,
-            file_path=file_path,
-            action="restored",
-            tool="MCPRestore",
-        )
-        return _ok({
-            "restored_seq": int(seq),
-            "new_seq": new_meta.seq if new_meta else 0,
-            "path": target.relative_to(root).as_posix(),
-        })
-
     # ---- adversarial review ---------------------------------------------
-
-    def agent_context_get(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        from ciao.web.agent_assets import (
-            list_command_assets,
-            list_prompt_assets,
-            list_subagents,
-            workspace_health,
-        )
-
-        return _ok({
-            "context": [asdict(item) for item in list_prompt_assets(self.config)],
-            "subagents": [asdict(item) for item in list_subagents(self.config)],
-            "commands": [asdict(item) for item in list_command_assets(self.config)],
-            "health": workspace_health(self.config),
-        })
 
     async def skills_sync(self, principal: McpPrincipal, refresh_upstream: bool = False) -> dict[str, Any]:
         self._workspace(principal)
@@ -1519,108 +1436,3 @@ class CiaoControlPlane:
         )
         return _ok(asdict(result))
 
-    # ---- operations ----------------------------------------------------
-
-    async def local_session_status(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        if self.local_sessions is None:
-            raise ControlPlaneError("unavailable", "Local session manager is unavailable.")
-        return _ok(self.local_sessions.status())
-
-    async def local_session_preflight(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        if self.local_sessions is None:
-            raise ControlPlaneError("unavailable", "Local session manager is unavailable.")
-        return _ok(await self.local_sessions.preflight())
-
-    async def local_session_handback(
-        self, principal: McpPrincipal, *, confirm_warnings: bool = False
-    ) -> dict[str, Any]:
-        self._workspace(principal)
-        if self.local_sessions is None:
-            raise ControlPlaneError("unavailable", "Local session manager is unavailable.")
-        preflight = await self.local_sessions.preflight()
-        if preflight.get("blockers"):
-            raise ControlPlaneError("secrets_blocked", "The git handback is blocked by the secrets check.")
-        if preflight.get("warnings") and not confirm_warnings:
-            return {
-                "ok": False,
-                "error": {
-                    "code": "confirmation_required",
-                    "message": "Preflight warnings require explicit confirmation.",
-                    "retryable": False,
-                    "details": preflight.get("warnings"),
-                },
-            }
-        return _ok(await self.local_sessions.commit_and_sync())
-
-    async def local_session_resync(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        if self.local_sessions is None:
-            raise ControlPlaneError("unavailable", "Local session manager is unavailable.")
-        return _ok(await self.local_sessions.resync())
-
-    def lifecycle_actions_list(self, principal: McpPrincipal) -> dict[str, Any]:
-        return _ok([
-            dict(item)
-            for item in self._deferred_actions.values()
-            if item.get("token_id") == principal.token_id
-        ])
-
-    def lifecycle_action_request(
-        self,
-        principal: McpPrincipal,
-        *,
-        action: Literal["restart", "package_update"],
-        confirmed: bool = False,
-    ) -> dict[str, Any]:
-        """Queue a self-affecting action after the requesting turn has drained."""
-        self._workspace(principal)
-        if action not in {"restart", "package_update"}:
-            raise ControlPlaneError("invalid_action", "action must be restart or package_update.")
-        if not confirmed:
-            raise ControlPlaneError(
-                "confirmation_required",
-                f"Set confirmed=true only after the user explicitly approved {action}.",
-            )
-        if self._lifecycle_callback is None:
-            raise ControlPlaneError("unavailable", "The server lifecycle callback is not ready.", retryable=True)
-        action_id = f"action-{uuid.uuid4().hex[:8]}"
-        record = {
-            "action_id": action_id,
-            "action": action,
-            "chat_id": principal.chat_id,
-            "token_id": principal.token_id,
-            "status": "queued",
-            "requested_at": datetime.now(UTC).isoformat(),
-            "completed_at": "",
-            "error": "",
-        }
-        self._deferred_actions[action_id] = record
-        asyncio.create_task(self._run_lifecycle_action(record), name=action_id)
-        return _ok({key: value for key, value in record.items() if key != "token_id"})
-
-    async def _run_lifecycle_action(self, record: dict[str, Any]) -> None:
-        """Wait until the MCP caller's chat is idle before mutating its server."""
-        chat_id = str(record.get("chat_id") or "")
-        try:
-            while chat_id and chat_id in self.pcm.active_chat_ids():
-                await asyncio.sleep(0.25)
-            record["status"] = "running"
-            if record["action"] == "package_update":
-                from ciao.package_version import update_package
-
-                result = await asyncio.to_thread(update_package)
-                record["result"] = result
-                if not result.get("ok"):
-                    raise RuntimeError(str(result.get("error") or "package update failed"))
-            record["status"] = "restart_requested"
-            callback = self._lifecycle_callback
-            if callback is None:
-                raise RuntimeError("server lifecycle callback became unavailable")
-            callback(int(self.config.restart_exit_code))
-            record["completed_at"] = datetime.now(UTC).isoformat()
-        except Exception as exc:  # noqa: BLE001 - persist a stable deferred result
-            record["status"] = "failed"
-            record["error"] = str(exc)
-            record["completed_at"] = datetime.now(UTC).isoformat()

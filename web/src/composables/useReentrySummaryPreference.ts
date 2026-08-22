@@ -1,6 +1,6 @@
 import { ref, type Ref } from 'vue'
 
-export const REENTRY_SUMMARY_STORAGE_KEY = 'ciao-reentry-summary-enabled'
+const REENTRY_SUMMARY_STORAGE_KEY = 'ciao-reentry-summary-enabled'
 
 type PreferenceStorage = Pick<Storage, 'getItem' | 'setItem'>
 
@@ -23,7 +23,7 @@ export function readReentrySummaryEnabled(
   }
 }
 
-export function writeReentrySummaryEnabled(
+function writeReentrySummaryEnabled(
   enabled: boolean,
   storage: PreferenceStorage | null = defaultStorage(),
 ): void {

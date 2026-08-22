@@ -651,7 +651,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             project_chat_manager=pcm,
             schedule_manager=schedule_manager,
             loop_manager=loop_manager,
-            local_session_manager=app.state.local_session_manager,
             app_settings=app_settings,
             startup_tracker=tracker,
             connection_tracker=connection_tracker,
@@ -668,7 +667,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         )
     app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
     app.state.focused_chats = {}
-    pcm._push_manager = app.state.push_manager
 
     # A read mutation is already broadcast to every connected PWA. Fan the
     # same mutation out to delivered OS notifications in the background: the
@@ -1087,8 +1085,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         restart_task[0] = asyncio.create_task(_restart_when_idle())
 
     app.state.request_restart = request_restart
-    if control_plane is not None:
-        control_plane.set_lifecycle_callback(request_restart)
 
     # ── Startup error triage ─────────────────────────────────
     # Cap the append-only launchd service logs, then — when the error log
