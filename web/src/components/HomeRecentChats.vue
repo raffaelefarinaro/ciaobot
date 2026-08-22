@@ -722,17 +722,23 @@ defineExpose({ onArrow })
 .home-lanes {
   display: grid;
   /* One lane at a time: the grid holds the selected workspace only, so a
-     single full-width column with a readable measure beats two half columns. */
+     single full-width column beats two half columns. Deliberately no own
+     max-width: .home-recent is the same --home-max shell the status line
+     above centers in, and a second cap here re-centered the lane inside it —
+     the lane floated mid-screen, unaligned with the greeting and leaving the
+     shell's width unused. */
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 20px;
-  max-width: 760px;
-  margin: 0 auto;
 }
 
 .home-lane {
   min-width: 0;
-  padding: var(--space-2) var(--space-3);
+  /* Vertical rhythm only: the lane background is transparent, and horizontal
+     padding here was the last few pixels offsetting the lane's left edge from
+     the status row above it. The shell padding already keeps focus rings
+     clear of the scroll edges. */
+  padding: var(--space-2) 0;
   border-radius: var(--radius-sm);
   background: transparent;
 }
