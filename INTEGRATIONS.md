@@ -146,10 +146,11 @@ ninth workspace in the sidebar's displayed order; the sidebar shows the assigned
 number on each workspace button. Number keys remain available for normal typing
 inside text fields.
 
-On the home screen, arrow-key navigation follows the visible lane layout: when
-workspace lanes are stacked vertically, up/down moves between workspaces and
-left/right moves between chats in the current workspace; side-by-side lanes use
-the corresponding horizontal/vertical mapping.
+The home screen shows the selected workspace's chats only; switching workspaces
+swaps the home content. Arrow-key navigation follows the visible lane layout:
+the selected workspace's lane and any stacked rescue lanes (stale or unknown
+workspaces) use up/down to move between lanes and left/right to move between
+chats within a lane.
 
 The sidebar's project and delegate-subchat disclosure state is local UI state;
 it has no integration, environment variable, or cross-device synchronization

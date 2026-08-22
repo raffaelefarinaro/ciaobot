@@ -951,9 +951,10 @@ describe('ChatLayout home arrow navigation', () => {
     return wrapper
   }
 
-  it('renders the recent-chat lanes on the home screen', async () => {
+  it('renders the recent-chat lane of the selected workspace on home', async () => {
     const wrapper = await mountHome()
-    expect(wrapper.findAll('.home-lane')).toHaveLength(2)
+    expect(wrapper.findAll('.home-lane')).toHaveLength(1)
+    expect(wrapper.find('[data-lane-key="personal"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -976,19 +977,19 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
-  it('moves focus across lanes from a window keydown', async () => {
+  it('moves focus through the home grid from a window keydown', async () => {
     const wrapper = await mountHome()
     const cards = wrapper.findAll('.home-chat-item')
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
     await nextTick()
     expect(document.activeElement).toBe(cards[0].element)
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
     await nextTick()
-    expect(document.activeElement).toBe(cards[2].element)
+    expect(document.activeElement).toBe(cards[1].element)
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))
     await nextTick()
     expect(document.activeElement).toBe(cards[0].element)
     wrapper.unmount()
@@ -1175,13 +1176,13 @@ describe('ChatLayout home arrow navigation', () => {
     const wrapper = await mountHome()
     const cards = wrapper.findAll('.home-chat-item')
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
     await nextTick()
     expect(document.activeElement).toBe(cards[0].element)
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
     await nextTick()
-    expect(document.activeElement).toBe(cards[2].element)
+    expect(document.activeElement).toBe(cards[1].element)
     wrapper.unmount()
   })
 })

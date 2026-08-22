@@ -1,7 +1,7 @@
 <template>
   <div v-if="!store.bootstrapped && store.projects.length === 0" class="home-recent home-recent--loading" aria-hidden="true">
     <div class="home-lanes">
-      <section v-for="i in 2" :key="i" class="home-lane-skeleton">
+      <section class="home-lane-skeleton">
         <div class="mm-shimmer-line" style="width: 36%; height: 14px; margin-bottom: 14px;"></div>
         <div class="mm-shimmer-line" style="width: 100%; height: 56px; margin-bottom: 10px;"></div>
         <div class="mm-shimmer-line" style="width: 92%; height: 56px; margin-bottom: 10px;"></div>
@@ -17,10 +17,6 @@
         :key="lane.key"
         :ref="(element) => setLaneRef(lane.key, element as HTMLElement | null)"
         class="home-lane"
-        :class="{
-          'home-lane--active': isLaneActive(lane),
-          'home-lane--unknown': !lane.workspace,
-        }"
         :data-lane-key="lane.key"
       >
         <header class="home-lane-header" :data-workspace-color="lane.color">
@@ -217,7 +213,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
@@ -304,6 +300,11 @@ function groupChatsByWorkspace(sortedChats: ChatInfo[]): Map<string, ChatInfo[]>
 const tidyChatsByWorkspace = computed(() => groupChatsByWorkspace(store.postprocessingChats()))
 const failedChatsByWorkspace = computed(() => groupChatsByWorkspace(store.insightsFailedChats()))
 
+// Home is scoped to the selected workspace: switching workspaces swaps this
+// lane's content instead of revealing another column. Chats belonging to other
+// registered workspaces stay off the screen entirely — they are one toggle
+// press away — while the rescue lanes below keep nothing vanishing until a
+// reload heals the registry.
 const lanes = computed<HomeLane[]>(() => {
   const grouped = new Map<string, ChatInfo[]>()
   const unknown: ChatInfo[] = []
@@ -316,26 +317,35 @@ const lanes = computed<HomeLane[]>(() => {
     grouped.set(workspace, [...(grouped.get(workspace) || []), chat])
   }
 
-  const result = store.workspaceOptions.map((workspace, index) => {
-    const chats = grouped.get(workspace.name) || []
-    grouped.delete(workspace.name)
-    return makeLane(
-      workspace.name,
-      workspaceLabel(workspace.name),
-      index + 1,
-      colorForWorkspace(workspace),
-      chats,
-    )
-  })
+  const knownNames = new Set(store.workspaceOptions.map(workspace => workspace.name))
+  const active = store.workspaceOptions.find(workspace => workspace.name === store.activeWorkspace)
+  const result: HomeLane[] = []
 
-  // Any workspace still in `grouped` belongs to a project whose workspace is no
+  if (active) {
+    const chats = grouped.get(active.name) || []
+    grouped.delete(active.name)
+    knownNames.delete(active.name)
+    // The key badge keeps the workspace's position among every registered
+    // workspace so it still matches the sidebar toggle's shortcuts.
+    const shortcutIndex = store.workspaceOptions.findIndex(w => w.name === active.name) + 1
+    result.push(makeLane(
+      active.name,
+      workspaceLabel(active.name),
+      shortcutIndex >= 1 && shortcutIndex <= 9 ? shortcutIndex : '—',
+      colorForWorkspace(active),
+      chats,
+    ))
+  }
+
+  // Anything left in `grouped` belongs to a project whose workspace is no
   // longer in workspaceOptions — renaming or deleting a workspace refreshes
-  // workspaces.value but leaves projects.value[].workspace on the old name. The
-  // flat grid used to render these chats; without this sweep they would be
-  // grouped and then never read back out, vanishing from home until a reload.
-  // They keep a real workspace name, so the lane stays activatable.
+  // workspaces.value but leaves projects.value[].workspace on the old name.
+  // Registered-but-inactive names are dropped here on purpose: their lanes
+  // come back when the user switches to them. Only unregistered names get a
+  // rescue lane, because no toggle position can ever reach those chats and,
+  // without this sweep, they would vanish from home until a reload.
   for (const [workspace, chats] of grouped) {
-    if (!chats.length) continue
+    if (!chats.length || knownNames.has(workspace)) continue
     result.push(makeLane(workspace, workspaceLabel(workspace), '—', 'pink', chats))
   }
 
@@ -527,10 +537,6 @@ function createChatInProject(lane: HomeLane, projectId: string): void {
   })
 }
 
-function isLaneActive(lane: HomeLane): boolean {
-  return lane.workspace === store.activeWorkspace
-}
-
 function tierEntries(lane: HomeLane): Array<{ key: HomeTierKey; label: string; chats: ChatInfo[] }> {
   return [
     { key: 'needsYou', label: 'needs you', chats: lane.tiers.needsYou },
@@ -587,9 +593,11 @@ function focusElement(element: HTMLElement) {
 }
 
 // ChatLayout owns the global keydown. The model is intentionally 2-D, but its
-// axes follow the rendered lane layout: vertical motion moves between lanes
-// when they are stacked, while horizontal motion moves between lanes when they
-// sit side by side. The other axis always moves within the current lane.
+// axes follow the rendered lane layout: the selected workspace's lane first,
+// then any rescue lanes (stale or unknown workspaces) stacked beneath it. When
+// lanes are stacked vertically moves between them and horizontally moves within
+// one; side by side it is the reverse. With a single lane every arrow stays in
+// that lane or is consumed at its edge.
 function onArrow(key: string): boolean {
   const model = focusableLanes()
   const available = model.some(lane => lane.length)
@@ -638,12 +646,12 @@ function onArrow(key: string): boolean {
   return true
 }
 
-// CSS switches `.home-lanes` from a two-column grid to a single stacked
-// column based on the component's own width. Read the first rendered lane
-// transition instead of duplicating that breakpoint here; the sidebar is
-// resizable and can make the same viewport either layout. In jsdom the boxes
-// have no geometry, so the historical side-by-side mapping remains the safe
-// fallback for unit tests and non-layout environments.
+// The grid is a single column now, but rescue lanes (stale or unknown
+// workspaces) still stack beneath the selected workspace's lane, so the axis
+// question survives: read the first rendered lane transition instead of
+// assuming. In jsdom the boxes have no geometry, so the historical
+// side-by-side mapping remains the safe fallback for unit tests and
+// non-layout environments.
 function laneAxis(): 'horizontal' | 'vertical' {
   const lanes = Array.from(lanesEl.value?.querySelectorAll<HTMLElement>('.home-lane') ?? [])
   for (let index = 1; index < lanes.length; index += 1) {
@@ -663,8 +671,8 @@ function clamp(value: number, lower: number, upper: number): number {
 
 // Where arrows start when nothing in the chat grid has focus. Prefer the lane
 // the focused element already lives in (a "+ new" / caret control), then the
-// active workspace's lane (the one the raised surface and hue rule highlight),
-// then any lane with cards. The model's lane order matches the DOM `.home-lane`
+// active workspace's lane (the first one on screen), then any lane with cards.
+// The model's lane order matches the DOM `.home-lane`
 // order because focusableLanes() builds from the same query.
 function anchorLaneIndex(model: HTMLElement[][]): number {
   const lanes = () => Array.from(lanesEl.value?.querySelectorAll<HTMLElement>('.home-lane') ?? [])
@@ -679,12 +687,6 @@ function anchorLaneIndex(model: HTMLElement[][]): number {
 }
 
 defineExpose({ onArrow })
-
-watch(() => store.activeWorkspace, async () => {
-  await nextTick()
-  const lane = laneElements.value[store.activeWorkspace]
-  lane?.scrollIntoView({ block: 'nearest' })
-})
 
 </script>
 
@@ -719,9 +721,13 @@ watch(() => store.activeWorkspace, async () => {
 
 .home-lanes {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* One lane at a time: the grid holds the selected workspace only, so a
+     single full-width column with a readable measure beats two half columns. */
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 20px;
+  max-width: 760px;
+  margin: 0 auto;
 }
 
 .home-lane {
@@ -729,19 +735,6 @@ watch(() => store.activeWorkspace, async () => {
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   background: transparent;
-}
-
-/* The selected workspace reads as a raised surface, not another accent line.
-   Every card and row in the lane already carries a hue rail, so a rail on the
-   lane itself competed with them for the same meaning. A neutral lift says
-   "this column" without adding a fourth coloured edge, and the accent stays
-   where it identifies the workspace: the header rule, the name and the key
-   badge. No border, so this is a surface rather than another outlined box. */
-.home-lane--active {
-  /* Between --bg and --bg2 on purpose: the cards inside are --bg2, so a full
-     --bg2 lane would swallow them. This lifts the column while leaving the
-     cards clearly above it. */
-  background: color-mix(in srgb, var(--bg2) 55%, var(--bg));
 }
 
 .home-lane-header {
@@ -752,15 +745,7 @@ watch(() => store.activeWorkspace, async () => {
   min-width: 0;
   min-height: 44px;
   padding: 6px 0 8px;
-  /* Inactive lanes keep the hue so the workspace is still identifiable, but at
-     a fraction of the weight, so the active lane's rule reads as the emphatic
-     one instead of every lane looking equally selected. */
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
-}
-
-.home-lane--active .home-lane-header {
-  border-bottom-width: 2px;
-  border-bottom-color: var(--accent);
 }
 
 .home-lane-heading {
@@ -769,10 +754,6 @@ watch(() => store.activeWorkspace, async () => {
   gap: 7px;
   min-width: 0;
   overflow: hidden;
-}
-
-.home-lane--active .home-lane-name {
-  color: var(--fg);
 }
 
 /* A bordered badge rather than bracketed text: it is a key you can press, and
@@ -788,10 +769,6 @@ watch(() => store.activeWorkspace, async () => {
   font-size: var(--text-xs);
   font-weight: 700;
   text-align: center;
-}
-
-.home-lane--active .home-lane-shortcut {
-  border-color: var(--accent);
 }
 
 .home-lane-name {
@@ -1301,12 +1278,9 @@ watch(() => store.activeWorkspace, async () => {
 }
 
 @container (max-width: 760px) {
-  /* Stack the lanes and keep every one of them open. Collapsing the inactive
-     lane to a summary row read as a stray element rather than a control, and it
-     hid that workspace's "+ new" button — leaving no way to start a chat there
-     on a phone. Scrolling past a short lane is cheaper than that. */
+  /* The lane is already one column; this only widens the gap between the
+     selected workspace's lane and any rescue lane beneath it on a phone. */
   .home-lanes {
-    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-5);
   }
 }

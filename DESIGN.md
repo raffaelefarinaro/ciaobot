@@ -112,16 +112,18 @@ Ciaobot is a focused control surface for a personal AI assistant. Its visual ide
 
 The PWA is information-dense but not cramped. Monospaced typography, compact labels, restrained animation, and a deep indigo foundation establish the console character. A warm pink accent supplies personality and orientation. The interface must remain understandable without color, animation, hover, or prior knowledge of its icons.
 
-The home screen ("jump back in") is the primary entry point: active chats are
-sorted into recency tiers rendered as lanes with key-badge navigation, unread
-and needs-input signals, and per-lane "+ new" project entry. One lane holds
-chats that carry a needs-your-input question or decision; an explicit unread
-lane sits between the working and quiet tiers; long-idle chats fade into the
-quiet lane rather than disappearing. Lanes collapse into a single stacked
-column under ~760px; arrow-key navigation follows that visual order, using
-up/down between stacked workspace lanes and left/right within a lane. Signals
-are shape-and-text-first (tier labels, badges,
-weight, dots) so no lane relies on color alone.
+The home screen ("jump back in") is the primary entry point: it shows the
+selected workspace's active chats sorted into recency tiers with key-badge
+navigation, unread and needs-input signals, and a "+ new" project entry.
+Switching workspaces swaps the home content instead of adding a column — one
+workspace at a time is what makes the switch mean something. Within the lane,
+chats carrying a needs-your-input question or decision tier first; an explicit
+unread tier sits between working and quiet; long-idle chats fade into the
+quiet tier rather than disappearing. Rescue lanes for stale or unknown
+workspaces stack beneath the selected workspace's lane; arrow-key navigation
+follows that visual order, using up/down between stacked lanes and left/right
+within a lane. Signals are shape-and-text-first (tier labels, badges,
+weight, dots) so no tier relies on color alone.
 
 `Ciaobot.app` owns the macOS Dock window, native menu-bar item, and
 notifications. Desktop preferences live in the tray itself rather than a
