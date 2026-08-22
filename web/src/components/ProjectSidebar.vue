@@ -1089,6 +1089,10 @@ const REVIEW_KIND_LABELS: Record<string, string> = {
   profile: 'profile',
   user: 'profile',
   rehome: 're-home',
+  project: 'project',
+  people: 'people',
+  learnings: 'learnings',
+  review: 'review',
   skill: 'skill',
 }
 

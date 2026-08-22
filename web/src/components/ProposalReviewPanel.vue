@@ -93,6 +93,10 @@ const KIND_LABELS: Record<string, string> = {
   profile: 'profile',
   user: 'profile',
   rehome: 're-home',
+  project: 'project',
+  people: 'people',
+  learnings: 'learnings',
+  review: 'review',
   skill: 'skill',
 }
 
@@ -137,6 +141,12 @@ function rowSubtitle(row: ProposalRow): string {
   // in that file, and naming it is what makes "view" obviously the first thing
   // to press.
   if (isSkill(row)) return row.path || 'a skill proposal file'
+  // Destination kinds name where an accept writes, so say that instead of the
+  // generic region form.
+  if (row.kind === 'project') return row.target || 'no project doc named'
+  if (row.kind === 'people') return `People/${row.target || '?'}.md`
+  if (row.kind === 'learnings') return 'Workspace/Learnings.md'
+  if (row.kind === 'review') return 'no destination yet — decide what it is'
   return `ciao:${row.region ?? row.kind}`
 }
 
@@ -148,13 +158,14 @@ function rowDetail(row: ProposalRow): string {
 
 /** Whether an accept can do what it says.
  *
- * A skill row has no accept descriptor on the server, and a re-home row with no
- * backed destination has nowhere to go — the old UI still rendered "Move to a
- * destination?" beside a confirm button that could not name one.
+ * A skill row has no accept descriptor on the server, a re-home row with no
+ * backed destination has nowhere to go, and a review row has no known
+ * destination at all — accepting one would be a guess wearing a button.
  */
 function canAccept(row: ProposalRow): boolean {
   if (isSkill(row)) return false
   if (isRehome(row)) return rehomeMode(row) === 'accept'
+  if (row.kind === 'review') return false
   return true
 }
 
@@ -352,12 +363,15 @@ function discussPrompt(row: ProposalRow): string {
       'Leave the proposal queued either way; I will accept or dismiss it myself.'
     )
   }
+  const about = row.kind === 'review'
+    ? 'a fact with no decided destination'
+    : `a \`${row.kind}\` proposal`
   return (
-    `A memory proposal is waiting for a decision (${where}), for the ` +
-    `\`ciao:${row.region || row.kind}\` region: ${row.text}\n\n` +
-    'Tell me whether this is durable and cross-session enough to belong in the ' +
-    'always-loaded region, or whether it belongs in a note instead. Do not edit ' +
-    'the region: leave the proposal queued and I will accept or dismiss it.'
+    `${about} is waiting for a decision (${where}): ${row.text}\n\n` +
+    'Tell me whether this is durable and cross-session enough to keep, and where it ' +
+    'should live — a bounded region, a project doc, a person note, Learnings, or ' +
+    'nowhere. Do not edit anything: leave the proposal queued and I will accept or ' +
+    'dismiss it myself.'
   )
 }
 
@@ -442,9 +456,11 @@ onMounted(() => { void store.fetch() })
     </header>
 
     <p class="pr-hint">
-      Accepting a memory row writes it into that workspace’s bounded guide region.
-      Re-home rows are not moved here. Skill rows are files — dismiss removes them,
-      and implement builds the skill in a chat.
+      Accepting a memory row writes it into that workspace’s bounded guide region;
+      project rows fold into the named doc, people rows create a stub note,
+      learnings append to Workspace/Learnings.md. Re-home rows are not moved here.
+      Skill rows are files — dismiss removes them, and implement builds the skill
+      in a chat. Review rows have no destination yet: talk it through first.
     </p>
 
 

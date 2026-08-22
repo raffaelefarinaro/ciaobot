@@ -251,6 +251,16 @@ Rules:
   entirely rather than fill it with session-local noise — a one-off choice
   about this one repo, a single loop, or a phrasing pushback that was only
   about this session has no place here.
+- End every bullet with exactly one destination tag, after the citation:
+  - [memory] - true regardless of which project is open: a standing
+    preference, an environment fact, a cross-project lesson.
+  - [profile] - who the user is: identity, role, communication style.
+  - [project] - true only within this project/repo: its decisions,
+    constraints, status. When unsure whether a fact is project-scoped or
+    global, use [review] instead of guessing.
+  - [people: <Name>] - a durable fact about a person; use their name.
+  - [learnings] - reusable how-to knowledge that spans projects.
+  - [review] - durable, but you are not sure where it belongs.
 - Skip routine successful tool calls.
 - Skip anything obvious from user/assistant text alone.
 - "Errors" = tool/model/system failure, not just things the user disliked.
@@ -269,16 +279,16 @@ Rules:
 - Be terse. One line per item where possible.
 
 ## Errors
-- <what failed> -> <how it was resolved, or "unresolved">. Only a failure whose fix is worth remembering. [idx=N]
+- <what failed> -> <how it was resolved, or "unresolved">. Only a failure whose fix is worth remembering. [idx=N] <tag>
 
 ## User corrections
-- <the standing rule that holds in future sessions>, phrased as present-tense state. Durable rule: <the same rule, present tense>. Never "User said: <quote> -> assistant did <x>" alone. [idx=N]
+- <the standing rule that holds in future sessions>, phrased as present-tense state. Durable rule: <the same rule, present tense>. Never "User said: <quote> -> assistant did <x>" alone. [idx=N] <tag>
 
 ## New entities
-- <type>: <name> - <one-line context>. Only recurring names. [idx=N]
+- <type>: <name> - <one-line context>. Only recurring names. [idx=N] <tag>
 
 ## Decisions
-- Chose <X> over <Y> because <reason>; this governs future sessions. Only precedent-setting choices. [idx=N]
+- Chose <X> over <Y> because <reason>; this governs future sessions. Only precedent-setting choices. [idx=N] <tag>
 
 ## Reusable snippets
 - <one-line description>:
@@ -287,7 +297,7 @@ Rules:
   ```
 
 ## Open loops
-- <thing left undone, with any deadline or condition>. [idx=N]
+- <thing left undone, with any deadline or condition>. [idx=N] <tag>
 
 ## Vault changes
 - <path> - <one-line summary of edit>. [idx=N]
@@ -520,6 +530,12 @@ async def extract_and_append(
     # out of the `extra` it is given at entry (not from the handle mid-block),
     # so it has to be resolved before the first tracked step opens.
     chat_id = str((trajectory_meta or {}).get("chat_id") or "")
+    # The project-doc fold runs before memory proposals, and the proposal step
+    # needs its outcome: facts the fold consumed must not also be queued for a
+    # region, while facts it skipped stay reviewable. Both are hoisted because
+    # the proposal step runs in the `finally` below.
+    doc_fold_wrote = False
+    resolved_doc_path = ""
     try:
         if not archive_path.exists():
             logger.warning("Archive path %s missing, skipping insights", archive_path)
@@ -584,6 +600,7 @@ async def extract_and_append(
                 doc = Path(project_doc_path)
                 if not doc.is_absolute() and workspace_root is not None:
                     doc = workspace_root / project_doc_path
+                resolved_doc_path = str(doc)
                 async with job_runs.track(
                     "project_doc_update", "Project doc update",
                     model=doc_model,
@@ -601,6 +618,7 @@ async def extract_and_append(
                         cwd=workspace_root,
                     )
                     run.extra["wrote"] = wrote
+                    doc_fold_wrote = wrote
                     if not wrote:
                         run.skip("no material changes for the project doc")
             except Exception:  # noqa: BLE001 — never crash the loop
@@ -640,10 +658,11 @@ async def extract_and_append(
                     "Trajectory persist failed for session %s", session_id
                 )
         # Memory proposals: scan the freshly-appended insights section and
-        # write actionable candidates to ``Workspace/Memory-Proposals.md``.
-        # "User corrections" are auto-promoted straight into the CLAUDE.md
-        # ``ciao:memory``/``ciao:profile`` regions; everything else waits for
-        # the curator agent to promote via Edit on the next session.
+        # route each fact to its destination. Confident, state-shaped facts
+        # are auto-applied straight to their destination (CLAUDE.md regions,
+        # People notes, Learnings); `[project]` facts the doc fold consumed
+        # are dropped; everything unsure or failed waits in
+        # ``Workspace/Memory-Proposals.md``.
         if (
             memory_proposals_enabled
             and proposal_vault_root is not None
@@ -670,6 +689,8 @@ async def extract_and_append(
                             else None
                         ),
                         stats=proposal_stats,
+                        project_doc_path=resolved_doc_path,
+                        project_fold_wrote=doc_fold_wrote,
                     )
                     run.extra["wrote"] = bool(proposals_result)
                     run.extra["proposals"] = proposal_stats.get("proposed", 0)
@@ -1046,6 +1067,16 @@ Rules:
   rather than fill it with session-local noise — a one-off choice about this
   one repo, a single exchange, or a phrasing pushback that only fixed this
   session has no place here.
+- End every bullet with exactly one destination tag:
+  - [memory] - true regardless of which project is open: a standing
+    preference, an environment fact, a cross-project lesson.
+  - [profile] - who the user is: identity, role, communication style.
+  - [project] - true only within this project/repo: its decisions,
+    constraints, status. When unsure whether a fact is project-scoped or
+    global, use [review] instead of guessing.
+  - [people: <Name>] - a durable fact about a person; use their name.
+  - [learnings] - reusable how-to knowledge that spans projects.
+  - [review] - durable, but you are not sure where it belongs.
 - "User corrections" = a correction that implies a preference the user wants to
   hold in future sessions. Drop corrections that only fixed this session's
   output. Append the "Durable rule:" sentence ONLY when the user stated a
@@ -1061,19 +1092,19 @@ Your entire response must be Markdown using only the section headers below. Neve
 return JSON, a code-fenced transcript, session metadata, or a generic recap.
 
 ## User corrections
-- <the standing rule that holds in future sessions>, phrased as present-tense state. Durable rule: <the same rule, present tense>. Never "User said: <quote> -> assistant did <x>" alone.
+- <the standing rule that holds in future sessions>, phrased as present-tense state. Durable rule: <the same rule, present tense>. Never "User said: <quote> -> assistant did <x>" alone. <tag>
 
 ## New entities
-- <type>: <name> - <one-line context>. Only recurring names.
+- <type>: <name> - <one-line context>. Only recurring names. <tag>
 
 ## Decisions
-- Chose <X> over <Y> because <reason>; this governs future sessions. Only precedent-setting choices.
+- Chose <X> over <Y> because <reason>; this governs future sessions. Only precedent-setting choices. <tag>
 
 ## Open loops
-- <thing left undone, with any deadline or condition>.
+- <thing left undone, with any deadline or condition>. <tag>
 
 ## Errors
-- <if the transcript itself describes a failure resolution that's worth keeping>
+- <if the transcript itself describes a failure resolution that's worth keeping> <tag>
 
 ## Reusable snippets
 - <only if a fully formed command or query appears in the assistant text>

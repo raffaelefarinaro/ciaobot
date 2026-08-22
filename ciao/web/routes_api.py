@@ -7000,11 +7000,16 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     "path": rel_path,
                     "line": line_index,
                 }
+                if bullet.target:
+                    # The payload a destination kind acts on: the person name
+                    # for [people], the doc path for [project]. Region kinds
+                    # and rehome carry none.
+                    row["target"] = bullet.target
                 accept = proposal_kinds.accept_for(bullet.kind)
                 if accept.action == "edit_region":
                     row["region"] = resolve_region(bullet.kind)
                     row["leak_warning"] = _leak_warning(config, bullet.kind, workspace)
-                else:
+                elif accept.action == "move_file":
                     # Rehome rows: expose the live signal. The destination named
                     # in the bullet is a guess unless the tags justify it, and a
                     # dual-tag note names more than one candidate.
@@ -7290,9 +7295,23 @@ async def proposals_batch(request: Request) -> JSONResponse:
         if action == "accept":
             for row in entry["rows"]:
                 accept = proposal_kinds.accept_for(row["kind"])
-                if accept.action != "edit_region":
+                if accept.action == "move_file":
+                    # Performed above the grouping, one at a time off the loop;
+                    # nothing to write here, only result shaping below.
                     continue
-                outcome = _promote_region_row(config, row)
+                if accept.action == "edit_region":
+                    outcome = _promote_region_row(config, row)
+                elif accept.action == "fold_doc":
+                    # A fold is a model call, so a large selection folds
+                    # sequentially; write-then-dismiss still holds per row.
+                    outcome = await _accept_project_row(config, row)
+                elif accept.action == "write_people_note":
+                    outcome = _accept_people_row(config, row)
+                elif accept.action == "append_learnings":
+                    outcome = _accept_learnings_row(config, row)
+                else:
+                    # route_manually: nothing to perform, and the row stays.
+                    outcome = {"ok": False, "error": "no destination yet"}
                 promoted[row["id"]] = outcome
                 if not outcome.get("ok"):
                     keep_lines.add(int(row["line"]))
@@ -7309,7 +7328,9 @@ async def proposals_batch(request: Request) -> JSONResponse:
             if action == "accept":
                 accept = proposal_kinds.accept_for(row["kind"])
                 outcome = promoted.get(row["id"], {})
-                failed = accept.action == "edit_region" and not outcome.get("ok")
+                # An absent outcome means nothing was written here (a rehome
+                # move performed above the grouping), which is a success.
+                failed = "ok" in outcome and not outcome["ok"]
                 result = {
                     "id": row["id"],
                     "action": accept.action,
@@ -7321,6 +7342,11 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     result["leak_warning"] = row.get("leak_warning", False)
                     if failed:
                         result["error"] = outcome.get("error", "could not write the region")
+                elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
+                    result["promoted"] = bool(outcome.get("ok"))
+                    result["destination"] = outcome.get("destination", "")
+                    if failed:
+                        result["error"] = outcome.get("error", "could not write the destination")
                 else:
                     result["promoted"] = False
                     result["destination"] = row.get("rehome", {}).get("destination", "")
@@ -7370,6 +7396,86 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
     except (ValueError, OSError) as exc:
         return {"ok": False, "error": str(exc), "region": region}
     return {"ok": True, "region": region, "usage": result.get("usage", {})}
+
+
+def _accept_people_row(config, row: dict[str, Any]) -> dict[str, Any]:
+    """Write an accepted `[people]` fact into a stub person note.
+
+    A note that already exists is not appended to blindly — merging a new fact
+    into someone's curated note is a judgment call, so the row stays queued
+    and the error says so.
+    """
+    from ciao.memory_proposals import write_people_note
+
+    name = str(row.get("target") or "").strip()
+    if not name:
+        return {"ok": False, "error": "the bullet names no person"}
+    try:
+        vault = config.workspace_vault_root(row["workspace"])
+    except (AttributeError, ValueError) as exc:
+        return {"ok": False, "error": f"could not resolve the vault: {exc}"}
+    try:
+        created = write_people_note(Path(vault), name, row["text"])
+    except OSError as exc:
+        return {"ok": False, "error": f"could not write the note: {exc}"}
+    if not created:
+        return {
+            "ok": False,
+            "error": f"People/{name}.md already exists; merge the fact manually, then dismiss",
+        }
+    return {"ok": True, "destination": f"People/{name}.md"}
+
+
+def _accept_learnings_row(config, row: dict[str, Any]) -> dict[str, Any]:
+    """Append an accepted `[learnings]` fact to Workspace/Learnings.md."""
+    from ciao.memory_proposals import append_learning
+
+    try:
+        vault = config.workspace_vault_root(row["workspace"])
+    except (AttributeError, ValueError) as exc:
+        return {"ok": False, "error": f"could not resolve the vault: {exc}"}
+    try:
+        append_learning(Path(vault), row["text"])
+    except OSError as exc:
+        return {"ok": False, "error": f"could not append the learning: {exc}"}
+    return {"ok": True, "destination": "Workspace/Learnings.md"}
+
+
+async def _accept_project_row(config, row: dict[str, Any]) -> dict[str, Any]:
+    """Fold an accepted `[project]` bullet into its canonical doc.
+
+    Reuses the archive-time fold (guards, NO_CHANGES sentinel, per-doc lock)
+    with just this bullet as input. ``False`` back means the model judged the
+    doc already covers the fact or a guard rejected the rewrite — ambiguous
+    enough that dropping the row silently would be wrong, so the caller keeps
+    it queued and the operator decides.
+    """
+    from ciao.project_doc_update import update_project_doc
+
+    doc_raw = str(row.get("target") or "").strip()
+    if not doc_raw:
+        return {"ok": False, "error": "the bullet names no project doc"}
+    doc = Path(doc_raw)
+    if not doc.is_absolute():
+        # Same resolution the archive-time fold uses: workspace-root-relative.
+        doc = Path(config.workspace_root) / doc
+    if not doc.is_file():
+        return {"ok": False, "error": f"project doc not found: {doc_raw}"}
+    insights = f"## Decisions\n- {row['text']}\n"
+    try:
+        wrote = await update_project_doc(
+            doc_path=doc,
+            insights_md=insights,
+            model=getattr(config, "insights_model", "") or "sonnet",
+        )
+    except Exception as exc:  # noqa: BLE001 — a failed fold keeps the row
+        return {"ok": False, "error": f"fold failed: {exc}"}
+    if not wrote:
+        return {
+            "ok": False,
+            "error": "the fold reported no changes; dismiss instead if the doc already covers this",
+        }
+    return {"ok": True, "destination": doc_raw}
 
 
 async def proposal_action(request: Request) -> JSONResponse:
@@ -7442,6 +7548,37 @@ async def proposal_action(request: Request) -> JSONResponse:
                     },
                     status_code=409,
                 )
+        elif accept.action == "fold_doc":
+            promoted = await _accept_project_row(config, row)
+            if not promoted.get("ok"):
+                return JSONResponse(
+                    {"error": promoted.get("error", "fold failed"), "id": pid},
+                    status_code=409,
+                )
+        elif accept.action == "write_people_note":
+            promoted = _accept_people_row(config, row)
+            if not promoted.get("ok"):
+                return JSONResponse(
+                    {"error": promoted.get("error", "could not write the note"), "id": pid},
+                    status_code=409,
+                )
+        elif accept.action == "append_learnings":
+            promoted = _accept_learnings_row(config, row)
+            if not promoted.get("ok"):
+                return JSONResponse(
+                    {"error": promoted.get("error", "could not append"), "id": pid},
+                    status_code=409,
+                )
+        else:
+            # route_manually: a [review] row has no known destination, so an
+            # accept would be a guess wearing a button.
+            return JSONResponse(
+                {
+                    "error": "this row has no destination yet; decide what it is first",
+                    "id": pid,
+                },
+                status_code=400,
+            )
 
     queue = Path(ctx["path"])
     lines = queue.read_text(encoding="utf-8").splitlines()
@@ -7458,6 +7595,9 @@ async def proposal_action(request: Request) -> JSONResponse:
             result["promoted"] = True
             result["usage"] = promoted.get("usage", {})
             result["leak_warning"] = row.get("leak_warning", False)
+        elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
+            result["promoted"] = True
+            result["destination"] = promoted.get("destination", "")
         else:
             # Rehome: the note itself is not moved here. Moving a file and
             # rewriting every reference to it is `vault_rehome`'s job and it is

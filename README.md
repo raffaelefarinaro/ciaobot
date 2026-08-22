@@ -114,7 +114,7 @@ Ciaobot keeps memory in layers so the agent can recall what matters without stuf
 - **Your vault** (`memory-vault/`, or a separate vault root per sidebar workspace) — durable markdown you own: people, projects, ideas. Browse it in Obsidian or any editor; it stays useful even without Ciaobot.
 - **One behavior file for the install** — `<workspace>/CLAUDE.md` (and `AGENTS.md` for Codex) applies to every chat.
 
-When your message mentions a name that appears in the vault index, the agent gets a quiet hint — “this probably means `People/Emma`” — so it opens the right note without you repeating context. And when a chat is archived, a pipeline turns it into durable knowledge: session insights are extracted, memory proposals are drafted, and daily/weekly curation runs update vault pages. Existing-folder onboarding also starts with an initial inventory and curation chat; it preserves the source notes, reorganizes only clear classifications, and reports ambiguous material. Nothing is promoted into long-term memory without review, and Ciaobot never discards or rewrites an existing notes folder during onboarding. Track the background steps under **Settings → Automation**, and see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
+When your message mentions a name that appears in the vault index, the agent gets a quiet hint — “this probably means `People/Emma`” — so it opens the right note without you repeating context. And when a chat is archived, a pipeline turns it into durable knowledge: session insights are extracted, memory proposals are drafted, and daily/weekly curation runs update vault pages. Existing-folder onboarding also starts with an initial inventory and curation chat; it preserves the source notes, reorganizes only clear classifications, and reports ambiguous material. Confident facts are filed to their destination automatically (regions, project docs, people notes, Learnings) and unsure ones wait in the proposals queue for review, and Ciaobot never discards or rewrites an existing notes folder during onboarding. Track the background steps under **Settings → Automation**, and see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
 
 ## Features
 
@@ -143,7 +143,7 @@ When your message mentions a name that appears in the vault index, the agent get
 **Memory, vault, and insight extraction**
 
 - Layered memory: a capped agent memory and user profile injected at chat start, plus a plain-markdown vault you own (Obsidian-compatible, syncable via GitHub/Drive/iCloud).
-- Archiving a chat runs an extraction pipeline: session insights and trajectories are captured, memory proposals are drafted, and project canonical docs are updated — nothing is promoted into long-term memory without review.
+- Archiving a chat runs an extraction pipeline: session insights and trajectories are captured, each durable fact is routed to its destination — bounded regions, the project's canonical doc, people notes, `Workspace/Learnings.md` — with confident facts applied automatically and unsure ones queued for review.
 - Daily and weekly curation routines keep vault pages and `Workspace/Learnings.md` current.
 - Vault-index hints: mention a name the index knows and the agent is quietly pointed at the right note.
 

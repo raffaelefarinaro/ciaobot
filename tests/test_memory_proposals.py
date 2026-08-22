@@ -222,25 +222,33 @@ def test_proposals_stats_stay_zero_when_nothing_is_filed(tmp_path: Path) -> None
     assert stats.get("proposed", 0) == 0
 
 
-# ── Auto-promotion of user corrections ────────────────────────────────────
+# ── Auto-apply ────────────────────────────────────────────────────────────
 #
-# Promotion now writes straight into the fenced `ciao:memory` / `ciao:profile`
-# regions of a CLAUDE.md guide (``guide_path=``), not a legacy `memory.md`.
-# There is no write-time cap enforcement any more — the only fallback path is
-# a guide with missing/malformed region markers.
+# apply_proposals writes straight into the fenced `ciao:memory` /
+# `ciao:profile` regions of a CLAUDE.md guide (``guide_path=``). With
+# ``vault_root=None`` only region-bound rows are acted on, which is what the
+# region tests below want; people/learnings rows stay in ``remaining``.
 
 
 def test_promote_writes_corrections_and_keeps_the_rest(tmp_path: Path) -> None:
     guide = write_guide(tmp_path / "CLAUDE.md")
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+    remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
 
-    assert promoted == ["Avoid em dashes; use commas instead."]
+    # Every confidently-addressed region fact applies: the correction into
+    # ciao:memory and the operator's self-entry into ciao:profile.
+    assert sorted(promoted) == sorted([
+        "Avoid em dashes; use commas instead.",
+        "person: User Example - the user, product lead.",
+    ])
     mem_entries, _diags = mt.read_region(guide, "memory")
     # Only the state-shaped rule lands in the region, not the chat event.
     assert "Avoid em dashes; use commas instead." in mem_entries
     assert all("User said" not in entry for entry in mem_entries)
-    # Decisions and entities are untouched and still reviewable.
+    profile_entries, _diags = mt.read_region(guide, "profile")
+    assert any("User Example" in entry for entry in profile_entries)
+    # Untagged decisions and non-operator entities are unsure by default and
+    # stay reviewable.
     remaining_texts = [p.text for p in remaining]
     assert any("Chose OpenRouter over Anthropic" in t for t in remaining_texts)
     assert all("no em dashes" not in t for t in remaining_texts)
@@ -254,9 +262,11 @@ def test_promote_drops_exact_duplicates(tmp_path: Path) -> None:
         memory_entries=["Avoid em dashes; use commas instead."],
     )
 
-    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+    remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
 
-    assert promoted == []
+    # The duplicate correction vanishes from both lists; only the operator
+    # self-entry (profile region, still empty) applies.
+    assert promoted == ["person: User Example - the user, product lead."]
     # Already remembered: not promoted, not proposed again.
     assert all(p.source_section != "User corrections" for p in remaining)
 
@@ -278,7 +288,7 @@ def test_promote_holds_back_event_shaped_corrections(tmp_path: Path) -> None:
         "drafting an issue to coding the fix. [idx=62]\n"
     )
     proposals = mp.propose_from_insights(insights)
-    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+    remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
 
     assert proposals == []
     assert promoted == []
@@ -296,7 +306,7 @@ def test_promote_ignores_echoed_rule_placeholder(tmp_path: Path) -> None:
         "Durable rule: <present-tense standing preference, if any>. [idx=3]\n"
     )
     proposals = mp.propose_from_insights(insights)
-    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+    remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
 
     assert promoted == []
     mem_entries, _diags = mt.read_region(guide, "memory")
@@ -312,7 +322,7 @@ def test_promote_state_shaped_correction_without_rule_clause(tmp_path: Path) -> 
         "- Prefers terse replies without preamble in code reviews. [idx=9]\n"
     )
     proposals = mp.propose_from_insights(insights)
-    _remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+    _remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
 
     assert promoted == ["Prefers terse replies without preamble in code reviews."]
 
@@ -320,7 +330,7 @@ def test_promote_state_shaped_correction_without_rule_clause(tmp_path: Path) -> 
 def test_promote_falls_back_to_proposals_when_no_guide(tmp_path: Path) -> None:
     """No ``guide_path`` at all is the simplest fallback path."""
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=None)
+    remaining, promoted = mp.apply_proposals(proposals, guide_path=None, vault_root=None)
 
     assert promoted == []
     assert remaining == proposals
@@ -339,10 +349,12 @@ def test_promote_falls_back_to_proposals_when_markers_malformed(tmp_path: Path) 
     )
 
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+    remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
 
-    assert promoted == []
-    # The correction stays reviewable instead of being lost.
+    # The memory region refused the write (malformed markers), so the
+    # correction stays reviewable; the healthy profile region still took the
+    # operator's self-entry.
+    assert not any("em dashes" in t for t in promoted)
     assert any(p.source_section == "User corrections" for p in remaining)
 
 
@@ -438,7 +450,7 @@ def test_promote_holds_back_no_op_rule_clause(tmp_path: Path) -> None:
         "Durable rule: N/A. [idx=5]\n"
     )
     proposals = mp.propose_from_insights(insights)
-    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+    remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
 
     assert promoted == []
     mem_entries, _diags = mt.read_region(guide, "memory")
@@ -460,7 +472,7 @@ def test_promote_survives_multi_index_citation(tmp_path: Path) -> None:
         "Durable rule: Avoid em dashes; use commas instead. [idx=12,34]\n"
     )
     proposals = mp.propose_from_insights(insights)
-    _remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+    _remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
 
     assert promoted == ["Avoid em dashes; use commas instead."]
 
@@ -474,7 +486,7 @@ def test_promote_accepts_rule_containing_if_any(tmp_path: Path) -> None:
         "Durable rule: Ask which tests to run, if any, before starting. [idx=7]\n"
     )
     proposals = mp.propose_from_insights(insights)
-    _remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+    _remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
 
     assert promoted == ["Ask which tests to run, if any, before starting."]
 
@@ -488,7 +500,7 @@ def test_promote_ignores_rule_label_quoted_inside_user_text(tmp_path: Path) -> N
         "and wanted shorter replies. [idx=8]\n"
     )
     proposals = mp.propose_from_insights(insights)
-    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
+    remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
 
     # No real durable-rule clause and an event-shaped frame: not durable.
     assert proposals == []
@@ -502,3 +514,137 @@ def test_durable_rule_label_matches_extraction_prompts() -> None:
 
     assert mp.DURABLE_RULE_LABEL in insights_mod._INSIGHTS_SYSTEM_PROMPT
     assert mp.DURABLE_RULE_LABEL in insights_mod._TEXT_MODE_SYSTEM_PROMPT
+
+
+# ── Destination tags and routing ──────────────────────────────────────────
+
+
+def test_tagged_bullets_route_to_their_destination() -> None:
+    insights = (
+        "## User corrections\n"
+        "- Prefers pnpm over npm in every repo. [idx=1] [memory]\n"
+        "## New entities\n"
+        "- person: Mo Salah - the user's coach. [idx=2] [people: Mo Salah]\n"
+        "## Decisions\n"
+        "- Chose Postgres over SQLite for the app because concurrency. [idx=3] [project]\n"
+        "- Chose conventional commits over freeform because tooling. [idx=4] [review]\n"
+    )
+    proposals = mp.propose_from_insights(insights)
+    by_target = {p.target: p for p in proposals}
+    assert set(by_target) == {"memory", "people", "project", "review"}
+    assert by_target["people"].payload == "Mo Salah"
+    # The tag is stripped from the queued text.
+    assert "[people" not in by_target["people"].text
+    assert "[project]" not in by_target["project"].text
+
+
+def test_untagged_non_operator_entity_defaults_to_review() -> None:
+    """A missing tag is uncertainty: only the old confident paths keep targets."""
+    proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
+    decision = next(p for p in proposals if "OpenRouter" in p.text)
+    manager = next(p for p in proposals if "Manager Example" in p.text)
+    product = next(p for p in proposals if "Smart Label Capture" in p.text)
+    assert decision.target == "review"
+    assert manager.target == "people"
+    assert manager.payload == "Manager Example"
+    assert product.target == "review"
+
+
+def test_apply_creates_people_note_only_when_absent(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    proposal = mp.MemoryProposal(
+        target="people", text="Mo Salah - the user's coach.",
+        source_section="New entities", payload="Mo Salah",
+    )
+    remaining, applied = mp.apply_proposals([proposal], vault_root=vault)
+    assert applied == ["Mo Salah - the user's coach."]
+    assert not remaining
+    note = vault / "People" / "Mo Salah.md"
+    assert note.exists()
+    assert "tags: [person]" in note.read_text(encoding="utf-8")
+
+    # An existing note is a merge decision, so the fact stays queued.
+    remaining, applied = mp.apply_proposals([proposal], vault_root=vault)
+    assert applied == []
+    assert len(remaining) == 1
+
+
+def test_apply_appends_learning_under_active(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    proposal = mp.MemoryProposal(
+        target="learnings",
+        text="defuddle extracts clean article text where readability fails.",
+        source_section="Decisions",
+    )
+    remaining, applied = mp.apply_proposals([proposal], vault_root=vault)
+    assert applied and not remaining
+    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
+    assert "## Active" in text
+    assert "defuddle extracts" in text
+
+    # A second append lands under the existing section, not a new one.
+    mp.apply_proposals(
+        [mp.MemoryProposal(target="learnings", text="Second lesson.",
+                           source_section="Decisions")],
+        vault_root=vault,
+    )
+    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
+    assert text.count("## Active") == 1
+    assert "Second lesson." in text
+
+
+def test_project_facts_are_dropped_when_the_fold_consumed_them(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n"
+        "## Decisions\n"
+        "- Chose Postgres over SQLite because concurrency. [idx=1] [project]\n",
+        encoding="utf-8",
+    )
+    stats: dict[str, int] = {}
+    out = mp.proposals_from_archive(
+        archive, vault,
+        project_doc_path="doc.md", project_fold_wrote=True, stats=stats,
+    )
+    # Consumed by the fold: nothing queued, nothing reported.
+    assert out is None
+    assert stats.get("proposed", 0) == 0
+
+
+def test_unconsumed_project_facts_queue_addressed_to_their_doc(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n"
+        "## Decisions\n"
+        "- Chose Postgres over SQLite because concurrency. [idx=1] [project]\n",
+        encoding="utf-8",
+    )
+    out = mp.proposals_from_archive(
+        archive, vault,
+        project_doc_path="projects/x/doc.md", project_fold_wrote=False,
+    )
+    assert out is not None
+    from ciao.proposal_kinds import parse_bullet
+    bullets = [
+        parse_bullet(line) for line in out.read_text(encoding="utf-8").splitlines()
+    ]
+    rows = [b for b in bullets if b is not None]
+    assert len(rows) == 1
+    assert rows[0].kind == "project"
+    assert rows[0].target == "projects/x/doc.md"
+
+
+def test_queue_bullet_round_trips_payload() -> None:
+    proposal = mp.MemoryProposal(
+        target="people", text="Alba - a collaborator.",
+        source_section="New entities", payload="Alba",
+    )
+    line = proposal.as_bullet()
+    assert line.startswith("- [people Alba] Alba - a collaborator.")
+    from ciao.proposal_kinds import parse_bullet
+    bullet = parse_bullet(line)
+    assert bullet is not None
+    assert bullet.kind == "people"
+    assert bullet.target == "Alba"

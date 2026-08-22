@@ -1107,7 +1107,9 @@ export interface RehomeSignal {
 /**
  * One queued proposal row from `GET /api/proposals`. Region kinds
  * (`memory`/`profile`/`user`) carry `region` and `leak_warning`; `rehome`
- * rows carry `rehome`; `skill` rows are files and carry neither.
+ * rows carry `rehome`; destination kinds carry `target` (the person name for
+ * `people`, the doc path for `project`); `skill` rows are files and carry
+ * none of these.
  */
 export interface ProposalRow {
   id: string
@@ -1120,6 +1122,7 @@ export interface ProposalRow {
   region?: string
   leak_warning?: boolean
   rehome?: RehomeSignal
+  target?: string
 }
 
 export interface ProposalsResponse {
