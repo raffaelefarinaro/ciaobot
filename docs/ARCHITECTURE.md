@@ -48,9 +48,6 @@ ciao/                          Python backend (Starlette).
   workspaces.py                Shared logical-workspace registry rules (validation, serialization, persistence) used by the PWA routes and the control-plane workspace tools.
   mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings). HTTP endpoints live in ciao/web/routes_mcp.py.
   control_surfaces.py          Read previously promoted per-provider legacy-vs-MCP decisions for per-chat Auto.
-  eval_runner.py               Reusable isolated full-chat runner and provider-neutral observation telemetry.
-  evals.py                     Strict declarative eval schema, target staging, assertions, reports, and suite execution.
-  release_evidence.py          Release scorecards, provider metrics, inventory diffs, sanitization, and comparisons.
   signals.py                   Restart / deploy signals.
   instance_lock.py             Process-lifetime lock for one backend per runtime directory (`.runtime/server.lock`).
   execution_modes.py           Claude/opencode provider approval policies and Ciaobot's auto-approved MCP control plane.
@@ -269,35 +266,6 @@ which reads `.runtime/control_surface_decision.json` and falls back to legacy
 for missing, partial, tied, or malformed decisions — but nothing writes that
 file any more, so an existing chat pinned to `auto` resolves from a stale
 decision or degrades to legacy.
-
-## Declarative live evaluations
-
-`ciao eval` runs schema-version-1 JSON suites for individual skills or
-subagents. A suite defines routing defaults, ordered scenarios, one target per
-scenario, optional routing overrides, and deterministic assertions. Parsing is
-strict: unknown fields, missing fields, and invalid values are reported at
-their JSON path before a server starts. Routing resolves command overrides
-first, then scenario values, then suite defaults.
-
-Each selected scenario gets a fresh temporary workspace and isolated Ciaobot
-server. `ciao/evals.py` copies only the selected canonical target, runs the
-normal skill synchronization, then removes unrelated provider projections. A
-workspace target takes precedence over the packaged target. The source
-workspace is never modified, and canonical paths and copied symlinks may not
-escape their source boundary.
-
-`ciao/eval_runner.py` creates a real project and chat, submits the prompt
-through the normal HTTP and provider path, waits for the terminal assistant
-message, and reads provider and MCP tool telemetry. Assertions are
-case-sensitive for text and use exact normalized tool identifiers; there is no
-fuzzy matching or model judge.
-
-After each scenario, `results.json` and `REPORT.md` are replaced atomically.
-Records retain declaration order and include status, routing, assertion
-outcomes, output or error, selected and effective models, normalized tools,
-usage, token totals, wall time, and provider duration. Interrupted runs retain
-completed records, mark the active scenario interrupted, leave unstarted
-records pending, and re-raise the interrupt.
 
 Server restart requests drain chat work before shutting down: active broker streams, already-queued follow-up turns, and background-subagent watchers are allowed to settle, while brand-new turns are rejected once draining begins. When drain starts, `ProjectChatManager.begin_restart_drain` publishes `server_restarting` on `/ws/events` (and the connect snapshot carries `restarting: true`) so every open PWA shows the full-screen restart overlay instead of treating turn rejection as a chat error. Shutdown starts only after several consecutive idle observations so the handoff from a completed parent turn to its background-agent watcher or synthesis stream cannot create a false-idle race. The macOS menu-bar action uses `/api/active-chats` as a guard before its direct launchd restart and asks the operator to retry once active chats finish.
 

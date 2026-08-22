@@ -41,8 +41,6 @@ ciao auth claude --print-only              # show terminal OAuth command
 ciao auth codex --print-only               # show Codex / ChatGPT login command
 ciao auth opencode --print-only            # show opencode login command
 ciao auth opencode                         # run provider login helper
-ciao scaffold eval example --workspace .  # create evals/example.json
-ciao eval --suite evals/example.json --workspace .
 ```
 
 ### macOS venv workarounds
@@ -84,15 +82,13 @@ archive, its signature, and `latest.json`.
 - **Release prep:** from a clean checkout, run:
 
 ```bash
-scripts/prepare-release --apply --run-release-evals --create-pr --ready
+scripts/prepare-release --apply --create-pr --ready
 ```
 
   That cuts `release/vX.Y.Z` from `develop`, aligns the Python, PWA, desktop
   npm/Cargo/Tauri versions and lockfiles, refreshes `CHANGELOG.md`, runs release
-  checks, runs the Claude/Codex release scorecard, commits sanitized evidence
-  under `release-evidence/vX.Y.Z/`, and opens a PR into `main`. Use
-  `--bump minor` or `--version X.Y.Z` when needed. Live release evals require
-  both provider logins and may spend provider tokens.
+  checks, and opens a PR into `main`. Use
+  `--bump minor` or `--version X.Y.Z` when needed.
 
 - **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA, embedded runtimes, universal app, native verifier, installer, and updater metadata. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
@@ -248,94 +244,6 @@ ciao memory-audit --json # Bounded-memory rot only (regions, no vault scan)
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
-
-### Declarative live evaluations
-
-Create a starter suite, then run it against the current workspace:
-
-```bash
-ciao scaffold eval example --workspace .
-ciao eval --suite evals/example.json --workspace .
-```
-
-The suite is schema-version 1 JSON. It declares routing defaults and ordered
-scenarios; each scenario selects exactly one `skill` or `subagent` target and
-contains deterministic assertions such as output text, regular expressions,
-and required or forbidden tools. Use `--filter` to select scenarios and
-`--provider`, `--model`, `--output`, `--turn-timeout`, or `--startup-timeout`
-to override execution settings. Routing precedence is CLI override, scenario,
-then suite default.
-
-Each scenario runs in a fresh temporary workspace and isolated Ciaobot server.
-Only the selected target is staged, workspace-owned targets take precedence
-over packaged targets, and the source workspace is not modified. Path and
-symlink boundary checks reject targets that escape their canonical source.
-
-The normal tests mock provider execution and require no credentials:
-
-```bash
-pytest -q tests/test_evals.py tests/test_eval_targets.py \
-  tests/test_eval_runner.py tests/test_eval_cli.py
-```
-
-Two opt-in fixtures exercise real provider credentials and may spend tokens:
-
-```bash
-ciao eval --suite tests/fixtures/evals/skill-smoke.json \
-  --workspace . --provider claude --output /tmp/ciao-eval-claude-skill
-
-ciao eval --suite tests/fixtures/evals/subagent-smoke.json \
-  --workspace . --provider codex --model sonnet \
-  --output /tmp/ciao-eval-codex-subagent
-
-ciao eval --suite tests/fixtures/evals/visual-plan.json \
-  --workspace . --provider claude --output /tmp/ciao-eval-visual-plan-claude
-
-ciao eval --suite tests/fixtures/evals/visual-plan.json \
-  --workspace . --provider codex --output /tmp/ciao-eval-visual-plan-codex
-```
-
-After every scenario, the output directory contains atomic `results.json` and
-`REPORT.md` snapshots. Results include status, assertion outcomes, output or
-error, routing, selected/effective model, normalized tools, usage, token
-totals, and timings. Live runs use the existing provider login and are not part
-of the normal credential-free test suite.
-
-### Public release evidence
-
-Release scorecards use the schema-version-2 suite in `evals/release.json`.
-They run both supported providers three times in cold, warm, and restart
-mode. Cold runs use a fresh isolated workspace; warm runs repeat the measured
-turns in one chat; restart runs preserve the synthetic vault while starting a
-new server and chat.
-
-```bash
-ciao eval release \
-  --suite evals/release.json \
-  --workspace . \
-  --version 0.0.0 \
-  --output release-evidence/v0.0.0 \
-  --from-ref v0.0.0
-
-ciao eval compare \
-  --baseline release-evidence/vPREVIOUS/summary.json \
-  --current release-evidence/vCURRENT/summary.json
-```
-
-The generated `REPORT.md`, `summary.json`, `changes.json`, and
-`rationale.md` are sanitized public artifacts. They contain aggregate
-context/cache/token/latency metrics, tool and memory-source summaries, and
-structural skill/MCP changes, but never prompts, model answers, vault content,
-tool arguments, or credentials. Performance and cache regressions are
-advisory; missing provider coverage and correctness failures stop release
-preparation. The evidence remains reviewable in the release PR and worktree;
-the release owner may attach or link it manually. No CI job runs or publishes
-the scorecard.
-
-Synthetic vault fixtures are the default. A local, sanitized vault can be used
-for a private operator run with `--vault-root /path/to/vault`; external source
-paths are hashed in the resulting public evidence and the vault is never copied
-into the repository or release assets.
 
 The Settings → Automations list is registry-driven: `GET /api/automation` carries
 each job's static `trigger` sentence, `schedule_id`, `one_time`, `uses_model`,

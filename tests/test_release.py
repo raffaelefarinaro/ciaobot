@@ -10,7 +10,6 @@ from ciao.release import (
     CommitSummary,
     ReleaseError,
     _resolve_source_ref,
-    _pr_body,
     apply_release_files,
     bump_version,
     read_versions,
@@ -146,20 +145,6 @@ def test_render_changelog_section_groups_commit_subjects() -> None:
     assert "### Added\n- feat: add release automation (`abc1234`)" in section
     assert "### Fixed\n- fix: repair package smoke (`def5678`)" in section
     assert "### Maintenance\n- docs: explain release flow (`987abcd`)" in section
-
-
-def test_pr_body_links_sanitized_release_evidence() -> None:
-    body = _pr_body(
-        "0.3.0",
-        "## v0.3.0 - 2026-07-05",
-        ["pytest tests/"],
-        evidence_path=Path("release-evidence/v0.3.0"),
-        evidence_flags=["advisory_regression:latency"],
-    )
-
-    assert "release-evidence/v0.3.0/REPORT.md" in body
-    assert "release-evidence/v0.3.0/summary.json" in body
-    assert "advisory_regression:latency" in body
 
 
 def test_apply_release_files_updates_versions_and_changelog(tmp_path: Path) -> None:

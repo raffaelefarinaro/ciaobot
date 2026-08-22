@@ -547,22 +547,8 @@ def _pr_body(
     version: str,
     changelog_section: str,
     checks: list[str],
-    *,
-    evidence_path: Path | None = None,
-    evidence_flags: list[str] | None = None,
 ) -> str:
     testing = "\n".join(f"- {label}" for label in checks) or "- Not run"
-    evidence = ""
-    if evidence_path is not None:
-        relative = evidence_path.as_posix()
-        flags = "\n".join(f"- `{flag}`" for flag in (evidence_flags or []))
-        evidence = (
-            "\n## Release evidence\n"
-            f"- [Public report]({relative}/REPORT.md)\n"
-            f"- [Machine-readable summary]({relative}/summary.json)\n"
-            f"- [Inventory changes]({relative}/changes.json)\n"
-            + (f"- Advisory flags:\n{flags}\n" if flags else "")
-        )
     return f"""## Summary
 - Release Ciaobot v{version} to `main`
 - Update package, PWA, desktop, and lockfile versions
@@ -573,7 +559,6 @@ def _pr_body(
 
 ## Testing
 {testing}
-{evidence}
 
 ## After approval
 - Merge this PR into `main`
@@ -800,26 +785,6 @@ def main(argv: list[str] | None = None) -> int:
             "installed gws CLI."
         ),
     )
-    parser.add_argument(
-        "--run-release-evals",
-        action="store_true",
-        help=(
-            "Run the Claude/Codex public release scorecard with cold, warm, "
-            "and restart repetitions before committing the release."
-        ),
-    )
-    parser.add_argument(
-        "--release-eval-suite",
-        type=Path,
-        default=Path("evals/release.json"),
-        help="Schema-version-2 release-eval suite.",
-    )
-    parser.add_argument(
-        "--release-eval-repeats",
-        type=int,
-        default=3,
-        help="Repetitions per provider and execution mode.",
-    )
 
     args = parser.parse_args(argv)
     root = Path(args.repo_root).expanduser().resolve()
@@ -881,11 +846,6 @@ def main(argv: list[str] | None = None) -> int:
         push=args.push,
         create_pr=args.create_pr,
     )
-    if args.run_release_evals:
-        print(
-            f"Release evidence: {root / 'release-evidence' / f'v{version}'} "
-            f"({args.release_eval_repeats} repetitions per mode/provider)"
-        )
 
     dep_updates: list = []
     if not args.skip_dep_check:
@@ -919,38 +879,6 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_gws_skills:
         touched = [*touched, *_refresh_stock_gws_skills(root)]
 
-    evidence_path: Path | None = None
-    evidence_flags: list[str] = []
-    if args.run_release_evals:
-        from ciao.release_evidence import ReleaseEvidenceError, run_release_evidence
-
-        suite_path = (root / args.release_eval_suite).resolve()
-        if not suite_path.is_file():
-            raise ReleaseError(f"release eval suite does not exist: {suite_path}")
-        evidence_path = root / "release-evidence" / f"v{version}"
-        baseline_path = (
-            root / "release-evidence" / from_ref / "summary.json"
-            if from_ref
-            else None
-        )
-        try:
-            evidence = run_release_evidence(
-                suite_path=suite_path,
-                workspace=root,
-                output=evidence_path,
-                version=version,
-                baseline_summary=baseline_path,
-                from_ref=from_ref,
-                to_ref="HEAD",
-                rationale=changelog_section,
-                repeats=args.release_eval_repeats,
-                require_complete=True,
-            )
-        except (ReleaseEvidenceError, OSError, ValueError) as exc:
-            raise ReleaseError(str(exc)) from exc
-        touched = [*touched, *evidence.files]
-        evidence_flags = list(evidence.advisory_flags)
-
     checks = [] if args.skip_checks else _run_checks(root, skip_frontend=args.skip_frontend)
 
     if args.commit:
@@ -972,15 +900,7 @@ def main(argv: list[str] | None = None) -> int:
             "--title",
             f"Release v{version}",
             "--body",
-            _pr_body(
-                version,
-                changelog_section,
-                checks,
-                evidence_path=(
-                    evidence_path.relative_to(root) if evidence_path else None
-                ),
-                evidence_flags=evidence_flags,
-            ),
+            _pr_body(version, changelog_section, checks),
         ]
         if not args.ready:
             cmd.append("--draft")

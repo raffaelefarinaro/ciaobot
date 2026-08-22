@@ -79,15 +79,13 @@ Then apply, commit, push, and open a ready-for-review PR into `main`:
 
 ```bash
 env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" \
-  --bump <patch|minor|major> --apply --run-release-evals \
+  --bump <patch|minor|major> --apply \
   --commit --push --create-pr --ready
 ```
 
-The `scripts/prepare-release` wrapper is equivalent (`CIAO_PYTHON=.venv/bin/python scripts/prepare-release --bump … --apply --run-release-evals --create-pr --ready`) but does **not** unset `PYTHONPATH` — see the trap below. Use `--version X.Y.Z` for an explicit version. Defaults: `--source develop` (cuts `release/vX.Y.Z` from `origin/develop`), `--base main`.
+The `scripts/prepare-release` wrapper is equivalent (`CIAO_PYTHON=.venv/bin/python scripts/prepare-release --bump … --apply --create-pr --ready`) but does **not** unset `PYTHONPATH` — see the trap below. Use `--version X.Y.Z` for an explicit version. Defaults: `--source develop` (cuts `release/vX.Y.Z` from `origin/develop`), `--base main`.
 
-What `--apply --run-release-evals` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`, `web/package.json`, `web/package-lock.json`, the five desktop version files (`desktop/package.json`, `desktop/package-lock.json`, `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/Cargo.lock`, `desktop/src-tauri/tauri.conf.json`), and the service-worker cache names in **both** `web/public/sw.js` and `ciao/web/static/sw.js`; refreshes `CHANGELOG.md`; auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the installed `gws` CLI differs from the pin; runs the Claude/Codex release scorecard three times in cold, warm, and restart modes; writes sanitized `release-evidence/vX.Y.Z/{REPORT.md,summary.json,changes.json,rationale.md}`; runs the full check suite; commits `release: prepare vX.Y.Z`; pushes the branch; opens the PR. Correctness failures or incomplete provider coverage stop the release. Performance, context, token, and cache regressions are advisory and appear in the evidence report.
-
-Release evidence is an explicit operator-triggered check owned by this skill. It is not run by CI and is not automatically added to GitHub release notes or assets. Review the generated files in the release PR with an LLM or human reviewer, then attach or publish them manually when appropriate.
+What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`, `web/package.json`, `web/package-lock.json`, the five desktop version files (`desktop/package.json`, `desktop/package-lock.json`, `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/Cargo.lock`, `desktop/src-tauri/tauri.conf.json`), and the service-worker cache names in **both** `web/public/sw.js` and `ciao/web/static/sw.js`; refreshes `CHANGELOG.md`; auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the installed `gws` CLI differs from the pin; runs the full check suite; commits `release: prepare vX.Y.Z`; pushes the branch; opens the PR.
 
 ## Rebuild the PWA last
 

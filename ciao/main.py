@@ -464,11 +464,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             tracker.fail("update_skills", "skill install failed")
             logger.exception("Skill update failed")
 
-    if getattr(config, "benchmark_mode", False):
-        logger.info("Benchmark mode: skipping autonomous skill refresh.")
-    else:
-        tracker.start("update_skills")
-        asyncio.create_task(asyncio.to_thread(_skills_task))
+    tracker.start("update_skills")
+    asyncio.create_task(asyncio.to_thread(_skills_task))
 
     if config.insights_backfill_on_startup:
         tracker.start("backfill_insights")
@@ -807,10 +804,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         logger.info(
             "Bootstrap mode: holding schedule/loop dispatch until setup completes."
         )
-    elif getattr(config, "benchmark_mode", False):
-        logger.info(
-            "Benchmark mode: holding autonomous schedule/loop dispatch."
-        )
     else:
         schedule_manager.start()
         # Loops with autostart begin running now; manually-started loops stay
@@ -964,8 +957,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             except Exception:
                 logger.exception("Branch backup push failed")
 
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_branch_backup_loop())
+    asyncio.create_task(_branch_backup_loop())
 
     # ── Google Workspace token health ────────────────────────
     # Cheap periodic `auth status` ping per configured GWS profile. When a
@@ -1002,9 +994,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 logger.exception("GWS token health check failed")
             await asyncio.sleep(_gws_health_interval)
 
-    if not getattr(config, "bootstrap_mode", False) and not getattr(
-        config, "benchmark_mode", False
-    ):
+    if not getattr(config, "bootstrap_mode", False):
         asyncio.create_task(_gws_health_loop())
 
 
@@ -1115,8 +1105,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Startup error triage failed")
 
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_startup_error_triage())
+    asyncio.create_task(_startup_error_triage())
 
     # ── Stale-install self-heal ──────────────────────────────
     # Production updates replace the complete app bundle atomically and then
@@ -1141,8 +1130,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 request_restart(config.restart_exit_code)
                 return
 
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_watch_installed_version())
+    asyncio.create_task(_watch_installed_version())
 
     # ── App bundle refresh on upgrade ────────────────────────
     async def _shutdown_providers() -> None:

@@ -529,10 +529,6 @@ class CiaoConfig:
     # server is unavailable at request time.
     mcp_enabled: bool = True
     control_surface: str = "mcp"
-    # Internal evaluation mode.  It keeps the HTTP/chat stack identical while
-    # suppressing autonomous background work that would contaminate paired
-    # legacy-vs-MCP measurements.  Manual schedules/loops remain available.
-    benchmark_mode: bool = False
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
@@ -1420,10 +1416,6 @@ class CiaoConfig:
                 in {"legacy", "mcp"}
                 else "mcp"
             ),
-            benchmark_mode=source.get("CIAO_BENCHMARK_MODE", "false")
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"},
         )
 
 
