@@ -138,6 +138,28 @@
         <div v-if="mm.selectedNode.description" class="mm-detail-desc">{{ mm.selectedNode.description }}</div>
         <button type="button" class="mm-detail-path" @click="openNoteFile(mm.selectedNode.id)">{{ mm.selectedNode.id }}</button>
 
+        <div class="mm-detail-section mm-detail-preview">
+          <h4>Content</h4>
+          <div v-if="previewLoading" class="mm-preview-skeleton" aria-hidden="true">
+            <span class="mm-shimmer-line" style="width: 100%; height: 8px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 92%; height: 8px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 8px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 60%; height: 8px;"></span>
+          </div>
+          <div v-else-if="previewError" class="mm-preview-error">{{ previewError }}</div>
+          <template v-else>
+            <div v-if="previewContent" class="mm-preview-wrap" :class="{ 'mm-preview--collapsed': isTruncated && !expandedPreview }">
+              <pre class="mm-preview-text">{{ displayedPreview }}</pre>
+              <div v-if="isTruncated && !expandedPreview" class="mm-preview-fade" aria-hidden="true"></div>
+            </div>
+            <div v-if="!previewContent && !previewError" class="mm-hint">Empty note.</div>
+            <div v-if="previewContent" class="mm-preview-actions">
+              <button v-if="isTruncated" type="button" class="mm-link" @click="expandedPreview = !expandedPreview">{{ expandedPreview ? 'Show less' : 'Show more' }}</button>
+              <button type="button" class="mm-link mm-link--primary" @click="openNoteFile(mm.selectedNode.id)">Open full file →</button>
+            </div>
+          </template>
+        </div>
+
         <div v-if="mm.selectedNode.tags.length" class="mm-detail-section">
           <h4>Tags</h4>
           <span v-for="t in mm.selectedNode.tags" :key="t" class="pill">{{ t }}</span>
@@ -266,6 +288,62 @@ async function deleteNote(id: string) {
     deletingNote.value = false
   }
 }
+
+// ---------- content preview in detail panel ----------
+const previewContent = ref('')
+const previewLoading = ref(false)
+const previewError = ref('')
+const expandedPreview = ref(false)
+const PREVIEW_LIMIT = 1200
+let previewToken = 0
+
+watch(() => mm.selectedId, async (id) => {
+  expandedPreview.value = false
+  if (!id) {
+    previewContent.value = ''
+    previewError.value = ''
+    previewLoading.value = false
+    return
+  }
+  previewLoading.value = true
+  previewError.value = ''
+  const token = ++previewToken
+  try {
+    const resp = await fetch(`/api/workspace-file?path=${encodeURIComponent(id)}`, { credentials: 'same-origin' })
+    if (token !== previewToken) return
+    if (!resp.ok) {
+      if (resp.status === 404) previewError.value = 'File not found.'
+      else if (resp.status === 413) previewError.value = 'File too large to preview.'
+      else if (resp.status === 403) previewError.value = 'Cannot preview this file.'
+      else previewError.value = `Failed to load (HTTP ${resp.status}).`
+      previewContent.value = ''
+      return
+    }
+    let text = await resp.text()
+    // Strip YAML frontmatter for a cleaner preview — the description/tags
+    // already surface frontmatter above, so showing raw `---` is noise.
+    if (text.startsWith('---')) {
+      const end = text.indexOf('\n---', 3)
+      if (end !== -1) {
+        const after = text.indexOf('\n', end + 4)
+        if (after !== -1) text = text.slice(after + 1)
+      }
+    }
+    previewContent.value = text.trimStart()
+  } catch (e) {
+    if (token !== previewToken) return
+    previewError.value = e instanceof Error ? e.message : String(e)
+    previewContent.value = ''
+  } finally {
+    if (token === previewToken) previewLoading.value = false
+  }
+})
+
+const isTruncated = computed(() => previewContent.value.length > PREVIEW_LIMIT)
+const displayedPreview = computed(() => {
+  if (!isTruncated.value || expandedPreview.value) return previewContent.value
+  return previewContent.value.slice(0, PREVIEW_LIMIT).trimEnd() + ' …'
+})
 
 watch(() => mm.focusSignal.seq, () => {
   const id = mm.focusSignal.id
@@ -1193,6 +1271,85 @@ onBeforeUnmount(() => {
 .mm-delete-btn:hover:not(:disabled) { color: #f7768e; border-color: #f7768e; }
 .mm-delete-btn:disabled { opacity: 0.6; cursor: default; }
 .pill { display: inline-block; background: var(--bg3); border-radius: var(--radius-pill); padding: 2px 9px; font-size: var(--text-xs); margin: 0 4px 4px 0; color: var(--fg2); }
+
+.mm-detail-preview .mm-preview-skeleton {
+  padding: 4px 0;
+}
+.mm-detail-preview .mm-shimmer-line {
+  display: block;
+  background: var(--bg3);
+  border-radius: 4px;
+  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+}
+.mm-preview-wrap {
+  position: relative;
+  max-height: 260px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.mm-preview-wrap.mm-preview--collapsed {
+  max-height: 220px;
+}
+.mm-preview-text {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg2);
+  max-height: 260px;
+  overflow: auto;
+}
+.mm-preview--collapsed .mm-preview-text {
+  max-height: 180px;
+  overflow: hidden;
+}
+.mm-preview-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 48px;
+  background: linear-gradient(to bottom, transparent, var(--bg));
+  pointer-events: none;
+}
+.mm-preview-error {
+  color: var(--warning, #ff9800);
+  font-size: var(--text-xs);
+  padding: 6px 0;
+}
+.mm-preview-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.mm-detail-preview .mm-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  cursor: pointer;
+}
+.mm-detail-preview .mm-link:hover { text-decoration: underline; }
+.mm-detail-preview .mm-link--primary {
+  margin-left: auto;
+  color: var(--fg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+}
+.mm-detail-preview .mm-link--primary:hover {
+  color: var(--fg);
+  background: var(--bg3);
+  text-decoration: none;
+}
 
 .mm-seg { display: flex; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
 .mm-seg button {
