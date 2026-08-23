@@ -488,6 +488,7 @@ async def extract_and_append(
     provider: str = "claude",
     project_doc_path: str = "",
     text_mode: bool = False,
+    guide_path: Path | None = None,
 ) -> None:
     """Call the model with the filtered transcript and append insights to the archive.
 
@@ -678,16 +679,15 @@ async def extract_and_append(
                     # The count is what the archived chat reports back to the
                     # user ("3 memory proposals"); a bare bool cannot say that.
                     proposal_stats: dict[str, int] = {}
+                    # The guide is the archive owner's workspace agent root,
+                    # threaded from the caller: region auto-promotion must
+                    # write the workspace the chat ran in, never an
+                    # install-root file.
                     proposals_result = proposals_from_archive(
                         archive_path,
                         proposal_vault_root,
                         auto_promote_memory=True,
-                        guide_path=(
-                            Path(config.workspace_root) / "CLAUDE.md"
-                            if config is not None
-                            and getattr(config, "workspace_root", None)
-                            else None
-                        ),
+                        guide_path=guide_path,
                         stats=proposal_stats,
                         project_doc_path=resolved_doc_path,
                         project_fold_wrote=doc_fold_wrote,
@@ -1152,7 +1152,10 @@ async def backfill_insights_task(
         """
         found: list[tuple[Path, str, bool]] = []
         # Sorted for a deterministic order (oldest first / alphabetic).
-        archives = sorted(base.glob("*/claude/*.md"))
+        # All providers (claude, opencode, codex) — the previous
+        # `*/claude/*.md` made opencode/codex transcripts invisible to
+        # backfill and to the scheduled insights run.
+        archives = sorted(base.glob("*/*/*.md"))
         done = 0
         for md in archives:
             # Cheap filters first. _has_insights_section reads the whole file,
@@ -1252,6 +1255,11 @@ async def backfill_insights_task(
                         vault_root=config.vault_root,
                         proposal_vault_root=(
                             config.workspace_vault_root(workspace)
+                            if workspace and config.workspace(workspace) is not None
+                            else None
+                        ),
+                        guide_path=(
+                            Path(config.agent_root(workspace)) / "CLAUDE.md"
                             if workspace and config.workspace(workspace) is not None
                             else None
                         ),
