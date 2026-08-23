@@ -16,7 +16,9 @@ import pytest
 
 from ciao.models import AgentRequest
 from ciao.providers.opencode import OpencodeProvider
-from tests.test_opencode_provider import _FakeEventStream, _provider
+# Same-directory import: tests/ is not a package (no __init__.py), and pytest
+# puts this directory on sys.path under its default import mode.
+from test_opencode_provider import _FakeEventStream, _provider
 
 
 def _sse(payload: dict[str, Any]) -> str:

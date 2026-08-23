@@ -110,8 +110,17 @@ _MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 # turn streams), so the TTL stays above that cadence to collapse bursts to
 # roughly one spawn per tick rather than one per poll.
 _READ_CACHE_TTL = 6.0
-_THREAD_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
-_COLLAB_CACHE: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+# A spawn that could not start at all (binary missing, process died, health
+# never answered) is cached longer than a read: while opencode is in this
+# state, every uncached read path spawns another doomed `opencode serve` and
+# holds it for up to `_SERVER_START_TIMEOUT`, so an un-negative-cached
+# `/subagents` poll stacks dying servers on every tick. The TTL stays well
+# under a minute so reads recover promptly once opencode starts working.
+_READ_FAILURE_CACHE_TTL = 20.0
+# Cache entries carry their own TTL as ``(stamp, ttl, value)``: a failed
+# spawn lives longer than a successful read (see `_READ_FAILURE_CACHE_TTL`).
+_THREAD_CACHE: dict[tuple[str, str], tuple[float, float, dict[str, Any]]] = {}
+_COLLAB_CACHE: dict[tuple[str, str], tuple[float, float, list[dict[str, Any]]]] = {}
 
 _SERVER_START_TIMEOUT = 30.0
 _SERVER_START_ATTEMPTS = 3
@@ -1143,8 +1152,14 @@ class OpencodeProvider(BaseSDKProvider):
             try:
                 await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT)
             except (TimeoutError, asyncio.TimeoutError):
-                process.kill()
-                await process.wait()
+                try:
+                    process.kill()
+                    await process.wait()
+                except (ProcessLookupError, FileNotFoundError):
+                    # The process already exited between the timeout and the
+                    # kill; treat it as cleanly gone rather than surfacing a
+                    # spurious task exception.
+                    pass
         # After the process is gone, so the tail still explains a crash above.
         reader = self._stderr_task
         self._stderr_task = None
@@ -1856,6 +1871,13 @@ class OpencodeProvider(BaseSDKProvider):
 
         error: str = ""
         saw_output = False
+
+        # The SSE subscription can drop mid-turn (network blip, server hiccup)
+        # before `session.idle` arrives. Rather than failing the whole turn,
+        # re-subscribe a bounded number of times; if the stream still will not
+        # hold, poll the message list until output quiesces and replay settled
+        # parts through the same accumulator (its `_emitted` bookkeeping makes
+        # the replay idempotent). Mirrors conduit's poll-backstop design.
         prompt_accepted = False
         prompt_rejected = False
         idle_seen = False
@@ -2070,21 +2092,26 @@ class OpencodeProvider(BaseSDKProvider):
             return {}
         key = (str(workspace_root), session_id)
         cached = _THREAD_CACHE.get(key)
-        if cached and time.monotonic() - cached[0] < _READ_CACHE_TTL:
-            return cached[1]
+        if cached and time.monotonic() - cached[0] < cached[1]:
+            return cached[2]
         thread: dict[str, Any] = {}
+        ttl = _READ_CACHE_TTL
         async with _EphemeralServer(workspace_root) as client:
             if client is None:
-                return {}
-            try:
-                info = await client.get(f"/session/{session_id}")
-                info.raise_for_status()
-                messages = await client.get(f"/session/{session_id}/message")
-                messages.raise_for_status()
-                thread = {"info": info.json(), "messages": messages.json()}
-            except (httpx.HTTPError, ValueError):
-                thread = {}
-        _THREAD_CACHE[key] = (time.monotonic(), thread)
+                # Cache the failure too, briefly longer than a read: an
+                # uncached miss here means another doomed server spawn on
+                # the next poll.
+                ttl = _READ_FAILURE_CACHE_TTL
+            else:
+                try:
+                    info = await client.get(f"/session/{session_id}")
+                    info.raise_for_status()
+                    messages = await client.get(f"/session/{session_id}/message")
+                    messages.raise_for_status()
+                    thread = {"info": info.json(), "messages": messages.json()}
+                except (httpx.HTTPError, ValueError):
+                    thread = {}
+        _THREAD_CACHE[key] = (time.monotonic(), ttl, thread)
         return thread
 
     @classmethod
@@ -2101,8 +2128,8 @@ class OpencodeProvider(BaseSDKProvider):
             return []
         key = (str(workspace_root), session_id)
         cached = _COLLAB_CACHE.get(key)
-        if cached and time.monotonic() - cached[0] < _READ_CACHE_TTL:
-            return cached[1]
+        if cached and time.monotonic() - cached[0] < cached[1]:
+            return cached[2]
 
         async def _child_messages(client: Any, child_id: str) -> list[Any]:
             try:
@@ -2114,29 +2141,33 @@ class OpencodeProvider(BaseSDKProvider):
             return payload if isinstance(payload, list) else []
 
         result: list[dict[str, Any]] = []
+        ttl = _READ_CACHE_TTL
         async with _EphemeralServer(workspace_root) as client:
             if client is None:
-                return []
-            try:
-                response = await client.get(f"/session/{session_id}/children")
-                response.raise_for_status()
-                children = response.json()
-            except (httpx.HTTPError, ValueError):
-                return []
-            if not isinstance(children, list):
-                return []
-            children = [
-                child for child in children
-                if isinstance(child, dict) and child.get("id")
-            ]
-            histories = await asyncio.gather(
-                *(_child_messages(client, str(child["id"])) for child in children)
-            )
-            result = [
-                {"info": child, "messages": messages}
-                for child, messages in zip(children, histories)
-            ]
-        _COLLAB_CACHE[key] = (time.monotonic(), result)
+                # Negative-cache the failed spawn (see read_thread).
+                ttl = _READ_FAILURE_CACHE_TTL
+            else:
+                try:
+                    response = await client.get(f"/session/{session_id}/children")
+                    response.raise_for_status()
+                    children = response.json()
+                except (httpx.HTTPError, ValueError):
+                    children = None
+                else:
+                    if not isinstance(children, list):
+                        children = []
+                    children = [
+                        child for child in children
+                        if isinstance(child, dict) and child.get("id")
+                    ]
+                    histories = await asyncio.gather(
+                        *(_child_messages(client, str(child["id"])) for child in children)
+                    )
+                    result = [
+                        {"info": child, "messages": messages}
+                        for child, messages in zip(children, histories)
+                    ]
+        _COLLAB_CACHE[key] = (time.monotonic(), ttl, result)
         return result
 
     @classmethod
@@ -2370,8 +2401,14 @@ class _EphemeralServer:
             try:
                 await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT)
             except (TimeoutError, asyncio.TimeoutError):
-                process.kill()
-                await process.wait()
+                try:
+                    process.kill()
+                    await process.wait()
+                except (ProcessLookupError, FileNotFoundError):
+                    # The process already exited between the timeout and the
+                    # kill; treat it as cleanly gone rather than surfacing a
+                    # spurious task exception.
+                    pass
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
