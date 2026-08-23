@@ -10,7 +10,10 @@
       <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
         <canvas
           ref="canvasEl"
+          :class="{ 'mm-canvas--node-hover': !!hoveredNode }"
           @mousedown="onMouseDown"
+          @mousemove="onCanvasHover"
+          @mouseleave="clearHover"
           @wheel.prevent="onWheel"
         />
         <div class="mm-zoom-controls">
@@ -49,10 +52,15 @@
         <div class="mm-hint-overlay">
           <span>
             {{ mm.visibleNodes.length }} notes ·
-            <template v-if="zoomedOut">zoom in for note titles</template>
+            <template v-if="zoomedOut">hover a note for its name · zoom in for titles</template>
             <template v-else>click a note to light up its links · shift-click two to trace a path</template>
           </span>
         </div>
+        <div
+          v-if="hoveredNode"
+          class="mm-hover-tip"
+          :style="{ left: hoverPos.x + 'px', top: hoverPos.y + 'px' }"
+        >{{ hoveredNode.title }}</div>
       </div>
       <div v-else class="mm-list-wrap">
         <table>
@@ -143,7 +151,6 @@ import {
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
 import { isLightTheme } from '../lib/theme'
-import { MIN_CLUSTER_SIZE } from '../lib/vaultAnalysis'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -160,9 +167,6 @@ const fileViewer = useFileViewerStore()
 const themeColors = reactive({
   light: false,
   label: 'rgba(231,232,240,0.85)',
-  labelDim: 'rgba(231,232,240,0.25)',
-  clusterLabel: '#e8e8f0',
-  surface: '#1a1a2e',
   edge: 'rgba(150,160,190,0.35)',
   edgeDim: 'rgba(120,126,150,0.08)',
   selectRing: '#fff',
@@ -171,9 +175,6 @@ function refreshThemeColors() {
   const light = isLightTheme.value
   themeColors.light = light
   themeColors.label = light ? 'rgba(32,33,48,0.88)' : 'rgba(231,232,240,0.85)'
-  themeColors.labelDim = light ? 'rgba(32,33,48,0.3)' : 'rgba(231,232,240,0.25)'
-  themeColors.clusterLabel = light ? '#1a1a2e' : '#e8e8f0'
-  themeColors.surface = light ? '#f4f4fa' : '#1a1a2e'
   themeColors.edge = light ? 'rgba(80,86,120,0.35)' : 'rgba(150,160,190,0.35)'
   themeColors.edgeDim = light ? 'rgba(120,126,150,0.12)' : 'rgba(120,126,150,0.08)'
   themeColors.selectRing = light ? '#1a1a2e' : '#fff'
@@ -183,9 +184,10 @@ function colorForNode(n: MemoryGraphNode): string {
   return categoryColorFor(catKeyFor(n))
 }
 
-// Mirrors the canvas's own cluster-label threshold so the hint can tell the
-// user why they are looking at cluster names rather than note titles.
-const zoomedOut = computed(() => zoomRatio() < CLUSTER_LABEL_MAX_RATIO)
+// Mirrors the canvas's own label threshold so the hint can tell the user why
+// note titles are not on screen yet (they appear past this zoom; before it,
+// names are available on hover).
+const zoomedOut = computed(() => zoomRatio() < LABEL_MIN_RATIO)
 
 // The graph always follows the workspace switcher shared with every other
 // view (sidebar toggle, number-key shortcut, chat header) — the store
@@ -592,81 +594,20 @@ function draw() {
     }
   })
 
-  if (vis.length >= CLUSTER_LABEL_MIN_NODES && zoomRatio() < CLUSTER_LABEL_MAX_RATIO) {
-    drawClusterLabels(vis, highlightSet)
-  } else {
-    drawLabels(vis, highlightSet)
-  }
-}
-
-/**
- * One label per visible cluster, at the centroid of its visible members. This
- * is the readable form of the far-out view: ~6 theme names instead of 318
- * overlapping note titles, and it doubles as the direct labelling the cluster
- * palette's validator WARNs require.
- */
-function drawClusterLabels(vis: MemoryGraphNode[], highlightSet: Set<string> | null) {
-  const sums = new Map<number, { x: number; y: number; n: number; slot: number }>()
-  for (const n of vis) {
-    if (highlightSet && !highlightSet.has(n.id)) continue
-    const cluster = mm.clusterOf(n.id)
-    if (!cluster) continue
-    const acc = sums.get(cluster.id)
-    if (acc) { acc.x += n.x; acc.y += n.y; acc.n += 1 }
-    else sums.set(cluster.id, { x: n.x, y: n.y, n: 1, slot: cluster.slot })
-  }
-  ctx!.textBaseline = 'middle'
-  ctx!.textAlign = 'center'
-  // Biggest clusters first: they get first claim on the space, and a smaller
-  // cluster whose centroid lands underneath is dropped rather than stacked.
-  // (Drawing them in the other order and letting later pills paint over
-  // earlier ones produced exactly the overlap this whole pass exists to avoid.)
-  const ordered = [...sums.entries()].sort((a, b) => b[1].n - a[1].n)
-  const placed: number[][] = []
-  const padX = 7 * dpr
-  const padY = 4 * dpr
-  const h = 15 * dpr
-  for (const [id, acc] of ordered) {
-    const cluster = mm.clusterById.get(id)
-    if (!cluster) continue
-    // One or two stray members of a cluster that mostly lives elsewhere is not
-    // a theme in *this* view; labelling it overstates what is on screen.
-    if (acc.n < MIN_CLUSTER_SIZE) continue
-    const [sx, sy] = worldToScreen(acc.x / acc.n, acc.y / acc.n)
-    // The count rides inside the pill. As a separate caption underneath it had
-    // no background of its own, so it read as debris floating over the nodes.
-    const text = `${cluster.label}  ${acc.n}`
-    ctx!.font = `600 ${14 * dpr}px -apple-system, sans-serif`
-    const w = ctx!.measureText(text).width
-    const x0 = sx - w / 2 - padX
-    const y0 = sy - h / 2 - padY
-    const x1 = x0 + w + padX * 2
-    const y1 = y0 + h + padY * 2
-    if (placed.some(b => x0 < b[2] && x1 > b[0] && y0 < b[3] && y1 > b[1])) continue
-    placed.push([x0, y0, x1, y1])
-    // A pill behind the text: cluster labels sit over the densest part of the
-    // graph by construction (that is where their members are), so plain text
-    // on top of nodes and edges would not read.
-    ctx!.fillStyle = themeColors.light ? 'rgba(244,244,250,0.92)' : 'rgba(26,26,46,0.9)'
-    roundRect(x0, y0, x1 - x0, y1 - y0, 5 * dpr)
-    ctx!.fill()
-    ctx!.strokeStyle = clusterColorFor(acc.slot, themeColors.light)
+  // A ring under the cursor: with labels hidden at this zoom the tooltip is
+  // the only name source, and the ring is what ties it to a specific dot.
+  if (hoveredNode.value && visSet.has(hoveredNode.value.id)) {
+    const n = hoveredNode.value
+    const [sx, sy] = worldToScreen(n.x, n.y)
+    const r = nodeRadius(n) * dpr * Math.max(0.7, Math.min(1.6, camera.scale))
+    ctx!.beginPath()
+    ctx!.arc(sx, sy, r + 3 * dpr, 0, Math.PI * 2)
     ctx!.lineWidth = 1.5 * dpr
+    ctx!.strokeStyle = themeColors.selectRing
     ctx!.stroke()
-    ctx!.fillStyle = themeColors.clusterLabel
-    ctx!.fillText(text, sx, sy)
   }
-  ctx!.textAlign = 'left'
-}
 
-function roundRect(x: number, y: number, w: number, h: number, r: number) {
-  ctx!.beginPath()
-  ctx!.moveTo(x + r, y)
-  ctx!.arcTo(x + w, y, x + w, y + h, r)
-  ctx!.arcTo(x + w, y + h, x, y + h, r)
-  ctx!.arcTo(x, y + h, x, y, r)
-  ctx!.arcTo(x, y, x + w, y, r)
-  ctx!.closePath()
+  drawLabels(vis, highlightSet)
 }
 
 // Labels get their own pass, run after every node is on screen, because
@@ -684,20 +625,19 @@ const LABEL_MAX_W = 170
 const LABEL_PAD = 3
 const LABEL_CELL = 96
 
-// Below this zoom the canvas labels *clusters* instead of notes. At the framed
-// view a 300-note vault has no room for 300 titles no matter how they are
-// placed, but it has ample room for the handful of theme names that summarise
-// them — which is also the direct labelling that makes the cluster palette
-// legal (see CLUSTER_PALETTE).
-const CLUSTER_LABEL_MAX_RATIO = 1.6
+// Below this zoom the canvas draws *no* labels at all: at the framed view a
+// 300-note vault has no room for 300 titles, and even a handful of pills over
+// the hairball read as clutter. Names stay reachable two other ways — hover
+// shows one under the cursor, and zooming past this ratio brings titles back.
+const LABEL_MIN_RATIO = 1.6
 /**
- * Cluster labels are a response to label *pressure*, not to zoom on its own.
+ * The degree floor is a response to label *pressure*, not to zoom on its own.
  * A small filtered view framed at fit scale has a low zoom ratio but acres of
- * free space, and summarising four visible notes as "single-barcode-ai-value ·
- * 4 notes" hides the only four titles the user came to read. Below this many
- * visible notes, every label goes to a note.
+ * free space, and hiding every title there would hide the only four notes the
+ * user came to read. At or below this many visible notes, the canvas is sparse
+ * enough that labels are exempt from both the zoom gate and the degree floor.
  */
-const CLUSTER_LABEL_MIN_NODES = 40
+const SPARSE_VIEW_NODES = 40
 // Minimum degree a node needs before it may claim a label, graded by how far
 // the user has zoomed in from the framed view: far out only hubs are legible at
 // all, close in everything that fits is welcome. This replaces the binary
@@ -705,7 +645,7 @@ const CLUSTER_LABEL_MIN_NODES = 40
 function labelDegreeFloor(visibleCount: number): number {
   // A sparse view has room for everything; gating by degree there would leave
   // a local neighbourhood of leaf notes completely unlabelled.
-  if (visibleCount <= CLUSTER_LABEL_MIN_NODES) return 0
+  if (visibleCount <= SPARSE_VIEW_NODES) return 0
   const ratio = zoomRatio()
   if (ratio >= 3.5) return 0
   if (ratio >= 2.5) return 1
@@ -725,6 +665,10 @@ function ellipsize(text: string, maxW: number): string {
 }
 
 function drawLabels(vis: MemoryGraphNode[], highlightSet: Set<string> | null) {
+  // Far out, nothing at all: titles only earn their pixels once the user has
+  // zoomed in past LABEL_MIN_RATIO — or the view is sparse enough not to need
+  // the room. Identification before that is hover's job.
+  if (vis.length > SPARSE_VIEW_NODES && zoomRatio() < LABEL_MIN_RATIO) return
   ctx!.font = `${LABEL_FONT_PX * dpr}px -apple-system, sans-serif`
   ctx!.textBaseline = 'middle'
   ctx!.fillStyle = themeColors.label
@@ -825,6 +769,43 @@ function hitTest(wx: number, wy: number): MemoryGraphNode | null {
   return null
 }
 
+// ---------- hover name overlay ----------
+// With labels hidden at far-out zoom (the default framing of a real vault),
+// a node's name has to be one hover away or the graph is unidentifiable.
+// DOM overlay rather than canvas text so it can follow the cursor without
+// waking the render loop for every pixel of movement; only the enter/leave
+// of a node redraws (the highlight ring).
+const hoveredNode = ref<MemoryGraphNode | null>(null)
+const hoverPos = ref({ x: 0, y: 0 })
+function onCanvasHover(e: MouseEvent) {
+  // While a press is held (node drag, pan) the surface is "grabbed", not
+  // "pointing" — a tooltip chasing the cursor mid-drag reads as noise.
+  if (!canvasEl.value || downPos) {
+    clearHover()
+    return
+  }
+  const rect = canvasEl.value.getBoundingClientRect()
+  const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
+  const n = hitTest(wx, wy)
+  if (n !== hoveredNode.value) {
+    hoveredNode.value = n
+    requestRedraw()
+  }
+  if (!n || !canvasWrap.value) return
+  // Below-right of the cursor, native-tooltip style, clamped inside the wrap.
+  const wrapRect = canvasWrap.value.getBoundingClientRect()
+  const x = e.clientX - wrapRect.left
+  const y = e.clientY - wrapRect.top
+  hoverPos.value = {
+    x: Math.max(0, Math.min(x + 14, canvasWrap.value.clientWidth - 270)),
+    y: Math.max(0, Math.min(y + 14, canvasWrap.value.clientHeight - 32)),
+  }
+}
+function clearHover() {
+  if (hoveredNode.value) requestRedraw()
+  hoveredNode.value = null
+}
+
 // A plain click has to survive a few pixels of incidental pointer jitter
 // between mousedown and mouseup, or it reads as a drag every time — this was
 // the "it keeps thinking I want to move it" complaint. Nothing (node move,
@@ -839,6 +820,7 @@ let dragged = false
 
 function onMouseDown(e: MouseEvent) {
   if (!canvasEl.value) return
+  clearHover()
   const rect = canvasEl.value.getBoundingClientRect()
   const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
   hitNode = hitTest(wx, wy)
@@ -1010,6 +992,24 @@ onBeforeUnmount(() => {
 
 .mm-canvas-wrap { position: relative; overflow: hidden; background: var(--bg); }
 .mm-canvas-wrap canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+.mm-canvas-wrap canvas.mm-canvas--node-hover { cursor: pointer; }
+/* Name overlay for the label-free far-out view. pointer-events:none so it can
+   never sit between the cursor and the node it names. */
+.mm-hover-tip {
+  position: absolute;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+  pointer-events: none;
+  z-index: 2;
+}
 .mm-zoom-controls { position: absolute; top: var(--space-3); right: var(--space-3); display: flex; flex-direction: column; gap: 6px; }
 .mm-hint-overlay {
   position: absolute; bottom: var(--space-3); left: var(--space-3); font-size: var(--text-xs); color: var(--fg3);

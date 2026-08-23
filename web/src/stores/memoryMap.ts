@@ -56,8 +56,8 @@ export const MEMORY_TYPE_META: Record<string, { label: string; color: string }> 
  * dE 1.6); a brute-force search over its slots found four to be the largest
  * subset that clears every gate in both themes. The two residual WARNs (dark
  * CVD dE 6.9, light contrast on yellow/magenta) are both relieved by direct
- * labels, which is why cluster labels on the canvas and the sidebar legend are
- * not optional decoration here — they are what makes the colour legal.
+ * labels — the sidebar legend names every coloured cluster, and hovering a
+ * node names it — so the colour never has to carry identification alone.
  *
  * Slots are assigned by cluster size and never cycled: a fifth cluster takes
  * the neutral, it does not get an invented hue.
