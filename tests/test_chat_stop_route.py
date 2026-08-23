@@ -63,10 +63,10 @@ def test_chat_stop_reaches_stop_chat_without_a_socket(tmp_path: Path, monkeypatc
     project = pcm.create_project("stop-route", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="stop-test")
 
-    calls: list[tuple[str, str]] = []
+    calls: list[str] = []
 
-    async def fake_stop_chat(chat_id: str, *, by: str = "user") -> bool:
-        calls.append((chat_id, by))
+    async def fake_stop_chat(chat_id: str) -> bool:
+        calls.append(chat_id)
         return True
 
     monkeypatch.setattr(pcm, "stop_chat", fake_stop_chat)
@@ -74,10 +74,7 @@ def test_chat_stop_reaches_stop_chat_without_a_socket(tmp_path: Path, monkeypatc
     response = asyncio.run(chat_stop(_request(chat.chat_id, _app(pcm))))
     body = json.loads(response.body)
 
-    # The route is the human's Stop button, so it must attribute the stop to
-    # the user: that is what keeps a stopped delegate from waking (and
-    # falsely alarming) its supervisor.
-    assert calls == [(chat.chat_id, "user")]
+    assert calls == [chat.chat_id]
     assert body == {"stopped": True}
 
 

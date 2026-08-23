@@ -505,7 +505,6 @@ class ChatStream:
         "_pending",
         "_pending_id_seq",
         "user_stopped",
-        "stopped_by",
         "background",
         # Open capability questions keyed by request_id, each
         # {"event": asyncio.Event(), "answer": None}. Populated by the
@@ -530,16 +529,6 @@ class ChatStream:
         # after an interrupted turn (a user stop is intentional, not an
         # error, so queued follow-ups should still go out).
         self.user_stopped: bool = False
-        # Who stopped this stream: "user" (Stop button / HTTP route), "agent"
-        # (another chat calling chat_stop) or "system" (an internal stop, e.g.
-        # ahead of archiving a delegate). Empty while the turn is live.
-        #
-        # Deliberately a SECOND flag rather than a reuse of `user_stopped`:
-        # that one is consumed and cleared inside the drive loop so a follow-up
-        # turn can start, which means it is already False by the time the turn
-        # tears down and the delegate wake is decided. This one is set once and
-        # never cleared, so teardown can still tell a stop from a natural end.
-        self.stopped_by: str = ""
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
         # queued user messages — a user send while one is active

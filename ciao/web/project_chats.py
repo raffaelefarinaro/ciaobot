@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optional, cast
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
@@ -190,23 +190,6 @@ _DELEGATE_WAKE_EXCERPT_CHARS = 600
 # Ceiling on live delegates per supervisor. A runaway fan-out spends real money
 # on provider turns, so the control plane refuses past this.
 _MAX_ACTIVE_DELEGATES = 6
-# File-writing tools, case-folded because the providers disagree on casing:
-# Claude and Codex emit `Edit`/`Write`, opencode emits `edit`/`write`. Verified
-# against the tool names actually recorded in agent_tool_calls.jsonl across all
-# three. `todowrite` is deliberately absent — it writes a task list, not a file.
-#
-# This UNDER-counts by design and cannot be fixed here: an agent editing with a
-# Bash heredoc, sed, or a script does real work that no write-tool name
-# captures, and Ciaobot's own auto mode tells agents to prefer Bash. A zero here
-# is a reason to look, never proof that nothing landed.
-_WRITE_TOOL_NAMES = frozenset({
-    "edit",
-    "write",
-    "multiedit",
-    "notebookedit",
-    "apply_patch",
-    "applypatch",
-})
 # Same coalescing idea for background command runs (ciao/background.py): a
 # batch of scripts that finishes together should produce one wake turn, not N.
 _BACKGROUND_WAKE_WINDOW_SECONDS = 5.0
@@ -864,22 +847,6 @@ class ChatInfo:
     # Transient UI flag: "pending" while an auto-title generation is in
     # flight, "ready" otherwise. Not persisted — reset to "ready" on load.
     title_status: str = "ready"
-    # Harness-observed tool activity for the current (or most recent) turn.
-    # Reset when a turn starts, bumped on every ToolUseEvent. Two jobs:
-    #
-    #   * liveness — `last_tool_at` is the only signal that separates a
-    #     delegate that is alive but slow from one that is dead. The turn-level
-    #     `last_activity_at` cannot: it is stamped at turn boundaries, so it
-    #     sits frozen at the start of a long run.
-    #   * completion — a count the delegate does not author. "Done" with zero
-    #     tool calls, or hundreds of calls and no writes, is worth seeing.
-    #
-    # Not persisted and deliberately absent from `to_dict`: they describe a
-    # live turn, so losing them on restart is correct.
-    tool_event_count: int = 0
-    write_tool_count: int = 0
-    bash_tool_count: int = 0
-    last_tool_at: str = ""
     # Deferred retry state for provider quota/session-limit failures. Pending
     # retries are replayed hourly until they succeed, the user stops them, or
     # the chat is archived/deleted.
@@ -3877,7 +3844,7 @@ class ProjectChatManager:
         if self._broker.get(chat_id) is None:
             return False
         try:
-            await self.stop_chat(chat_id, by="system")
+            await self.stop_chat(chat_id)
         except Exception:  # noqa: BLE001 — a failed stop must not block the archive
             logger.exception(
                 "Stopping delegate subchat %s before archive failed", chat_id
@@ -5089,42 +5056,6 @@ class ProjectChatManager:
                     "input": {"summary": event.tool_input},
                 })
                 self._record_agent_tool_use(chat, request, event)
-                self._bump_tool_activity(chat, event.tool_name)
-
-    @staticmethod
-    def _reset_tool_activity(chat: ChatInfo) -> None:
-        """Zero the per-turn tool counters. Called at every turn start."""
-        chat.tool_event_count = 0
-        chat.write_tool_count = 0
-        chat.bash_tool_count = 0
-        chat.last_tool_at = ""
-
-    @staticmethod
-    def _tool_activity_snapshot(chat: ChatInfo) -> dict[str, Any]:
-        """The counters as plain values, for a record that outlives the turn."""
-        return {
-            "tool_event_count": chat.tool_event_count,
-            "write_tool_count": chat.write_tool_count,
-            "bash_tool_count": chat.bash_tool_count,
-        }
-
-    def _bump_tool_activity(self, chat: ChatInfo, tool_name: str) -> None:
-        """Record that *chat* just used a tool.
-
-        In memory only — no ``_save()``. This fires on every tool call of every
-        chat, and persisting each one would rewrite the state file thousands of
-        times per run to store something that is meaningless after a restart.
-        """
-        live = self._chats.get(chat.chat_id)
-        if live is None:
-            return
-        live.tool_event_count += 1
-        live.last_tool_at = _now_iso()
-        name = (tool_name or "").casefold()
-        if name in _WRITE_TOOL_NAMES:
-            live.write_tool_count += 1
-        elif name == "bash":
-            live.bash_tool_count += 1
 
     def _record_agent_tool_use(
         self,
@@ -6063,9 +5994,6 @@ class ProjectChatManager:
         sent_at_iso: str = ""
         if chat_meta is not None:
             self._invalidate_reentry_summary(chat_meta)
-            # Scope the tool counters to this turn: a supervisor reviewing a
-            # delegate wants "what did this run do", not a lifetime total.
-            self._reset_tool_activity(chat_meta)
             # A new user turn answers (or supersedes) any paused question, so
             # the persisted picker state no longer applies.
             chat_meta.pending_question = ""
@@ -6533,14 +6461,6 @@ class ProjectChatManager:
                         stream.user_stopped = False
                         if next_pending is not None:
                             had_error = False
-                            # The stop ended *that turn*, not the stream: a
-                            # follow-up turn is about to start on this same
-                            # ChatStream and reaches teardown on its own
-                            # merits. Leaving the flag set would suppress the
-                            # delegate wake for a turn that actually finished
-                            # (human stop), or report a completed turn as
-                            # STOPPED (agent stop).
-                            stream.stopped_by = ""
                     if next_pending is None or had_error:
                         if had_error and next_pending is not None:
                             # A real error broke the loop after we'd already
@@ -6577,11 +6497,6 @@ class ProjectChatManager:
                     chat_meta2 = self._chats.get(chat_id)
                     if chat_meta2 is not None:
                         chat_meta2.pending_question = ""
-                        # Same turn scoping start_stream applies: a follow-up
-                        # turn runs on this stream, so without this the
-                        # "observed" counts in a delegate's wake report would
-                        # be a running total across every queued turn.
-                        self._reset_tool_activity(chat_meta2)
                         turn_index2 = chat_meta2.user_turn_count
                         chat_meta2.user_turn_count = turn_index2 + 1
                         if merged_image_refs:
@@ -6712,22 +6627,8 @@ class ProjectChatManager:
                 # delegate that failed is exactly the news the parent needs,
                 # and staying silent would leave the supervisor waiting on a
                 # child that is never coming back.
-                #
-                # A stop is the exception. `stopped_by` says who asked, and
-                # only an agent-issued stop is reported: a human stopping a
-                # delegate is taking it over, so waking the supervisor would
-                # start a turn on top of the chat the user just grabbed, and a
-                # `system` stop (archiving the delegate) is bookkeeping the
-                # supervisor already knows about. `stopped_by` is read rather
-                # than `user_stopped` because the drive loop clears that one
-                # before we get here.
                 delegate = self._chats.get(chat_id)
-                stopped_by = stream.stopped_by
-                if (
-                    delegate is not None
-                    and delegate.spawned_from_chat_id
-                    and stopped_by in ("", "agent")
-                ):
+                if delegate is not None and delegate.spawned_from_chat_id:
                     self._queue_delegate_wake(
                         delegate.spawned_from_chat_id,
                         child_chat_id=chat_id,
@@ -6735,7 +6636,6 @@ class ProjectChatManager:
                         delegation_id=delegate.delegation_id,
                         reply=last_assistant_text,
                         had_error=had_error,
-                        stopped=bool(stopped_by),
                     )
 
         asyncio.create_task(_drive())
@@ -7218,7 +7118,6 @@ class ProjectChatManager:
         delegation_id: str,
         reply: str,
         had_error: bool,
-        stopped: bool = False,
     ) -> None:
         """Record a finished delegate and arm the coalescing window.
 
@@ -7236,20 +7135,12 @@ class ProjectChatManager:
                 parent_chat_id,
             )
             return
-        # Snapshot the tool counters now, alongside the reply they describe.
-        # The wake only fires after the coalescing window, and the counters are
-        # zeroed by the next turn start — a delegate re-prompted inside that
-        # window would otherwise be reported as "0 tool calls", which the wake
-        # prompt tells the supervisor to read as "it did nothing".
-        child = self._chats.get(child_chat_id)
         self._delegate_wake_pending.setdefault(parent_chat_id, []).append({
             "chat_id": child_chat_id,
             "title": child_title,
             "delegation_id": delegation_id,
             "reply": reply or "",
             "had_error": had_error,
-            "stopped": stopped,
-            **(self._tool_activity_snapshot(child) if child is not None else {}),
         })
         existing = self._delegate_wake_tasks.get(parent_chat_id)
         if existing is not None and not existing.done():
@@ -7503,7 +7394,6 @@ class ProjectChatManager:
                 f"{len(still_running)} still running: {', '.join(still_running)}."
             )
         deferred = False
-        stopped = False
         for entry in finished:
             child = self._chats.get(entry["chat_id"])
             # A provider quota rejection sets had_error AND arms a deferred
@@ -7517,13 +7407,6 @@ class ProjectChatManager:
                     else "DEFERRED, retry pending"
                 )
                 deferred = True
-            elif entry.get("stopped"):
-                # Ordered ahead of had_error on purpose: a stop produces an
-                # error-shaped result and the drive loop only resets had_error
-                # when a follow-up was queued, so a stop with an empty queue
-                # would otherwise report as FAILED.
-                status = "STOPPED"
-                stopped = True
             elif entry["had_error"]:
                 status = "FAILED"
             else:
@@ -7536,22 +7419,6 @@ class ProjectChatManager:
                 entry["reply"], limit=_DELEGATE_WAKE_EXCERPT_CHARS
             ) if entry["reply"].strip() else "(no final message)"
             lines.append(excerpt)
-            # Counted by the harness from the delegate's own tool stream, so
-            # unlike the excerpt above it is not the delegate's account of
-            # itself. A "done" with no tool calls at all is the case this
-            # exists for. Snapshotted at queue time; the live chat is only a
-            # fallback (and may be gone entirely if the delegate was deleted).
-            observed = (
-                self._tool_activity_snapshot(child) if child is not None else None
-            )
-            if "tool_event_count" in entry:
-                observed = entry
-            if observed is not None:
-                lines.append(
-                    f"  [observed: {observed['tool_event_count']} tool calls, "
-                    f"{observed['write_tool_count']} file writes, "
-                    f"{observed['bash_tool_count']} bash]"
-                )
         lines.append("")
         if deferred:
             lines.append(
@@ -7562,16 +7429,6 @@ class ProjectChatManager:
                 "abandon it."
             )
             lines.append("")
-        if stopped:
-            lines.append(
-                "A STOPPED delegate had its turn ended early by an "
-                "agent-issued chat_stop (yours, unless another agent chat "
-                "reached it) — it did not fail and it did not finish. Whatever "
-                "it had already written is still on disk. Decide explicitly "
-                "whether to re-dispatch the remainder; do not report it as "
-                "failed."
-            )
-            lines.append("")
         lines.append(
             "Review this against what you asked each delegate to do. The "
             "excerpt above is truncated and is the delegate's own account, so "
@@ -7580,15 +7437,6 @@ class ProjectChatManager:
             "its session_id from chat_get and read that provider session's "
             "JSONL (chat_get returns metadata only, never messages). Report to "
             "the user only once you have checked."
-        )
-        lines.append("")
-        lines.append(
-            "The [observed: ...] counts come from the harness, not the "
-            "delegate. A delegate reporting success with no tool calls did "
-            "nothing; treat that as the claim being wrong, not the count. Low "
-            "file writes are weaker evidence — editing through bash is normal "
-            "here and does not show up as a write — so check the diff before "
-            "concluding either way."
         )
         return "\n".join(lines)
 
@@ -7905,26 +7753,13 @@ class ProjectChatManager:
             return False
         return stream.resolve_capability(request_id, action, model_id)
 
-    async def stop_chat(
-        self, chat_id: str, *, by: Literal["user", "agent", "system"] = "user"
-    ) -> bool:
-        """End a chat's in-flight turn.
-
-        ``by`` records who asked, because a delegate's teardown treats the three
-        cases differently (see the wake decision in ``start_stream``): a human
-        stop means "I am taking over", so the supervisor is deliberately not
-        woken, while a stop the supervisor itself issued through ``chat_stop``
-        is reported back so it does not sit waiting on a child it killed.
-        Defaults to ``"user"`` so an un-updated caller stays silent rather than
-        waking a supervisor it did not mean to.
-        """
+    async def stop_chat(self, chat_id: str) -> bool:
         # Mark the active stream as user-stopped so the drive loop flushes
         # any queued follow-up messages instead of dropping them. A stop is
         # intentional, not an error.
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
-            stream.stopped_by = by
             if stream.background:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream).

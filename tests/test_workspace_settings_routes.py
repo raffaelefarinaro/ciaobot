@@ -149,7 +149,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         "allowed_mcp_servers": None,
         "gws_profile": "work",
-        "delegate_max_mode": "",
         "color": "pink",
     }
 
@@ -185,10 +184,8 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "disallowed_tools": None,
             "allowed_mcp_servers": None,
             "gws_profile": "personal",
-            "delegate_max_mode": "",
             "color": "pink",
         },
-
     ]
     assert pcm.refresh_count == 3
 
@@ -1040,71 +1037,3 @@ def test_gws_personal_purpose_keeps_the_separation_warning_once_connected(tmp_pa
     personal = next(p for p in resp.json()["profiles"] if p["name"] == "personal")
     assert "Keep this separate from company systems." in personal["purpose"]
     assert personal["purpose"].endswith("Connected to Gmail.")
-
-
-def test_operator_set_delegate_ceiling_survives_an_unrelated_save(tmp_path):
-    """delegate_max_mode is operator-only, so nothing else may erase it.
-
-    The registry is written by ``CiaoConfig.persist_workspace_registry``, which
-    hand-rolls its payload rather than reusing ``workspace_to_dict`` — so a new
-    field added only to the serializer is dropped the next time anything saves,
-    silently reverting the ceiling to "cap children at the parent's mode".
-    """
-    runtime = tmp_path / ".runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-    (runtime / "workspaces.json").write_text(
-        json.dumps([
-            {
-                "name": "work",
-                "vault_root": "memory-vault/work",
-                "default_provider": "claude",
-                "default_model": "",
-                "delegate_max_mode": "bypass",
-            }
-        ]),
-        encoding="utf-8",
-    )
-
-    client, config, _pcm = _client(tmp_path)
-    assert config.workspace("work").delegate_max_mode == "bypass"
-
-    # An unrelated edit, through the surface an operator actually uses.
-    patch = client.patch("/api/workspaces/work", json={"default_model": "sonnet"})
-    assert patch.status_code == 200
-
-    assert config.workspace("work").delegate_max_mode == "bypass"
-    stored = json.loads((runtime / "workspaces.json").read_text())
-    work = next(item for item in stored if item["name"] == "work")
-    assert work["delegate_max_mode"] == "bypass"
-    assert work["default_model"] == "sonnet"
-
-
-def test_a_request_body_can_never_set_the_delegate_ceiling(tmp_path):
-    """The PATCH route feeds the same parser the auto-approved MCP tool uses."""
-    client, config, _pcm = _client(tmp_path)
-    client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
-
-    patch = client.patch(
-        "/api/workspaces/client-a", json={"delegate_max_mode": "bypass"}
-    )
-    assert patch.status_code == 200
-    assert config.workspace("client-a").delegate_max_mode == ""
-
-
-def test_an_unrecognized_delegate_ceiling_falls_back_to_no_override(tmp_path):
-    """A typo in the registry must not stop the app loading, nor grant bypass."""
-    runtime = tmp_path / ".runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-    (runtime / "workspaces.json").write_text(
-        json.dumps([
-            {
-                "name": "work",
-                "vault_root": "memory-vault/work",
-                "delegate_max_mode": "BYPASSS",
-            }
-        ]),
-        encoding="utf-8",
-    )
-
-    _client_, config, _pcm = _client(tmp_path)
-    assert config.workspace("work").delegate_max_mode == ""

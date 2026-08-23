@@ -164,7 +164,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "gws_profile": "personal",
                 "disallowed_tools": None,
                 "allowed_mcp_servers": None,
-                "delegate_max_mode": "",
                 "color": "pink",
             },
             {
@@ -175,7 +174,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "gws_profile": "work",
                 "disallowed_tools": [],
                 "allowed_mcp_servers": None,
-                "delegate_max_mode": "",
                 "color": "pink",
             },
         ],

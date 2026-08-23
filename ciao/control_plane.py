@@ -82,41 +82,20 @@ class McpPrincipal:
         )
 
 
-# Permission modes ordered weakest to strongest, so a child chat's requested
-# mode can be compared against its ceiling. ``plan`` is read-only, ``normal``
-# asks before acting, ``auto`` acts with safer defaults, ``bypass`` skips
-# approvals. Mirrors ``BridgeMode`` in ciao.models.
-_MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
-
-
 class ControlPlaneError(ValueError):
     """Stable application error returned by MCP adapters."""
 
-    def __init__(
-        self,
-        code: str,
-        message: str,
-        *,
-        retryable: bool = False,
-        details: dict[str, Any] | None = None,
-    ):
+    def __init__(self, code: str, message: str, *, retryable: bool = False):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
-        # Structured facts a caller can act on without parsing the message.
-        # Merged into `payload` under "details" so the top-level shape (code,
-        # message, retryable) stays fixed for existing handlers.
-        self.details = details
 
     def payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+        return {
             "code": self.code,
             "message": str(self),
             "retryable": self.retryable,
         }
-        if self.details:
-            payload["details"] = self.details
-        return payload
 
 
 def _ok(data: Any = None, **extra: Any) -> dict[str, Any]:
@@ -299,90 +278,26 @@ class CiaoControlPlane:
         chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
         return str(getattr(chat, "mode", "auto") or "auto")
 
-    def _child_mode(
-        self,
-        principal: McpPrincipal,
-        requested: str | None,
-        *,
-        workspace_ceiling: bool = True,
-    ) -> str:
-        """Hold an MCP-created child at or below its permission ceiling.
+    def _child_mode(self, principal: McpPrincipal, requested: str | None) -> str:
+        """Keep an MCP-created child at its caller's permission ceiling.
 
-        The child starts its first turn immediately, so accepting a *stronger*
+        The child starts its first turn immediately, so accepting a stronger
         mode from model-authored tool arguments would let a normal/auto chat
-        manufacture a bypass session without an operator approval. The provider
-        enforces the returned mode as its session permission rules; keeping the
-        clamp here also covers Codex and Claude child chats.
-
-        A ceiling, not a pin. This used to return the parent's mode outright and
-        ignore ``requested``, which blocked *de-escalation* too: a bypass chat
-        could not spawn a read-only ``plan`` delegate, and a ``chat_update``
-        lowering a running delegate's mode was silently reverted (and, once
-        clamp reporting landed, announced as a clamp on a downgrade). A weaker
-        request is always honoured; only an upward one is clamped.
-
-        The ceiling is the parent's own mode, or the workspace's
-        ``delegate_max_mode`` when that is set and higher — the operator-only
-        lever that lets a delegate run stronger than the chat that dispatched
-        it. It is deliberately absent from ``workspace_update``: that tool is
-        auto-approved, so a model-settable ceiling would raise itself.
-
-        ``workspace_ceiling=False`` drops that lever back to the parent's own
-        mode. Callers that edit an *existing* chat (``chat_update``) pass it:
-        the registry setting licenses a chat an agent creates, not a mid-flight
-        upgrade of a chat that already exists — otherwise a ``normal`` chat in a
-        ``bypass``-ceiling workspace could call the auto-approved
-        ``chat_update`` on itself and raise its own permission mode.
+        manufacture a bypass session without an operator approval. The
+        provider enforces the returned mode as its session permission rules;
+        keeping the clamp here also covers Codex and Claude child chats.
         """
         parent_mode = self.chat_mode(principal)
-        if parent_mode not in _MODE_RANK:
+        if parent_mode not in {"normal", "plan", "auto", "bypass"}:
             parent_mode = "normal"
-        ceiling = parent_mode
-        if workspace_ceiling:
-            allowed_max = self._delegate_max_mode(principal)
-            if allowed_max and _MODE_RANK[allowed_max] > _MODE_RANK[ceiling]:
-                ceiling = allowed_max
-        # Providers disagree on casing and models mistype; normalize before
-        # ranking so "Plan" is honoured as a downgrade instead of falling into
-        # the unknown-mode branch below.
-        normalized = str(requested or "").strip().casefold()
-        if not normalized:
-            return ceiling
-        if normalized not in _MODE_RANK:
-            # An unrecognized mode must never inherit a *raised* ceiling: that
-            # would turn a typo into an escalation. Fall back to the caller's
-            # own mode, which is what this helper returned before the ceiling
-            # existed. update_chat/create_chat reject anything else downstream.
+        if requested and requested != parent_mode:
             logger.warning(
-                "Unknown child chat mode %r; falling back to parent %r for %s",
+                "Clamping child chat mode %r to parent %r for %s",
                 requested,
                 parent_mode,
                 principal.chat_id or "unscoped MCP session",
             )
-            return parent_mode
-        if _MODE_RANK[normalized] <= _MODE_RANK[ceiling]:
-            return normalized
-        logger.warning(
-            "Clamping child chat mode %r to ceiling %r for %s",
-            requested,
-            ceiling,
-            principal.chat_id or "unscoped MCP session",
-        )
-        return ceiling
-
-    def _delegate_max_mode(self, principal: McpPrincipal) -> str:
-        """The workspace's operator-set maximum mode for a child chat, if any.
-
-        Reads ``principal.workspace`` directly rather than going through
-        ``_workspace``: that helper raises for an unscoped MCP session, and an
-        unscoped caller should fall back to the parent-mode ceiling, not fail to
-        create a chat at all.
-        """
-        if not principal.workspace:
-            return ""
-        workspace = self.config.workspace(principal.workspace)
-        value = str(getattr(workspace, "delegate_max_mode", "") or "")
-        return value if value in _MODE_RANK else ""
+        return parent_mode
 
     def _vault_root(self, principal: McpPrincipal) -> Path:
         workspace = self._workspace(principal)
@@ -770,12 +685,9 @@ class CiaoControlPlane:
         requested_mode = mode
         if mode is not None:
             # A normal/auto MCP caller must not upgrade its own or another
-            # chat to bypass through the auto-approved metadata tool. The
-            # workspace's `delegate_max_mode` is deliberately NOT honoured
-            # here: it licenses a chat an agent *creates*, and applying it to
-            # an existing chat would let any chat in that workspace raise its
-            # own mode with one auto-approved call. Downgrades still work.
-            mode = self._child_mode(principal, mode, workspace_ceiling=False)
+            # chat to bypass through the auto-approved metadata tool. Keep the
+            # same ceiling used for newly-created child chats.
+            mode = self._child_mode(principal, mode)
         updated = self.pcm.update_chat(
             chat_id,
             title=title,
@@ -969,16 +881,12 @@ class CiaoControlPlane:
                 "self_stop_forbidden",
                 "The current turn cannot stop itself through MCP; use the PWA stop control.",
             )
-        return _ok({
-            "chat_id": chat_id,
-            "stopped": await self.pcm.stop_chat(chat_id, by="agent"),
-        })
+        return _ok({"chat_id": chat_id, "stopped": await self.pcm.stop_chat(chat_id)})
 
     # ---- delegates -----------------------------------------------------
 
     def _delegate_payload(self, chat: Any, *, streaming: bool) -> dict[str, Any]:
-        last_tool_at = str(getattr(chat, "last_tool_at", "") or "")
-        payload = {
+        return {
             "chat_id": chat.chat_id,
             "title": chat.title,
             "provider": chat.provider,
@@ -988,39 +896,7 @@ class CiaoControlPlane:
             "running": streaming,
             "created_at": chat.created_at,
             "last_activity_at": chat.last_activity_at,
-            # Harness-observed tool activity for the current or last turn. For a
-            # running delegate this is the liveness signal: last_activity_at is
-            # stamped at turn boundaries, so it stays frozen at the start of a
-            # long run and cannot separate alive-but-slow from dead.
-            "tool_event_count": int(getattr(chat, "tool_event_count", 0) or 0),
-            "write_tool_count": int(getattr(chat, "write_tool_count", 0) or 0),
-            "bash_tool_count": int(getattr(chat, "bash_tool_count", 0) or 0),
-            "last_tool_at": last_tool_at,
         }
-        # Ages are computed here rather than left to the caller. Handing an
-        # agent two bare ISO strings and expecting it to diff them against the
-        # right clock is how a supervisor once read UTC timestamps against local
-        # time, concluded three healthy delegates had been idle for hours, and
-        # killed them. `None` means "no such event yet", not "zero".
-        payload["age_seconds"] = self._seconds_since(chat.created_at)
-        payload["idle_seconds"] = self._seconds_since(
-            last_tool_at or chat.last_activity_at or chat.created_at
-        )
-        return payload
-
-    @staticmethod
-    def _seconds_since(stamp: str) -> int | None:
-        """Whole seconds between *stamp* and now, or None if unparseable."""
-        text = str(stamp or "").strip()
-        if not text:
-            return None
-        try:
-            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if moment.tzinfo is None:
-            moment = moment.replace(tzinfo=UTC)
-        return max(0, int((datetime.now(UTC) - moment).total_seconds()))
 
     def delegate_spawn(
         self,

@@ -70,9 +70,6 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
             else None
         ),
         "gws_profile": getattr(workspace, "gws_profile", ""),
-        # Read-only over the wire: it is set by the operator in the registry,
-        # never accepted from a request body (see workspace_from_request).
-        "delegate_max_mode": getattr(workspace, "delegate_max_mode", ""),
         "color": color,
     }
 
@@ -175,14 +172,6 @@ def workspace_from_request(
         disallowed_tools=disallowed_tools,
         allowed_mcp_servers=allowed_mcp_servers,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
-        # Deliberately taken from the existing record only, never from `data`.
-        # Both callers of this helper (the PWA settings route and the MCP
-        # control plane) hand it a request body, and the MCP surface is
-        # auto-approved — accepting a ceiling from there would let a model raise
-        # its own. Operators edit it in `.runtime/workspaces.json`.
-        delegate_max_mode=(
-            existing.delegate_max_mode if existing is not None else ""
-        ),
         color=color,
     )
 

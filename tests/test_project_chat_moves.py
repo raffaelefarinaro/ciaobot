@@ -509,10 +509,7 @@ async def test_archive_stops_a_running_delegate_before_snapshotting_it(
         lambda chat_id: object() if chat_id in live else real_get(chat_id),
     )
 
-    async def fake_stop(chat_id: str, *, by: str = "user") -> bool:
-        # An archive-time stop is attributed to the system, not the user: it is
-        # bookkeeping the supervisor already knows about, so it must not wake it.
-        assert by == "system"
+    async def fake_stop(chat_id: str) -> bool:
         calls.append(f"stop:{chat_id}")
         live.discard(chat_id)
         return True
@@ -577,7 +574,7 @@ async def test_archive_route_reports_the_cascade_per_subchat(
         lambda chat_id: object() if chat_id in live else real_get(chat_id),
     )
 
-    async def fake_stop(chat_id: str, *, by: str = "user") -> bool:
+    async def fake_stop(chat_id: str) -> bool:
         live.discard(chat_id)
         return True
 

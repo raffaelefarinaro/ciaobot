@@ -2503,7 +2503,7 @@ async def chat_stop(request: Request) -> JSONResponse:
     chat_id = request.path_params["chat_id"]
     if pcm.get_chat(chat_id) is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    stopped = await pcm.stop_chat(chat_id, by="user")
+    stopped = await pcm.stop_chat(chat_id)
     return JSONResponse({"stopped": stopped})
 
 
