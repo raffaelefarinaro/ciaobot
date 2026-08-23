@@ -302,14 +302,13 @@ def test_run_evolution_pass_writes_trim_proposal_for_oversized_skill(
     assert "No clear improvement found" in body
 
 
-def test_run_evolution_pass_writes_stub_for_undercap_no_proposal(
+def test_run_evolution_pass_does_not_write_stub_for_undercap_no_proposal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An under-cap skill whose model pass returns 'no improvement' must
-    still get a stub proposal so it doesn't vanish from the audit trail.
-    Regression for skill-evolution-audit-gap: previously only over-cap
-    no-proposal skills got a stub, so under-cap no-proposal skills had no
-    comparable record for next week's pass."""
+    not clutter the review queue. Only over-cap no-proposal gets a stub;
+    under-cap weak signals (loaded-but-not-causal) are audit-logged via
+    job_runs (has_proposal=no-proposal) and return no file."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     tb.write_trajectory(_t("small-skill", corrections=1) | {
         "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -334,13 +333,10 @@ def test_run_evolution_pass_writes_stub_for_undercap_no_proposal(
     pi_mock.assert_called_once()
     system_prompt = pi_mock.call_args.kwargs["system_prompt"]
     assert "trim" not in system_prompt.lower()
-    # A stub proposal must still land so the audit trail has an entry.
-    assert len(paths) == 1
-    body = paths[0].read_text(encoding="utf-8")
-    assert "No clear improvement found" in body
-    # The stub records the trajectory refs so next week's pass is comparable.
-    assert "trajectories: 1" in body
-    # The intentional has_proposal branch must not create a runtime failure.
+    # No stub file should be written for under-cap no-improvement.
+    assert len(paths) == 0
+    assert list((tmp_path / "out").glob("*.md")) == []
+    # The has_proposal=no-proposal branch must not create a runtime failure.
     runs = recent_job_failures()
     assert runs == []
 

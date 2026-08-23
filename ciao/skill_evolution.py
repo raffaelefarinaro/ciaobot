@@ -662,10 +662,12 @@ async def _process_skill_dag(
     tests_root: Path | None,
 ) -> Path | None:
     """Run the per-skill DAG and return the written proposal path, or
-    ``None`` if no proposal was written (e.g. semantic drift, test
-    failure with a proposal present). A no-proposal result writes a
-    stub instead (both over-cap and under-cap), so it does not return
-    ``None`` for the no-improvement case.
+    ``None`` if no proposal was written (e.g. no clear improvement,
+    semantic drift, test failure). A no-proposal result only writes a
+    stub when the skill is over-cap (the trim surface needs human
+    attention); under-cap no-improvement is a weak signal and does not
+    clutter the review queue. The ``has_proposal=no-proposal`` node
+    still lands in ``job_runs.jsonl`` for audit.
 
     The async work (proposal generation, semantic check) happens before
     we build the DAG, because the DAG executor in :mod:`ciao.dag` is
@@ -742,36 +744,23 @@ async def _process_skill_dag(
         return True, str(path)
 
     def write_stub_node(ctx: dict[str, Any]) -> tuple[bool, str]:
-        # No-proposal path: persist a stub so the next run (or a human
-        # reviewer) sees the skill has been considered. Fires for both
-        # over-cap (model couldn't propose a safe trim) and under-cap
-        # (model found no clear improvement) skills. Without the under-cap
-        # branch, flagged-but-no-proposal skills vanished from the audit
-        # trail, leaving next week's pass with no comparable record.
-        if proposal is not None:
-            return False, "no-stub-needed"
+        # Only over-cap no-proposal persists a stub. Under-cap no-improvement
+        # is a weak signal (loaded-but-not-causal) and would flood the
+        # review queue with no actionable edit. The DAG already logs
+        # has_proposal=no-proposal in job_runs.jsonl, which is sufficient
+        # audit; writing a draft proposal for it clutters the human queue.
+        if not (over_cap and proposal is None):
+            return False, "no-stub-needed", True
         size = len(skill_text.encode("utf-8"))
-        if over_cap:
-            stub = (
-                "No clear improvement found.\n\n"
-                f"Skill is {size} bytes "
-                f"(cap: {MAX_SKILL_BYTES}). The model could not "
-                "propose a safe trim that preserves the primary "
-                "workflow. Consider a manual review: the skill "
-                "may have grown organically and the trim surface "
-                "is unclear without domain context."
-            )
-        else:
-            stub = (
-                "No clear improvement found.\n\n"
-                "The model pass returned no concrete improvement for "
-                "this skill this week. The skill is under the size cap "
-                f"({size} / {MAX_SKILL_BYTES} bytes) and was flagged from "
-                f"{len(skill_trajectories)} trajectory "
-                f"({'session' if len(skill_trajectories) == 1 else 'sessions'}). "
-                "Recorded so next week's pass has a comparable audit "
-                "entry; no edit applied."
-            )
+        stub = (
+            "No clear improvement found.\n\n"
+            f"Skill is {size} bytes "
+            f"(cap: {MAX_SKILL_BYTES}). The model could not "
+            "propose a safe trim that preserves the primary "
+            "workflow. Consider a manual review: the skill "
+            "may have grown organically and the trim surface "
+            "is unclear without domain context."
+        )
         path = write_proposal(
             skill_name=skill_name,
             skill_path=skill_path,
@@ -843,8 +832,8 @@ async def run_evolution_pass(
 
     Per-skill pipeline: each flagged skill is processed by
     :func:`_process_skill_dag`, which runs ``has_proposal`` →
-    ``semantic`` → ``tests`` → ``write`` (or ``write_stub`` on any
-    no-proposal result, over-cap or under-cap) as a DAG via
+    ``semantic`` → ``tests`` → ``write`` (or ``write_stub`` on
+    over-cap-with-no-proposal) as a DAG via
     :mod:`ciao.dag`. Per-node
     timing lands in ``.runtime/job_runs.jsonl`` with label
     ``skillevo:<skill>:<node>``.

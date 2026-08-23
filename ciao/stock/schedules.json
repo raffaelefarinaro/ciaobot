@@ -94,7 +94,7 @@
       "workspace": "",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Run `python3 -m ciao.skill_evolution` with the workspace default model. Summarize proposals written and any failed gates. Do not apply proposals automatically, and do not edit native memory unless the curation workflow explicitly calls for it."
+      "prompt": "Run `python3 -m ciao.skill_evolution --min-sessions 2` with the workspace default model. Requires at least 2 failing sessions per skill (reduces noise from single-session weak signals where a skill was merely loaded). Summarize proposals written and any failed gates. Do not apply proposals automatically, and do not edit native memory unless the curation workflow explicitly calls for it."
     }
   ]
 }
