@@ -1348,114 +1348,6 @@
         </template>
       </template>
 
-      <!-- CONTEXT TAB -->
-      <template v-if="currentTab === 'context'">
-        <div class="card">
-          <div class="settings-card-header settings-card-header--context">
-            <div>
-              <p class="section-title">agent context</p>
-              <p class="hint">
-                How Ciaobot assembles context for every CLI. This guide is independent of the current chat, project, and workspace.
-              </p>
-            </div>
-          </div>
-
-          <div class="skill-list">
-            <template v-for="item in contextAssets" :key="item.id">
-              <details
-                v-if="item.id === 'memory-sources'"
-                class="skill-row instruction-row memory-context-row"
-                :open="workspaceMemoryExpanded"
-                @toggle="workspaceMemoryExpanded = ($event.currentTarget as HTMLDetailsElement).open"
-              >
-                <summary class="skill-main memory-context-summary">
-                  <div class="skill-title-row command-title-row">
-                    <span class="skill-chevron">{{ workspaceMemoryExpanded ? '&#9662;' : '&#9656;' }}</span>
-                    <span class="skill-name">{{ item.title }}</span>
-                  </div>
-                  <p class="skill-description">{{ item.description }}</p>
-                </summary>
-                <div class="skill-detail memory-source-list">
-                  <template v-for="group in workspaceMemoryGroups" :key="group.id">
-                    <p class="memory-source-group-title">{{ group.title }}</p>
-                    <div v-for="memory in group.items" :key="memory.id" class="memory-source">
-                      <span class="memory-source-heading">
-                        <span>{{ memory.title }}</span>
-                        <span class="memory-source-badges">
-                          <span :class="assetOriginClass('builtin')">{{ assetOriginLabel('builtin') }}</span>
-                          <span class="badge badge--muted command-source">{{ memoryInjectionLabel(memory) }}</span>
-                        </span>
-                      </span>
-                      <span class="memory-source-summary-copy">{{ memory.description }}</span>
-                      <p
-                        v-for="sourceFile in memorySourceFiles(memory)"
-                        :key="sourceFile.path"
-                        class="skill-meta memory-source-file"
-                      >
-                        <span class="skill-meta-label">Source file</span>
-                        <button class="inline-path-button" @click.stop="openAssetPath(sourceFile.path)">{{ sourceFile.label }}</button>
-                      </p>
-                    </div>
-                  </template>
-                </div>
-              </details>
-
-              <div
-                v-else
-                class="skill-row instruction-row"
-                :class="{ expanded: isContextExpanded(item) }"
-                :style="{ paddingLeft: `${10 + Math.min(item.level || 0, 4) * 18}px` }"
-                @click="toggleContext(item)"
-              >
-                <div class="skill-main">
-                  <div class="skill-title-row command-title-row">
-                    <span class="skill-chevron">{{ isContextExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
-                    <span class="skill-name">{{ item.title }}</span>
-                    <span class="skill-badges">
-                      <span :class="assetOriginClass(contextOrigin(item))">{{ assetOriginLabel(contextOrigin(item)) }}</span>
-                      <span v-if="item.scope" class="badge badge--muted command-source">{{ item.scope }}</span>
-                    </span>
-                  </div>
-                  <p class="skill-description">{{ item.description }}</p>
-                  <div v-if="isContextExpanded(item)" class="skill-detail">
-                    <p
-                      v-for="sourceFile in contextSourceFiles(item)"
-                      :key="sourceFile.path"
-                      class="skill-meta"
-                    >
-                      <span class="skill-meta-label">Source file</span>
-                      <button class="inline-path-button" @click.stop="openAssetPath(sourceFile.path)">{{ sourceFile.label }}</button>
-                    </p>
-                    <div v-if="item.id === 'cli-instruction-chain'" class="runtime-context-summary">
-                      <p class="hint hint--compact">At chat start, the active CLI discovers the applicable instruction files:</p>
-                      <ul>
-                        <li><strong>Global instructions:</strong> your user-level <code>CLAUDE.md</code>, when present.</li>
-                        <li><strong>Workspace instructions:</strong> the workspace <code>CLAUDE.md</code>. It is the single guide — <code>AGENTS.md</code> is a symlink to it, so Claude Code and Codex read the same file.</li>
-                        <li><strong>Local, override, and nested instructions:</strong> local overrides, imported Markdown files, and more specific instruction files each CLI discovers for the working directory.</li>
-                      </ul>
-                    </div>
-                    <div v-else-if="item.id === 'ciaobot-system-prompt'" class="runtime-context-summary">
-                      <p class="hint hint--compact">
-                        Shared Ciaobot behavior and tool instructions are appended when the chat starts. The memory snapshot is appended next.
-                      </p>
-                    </div>
-                    <div v-else-if="item.id === 'runtime-context-hook'" class="runtime-context-summary">
-                      <p class="hint hint--compact">Every user turn includes:</p>
-                      <ul>
-                        <li><strong>Project context:</strong> the current project's single saved context value, when one is set.</li>
-                        <li><strong>Project document:</strong> a link to its <code>README.md</code> or canonical document, when available.</li>
-                        <li><strong>Runtime:</strong> today's date, workspace/project identifiers, Google profile, and working directory.</li>
-                        <li><strong>Relevant vault context:</strong> entity links matched from the current prompt.</li>
-                        <li><strong>Continuity:</strong> provider handover context when a chat has just switched providers.</li>
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </template>
-            </div>
-        </div>
-      </template>
 
       <!-- SKILLS TAB -->
       <template v-if="currentTab === 'skills'">
@@ -2141,7 +2033,6 @@ import type {
   McpUsage,
   McpProjectServer,
   McpEnvKey,
-  PromptAsset,
   ProviderConfigSettings,
   RoutineSettings,
   SkillInventory,
@@ -2192,8 +2083,6 @@ const currentTab = computed(() => {
 const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
-const expandedContext = ref<Record<string, boolean>>({})
-const workspaceMemoryExpanded = ref(false)
 
 // MCP Server management state
 const showAddMcpServer = ref(false)
@@ -2592,12 +2481,6 @@ function isSubagentExpanded(agent: SubagentAsset) {
 function toggleSubagent(agent: SubagentAsset) {
   const key = `${agent.source}:${agent.name}:${agent.path}`
   expandedSubagents.value[key] = !isSubagentExpanded(agent)
-}
-function isContextExpanded(item: PromptAsset) {
-  return expandedContext.value[item.id] || false
-}
-function toggleContext(item: PromptAsset) {
-  expandedContext.value[item.id] = !isContextExpanded(item)
 }
 function openAssetPath(path: string) {
   if (!path) return
@@ -3485,139 +3368,6 @@ function mcpServerOrigin(_srv: { name?: string; source?: string }): AssetOrigin 
   return 'custom'
 }
 
-function contextOrigin(item: { editable?: boolean; source?: string; scope?: string }): AssetOrigin {
-  if (item.editable) return 'custom'
-  const source = `${item.source || ''} ${item.scope || ''}`.toLowerCase()
-  if (source.includes('generated') || source.includes('ciaobot') || source.includes('session')) {
-    return 'builtin'
-  }
-  return 'builtin'
-}
-
-function contextGuideAsset(
-  id: string,
-  title: string,
-  description: string,
-  scope: string,
-  source: string,
-  editable: boolean = false,
-): PromptAsset {
-  return { id, title, description, scope, source, path: '', editable, content: '' }
-}
-
-type ContextSourceFile = { label: string; path: string }
-
-function sourceFile(item: PromptAsset, label: string = item.path): ContextSourceFile[] {
-  return item.path ? [{ label, path: item.path }] : []
-}
-
-function contextSourceFiles(item: PromptAsset): ContextSourceFile[] {
-  const inventory = agentAssets.value?.context || []
-  if (item.id === 'cli-instruction-chain') {
-    // AGENTS.md is linked to CLAUDE.md, so a single row covers both guides;
-    // the link opens the canonical CLAUDE.md.
-    const expected = /(?:^|[\\/])CLAUDE\.md$/i
-    const candidates = inventory.filter(candidate =>
-      candidate.scope === 'project' && expected.test(candidate.path),
-    )
-    const preferred = candidates.find(candidate => !candidate.path.replaceAll('\\', '/').includes('/')) || candidates[0]
-    return [{ label: 'CLAUDE.md / AGENTS.md', path: preferred?.path || 'CLAUDE.md' }]
-  }
-  if (item.id === 'ciaobot-system-prompt') {
-    const configured = inventory.find(candidate => candidate.id === 'ciaobot-system-prompt')
-    return configured?.path
-      ? sourceFile(configured)
-      : [{ label: 'ciao/system_prompt.md', path: 'ciao/system_prompt.md' }]
-  }
-  return []
-}
-
-function memorySourceFiles(item: PromptAsset): ContextSourceFile[] {
-  const inventory = agentAssets.value?.context || []
-  if (item.id === 'ciaobot-memory' || item.id === 'ciaobot-user') {
-    const configured = inventory.find(candidate => candidate.id === item.id)
-    return configured ? sourceFile(configured) : []
-  }
-  if (item.id === 'workspace-memory') {
-    return inventory
-      .filter(candidate => candidate.scope === 'vault')
-      .flatMap(candidate => sourceFile(candidate))
-  }
-  return []
-}
-
-const workspaceMemoryAssets = computed<PromptAsset[]>(() => [
-  contextGuideAsset(
-    'ciaobot-memory',
-    'Global remembered facts',
-    'Cross-session facts, conventions, and lessons shared across all workspaces.',
-    'bounded-memory',
-    'session start',
-  ),
-  contextGuideAsset(
-    'ciaobot-user',
-    'Global user profile',
-    'Your identity and response preferences, shared across all workspaces.',
-    'bounded-memory',
-    'session start',
-  ),
-  contextGuideAsset(
-    'workspace-memory',
-    'Workspace notes (MEMORY.md)',
-    'Durable notes from whichever workspace the chat uses. This file is not inserted automatically.',
-    'vault',
-    'on demand',
-  ),
-])
-
-const workspaceMemoryGroups = computed(() => [
-  {
-    id: 'automatic',
-    title: 'Global · included automatically at chat start',
-    items: workspaceMemoryAssets.value.filter(item => item.scope === 'bounded-memory'),
-  },
-  {
-    id: 'available',
-    title: 'Workspace-specific · opened only when relevant',
-    items: workspaceMemoryAssets.value.filter(item => item.scope === 'vault'),
-  },
-].filter(group => group.items.length))
-
-function memoryInjectionLabel(item: PromptAsset): string {
-  return item.source
-}
-
-const contextAssets = computed<PromptAsset[]>(() => [
-  contextGuideAsset(
-    'cli-instruction-chain',
-    'CLI instructions (CLAUDE.md · AGENTS.md)',
-    'The active CLI assembles the applicable global, workspace, override, and imported instruction files. The workspace CLAUDE.md and AGENTS.md are linked, so Claude Code and Codex read the same instructions.',
-    'CLI',
-    'session start',
-    true,
-  ),
-  contextGuideAsset(
-    'ciaobot-system-prompt',
-    'Ciaobot system instructions',
-    'Shared Ciaobot behavior and tool instructions appended when the chat starts.',
-    'Ciaobot',
-    'session start',
-  ),
-  contextGuideAsset(
-    'memory-sources',
-    'Memory sources',
-    'Global session memory is appended at chat start; workspace-specific notes are opened only when relevant.',
-    'Ciaobot',
-    'session start',
-  ),
-  contextGuideAsset(
-    'runtime-context-hook',
-    'Per-turn runtime context hook',
-    'Dynamic project references and runtime metadata added before every user prompt.',
-    'Ciaobot',
-    'each turn',
-  ),
-])
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
 const workspaceHealth = computed<WorkspaceHealthResponse | null>(() => agentAssets.value?.health || null)
@@ -4850,21 +4600,6 @@ async function doPackageUpdate() {
   justify-content: flex-end;
   flex: 0 0 auto;
 }
-.settings-card-header--context {
-  flex-direction: row;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--space-4);
-}
-.settings-card-header--context > div:first-child {
-  min-width: 0;
-}
-@container (max-width: 640px) {
-  .settings-card-header--context {
-    align-items: stretch;
-    flex-direction: column;
-  }
-}
 .hint--compact {
   margin: 0;
 }
@@ -5974,92 +5709,6 @@ a.btn-secondary {
   font-size: var(--text-xs);
   line-height: 1.45;
   white-space: pre-wrap;
-}
-.skill-row.memory-context-row {
-  display: block;
-}
-.memory-context-row > summary {
-  list-style: none;
-}
-.memory-context-row > summary::-webkit-details-marker {
-  display: none;
-}
-.memory-context-summary {
-  min-height: var(--touch);
-  cursor: pointer;
-}
-.memory-context-row[open] .memory-context-summary .skill-description {
-  display: block;
-  -webkit-line-clamp: unset;
-  overflow: visible;
-}
-.memory-source-list {
-  gap: var(--space-2);
-}
-.memory-source-group-title {
-  margin: var(--space-2) 0 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.memory-source-group-title:first-child {
-  margin-top: 0;
-}
-.memory-source {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg2) 72%, transparent);
-}
-.memory-source-heading {
-  display: flex;
-  min-height: 24px;
-  align-items: flex-start;
-  gap: var(--space-2);
-  color: var(--fg);
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-.memory-source-badges {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  margin-left: auto;
-}
-.memory-source-summary-copy {
-  display: block;
-  margin-top: var(--space-1);
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-weight: 400;
-  line-height: 1.45;
-}
-.memory-source .skill-meta {
-  margin-top: var(--space-2);
-}
-@container (max-width: 640px) {
-  .memory-source-heading {
-    flex-direction: column;
-  }
-  .memory-source-badges {
-    margin-left: 0;
-  }
-}
-.runtime-context-summary ul {
-  margin: var(--space-2) 0 0;
-  padding-left: 20px;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.55;
-}
-.runtime-context-summary li + li {
-  margin-top: var(--space-1);
-}
-.runtime-context-summary strong {
-  color: var(--fg);
 }
 .subsection-title--spaced {
   margin-bottom: var(--space-2);

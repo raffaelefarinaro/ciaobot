@@ -322,13 +322,6 @@
           models
         </router-link>
         <router-link
-          to="/settings/context"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/context' }"
-        >
-          context
-        </router-link>
-        <router-link
           to="/settings/skills"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/skills' }"

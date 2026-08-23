@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ciao.context.entity_tagger import find_entities, format_entities
-from ciao.memory_injector import system_prompt_payload
+from ciao.core_prompt import system_prompt_payload
 from ciao.model_tiers import canonical_tier
 from ciao.models import (
     AgentRequest,

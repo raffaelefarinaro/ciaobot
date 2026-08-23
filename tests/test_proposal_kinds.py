@@ -47,27 +47,24 @@ def test_regex_is_derived_from_the_kind_table() -> None:
         assert pk.parse_bullet(f"  -  [{kind}]  content") is not None
 
 
-def test_all_former_call_sites_agree_on_one_fixture(tmp_path: Path) -> None:
-    """os_audit, control_plane and the web layer count the same rows.
+def test_os_audit_counts_all_proposal_kinds(tmp_path: Path) -> None:
+    """os_audit's memory-audit scan sees every proposal kind.
 
-    All four kinds must be visible to every counter; previously the web layer
-    missed ``[profile]`` and none matched ``[rehome]``.
+    All four kinds must be visible to the counter; previously the web layer
+    missed ``[profile]`` and none matched ``[rehome]``. The web layer's own
+    proposal-bullet counter was removed with the Settings Context tab, so
+    os_audit is the reference implementation here.
     """
     from ciao.os_audit import audit_memory
-    from ciao.web.agent_assets import _count_proposal_bullets
 
     path = _fixture_file(tmp_path)
 
-    # os_audit counts via its memory-audit scan.
     report = audit_memory(
         vault_root=tmp_path,
         proposal_paths=[path],
         today=datetime.date(2026, 8, 19),
     )
     assert report["pending_memory_proposals"] == 4
-
-    # the web layer's counter sees every kind too.
-    assert _count_proposal_bullets(path) == 4
 
 
 def test_resolve_removes_one_matched_bullet(tmp_path: Path) -> None:

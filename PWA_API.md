@@ -86,7 +86,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/automation/backfill-insights` | Run Session insights over every archived chat missing them. Optional `{"model": "<model-id>"}` runs this pass with a different model without changing the stored setting |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
-| GET | `/api/agent-assets` | List instruction sources, subagents, slash commands, and workspace health for Settings |
+| GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings |
 | GET | `/api/agent-assets/audit` | Full AI OS audit report; `status` is `healthy`, `needs_attention`, or `error` |
 | GET | `/api/workspace-health` | Scan workspace/vault/discovery-file health |
 | POST | `/api/workspace-health/fix` | Apply the automatic remedies (create missing scaffold files, re-link skills); returns the fresh report |
@@ -201,7 +201,7 @@ Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer ho
 **Agent assets**
 
 ```bash
-# Inspect Claude Code context sources, generated Ciaobot prompt blocks, subagents, and commands.
+# Inspect subagents, commands, and workspace health.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/agent-assets"
 
 # Inspect workspace/vault health only.

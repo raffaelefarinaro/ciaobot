@@ -41,7 +41,7 @@ from typing import Any
 
 import httpx
 
-from ciao.memory_injector import system_prompt_payload
+from ciao.core_prompt import system_prompt_payload
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,

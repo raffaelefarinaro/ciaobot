@@ -66,7 +66,7 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.execution_modes import auto_approved_mcp_tool_names, harness_skill_overrides
-from ciao.memory_injector import system_prompt_payload
+from ciao.core_prompt import system_prompt_payload
 from ciao.observability.hooks import (
     build_foreground_bash_hook,
 )

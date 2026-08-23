@@ -33,7 +33,7 @@ def _system_instructions() -> str:
     try:
         return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
     except Exception:  # noqa: BLE001
-        logger.exception("memory_injector: failed to load %s", _SYSTEM_PROMPT_PATH)
+        logger.exception("core_prompt: failed to load %s", _SYSTEM_PROMPT_PATH)
         return ""
 
 

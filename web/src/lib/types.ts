@@ -768,21 +768,10 @@ export interface CommandsResponse {
 
 // ── Settings agent assets ────────────────────────────────────────────────
 
-export interface PromptAsset {
-  id: string
-  title: string
-  description: string
-  source: string
-  path: string
-  editable: boolean
-  content: string
-  scope?: string
-  parent_id?: string
-  level?: number
-  status?: 'ok' | 'missing' | 'blocked' | string
-  imports?: string[]
-  provider?: 'claude' | 'codex' | 'shared' | string
-  workspace?: string
+export interface AgentAssetsResponse {
+  subagents: SubagentAsset[]
+  commands: CommandAsset[]
+  health?: WorkspaceHealthResponse
 }
 
 export interface SubagentAsset {
@@ -806,13 +795,6 @@ export interface CommandAsset {
   editable: boolean
   vault_path: string
   content: string
-}
-
-export interface AgentAssetsResponse {
-  context: PromptAsset[]
-  subagents: SubagentAsset[]
-  commands: CommandAsset[]
-  health?: WorkspaceHealthResponse
 }
 
 export interface CreatedAgentAssetResponse<T> {

@@ -1,4 +1,4 @@
-"""Tests for ``ciao.memory_injector``.
+"""Tests for ``ciao.core_prompt``.
 
 The injector appends only the Ciaobot core instructions; bounded-memory
 regions reach every provider through its native guide load, so their
@@ -8,7 +8,7 @@ covered in ``test_memory_tool.py``.
 
 from __future__ import annotations
 
-from ciao import memory_injector as mi
+from ciao import core_prompt as mi
 
 
 def test_system_prompt_payload_returns_instructions_for_empty() -> None:

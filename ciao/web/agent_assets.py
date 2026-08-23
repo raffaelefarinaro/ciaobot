@@ -14,42 +14,13 @@ from typing import Any, Iterable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ciao.memory_injector import system_prompt_payload
-from ciao.memory_tool import (
-    DEFAULT_MEMORY_CHAR_LIMIT,
-    DEFAULT_USER_CHAR_LIMIT,
-    ensure_regions,
-    read_region,
-    region_usage,
-    serialize_entries,
-)
-from ciao.observability.hooks import _runtime_lines
-from ciao.proposal_kinds import BULLET_RE
+from ciao.memory_tool import ensure_regions
 from ciao.sync_skills import sync_workspace_skills
 from ciao.web.commands import _parse_frontmatter
 
 logger = logging.getLogger(__name__)
 
 _ASSET_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
-_IMPORT_RE = re.compile(r"(?<!\w)@([^\s\)\]>,]+\.md)")
-
-
-@dataclass(slots=True)
-class PromptAsset:
-    id: str
-    title: str
-    description: str
-    source: str
-    path: str
-    editable: bool
-    content: str
-    scope: str = ""
-    parent_id: str = ""
-    level: int = 0
-    status: str = "ok"
-    imports: list[str] = field(default_factory=list)
-    provider: str = "shared"
-    workspace: str = ""
 
 
 @dataclass(slots=True)
@@ -99,22 +70,6 @@ def _relative_or_absolute(path: Path, root: Path) -> str:
         return str(path.relative_to(root))
     except ValueError:
         return str(path)
-
-
-def _asset_id(path: Path, root: Path) -> str:
-    return "file:" + _relative_or_absolute(path, root)
-
-
-def _is_under(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except (OSError, ValueError):
-        return False
-
-
-def _is_editable_file(path: Path, config: Any) -> bool:
-    return _is_under(path, Path(config.workspace_root)) or _is_under(path, Path(config.vault_root))
 
 
 def _normalize_asset_name(raw: str) -> str:
@@ -301,161 +256,6 @@ def _dedupe_by_name(items: list[Any]) -> list[Any]:
     return out
 
 
-def _resolve_import(raw: str, *, base: Path) -> Path:
-    value = raw.strip()
-    if value.startswith("@"):
-        value = value[1:]
-    candidate = Path(value).expanduser()
-    if candidate.is_absolute():
-        return candidate
-    return (base.parent / candidate).resolve()
-
-
-def _prompt_file_asset(
-    *,
-    path: Path,
-    config: Any,
-    title: str,
-    description: str,
-    scope: str,
-    source: str = "file",
-    parent_id: str = "",
-    level: int = 0,
-    status: str = "ok",
-    content: str | None = None,
-    provider: str = "shared",
-    workspace: str = "",
-) -> PromptAsset:
-    root = Path(config.workspace_root)
-    text = _read_text(path) if content is None and path.exists() else (content or "")
-    return PromptAsset(
-        id=_asset_id(path, root),
-        title=title,
-        description=description,
-        source=source,
-        path=_relative_or_absolute(path, root),
-        editable=path.exists() and _is_editable_file(path, config),
-        content=text,
-        scope=scope,
-        parent_id=parent_id,
-        level=level,
-        status=status,
-        imports=_IMPORT_RE.findall(text),
-        provider=provider,
-        workspace=workspace,
-    )
-
-
-def _collect_import_assets(
-    *,
-    parent: PromptAsset,
-    parent_path: Path,
-    config: Any,
-    seen: set[tuple[str, Path]],
-    depth: int = 0,
-) -> list[PromptAsset]:
-    if depth >= 4:
-        return []
-    root = Path(config.workspace_root)
-    allowed_roots = [root, Path(config.vault_root), Path.home() / ".claude"]
-    out: list[PromptAsset] = []
-    for raw in parent.imports:
-        path = _resolve_import(raw, base=parent_path)
-        status = "ok"
-        description = f"Imported by {parent.title}."
-        content = None
-        if not path.exists():
-            status = "missing"
-            description = f"Referenced by {parent.title}, but the file does not exist."
-            content = ""
-        elif not any(_is_under(path, allowed) for allowed in allowed_roots):
-            status = "blocked"
-            description = f"Referenced by {parent.title}, but outside the configured workspace/vault roots."
-            content = ""
-        resolved = path.resolve() if path.exists() else path
-        seen_key = (parent.provider, resolved)
-        if seen_key in seen:
-            continue
-        seen.add(seen_key)
-        asset = _prompt_file_asset(
-            path=path,
-            config=config,
-            title=f"Import: {path.name}",
-            description=description,
-            scope="import",
-            source="file-import",
-            parent_id=parent.id,
-            level=parent.level + 1,
-            status=status,
-            content=content,
-            provider=parent.provider,
-            workspace=parent.workspace,
-        )
-        out.append(asset)
-        if status == "ok":
-            out.extend(_collect_import_assets(
-                parent=asset,
-                parent_path=path,
-                config=config,
-                seen=seen,
-                depth=depth + 1,
-            ))
-    return out
-
-
-def _count_proposal_bullets(path: Path) -> int:
-    if not path.is_file():
-        return 0
-    return sum(
-        1 for line in _read_text(path).splitlines() if BULLET_RE.match(line)
-    )
-
-
-def _bounded_memory_assets(config: Any) -> list[PromptAsset]:
-    """Bounded ``ciao:memory`` / ``ciao:profile`` region rows for Settings → Context.
-
-    Both regions live as fenced markers inside the workspace ``CLAUDE.md``, so
-    both rows point at that one file. They are edited in place with ``Edit``;
-    there is no separate memory file or CLI.
-    """
-    guide = Path(config.workspace_root) / "CLAUDE.md"
-    mem_limit = int(getattr(config, "memory_char_limit", DEFAULT_MEMORY_CHAR_LIMIT))
-    usr_limit = int(getattr(config, "user_char_limit", DEFAULT_USER_CHAR_LIMIT))
-    specs = (
-        ("memory", "ciaobot-memory", "Agent memory", mem_limit),
-        ("profile", "ciaobot-user", "User profile", usr_limit),
-    )
-    out: list[PromptAsset] = []
-    for region, asset_id, title, limit in specs:
-        entries, diags = read_region(guide, region)
-        if diags:
-            description = (
-                f"The `ciao:{region}` region markers are missing or malformed in "
-                f"CLAUDE.md ({'; '.join(d.message for d in diags)}). "
-                "Edit CLAUDE.md to restore them, or run sync-skills to fix issues."
-            )
-            content = _read_text(guide)
-        else:
-            usage = region_usage(entries, limit)
-            description = (
-                f"Bounded {title.lower()} ({usage['used_chars']:,}/{usage['char_limit']:,} "
-                f"chars, {usage['pct']:.0f}%). Injected at session start; edits apply on "
-                f"the next chat. Edit the `ciao:{region}` region on CLAUDE.md."
-            )
-            content = serialize_entries(entries)
-        out.append(PromptAsset(
-            id=asset_id,
-            title=title,
-            description=description,
-            source="file",
-            path=str(guide.resolve()),
-            editable=True,
-            content=content,
-            scope="bounded-memory",
-        ))
-    return out
-
-
 def _memory_proposal_paths(config: Any, vault: Path, root: Path) -> list[tuple[Path, str]]:
     """Proposal queue files under each workspace vault."""
     paths: list[tuple[Path, str]] = []
@@ -478,44 +278,6 @@ def _memory_proposal_paths(config: Any, vault: Path, root: Path) -> list[tuple[P
         title = f"Memory proposals ({name})" if len(ws_names) > 1 else "Memory proposals"
         paths.append((ws_vault_root / "Workspace" / "Memory-Proposals.md", title))
     return paths
-
-
-def _memory_proposal_assets(config: Any) -> list[PromptAsset]:
-    """Draft proposal queue rows — not injected into the prompt."""
-    vault = Path(config.vault_root)
-    root = Path(config.workspace_root)
-    out: list[PromptAsset] = []
-    for path, title in _memory_proposal_paths(config, vault, root):
-        pending = _count_proposal_bullets(path)
-        if not path.is_file() and pending == 0:
-            continue
-        if pending:
-            summary = f"{pending} pending proposal{'s' if pending != 1 else ''} from archived chats."
-        else:
-            summary = "No pending proposals."
-        description = (
-            f"{summary} Not injected until you or the agent promotes them into bounded memory or vault notes."
-        )
-        rel = _relative_or_absolute(path, root)
-        out.append(PromptAsset(
-            id=f"memory-proposals:{rel}",
-            title=title,
-            description=description,
-            source="proposal-queue",
-            path=rel,
-            editable=path.is_file() and _is_editable_file(path, config),
-            content=_read_text(path) if path.is_file() else "",
-            scope="review",
-        ))
-    return out
-
-
-def _insert_after_system_prompt(prompts: list[PromptAsset], items: list[PromptAsset]) -> None:
-    for index, item in enumerate(prompts):
-        if item.id == "ciaobot-system-prompt":
-            prompts[index + 1:index + 1] = items
-            return
-    prompts.extend(items)
 
 
 def _workspace_memory_paths(
@@ -813,167 +575,11 @@ def list_command_assets(config: Any) -> list[CommandAsset]:
     return sorted(_dedupe_by_name(items), key=lambda item: item.name)
 
 
-def list_prompt_assets(config: Any) -> list[PromptAsset]:
-    root = Path(config.workspace_root)
-    system_prompt_path = Path(__file__).resolve().parents[1] / "system_prompt.md"
-    prompts: list[PromptAsset] = []
-    seen: set[tuple[str, Path]] = set()
-
-    system_prompt = system_prompt_payload("") or {}
-    sys_prompt_asset = PromptAsset(
-        id="ciaobot-system-prompt",
-        title="Ciaobot system prompt append",
-        description=(
-            "Generated compact Ciaobot core shared by Claude, Codex, and OpenCode. "
-            "Native CLAUDE.md/AGENTS.md instructions and memory are loaded by each "
-            "provider separately; bounded memory files are listed below."
-        ),
-        source="generated",
-        path=_relative_or_absolute(system_prompt_path, root),
-        editable=False,
-        content=str(system_prompt.get("append") or ""),
-        scope="generated",
-    )
-
-    added_sys_prompt = False
-
-    codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
-
-    def first_nonempty(paths: tuple[Path, ...]) -> Path | None:
-        for candidate in paths:
-            try:
-                if candidate.is_file() and candidate.read_text(encoding="utf-8").strip():
-                    return candidate
-            except OSError:
-                continue
-        return None
-
-    codex_global = first_nonempty((codex_home / "AGENTS.override.md", codex_home / "AGENTS.md"))
-    codex_project = first_nonempty((root / "AGENTS.override.md", root / "AGENTS.md"))
-
-    file_assets = [
-        (Path.home() / ".claude" / "CLAUDE.md", "Global CLAUDE.md", "User-level instructions loaded by Claude Code before project files.", "global", "claude", ""),
-        (root / "CLAUDE.md", "Project CLAUDE.md", "Project instructions loaded by Claude Code.", "project", "claude", ""),
-        (root / "CLAUDE.local.md", "Local CLAUDE.local.md", "Machine-local project instructions loaded by Claude Code when present.", "local", "claude", ""),
-        (root / ".claude" / "CLAUDE.md", "Project .claude/CLAUDE.md", "Additional project instructions loaded by Claude Code when present.", "project", "claude", ""),
-    ]
-    if codex_global is not None:
-        file_assets.insert(1, (
-            codex_global,
-            f"Global {codex_global.name}",
-            f"User-level instructions selected by Codex from {codex_home} before project files.",
-            "global",
-            "codex",
-            "",
-        ))
-    if codex_project is not None:
-        file_assets.insert(3 if codex_global is not None else 2, (
-            codex_project,
-            f"Project {codex_project.name}",
-            "Project instructions selected by Codex CLI discovery.",
-            "project",
-            "codex",
-            "",
-        ))
-
-    # opencode reads AGENTS.md, falling back to CLAUDE.md, plus its own global
-    # file. It shares the project AGENTS.md row above rather than duplicating
-    # it, so only the opencode-specific global is listed here.
-    opencode_global = first_nonempty((
-        Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-        .expanduser() / "opencode" / "AGENTS.md",
-    ))
-    if opencode_global is not None:
-        file_assets.append((
-            opencode_global,
-            "Global opencode AGENTS.md",
-            "User-level instructions loaded by opencode before project files.",
-            "global",
-            "opencode",
-            "",
-        ))
-
-    ws_names = []
-    if hasattr(config, "workspace_names") and callable(config.workspace_names):
-        ws_names = config.workspace_names()
-
-    if not ws_names:
-        file_assets.append((Path(config.vault_root) / "MEMORY.md", "Workspace memory", "Durable memory file under the configured workspace vault root.", "vault", "shared", ""))
-    else:
-        for name in ws_names:
-            ws_vault_root = config.workspace_vault_root(name)
-            title = f"Workspace memory ({name})" if len(ws_names) > 1 else "Workspace memory"
-            file_assets.append((
-                ws_vault_root / "MEMORY.md",
-                title,
-                f"Durable workspace memory file under the configured {name} vault root.",
-                "vault",
-                "shared",
-                name,
-            ))
-
-    for path, title, description, scope, provider, workspace in file_assets:
-        if path == root / "CLAUDE.md" and not added_sys_prompt:
-            prompts.append(sys_prompt_asset)
-            added_sys_prompt = True
-
-        if path.exists():
-            seen.add((provider, path.resolve()))
-            asset = _prompt_file_asset(
-                path=path,
-                config=config,
-                title=title,
-                description=description,
-                scope=scope,
-                provider=provider,
-                workspace=workspace,
-            )
-            prompts.append(asset)
-            prompts.extend(_collect_import_assets(
-                parent=asset,
-                parent_path=path,
-                config=config,
-                seen=seen,
-            ))
-
-    if not added_sys_prompt:
-        prompts.append(sys_prompt_asset)
-
-    _insert_after_system_prompt(prompts, _bounded_memory_assets(config))
-    prompts.extend(_memory_proposal_assets(config))
-
-    runtime_preview = "\n".join([
-        "Every user turn receives:",
-        "- the active project's single saved context value, when set",
-        "- the active project name and a path to its README.md or canonical project document",
-        "- today's date, active workspace/project, GWS profile, and working directory",
-        "- vault entity links matched from the current prompt",
-        "- provider handover context when a chat has just switched providers",
-        "",
-        "Current runtime fields:",
-        "<ciao-runtime>",
-        *_runtime_lines(root, os.environ.copy()),
-        "</ciao-runtime>",
-    ])
-    prompts.append(PromptAsset(
-        id="runtime-context-hook",
-        title="Per-turn runtime context hook",
-        description="Project context, the project document path, runtime fields, matching vault entities, and any provider handover are sent with each user turn.",
-        source="generated",
-        path="",
-        editable=False,
-        content=runtime_preview,
-        scope="generated",
-    ))
-    return prompts
-
-
 async def agent_assets_endpoint(request: Request) -> JSONResponse:
-    """GET /api/agent-assets — Settings inventory for context sources, agents, and commands."""
+    """GET /api/agent-assets — Settings inventory for subagents, commands, and health."""
     config = request.app.state.config
     try:
         return JSONResponse({
-            "context": [asdict(item) for item in list_prompt_assets(config)],
             "subagents": [asdict(item) for item in list_subagents(config)],
             "commands": [asdict(item) for item in list_command_assets(config)],
             "health": workspace_health(config),
