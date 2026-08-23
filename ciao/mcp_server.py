@@ -1286,6 +1286,13 @@ class CiaoMcpService:
                     tier alias). Unknown ids are rejected with `invalid_model`
                     and a list of valid alternatives. Omit to inherit the
                     workspace default.
+                mode: Permission mode for the delegate. A mode weaker than
+                    this chat's is always honoured (spawn a `plan` delegate to
+                    read and report without writing). A stronger one is capped
+                    at this chat's own mode, unless the operator has raised the
+                    workspace's delegate ceiling; when that happens the reply
+                    carries `mode_clamped` and `requested_mode` rather than
+                    failing. Omit to inherit this chat's mode.
                 delegation_id: Shared tag for delegates dispatched as one
                     batch, so their completion reports group together.
             """
@@ -1307,6 +1314,17 @@ class CiaoMcpService:
         @tool(name="delegates_list", annotations=_READ, structured_output=True)
         async def delegates_list(chat_id: str = "") -> dict[str, Any]:
             """List delegates spawned by a chat and which are still running.
+
+            Each row carries harness-counted tool activity for the delegate's
+            current or most recent turn: `tool_event_count`, `write_tool_count`,
+            `bash_tool_count`, `last_tool_at`, plus `age_seconds` and
+            `idle_seconds` already computed against the server's clock.
+
+            Use `idle_seconds` — not `last_activity_at`, which is only stamped
+            at turn boundaries and stays frozen for the whole of a long run — to
+            judge whether a running delegate is alive. A rising
+            `tool_event_count` means it is working, however slowly; that is the
+            difference between a correct decision to stop one and a wrong one.
 
             To read a delegate's real transcript, take its session_id from
             chat_get and read that provider session's JSONL — chat_get itself
