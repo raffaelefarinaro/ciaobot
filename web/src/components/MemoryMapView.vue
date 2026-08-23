@@ -5,7 +5,41 @@
     <ProposalReviewPanel v-if="mm.view === 'review'" />
 
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode }">
-      <div v-if="mm.loading" class="mm-empty">Loading vault graph…</div>
+      <div v-if="mm.loading" class="mm-skeleton" role="status" aria-live="polite" aria-label="Loading vault graph">
+        <div class="mm-brain-skeleton" aria-hidden="true">
+          <svg viewBox="0 0 200 140" class="mm-brain-svg">
+            <!-- brain/network skeleton: nodes + interconnections -->
+            <line x1="45" y1="38" x2="82" y2="52" class="mm-brain-edge" />
+            <line x1="82" y1="52" x2="118" y2="42" class="mm-brain-edge" />
+            <line x1="118" y1="42" x2="155" y2="58" class="mm-brain-edge" />
+            <line x1="82" y1="52" x2="92" y2="92" class="mm-brain-edge" />
+            <line x1="118" y1="42" x2="108" y2="92" class="mm-brain-edge" />
+            <line x1="92" y1="92" x2="108" y2="92" class="mm-brain-edge" />
+            <line x1="45" y1="38" x2="38" y2="86" class="mm-brain-edge" />
+            <line x1="38" y1="86" x2="70" y2="118" class="mm-brain-edge" />
+            <line x1="155" y1="58" x2="162" y2="92" class="mm-brain-edge" />
+            <line x1="162" y1="92" x2="130" y2="118" class="mm-brain-edge" />
+            <line x1="70" y1="118" x2="100" y2="128" class="mm-brain-edge" />
+            <line x1="130" y1="118" x2="100" y2="128" class="mm-brain-edge" />
+            <circle cx="45" cy="38" r="10" class="mm-brain-node mm-brain-node--1" />
+            <circle cx="82" cy="52" r="7" class="mm-brain-node mm-brain-node--2" />
+            <circle cx="118" cy="42" r="8" class="mm-brain-node mm-brain-node--3" />
+            <circle cx="155" cy="58" r="9" class="mm-brain-node mm-brain-node--4" />
+            <circle cx="92" cy="92" r="8" class="mm-brain-node mm-brain-node--2" />
+            <circle cx="108" cy="92" r="7" class="mm-brain-node mm-brain-node--1" />
+            <circle cx="38" cy="86" r="6" class="mm-brain-node mm-brain-node--3" />
+            <circle cx="162" cy="92" r="6" class="mm-brain-node mm-brain-node--2" />
+            <circle cx="70" cy="118" r="7" class="mm-brain-node mm-brain-node--4" />
+            <circle cx="130" cy="118" r="7" class="mm-brain-node mm-brain-node--1" />
+            <circle cx="100" cy="128" r="6" class="mm-brain-node mm-brain-node--3" />
+          </svg>
+        </div>
+        <div class="mm-skeleton-text"><span class="history-loading-spinner" aria-hidden="true"></span> Mapping your vault…</div>
+        <div class="mm-skeleton-bars" aria-hidden="true">
+          <span class="mm-shimmer-line" style="width: 42%; height: 8px;"></span>
+          <span class="mm-shimmer-line" style="width: 58%; height: 8px; margin-top: 8px;"></span>
+        </div>
+      </div>
       <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
       <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
         <canvas
@@ -1035,6 +1069,86 @@ onBeforeUnmount(() => {
 }
 
 .mm-empty { color: var(--fg3); font-size: var(--text-sm); padding: var(--space-5); text-align: center; }
+
+.mm-skeleton {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  min-height: 320px;
+  color: var(--fg3);
+  text-align: center;
+}
+.mm-brain-skeleton {
+  width: min(360px, 80%);
+  display: flex;
+  justify-content: center;
+}
+.mm-brain-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.mm-brain-edge {
+  stroke: var(--border);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  opacity: 0.55;
+}
+.mm-brain-node {
+  fill: var(--bg3);
+  stroke: var(--border);
+  stroke-width: 1.2;
+}
+.mm-brain-node--1 { animation: mm-brain-pulse 1.6s ease-in-out infinite; }
+.mm-brain-node--2 { animation: mm-brain-pulse 1.6s ease-in-out infinite 0.2s; }
+.mm-brain-node--3 { animation: mm-brain-pulse 1.6s ease-in-out infinite 0.4s; }
+.mm-brain-node--4 { animation: mm-brain-pulse 1.6s ease-in-out infinite 0.6s; }
+@keyframes mm-brain-pulse {
+  0%, 100% { fill: var(--bg3); opacity: 1; }
+  50% { fill: var(--bg-elev, var(--bg3)); opacity: 0.7; }
+}
+.history-loading-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: mm-spin 0.7s linear infinite;
+  flex: none;
+}
+@keyframes mm-spin { to { transform: rotate(360deg); } }
+.mm-skeleton-text {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+.mm-skeleton-bars {
+  width: min(280px, 60%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.mm-skeleton-bars .mm-shimmer-line {
+  display: block;
+  background: var(--bg3);
+  border-radius: 4px;
+  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+}
+@keyframes title-shimmer-sweep {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mm-brain-node { animation: none; }
+  .mm-skeleton-bars .mm-shimmer-line { animation: none; }
+}
 
 .mm-list-wrap { overflow: auto; padding: var(--space-4); }
 .mm-list-wrap table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }

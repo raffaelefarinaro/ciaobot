@@ -287,11 +287,10 @@ async function mergePeopleViaChat(row: ProposalRow) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChat(row.workspace, `Merge ${row.target || 'person'} fact`)
+    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge ${row.target || 'person'} fact`)
     if (!chat) return
     projectStore.sendMessage(chat.chat_id, peopleMergePrompt(row))
-    const { router } = await import('../router')
-    await router.push(`/chat/${chat.chat_id}`)
+    pushBackgroundToast(chat.chat_id, 'Merging in background', `${row.target || 'Person'} fact — click to open the chat`)
   } finally {
     chatBusy.value = false
   }
@@ -301,11 +300,10 @@ async function mergeProjectViaChat(row: ProposalRow, errorMsg: string) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChat(row.workspace, `Merge project fact`)
+    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge project fact`)
     if (!chat) return
     projectStore.sendMessage(chat.chat_id, projectMergePrompt(row, errorMsg))
-    const { router } = await import('../router')
-    await router.push(`/chat/${chat.chat_id}`)
+    pushBackgroundToast(chat.chat_id, 'Merging in background', 'Project fact — click to open the chat')
   } finally {
     chatBusy.value = false
   }
@@ -315,11 +313,10 @@ async function mergeMemoryViaChat(row: ProposalRow, errorMsg: string) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChat(row.workspace, `Merge memory fact`)
+    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge memory fact`)
     if (!chat) return
     projectStore.sendMessage(chat.chat_id, memoryMergePrompt(row, errorMsg))
-    const { router } = await import('../router')
-    await router.push(`/chat/${chat.chat_id}`)
+    pushBackgroundToast(chat.chat_id, 'Merging in background', 'Memory fact — click to open the chat')
   } finally {
     chatBusy.value = false
   }
@@ -329,11 +326,10 @@ async function mergeLearningsViaChat(row: ProposalRow, errorMsg: string) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChat(row.workspace, `Merge learning`)
+    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge learning`)
     if (!chat) return
     projectStore.sendMessage(chat.chat_id, learningsMergePrompt(row, errorMsg))
-    const { router } = await import('../router')
-    await router.push(`/chat/${chat.chat_id}`)
+    pushBackgroundToast(chat.chat_id, 'Merging in background', 'Learning — click to open the chat')
   } finally {
     chatBusy.value = false
   }
@@ -421,6 +417,38 @@ async function openWorkspaceChat(workspace: string, title: string) {
   return projectStore.createChat(project.project_id, title)
 }
 
+async function openWorkspaceChatInBackground(workspace: string, title: string) {
+  const target = workspace || projectStore.activeWorkspace
+  let project = projectStore.projects.find((p) => p.workspace === target && Boolean(p.is_auto))
+  if (!project) {
+    const { api } = await import('../lib/api')
+    try {
+      const created = await api.post<any>('/api/projects', { name: 'General', workspace: target, context: '' })
+      if (!projectStore.projects.some((p) => p.project_id === created.project_id)) {
+        projectStore.projects.push(created)
+      }
+      project = created
+    } catch {
+      return null
+    }
+  }
+  if (!project) return null
+  try {
+    const { api } = await import('../lib/api')
+    const chat = await api.post<any>(`/api/projects/${project.project_id}/chats`, { title })
+    if (!projectStore.chats.some((c) => c.chat_id === chat.chat_id)) {
+      projectStore.chats.push(chat)
+    }
+    return chat
+  } catch {
+    return null
+  }
+}
+
+function pushBackgroundToast(chatId: string, title: string, body: string) {
+  projectStore.pushToast({ chat_id: chatId, title, body })
+}
+
 /** Open the proposal itself.
  *
  * A skill row showed its filename and the words "a skill proposal file", which
@@ -450,11 +478,10 @@ async function implementSkill(row: ProposalRow) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChat(row.workspace, `Implement ${row.text}`)
+    const chat = await openWorkspaceChatInBackground(row.workspace, `Implement ${row.text}`)
     if (!chat) return
     projectStore.sendMessage(chat.chat_id, implementPrompt(row))
-    const { router } = await import('../router')
-    await router.push(`/chat/${chat.chat_id}`)
+    pushBackgroundToast(chat.chat_id, 'Building skill in background', `${row.text} — click to open the chat`)
   } finally {
     chatBusy.value = false
   }
@@ -484,11 +511,10 @@ async function discuss(row: ProposalRow) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChat(row.workspace, 'Proposal review')
+    const chat = await openWorkspaceChatInBackground(row.workspace, 'Proposal review')
     if (!chat) return
     projectStore.sendMessage(chat.chat_id, discussPrompt(row))
-    const { router } = await import('../router')
-    await router.push(`/chat/${chat.chat_id}`)
+    pushBackgroundToast(chat.chat_id, 'Discussion in background', 'Proposal review — click to open the chat')
   } finally {
     chatBusy.value = false
   }
@@ -555,7 +581,7 @@ async function batchDiscuss() {
   if (!rows.length || chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChat(projectStore.activeWorkspace, 'Proposal review')
+    const chat = await openWorkspaceChatInBackground(projectStore.activeWorkspace, 'Proposal review')
     if (!chat) return
     const lines = rows.map((r, i) => `${i + 1}. [${r.kind}] ${r.text}`).join('\n')
     projectStore.sendMessage(
@@ -565,8 +591,7 @@ async function batchDiscuss() {
         'or should be dropped. Do not edit any region or move any file: leave ' +
         'them queued and I will accept or dismiss them myself.',
     )
-    const { router } = await import('../router')
-    await router.push(`/chat/${chat.chat_id}`)
+    pushBackgroundToast(chat.chat_id, 'Discussion in background', `${rows.length} proposals — click to open the chat`)
   } finally {
     chatBusy.value = false
   }
@@ -812,7 +837,7 @@ onMounted(() => { void store.fetch() })
   color: var(--fg2);
   font-size: 0.8rem;
   line-height: 1.5;
-  max-width: 68ch;
+  max-width: none;
 }
 
 .pr-error {

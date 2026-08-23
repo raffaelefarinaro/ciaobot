@@ -249,7 +249,7 @@ describe('ProposalReviewPanel', () => {
       project_id: 'p-work', name: 'General', workspace: 'work', context: '',
       created_at: '', order: 0, vault_folder: 'general', is_auto: true,
     } as never]
-    vi.spyOn(projects, 'createChat').mockResolvedValue({ chat_id: 'chat-x' } as never)
+    apiPost.mockResolvedValue({ chat_id: 'chat-x', project_id: 'p-work' } as never)
     const send = vi.spyOn(projects, 'sendMessage').mockImplementation(() => true as never)
     const proposals = useProposalsStore()
     const act = vi.spyOn(proposals, 'act')
