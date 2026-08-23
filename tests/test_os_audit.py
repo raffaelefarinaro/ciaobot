@@ -198,6 +198,45 @@ def test_memory_actionable_count_covers_the_mechanical_findings(tmp_path: Path) 
     assert report["total_issues"] >= 1
 
 
+def test_run_os_audit_reports_stale_notes_as_informational(tmp_path: Path) -> None:
+    """Aging notes are evidence for the curation routine, not audit defects.
+
+    They render in memory_hygiene so the weekly report can name them, but they
+    must not gate the status or the actionable count — a vault nobody has
+    touched in months is not an install that needs emergency attention, it is
+    a queue for the next curation pass.
+    """
+    import os as _os
+    import time as _time
+
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "People" / "Mo.md").write_text(
+        "---\ntype: person\n---\n# Mo\n", encoding="utf-8"
+    )
+    old = _time.time() - 200 * 86400
+    _os.utime(vault / "People" / "Mo.md", (old, old))
+    _seed_guide(tmp_path / "CLAUDE.md", memory=["durable lesson"], profile=[])
+
+    report = run_os_audit(workspace_dir=tmp_path, vault_root=vault)
+    memory = report["memory_hygiene"]
+
+    stale = memory["stale_notes"]
+    assert len(stale) == 1
+    assert stale[0]["path"] == "memory-vault/People/Mo.md"
+    assert stale[0]["threshold_days"] == 90
+    assert memory["notes_checked"] >= 1
+
+    from ciao.os_audit import format_audit_markdown, memory_actionable_count
+
+    # Informational by contract: nothing here is actionable on its own.
+    findings = memory_actionable_count(memory)
+    assert findings == 0
+    assert "Notes not verified within their type's horizon" in (
+        format_audit_markdown(report)
+    )
+
+
 def test_format_audit_markdown_renders_rot_findings(tmp_path: Path) -> None:
     (tmp_path / "memory-vault").mkdir()
     _seed_guide(

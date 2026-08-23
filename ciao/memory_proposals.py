@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, date
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -358,9 +358,13 @@ def write_people_note(vault_root: Path, name: str, text: str) -> bool:
     if path.exists():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
+    # `updated:` records the note's creation as its first verification, so a
+    # person the system stopped hearing about ages out visibly instead of
+    # relying on mtime (which file copies and migrations reset silently).
     note = (
         "---\n"
         "tags: [person]\n"
+        f"updated: {date.today().isoformat()}\n"
         f"---\n# {stem}\n\n{text}\n"
     )
     path.write_text(note, encoding="utf-8")

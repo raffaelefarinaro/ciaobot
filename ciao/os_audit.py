@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
-from ciao.memory_audit import audit_entries
+from ciao.memory_audit import audit_entries, find_stale_notes
 from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
     DEFAULT_USER_CHAR_LIMIT,
@@ -688,6 +688,47 @@ def _scan_memory_guide(
     }
 
 
+def _scan_note_staleness(
+    vault_root: Path,
+    workspace_name: str,
+    current: datetime.date,
+) -> dict[str, Any]:
+    """Age the workspace's own notes, for the memory-hygiene section.
+
+    A separate pass from ``_vault_audit`` because it needs parsed frontmatter
+    (``updated:``) rather than lint findings; ``scan_vault`` is the same walk
+    the index rebuild already does routinely. Failures degrade to an empty
+    result with a scan error, never to "checked and clean".
+    """
+    empty: dict[str, Any] = {
+        "stale_notes": [],
+        "notes_checked": 0,
+        "notes_exempt": 0,
+        "errors": [],
+    }
+    if not vault_root.is_dir():
+        return empty
+    try:
+        from ciao.vault_index import scan_vault
+
+        entries = scan_vault(vault_root, workspace=workspace_name or "personal")
+    except Exception as exc:  # noqa: BLE001 — advisory section
+        logger.exception("OS audit: note staleness scan failed")
+        return {
+            **empty,
+            "errors": [
+                _diagnostic(
+                    "note_staleness_scan_failed",
+                    vault_root,
+                    f"note staleness scan failed: {exc}",
+                )
+            ],
+        }
+    result = find_stale_notes(entries, vault_root=vault_root, today=current)
+    result["errors"] = []
+    return result
+
+
 def _aggregate_memory_guides(
     guides: list[dict[str, Any]],
     *,
@@ -1195,7 +1236,9 @@ def memory_actionable_count(memory_result: dict[str, Any]) -> int:
 
     `superseded_state_candidates` is deliberately excluded: it is a judgement
     the user may decline, and a finding that can never be cleared would hold
-    the audit at needs_attention until people stop reading it.
+    the audit at needs_attention until people stop reading it. `stale_notes`
+    is excluded for the same reason — age is evidence for review, not a
+    defect; the daily curation routine consumes it.
     """
     # int() because memory_result is dict[str, Any]: the counts are ints at
     # runtime, but the sum is Any to the type checker.
@@ -1370,6 +1413,15 @@ def run_os_audit(
             proposal_files=proposal_files,
             errors=proposal_errors,
         )
+        # Vault-note aging joins the same section: it is memory rot, just on
+        # the on-demand surface instead of the always-loaded one. Informational
+        # like superseded-state candidates — age is evidence for the curation
+        # routine, not a defect that holds the audit red.
+        stale = _scan_note_staleness(notes, workspace_name, current)
+        memory_result.update(
+            {k: v for k, v in stale.items() if k != "errors"}
+        )
+        memory_result["errors"].extend(stale["errors"])
     else:
         memory_result = _aggregate_memory_guides(
             [], pending_memory_proposals=0, proposal_files=[], errors=[]
@@ -1592,6 +1644,12 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                     "- Informational superseded-state candidates: "
                     f"{len(memory.get('superseded_state_candidates', []))}"
                 ),
+                (
+                    "- Notes not verified within their type's horizon "
+                    "(informational): "
+                    f"{len(memory.get('stale_notes', []))} of "
+                    f"{memory.get('notes_checked', 0)} dated notes"
+                ),
             ]
         )
         # Over-cap is actionable only when the workspace is named: a global total
@@ -1617,6 +1675,12 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
             lines.append(
                 f"  - ℹ️ [{finding['region']}] {len(finding['entries'])} entries about "
                 f"`{finding['subject']}`; check whether one supersedes the other"
+            )
+        for finding in memory.get("stale_notes", [])[:8]:
+            lines.append(
+                f"  - ℹ️ [{finding['type']}] `{finding['path']}` unverified for "
+                f"{finding['age_days']}d (horizon {finding['threshold_days']}d, "
+                f"last checked {finding['last_verified']} via {finding['source']})"
             )
 
     if "job_runs_audit" in report:

@@ -240,7 +240,7 @@ ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
-ciao memory-audit --json # Bounded-memory rot only (regions, no vault scan)
+ciao memory-audit --json # Bounded-memory rot only (regions; add --with-vault for note aging)
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
@@ -347,9 +347,22 @@ matching `rule_overlaps_found`. It is a judgement the user may legitimately
 decline, and a finding that can never be cleared would pin the whole audit at
 `needs_attention` until people stop reading it.
 
+The same state/event rule also decides how **age** is read on vault notes: an
+entity note (person, project) asserts current state, so going unverified past
+its type's horizon is a review candidate; logs and journals record events,
+which never go stale. `find_stale_notes` ages each note from frontmatter
+`updated:` (a deliberate "I re-checked this" claim) or file mtime, against
+per-type horizons (project 30d, person 90d, everything else 180d; `Workspace/`
+queue files exempt — flagging an inbox for being an inbox is noise). Like
+`superseded_state_candidates` these findings are informational: they surface in
+`os-audit`'s memory section, the Memory Map sidebar ("Needs review"), and the
+daily `system-memory-curation` run, which re-verifies each note and stamps
+`updated:` when the facts still hold.
+
 `ciao memory-audit` reads one file and skips the vault scan, so the daily
 `system-memory-curation` schedule can afford to call it and fix what it finds.
-Exit 0 clean, 1 findings, 2 a region could not be read.
+`--with-vault` adds the note-aging pass (still informational, never changes the
+exit code). Exit 0 clean, 1 findings, 2 a region could not be read.
 
 ## Skills, subagents, and slash commands
 

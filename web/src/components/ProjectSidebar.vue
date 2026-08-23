@@ -639,6 +639,35 @@
           >show {{ Math.min(20, mm.orphanNotes.length - orphanLimit) }} more</button>
         </template>
 
+        <!-- Aging notes: facts nobody has verified within their type's
+             horizon. The actionable counterpart of "Recently written" — the
+             daily curation routine reviews this same list, so an entry here
+             is either worth re-confirming or worth deleting. -->
+        <template v-if="mm.staleNotes.length">
+          <div class="mm-row-between">
+            <h3>Needs review ({{ mm.staleNotes.length }})</h3>
+          </div>
+          <div class="mm-link-list">
+            <div
+              v-for="n in mm.staleNotes.slice(0, staleLimit)"
+              :key="n.id"
+              class="mm-link-item"
+              :title="`Unverified for ${n.ageDays ?? '?'} days — click to open it in the map`"
+              @click="mm.requestFocus(n.id)"
+            >
+              <span class="dot mm-dot--stale" />
+              <span class="label">{{ n.title }}</span>
+              <span class="cnt">{{ mm.ageLabelOf(n) }}</span>
+            </div>
+          </div>
+          <button
+            v-if="mm.staleNotes.length > staleLimit"
+            type="button"
+            class="mm-link"
+            @click="staleLimit += 20"
+          >show {{ Math.min(20, mm.staleNotes.length - staleLimit) }} more</button>
+        </template>
+
         <!-- Entry points into the graph: the note you last touched is almost
              always the one you opened the map about. -->
         <template v-if="mm.recentNotes.length">
@@ -1096,6 +1125,7 @@ function reviewKindLabel(kind: string): string {
 // real vault, so it grows on demand rather than pushing every other section off
 // the bottom of the sidebar.
 const orphanLimit = ref(8)
+const staleLimit = ref(8)
 const route = useRoute()
 const router = useRouter()
 
@@ -2977,6 +3007,9 @@ async function confirmDeleteChat(chatId: string) {
 }
 .mm-link-item:hover { background: var(--bg3); }
 .mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+/* Aging note marker: the app warning token, not a category colour — age is
+   not a type, and reusing a hue would lie about what the dot means. */
+.mm-dot--stale { background: var(--warning, #ff9800); }
 .mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
 /* Marks which note the map is currently centred on, so the recent list
    doubles as a "you are here" indicator rather than just a jump list. */

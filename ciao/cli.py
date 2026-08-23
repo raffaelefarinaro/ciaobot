@@ -2105,6 +2105,33 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         proposal_files=proposal_files,
         errors=proposal_errors,
     )
+    # Optional vault pass: the regions are cheap and this command exists for
+    # the daily routine, so the vault walk is opt-in rather than default —
+    # the same reason it was split from os-audit in the first place.
+    if args.with_vault:
+        from ciao.memory_audit import find_stale_notes
+        from ciao.vault_index import scan_vault
+
+        try:
+            # The stamp only feeds graph scoping; the staleness detector keys
+            # on type and dates, not workspace.
+            entries = scan_vault(vault, workspace="personal")
+            report["stale_notes"] = find_stale_notes(
+                entries, vault_root=vault, today=datetime.date.today()
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory section
+            report["stale_notes"] = {
+                "stale_notes": [],
+                "notes_checked": 0,
+                "notes_exempt": 0,
+            }
+            report["errors"].append(
+                {
+                    "type": "note_staleness_scan_failed",
+                    "path": str(vault),
+                    "message": f"note staleness scan failed: {exc}",
+                }
+            )
     # Same definition os-audit exits on, so the two commands cannot disagree
     # about whether these regions are clean.
     findings = memory_actionable_count(report)
@@ -2137,6 +2164,19 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         )
         for finding in report["superseded_state_candidates"]:
             print(f"  [{finding['region']}] {finding['subject']}")
+        stale = report.get("stale_notes") or {}
+        if stale:
+            print(
+                "Notes not verified within their type's horizon (informational): "
+                f"{len(stale.get('stale_notes', []))} of "
+                f"{stale.get('notes_checked', 0)} dated notes"
+            )
+            for finding in stale.get("stale_notes", []):
+                print(
+                    f"  [{finding['type']}] {finding['path']} :: "
+                    f"{finding['age_days']}d since last check "
+                    f"(horizon {finding['threshold_days']}d)"
+                )
 
     if report["marker_errors"] or report["errors"]:
         return 2
@@ -3217,9 +3257,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Reads the ciao:memory and ciao:profile regions of the workspace "
             "CLAUDE.md and reports entries that record a chat event instead of "
             "current state, entries citing a path that no longer exists, and "
-            "subjects carrying more than one value. Read-only. Exit 0 when "
-            "clean, 1 when there are findings, 2 when a region could not be "
-            "read."
+            "subjects carrying more than one value. With --with-vault, also "
+            "reports vault notes whose facts have gone unverified past their "
+            "type's horizon. Read-only. Exit 0 when clean, 1 when there are "
+            "findings, 2 when a region could not be read."
         ),
     )
     memory_audit_parser.add_argument(
@@ -3238,6 +3279,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Output raw JSON audit report.",
+    )
+    memory_audit_parser.add_argument(
+        "--with-vault",
+        action="store_true",
+        help=(
+            "Also age the vault's notes (frontmatter `updated:` or mtime "
+            "against per-type horizons) and report stale ones. Informational: "
+            "they never change the exit code."
+        ),
     )
     memory_audit_parser.set_defaults(func=_memory_audit_command)
 

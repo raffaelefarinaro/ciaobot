@@ -15,6 +15,16 @@ export interface MemoryGraphNode {
   degree: number
   /** Epoch seconds from the server, ordering the recently-written entry points. */
   mtime: number
+  /** Frontmatter `updated:` (YYYY-MM-DD) — when the facts were last verified. */
+  updated: string
+  /**
+   * True when the note's age passes its type's staleness horizon, computed
+   * server-side by the same detector the audit and daily curation consume.
+   * Event types (logs, journals) never go stale and are never flagged.
+   */
+  stale: boolean
+  /** Days since last verification; null when the note carries no usable date. */
+  ageDays: number | null
   // simulation state, owned by the canvas but persisted here so the graph
   // does not re-scatter every time the sidebar touches the store.
   x: number
@@ -217,6 +227,17 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       .sort((a, b) => b.mtime - a.mtime),
   )
   /**
+   * Notes whose facts have gone unverified past their type's horizon. Same
+   * to-do-list shape as orphans: each one is worth re-checking, correcting,
+   * or deleting — and the daily curation routine works from the same list,
+   * so what shows here is exactly what that run will touch.
+   */
+  const staleNotes = computed(() =>
+    nodes.value
+      .filter(n => n.stale && activeCats.has(catKeyFor(n)))
+      .sort((a, b) => (b.ageDays ?? 0) - (a.ageDays ?? 0)),
+  )
+  /**
    * High betweenness with modest degree = a note that sits *between* clusters
    * rather than at the centre of one. Those are the notes whose deletion would
    * actually fragment the vault, which a degree ranking never surfaces.
@@ -234,6 +255,21 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   /** Entry points for the local view, most recently written first. */
   const recentNotes = computed(() => [...nodes.value].sort((a, b) => b.mtime - a.mtime).slice(0, 6))
   const selectedNode = computed(() => (selectedId.value ? nodesById.value.get(selectedId.value) || null : null))
+
+  /**
+   * Compact age for list rows and the detail panel: "5mo" style, or an empty
+   * string when the note carries no usable date at all.
+   */
+  function ageLabelOf(n: MemoryGraphNode): string {
+    if (n.ageDays === null && !n.updated && !n.mtime) return ''
+    const days = n.ageDays ?? Math.floor((Date.now() / 1000 - n.mtime) / 86400)
+    if (!Number.isFinite(days)) return ''
+    if (days < 1) return 'today'
+    if (days < 30) return `${days}d`
+    if (days < 365) return `${Math.floor(days / 30)}mo`
+    const years = days / 365
+    return `${years >= 2 ? Math.floor(years) : years.toFixed(1)}y`
+  }
 
   const pathIds = computed<Set<string>>(() => {
     if (!pathStart.value || !pathEnd.value) return new Set()
@@ -282,6 +318,9 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
         aliases: n.aliases || [],
         description: n.description || '',
         mtime: typeof n.mtime === 'number' ? n.mtime : 0,
+        updated: typeof n.updated === 'string' ? n.updated : '',
+        stale: n.stale === true,
+        ageDays: typeof n.age_days === 'number' ? n.age_days : null,
         x: (Math.random() - 0.5) * 800,
         y: (Math.random() - 0.5) * 800,
         vx: 0,
@@ -393,7 +432,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     hideOrphans, colorMode, view,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode, pathIds, pathHint,
-    clusters, clusterById, orphanNotes, bridgeNotes, recentNotes,
+    clusters, clusterById, orphanNotes, bridgeNotes, recentNotes, staleNotes, ageLabelOf,
     clusterOf, clusterSlotOf, betweennessOf,
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
     setColorMode, toggleHideOrphans, isolateCluster,

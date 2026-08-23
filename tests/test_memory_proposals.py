@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from ciao import memory_proposals as mp
@@ -561,7 +562,11 @@ def test_apply_creates_people_note_only_when_absent(tmp_path: Path) -> None:
     assert not remaining
     note = vault / "People" / "Mo Salah.md"
     assert note.exists()
-    assert "tags: [person]" in note.read_text(encoding="utf-8")
+    text = note.read_text(encoding="utf-8")
+    assert "tags: [person]" in text
+    # Creation counts as the first verification, so the stub is born dated
+    # and can age out visibly instead of relying on mtime.
+    assert re.search(r"^updated: \d{4}-\d{2}-\d{2}$", text, re.MULTILINE)
 
     # An existing note is a merge decision, so the fact stays queued.
     remaining, applied = mp.apply_proposals([proposal], vault_root=vault)

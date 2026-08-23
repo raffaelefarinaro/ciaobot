@@ -182,6 +182,11 @@ class Entry:
     related_unresolved: list[str] = field(default_factory=list)
     workspace: str = "personal"
     description: str = ""
+    # Frontmatter ``updated:`` (YYYY-MM-DD): when the note's facts were last
+    # verified, as opposed to when the file was last written. Empty when the
+    # note carries no such key — consumers then fall back to mtime, which
+    # says "touched", not "checked". See ciao.memory_audit for the consumer.
+    updated: str = ""
 
 
 def _is_excluded(rel_path: Path) -> bool:
@@ -485,6 +490,7 @@ def scan_vault(
         tags = _coerce_list(fm.get("tags"))
         aliases = _coerce_list(fm.get("aliases"))
         description = (fm.get("description") or "").strip()
+        updated = str(fm.get("updated") or "").strip()
         related_raw = _coerce_list(fm.get("related")) + _coerce_list(fm.get("relatedTo"))
         related_refs = [_normalize_related_value(r) for r in related_raw]
         related_refs = [r for r in related_refs if r]
@@ -507,6 +513,7 @@ def scan_vault(
                 related=related_refs,  # resolved below
                 workspace=workspace or _workspace_of(rel_from_vault),
                 description=description,
+                updated=updated,
             )
         )
 
@@ -843,6 +850,7 @@ def format_json(entries: list[Entry], hops: list[int] | None = None) -> str:
             "tags": e.tags,
             "aliases": e.aliases,
             "related": e.related,
+            "updated": e.updated,
         }
         if hop is not None:
             d["hop"] = hop

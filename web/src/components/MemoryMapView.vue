@@ -70,6 +70,7 @@
               <th @click="setSort('type')">Type</th>
               <th>Tags</th>
               <th @click="setSort('degree')">Links</th>
+              <th @click="setSort('age')" title="Days since the note's facts were last verified">Checked</th>
             </tr>
           </thead>
           <tbody>
@@ -80,6 +81,7 @@
                 <span v-for="t in n.tags.slice(0, 4)" :key="t" class="tag-mini">{{ t }}</span>
               </td>
               <td>{{ n.degree }}</td>
+              <td :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past its type's horizon">needs review</span></td>
             </tr>
           </tbody>
         </table>
@@ -94,7 +96,11 @@
           @click="mm.selectNode(null)"
         >×</button>
         <div class="mm-detail-type">{{ categoryLabelFor(mm.selectedNode) }}</div>
-        <div class="mm-detail-title">{{ mm.selectedNode.title }}</div>
+        <div class="mm-detail-title">
+          {{ mm.selectedNode.title }}
+          <span v-if="mm.selectedNode.stale" class="stale-badge" title="Unverified past this note type's staleness horizon">needs review</span>
+        </div>
+        <div v-if="ageLabelOfSelected" class="mm-detail-verified">Last verified {{ ageLabelOfSelected }} ago</div>
         <div v-if="mm.selectedNode.description" class="mm-detail-desc">{{ mm.selectedNode.description }}</div>
         <button type="button" class="mm-detail-path" @click="openNoteFile(mm.selectedNode.id)">{{ mm.selectedNode.id }}</button>
 
@@ -879,17 +885,29 @@ function onWheel(e: WheelEvent) {
 // mirrors the shared `mm.view` state, seeding it from the URL on mount.
 const proposals = useProposalsStore()
 mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph'
-const sortKey = ref<'title' | 'type' | 'degree'>('title')
+const sortKey = ref<'title' | 'type' | 'degree' | 'age'>('title')
 const sortDir = ref(1)
-function setSort(key: 'title' | 'type' | 'degree') {
+function setSort(key: 'title' | 'type' | 'degree' | 'age') {
   if (sortKey.value === key) sortDir.value *= -1
   else { sortKey.value = key; sortDir.value = 1 }
 }
+/** Age for the detail heading; empty when the note carries no date at all. */
+const ageLabelOfSelected = computed(() => {
+  const n = mm.selectedNode
+  if (!n) return ''
+  return mm.ageLabelOf(n)
+})
 const sortedVisibleNodes = computed(() => {
   const arr = [...mm.visibleNodes]
   arr.sort((a, b) => {
-    const av = sortKey.value === 'degree' ? a.degree : (a as any)[sortKey.value] || ''
-    const bv = sortKey.value === 'degree' ? b.degree : (b as any)[sortKey.value] || ''
+    let av: string | number
+    let bv: string | number
+    if (sortKey.value === 'degree') { av = a.degree; bv = b.degree }
+    else if (sortKey.value === 'age') {
+      // Oldest first by default: the point of sorting by age is triage.
+      av = a.ageDays ?? Number.MAX_SAFE_INTEGER
+      bv = b.ageDays ?? Number.MAX_SAFE_INTEGER
+    } else { av = (a as any)[sortKey.value] || ''; bv = (b as any)[sortKey.value] || '' }
     if (av < bv) return -1 * sortDir.value
     if (av > bv) return 1 * sortDir.value
     return 0
@@ -1028,11 +1046,26 @@ onBeforeUnmount(() => {
 .mm-list-wrap tbody tr:hover { background: var(--bg3); cursor: pointer; }
 .mm-list-wrap .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; }
 .mm-list-wrap .muted { color: var(--fg3); }
+.stale-age { color: var(--warning, #ff9800); white-space: nowrap; }
+.stale-flag {
+  display: inline-block; margin-left: 6px;
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
+}
 .tag-mini { display: inline-block; background: var(--bg3); color: var(--fg2); border-radius: 4px; padding: 1px 6px; font-size: var(--text-xs); margin: 0 3px 2px 0; }
 
 .mm-detail-type { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg3); }
 .mm-detail-title { font-size: var(--text-lg); font-weight: 600; margin: 4px 0 var(--space-2); }
 .mm-detail-desc { color: var(--fg2); font-size: var(--text-sm); margin-bottom: var(--space-3); }
+/* Age is a warning state, not a category, so it uses the app's warning token
+   rather than any type hue. */
+.stale-badge {
+  display: inline-block; vertical-align: middle;
+  background: color-mix(in srgb, var(--warning, #ff9800) 15%, transparent);
+  color: var(--warning, #ff9800);
+  border-radius: var(--radius-pill); padding: 1px 9px; margin-left: 6px;
+  font-size: var(--text-xs); font-weight: 500; letter-spacing: normal; text-transform: none;
+}
+.mm-detail-verified { color: var(--fg3); font-size: var(--text-xs); margin: -2px 0 var(--space-2); }
 .mm-detail-path {
   display: block; width: 100%; text-align: left; background: none; border: none; padding: 0;
   font-family: var(--font); font-size: var(--text-xs); color: var(--fg3); word-break: break-all; cursor: pointer;

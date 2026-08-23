@@ -4434,6 +4434,23 @@ async def vault_graph(request: Request) -> JSONResponse:
             # symlink) must not fail the whole graph request.
             return 0.0
 
+    # Aging uses the same thresholds as the audit and the daily curation pass,
+    # so the map's "needs review" list cannot disagree with what the routine
+    # acts on. One shared detector, three consumers.
+    from ciao.memory_audit import (
+        note_last_verified,
+        note_threshold_days,
+    )
+
+    current_date = datetime.now(UTC).date()
+
+    def _staleness(e) -> tuple[bool, int | None]:
+        verified, _source = note_last_verified(e.updated, _mtime(str(e.path)))
+        if verified is None:
+            return False, None
+        age_days = (current_date - verified).days
+        return age_days >= note_threshold_days((e.type or "").strip()), age_days
+
     nodes = [
         {
             "id": str(e.path),
@@ -4445,6 +4462,8 @@ async def vault_graph(request: Request) -> JSONResponse:
             "workspace": e.workspace,
             "degree": len(graph.get(str(e.path), ())),
             "mtime": _mtime(str(e.path)),
+            "updated": e.updated,
+            **dict(zip(("stale", "age_days"), _staleness(e))),
         }
         for e in scoped
     ]

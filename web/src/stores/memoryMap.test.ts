@@ -19,6 +19,9 @@ function node(id: string, degree: number, extra: Partial<MemoryGraphNode> = {}):
     workspace: 'work',
     degree,
     mtime: 0,
+    updated: '',
+    stale: false,
+    ageDays: null,
     x: 0,
     y: 0,
     vx: 0,
@@ -93,6 +96,29 @@ describe('orphans', () => {
     const mm = seedChain()
     mm.toggleHideOrphans()
     expect(mm.orphanNotes.map(n => n.id)).toEqual(['orphan'])
+  })
+})
+
+describe('staleness', () => {
+  test('staleNotes ranks the oldest unverified note first', () => {
+    const mm = useMemoryMapStore()
+    mm.nodes = [
+      node('mid', 1, { stale: true, ageDays: 100 }),
+      node('fresh', 0),
+      node('old', 1, { stale: true, ageDays: 400 }),
+    ]
+    mm.edges = []
+    mm.resetCategories()
+    expect(mm.staleNotes.map(n => n.id)).toEqual(['old', 'mid'])
+    expect(mm.staleNotes).not.toContain(mm.nodesById.get('fresh'))
+  })
+
+  test('ageLabelOf stays quiet about notes with no usable date', () => {
+    const mm = useMemoryMapStore()
+    expect(mm.ageLabelOf(node('a', 0, { ageDays: 400 }))).toBe('1.1y')
+    expect(mm.ageLabelOf(node('b', 0, { ageDays: 45 }))).toBe('1mo')
+    expect(mm.ageLabelOf(node('c', 0, { ageDays: 3 }))).toBe('3d')
+    expect(mm.ageLabelOf(node('d', 0, { ageDays: null, mtime: 0 }))).toBe('')
   })
 })
 

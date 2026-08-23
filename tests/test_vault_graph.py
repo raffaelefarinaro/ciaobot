@@ -125,3 +125,48 @@ def test_vault_graph_survives_a_note_that_cannot_be_stat_ed(client, tmp_path):
     assert resp.status_code == 200
     titles = {n["title"] for n in resp.json()["nodes"]}
     assert "Ghost" not in titles or _node(resp.json(), "Ghost")["mtime"] == 0.0
+
+
+def test_vault_graph_reports_staleness_from_mtime(client, tmp_path):
+    """The map's needs-review list is computed by the same detector the audit
+    and daily curation consume, so all three surfaces agree."""
+    import os
+    import time
+
+    vault = tmp_path / "memory-vault"
+    # Fixture notes are type `note` (default 180-day horizon): push one well
+    # past it while its sibling stays fresh.
+    old = time.time() - 400 * 86400
+    os.utime(vault / "personal" / "B.md", (old, old))
+
+    resp = client.get("/api/vault/graph")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    aged = _node(data, "B")
+    assert aged["stale"] is True
+    assert aged["age_days"] >= 400
+
+    fresh = _node(data, "A")
+    assert fresh["stale"] is False
+
+
+def test_vault_graph_frontmatter_updated_beats_old_mtime(client, tmp_path):
+    """`updated:` is a deliberate re-verification claim, so it wins over an
+    older file mtime (a future date also proves negative ages stay sane)."""
+    import os
+    import time
+
+    vault = tmp_path / "memory-vault"
+    (vault / "personal" / "Verified.md").write_text(
+        "---\ntype: person\nupdated: 2099-01-01\n---\n# Verified\n",
+        encoding="utf-8",
+    )
+    old = time.time() - 400 * 86400
+    os.utime(vault / "personal" / "Verified.md", (old, old))
+
+    resp = client.get("/api/vault/graph")
+    node = _node(resp.json(), "Verified")
+    assert node["stale"] is False
+    assert node["age_days"] <= 0
+    assert node["updated"] == "2099-01-01"

@@ -13,6 +13,13 @@ appended and never edited). The regions are a state surface. Rot is what you get
 when events pile up in them, when a path they cite stops existing, or when a new
 value is appended next to the old one instead of replacing it.
 
+The same state/event rule decides how *age* is read on vault notes: an entity
+note (a person, a project) asserts current state, so going unverified for a
+long time is a candidate for review; a log or journal entry records an event,
+and events never go stale no matter how old they are. Age alone is never a
+defect — it is evidence for the curation routine to judge, which is why these
+findings are informational and do not raise audit status.
+
 Deliberately model-free. A model asked to tally a few hundred entries returns a
 confident number, and a different one tomorrow. The detectors here count; the
 curation routine that consumes them judges. That means they are tuned for
@@ -22,6 +29,7 @@ report, which is worse than a detector that stays quiet.
 
 from __future__ import annotations
 
+import datetime
 import re
 from pathlib import Path
 from typing import Any
@@ -311,4 +319,146 @@ def audit_entries(
         "superseded_state_candidates": superseded,
         "paths_checked": checked,
         "paths_unverifiable": unverifiable,
+    }
+
+
+# ---- Vault-note aging -------------------------------------------------------
+#
+# The bounded regions are read every turn, so their rot is expensive and the
+# detectors above watch them continuously. Vault notes are read on demand, but
+# they rot too: a project note whose status nobody has checked in four months
+# is asserted to whoever finally opens it, and the curation routine cannot
+# review what nothing ever lists.
+
+# Days after which a note's facts count as unverified, by note type. Two
+# overrides over one default because entity types rot at different speeds: an
+# active project's state changes weekly while a person's employer changes
+# yearly. 90 days for people matches the weekly-review template's existing
+# staleness rule, which until now was aspirational.
+STALE_NOTE_THRESHOLDS_DAYS: dict[str, int] = {
+    "project": 30,
+    "person": 90,
+}
+STALE_NOTE_DEFAULT_DAYS = 180
+
+# Event surfaces never age out — a log entry from two years ago is exactly as
+# true as it was the day it was written. ``workspace`` covers the Workspace/
+# queue files (proposals, learnings, skill triage), whose lifecycles are owned
+# by the curation routines; flagging an inbox for being an inbox is noise.
+STALE_NOTE_EXEMPT_TYPES = frozenset({"log", "journal", "workspace"})
+
+_UPDATED_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def note_threshold_days(note_type: str) -> int:
+    """Days of silence after which this note type counts as unverified."""
+    return STALE_NOTE_THRESHOLDS_DAYS.get(note_type, STALE_NOTE_DEFAULT_DAYS)
+
+
+def parse_verified_date(raw: str) -> datetime.date | None:
+    """Parse a frontmatter ``updated:`` value. None unless YYYY-MM-DD."""
+    value = (raw or "").strip()
+    if not _UPDATED_DATE_RE.match(value):
+        return None
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError:
+        # Shape-valid but not a real date (2025-02-30). Treated as absent:
+        # the detector falls back to mtime rather than guessing.
+        return None
+
+
+def note_last_verified(
+    updated: str, mtime: float | None
+) -> tuple[datetime.date | None, str]:
+    """When a note's facts were last verified, and where that came from.
+
+    Prefers frontmatter ``updated:`` — a deliberate claim that someone re-read
+    the note — and falls back to mtime, which only says the file changed.
+    Returns ``(date, source)`` with source ``""`` when neither is usable.
+    """
+    from_date = parse_verified_date(updated)
+    if from_date is not None:
+        return from_date, "frontmatter"
+    if mtime and mtime > 0:
+        return (
+            datetime.datetime.fromtimestamp(mtime, datetime.timezone.utc).date(),
+            "mtime",
+        )
+    return None, ""
+
+
+def find_stale_notes(
+    entries: list[Any],
+    *,
+    vault_root: Path | None = None,
+    path_prefix: Path | None = None,
+    mtimes: dict[str, float] | None = None,
+    today: datetime.date | None = None,
+) -> dict[str, Any]:
+    """Vault notes whose facts have gone unverified past their type's horizon.
+
+    ``entries`` are :class:`ciao.vault_index.Entry` objects (anything with
+    ``path``/``title``/``type``/``updated`` works). Age comes from frontmatter
+    ``updated:`` when present, else file mtime — supplied per rendered path via
+    ``mtimes``, or stat'ed here by stripping ``path_prefix`` off the rendered
+    path and joining onto ``vault_root``.
+
+    Precision-first like every detector in this module: exempt event types,
+    report age and threshold side by side so a reader can disagree with the
+    verdict without losing the evidence, and return checked/exempt counts so
+    an empty list is not mistaken for full coverage.
+    """
+    current = today or datetime.date.today()
+    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
+    findings: list[dict[str, Any]] = []
+    checked = 0
+    exempt = 0
+
+    for entry in entries:
+        note_type = (entry.type or "").strip()
+        if note_type in STALE_NOTE_EXEMPT_TYPES:
+            exempt += 1
+            continue
+        threshold = note_threshold_days(note_type)
+        rendered = str(entry.path)
+        if mtimes is not None:
+            mtime = mtimes.get(rendered, 0.0)
+        elif vault_root is not None:
+            rel = entry.path
+            try:
+                rel = Path(rendered).relative_to(prefix)
+            except ValueError:
+                pass
+            try:
+                mtime = (Path(vault_root) / rel).stat().st_mtime
+            except OSError:
+                mtime = 0.0
+        else:
+            mtime = 0.0
+        verified, source = note_last_verified(entry.updated, mtime)
+        if verified is None:
+            # Unverifiable is not stale: calling it so would be a guess.
+            continue
+        checked += 1
+        age_days = (current - verified).days
+        if age_days < threshold:
+            continue
+        findings.append(
+            {
+                "path": rendered,
+                "title": entry.title,
+                "type": note_type or "note",
+                "age_days": age_days,
+                "threshold_days": threshold,
+                "last_verified": verified.isoformat(),
+                "source": source,
+            }
+        )
+
+    findings.sort(key=lambda f: (-f["age_days"], f["path"]))
+    return {
+        "stale_notes": findings,
+        "notes_checked": checked,
+        "notes_exempt": exempt,
     }
