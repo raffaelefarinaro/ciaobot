@@ -322,6 +322,201 @@ describe('per-chat WS auto-reconnect', () => {
   })
 })
 
+describe('unacknowledged send recovery', () => {
+  // Regression harness for the "page refreshed and removed my message"
+  // bug: a send handed to a WS that dies before the server reads it used
+  // to be lost silently, and the reconnect's history reload wiped the
+  // optimistic bubble.
+
+  function sentMessageFrames(): string[] {
+    return fakeSockets
+      .flatMap(s => (s.send as Mock).mock.calls.map((c: unknown[]) => String(c[0])))
+      .filter(raw => JSON.parse(raw).type === 'message')
+  }
+
+  test('tracks a send until the server echoes it', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unacked'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'hold my place')
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.text).toBe('hold my place')
+
+    // Server proof of receipt: the broker-replayed user_echo.
+    const ws = fakeSockets[fakeSockets.length - 1]
+    ws.onmessage?.({ data: JSON.stringify({ type: 'user_echo', text: 'hold my place' }) })
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeUndefined()
+  })
+
+  test('resends a provably-lost message once after reconnect with empty history', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-resend'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        // Current servers answer with the paginated envelope; an empty one
+        // adopts-wholesale over the optimistic timeline, wiping the bubble
+        // exactly like the production reload does.
+        return Promise.resolve({
+          items: [],
+          total: 0,
+          offset: 0,
+          limit: 50,
+          hasMore: false,
+          nextOffset: null,
+        })
+      }
+      return Promise.resolve([]) // loadSubagents etc.
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'lost in suspension')
+    expect(sentMessageFrames()).toHaveLength(1)
+    expect(store.messages[chatId]?.some(m => m.role === 'user')).toBe(true)
+
+    // The socket dies like a suspended WKWebView: close fires on an opened
+    // socket for the active chat → auto-reconnect → history reload.
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100) // reconnect delay (50ms) + loadMessages
+      await vi.advanceTimersByTimeAsync(1600) // recovery grace window
+
+      // The lost message was re-sent over the reconnected socket exactly once.
+      const frames = sentMessageFrames()
+      expect(frames).toHaveLength(2)
+      expect(JSON.parse(frames[1]).text).toBe('lost in suspension')
+      // The retry is itself still tracked (attempt 1), not reset.
+      expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.attempts).toBe(1)
+      // And the user bubble is back.
+      expect(store.messages[chatId]?.some(m => m.role === 'user' && m.content === 'lost in suspension')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('does not resend when the turn already landed server-side', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-landed'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        // Envelope history that already contains the user turn, stamped with
+        // the server-assigned turn_index like every hydrated row: the server
+        // received the frame even though no echo reached the client.
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'delivered really', timestamp: '2026-08-22T10:00:00Z', turn_index: 3 },
+          ],
+          total: 1,
+          offset: 0,
+          limit: 50,
+          hasMore: false,
+          nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'delivered really')
+    expect(sentMessageFrames()).toHaveLength(1)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // No duplicate turn: only the original frame was ever sent, and the
+    // tracking was cleared by the history row.
+    expect(sentMessageFrames()).toHaveLength(1)
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeUndefined()
+  })
+
+  test('surfaces an error bubble when the one automatic retry also fails', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-twice'
+    store.activeChatId = chatId
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'twice unlucky')
+
+    const emptyEnvelope = () => Promise.resolve({
+      items: [],
+      total: 0,
+      offset: 0,
+      limit: 50,
+      hasMore: false,
+      nextOffset: null,
+    })
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) return emptyEnvelope()
+      return Promise.resolve([])
+    })
+
+    vi.useFakeTimers()
+    try {
+      // First drop and recovery.
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(1700)
+      // The resent frame rides the second socket; kill it too. History is
+      // still empty, so the recovery runs again — but must not loop.
+      const sockets = [...fakeSockets]
+      sockets[sockets.length - 1].close()
+      await vi.advanceTimersByTimeAsync(1700)
+      await vi.advanceTimersByTimeAsync(1700)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentMessageFrames()
+    expect(frames).toHaveLength(2) // original + one retry, nothing more
+    const sys = (store.messages[chatId] || []).filter(
+      m => m.role === 'system' && m.content.includes("didn't reach the engine"),
+    )
+    expect(sys).toHaveLength(1)
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeUndefined()
+  })
+
+  test('a full page reload restores the pending send from localStorage', async () => {
+    // Simulate the crash the user sees: the send was tracked, then the whole
+    // page reloaded before any ack. restoreState() must resurrect the entry
+    // so the next reconnect of that chat recovers it.
+    localStorageData['ciao-unacked-sends'] = JSON.stringify({
+      'chat-after-reload': { text: 'survived the refresh', at: Date.now(), attempts: 0 },
+    })
+    const store = useProjectStore()
+    store.restoreState()
+
+    const chatId = 'chat-after-reload'
+    store.activeChatId = chatId
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentMessageFrames()
+    expect(frames).toHaveLength(1)
+    expect(JSON.parse(frames[0]).text).toBe('survived the refresh')
+  })
+})
+
 describe('deferred message sends', () => {
   test('does not attach a deferred message image to a later send', () => {
     const store = useProjectStore()
@@ -2103,7 +2298,9 @@ describe('latest status sync', () => {
           { chat_id: chatId, project_id: 'p1', title: 'Fresh title', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, last_activity_at: '2026-07-06T10:00:00Z' },
         ])
       }
-      if (path === `/api/chats/${chatId}/messages`) {
+      // Prefix match: loadMessages now requests the paginated envelope
+      // (?limit=50), so exact equality silently misses and falls through.
+      if (path.startsWith(`/api/chats/${chatId}/messages`)) {
         return Promise.resolve([
           { role: 'user', content: 'status?', sent_at: '2026-07-06T09:59:00Z', turn_index: 0 },
           { role: 'assistant', content: 'done', sent_at: '2026-07-06T10:00:00Z' },
@@ -2143,7 +2340,7 @@ describe('latest status sync', () => {
           { chat_id: chatId, project_id: 'p1', title: 'Mid turn', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
       }
-      if (path === `/api/chats/${chatId}/messages`) {
+      if (path.startsWith(`/api/chats/${chatId}/messages`)) {
         // Claude session files already contain progress notes mid-turn.
         return Promise.resolve([
           { role: 'user', content: 'yes make it more robust', sent_at: '2026-07-18T08:00:00Z', turn_index: 0 },
@@ -2442,7 +2639,7 @@ describe('deep-link chat navigation', () => {
     store.streaming['c1'] = true
 
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats/c1/messages') {
+      if (path.startsWith('/api/chats/c1/messages')) {
         return Promise.resolve([
           { role: 'user', content: 'hi', sent_at: '2026-01-01T00:00:00Z' },
           { role: 'assistant', content: 'the answer', sent_at: '2026-01-01T00:00:05Z' },
@@ -2681,7 +2878,7 @@ describe('workspace and chat transitions', () => {
           { chat_id: 'c-client', project_id: 'p-client', title: 'Client chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
       }
-      if (path === '/api/chats/c-client/messages') return Promise.resolve([])
+      if (path.startsWith('/api/chats/c-client/messages')) return Promise.resolve([])
       return Promise.resolve([])
     })
 
@@ -2743,7 +2940,7 @@ describe('workspace and chat transitions', () => {
             { chat_id: 'c1', project_id: 'p1', title: 'Long chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
           ])
         }
-        if (path === '/api/chats/c1/messages') {
+        if (path.startsWith('/api/chats/c1/messages')) {
           seen()
           // Never resolves until we say so: stands in for a slow transcript.
           return new Promise(resolve => { releaseMessages = resolve })
@@ -2822,7 +3019,7 @@ describe('workspace and chat transitions', () => {
     store.activeChatId = 'c-work'
 
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats/c-personal/messages') {
+      if (path.startsWith('/api/chats/c-personal/messages')) {
         return new Promise(() => {}) // a transcript that would block forever
       }
       return Promise.resolve([])
@@ -2850,7 +3047,7 @@ describe('workspace and chat transitions', () => {
     store.activeWorkspace = 'work'
     store.activeChatId = 'c-work'
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats/c-personal-old/messages') {
+      if (path.startsWith('/api/chats/c-personal-old/messages')) {
         return new Promise(() => {})
       }
       return Promise.resolve([])

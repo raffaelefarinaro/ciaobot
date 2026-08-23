@@ -270,11 +270,15 @@ async def ws_chat(websocket: WebSocket) -> None:
                     # Else: the stream raced-finish between check and queue;
                     # fall through to start a new stream below.
 
-                try:
-                    await websocket.send_json({"type": "status", "message": "thinking"})
-                except (WebSocketDisconnect, RuntimeError):
-                    break
-
+                # Start the turn BEFORE touching the socket. The stream runs
+                # in a broker-owned background task and buffers every event
+                # (user_echo included) for replay, so it does not need this
+                # connection to survive. The previous order wrote a
+                # "thinking" status first and dropped the whole message when
+                # that write hit a socket that had just died (WebKit
+                # suspension closes it right after the send frame arrives) —
+                # the turn never started and the client's optimistic bubble
+                # was wiped by the reconnecting history reload.
                 try:
                     pcm.start_stream(chat_id, text, images=images or None)
                 except RestartDrainingError as exc:
@@ -296,6 +300,13 @@ async def ws_chat(websocket: WebSocket) -> None:
                     except (WebSocketDisconnect, RuntimeError):
                         break
                     continue
+                # Best-effort ack. A dead socket here must not drop the turn:
+                # breaking only ends this connection, and the reconnecting
+                # client replays the buffered user_echo from the live stream.
+                try:
+                    await websocket.send_json({"type": "status", "message": "thinking"})
+                except (WebSocketDisconnect, RuntimeError):
+                    break
                 # The attach loop picks the new stream up on its next tick;
                 # the user_echo is buffered so nothing is lost to the gap.
 
