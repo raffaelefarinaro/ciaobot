@@ -177,6 +177,9 @@ async function openChat(action: OperatorAction): Promise<void> {
 }
 
 .housekeeping {
+  width: 100%;
+  max-width: var(--home-max);
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
