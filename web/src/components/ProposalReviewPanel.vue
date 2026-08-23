@@ -227,19 +227,160 @@ function rehomeMode(row: ProposalRow): 'accept' | 'picker' | 'question' {
   return 'question'
 }
 
-function confirmAccept(row: ProposalRow) {
+async function confirmAccept(row: ProposalRow) {
   // A region-kind row with a leak warning must be confirmed before the accept
   // is sent: accepting writes a region visible in every workspace.
   if (row.leak_warning) {
     confirmLeakId.value = row.id
     return
   }
-  void store.act(row.id, 'accept')
+  await acceptWithPeopleFallback(row)
 }
 
-function doAccept(row: ProposalRow, workspace = '') {
+async function doAccept(row: ProposalRow, workspace = '') {
   confirmLeakId.value = ''
-  void store.act(row.id, 'accept', workspace)
+  await acceptWithPeopleFallback(row, workspace)
+}
+
+async function acceptWithPeopleFallback(row: ProposalRow, workspace = '') {
+  // Direct accept is best-effort by design – create-only for people
+  // (`ciao/memory_proposals.py:348` + `ciao/web/routes_api.py:7559`),
+  // fold-guard for projects (`ciao/web/routes_api.py:7602`), cap/region
+  // for memory (`ciao/web/routes_api.py:7518`). When it refuses, falling
+  // back to a chat that merges keeps the prompt self-contained and nothing
+  // breaks – the row stays queued until the merge lands.
+  const { api } = await import('../lib/api')
+  store.setBusy(row.id, true)
+  try {
+    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+    await api.post(`/api/proposals/${row.id}/accept${query}`)
+    await store.fetch()
+    return
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    const isFallbackCase =
+      row.kind === 'people' && /already exists/i.test(msg) ||
+      row.kind === 'project' ||
+      row.kind === 'memory' || row.kind === 'profile' || row.kind === 'user' ||
+      row.kind === 'learnings'
+    if (isFallbackCase) {
+      await mergeViaChat(row, msg)
+      return
+    }
+    store.error = msg
+    return
+  } finally {
+    store.setBusy(row.id, false)
+  }
+}
+
+async function mergeViaChat(row: ProposalRow, errorMsg: string) {
+  // Reuse the people-specific helper for its title, otherwise generic.
+  if (row.kind === 'people') return mergePeopleViaChat(row)
+  if (row.kind === 'project') return mergeProjectViaChat(row, errorMsg)
+  if (row.kind === 'memory' || row.kind === 'profile' || row.kind === 'user') return mergeMemoryViaChat(row, errorMsg)
+  if (row.kind === 'learnings') return mergeLearningsViaChat(row, errorMsg)
+  return mergePeopleViaChat(row)
+}
+
+async function mergePeopleViaChat(row: ProposalRow) {
+  if (chatBusy.value) return
+  chatBusy.value = true
+  try {
+    const chat = await openWorkspaceChat(row.workspace, `Merge ${row.target || 'person'} fact`)
+    if (!chat) return
+    projectStore.sendMessage(chat.chat_id, peopleMergePrompt(row))
+    const { router } = await import('../router')
+    await router.push(`/chat/${chat.chat_id}`)
+  } finally {
+    chatBusy.value = false
+  }
+}
+
+async function mergeProjectViaChat(row: ProposalRow, errorMsg: string) {
+  if (chatBusy.value) return
+  chatBusy.value = true
+  try {
+    const chat = await openWorkspaceChat(row.workspace, `Merge project fact`)
+    if (!chat) return
+    projectStore.sendMessage(chat.chat_id, projectMergePrompt(row, errorMsg))
+    const { router } = await import('../router')
+    await router.push(`/chat/${chat.chat_id}`)
+  } finally {
+    chatBusy.value = false
+  }
+}
+
+async function mergeMemoryViaChat(row: ProposalRow, errorMsg: string) {
+  if (chatBusy.value) return
+  chatBusy.value = true
+  try {
+    const chat = await openWorkspaceChat(row.workspace, `Merge memory fact`)
+    if (!chat) return
+    projectStore.sendMessage(chat.chat_id, memoryMergePrompt(row, errorMsg))
+    const { router } = await import('../router')
+    await router.push(`/chat/${chat.chat_id}`)
+  } finally {
+    chatBusy.value = false
+  }
+}
+
+async function mergeLearningsViaChat(row: ProposalRow, errorMsg: string) {
+  if (chatBusy.value) return
+  chatBusy.value = true
+  try {
+    const chat = await openWorkspaceChat(row.workspace, `Merge learning`)
+    if (!chat) return
+    projectStore.sendMessage(chat.chat_id, learningsMergePrompt(row, errorMsg))
+    const { router } = await import('../router')
+    await router.push(`/chat/${chat.chat_id}`)
+  } finally {
+    chatBusy.value = false
+  }
+}
+
+function peopleMergePrompt(row: ProposalRow): string {
+  const target = row.target || '?'
+  const where = `queued in the ${row.workspace} workspace`
+  return (
+    `A \`[people ${target}]\` proposal is queued (${where}) but \`People/${target}.md\` already exists, so a direct accept correctly refused to overwrite it.\n\n` +
+    `Fact to merge: ${row.text}\n\n` +
+    `Read \`People/${target}.md\` in the ${row.workspace} vault, merge this fact into it without duplicating anything already there (keep \`tags: [person]\`, add a sentence under the heading or appropriate section), and write it back.\n\n` +
+    `After the note is updated, dismiss the queued proposal that contains this exact text (remove its bullet from \`Workspace/Memory-Proposals.md\` or run \`ciao memory-proposal-dismiss "<substring>"\`) so it disappears from Review. ` +
+    `If the fact is already present verbatim, just dismiss the proposal. Leave other proposals untouched. Nothing is broken – this is the expected merge path for existing person notes.`
+  )
+}
+
+function projectMergePrompt(row: ProposalRow, errorMsg: string): string {
+  const target = row.target || 'the project doc'
+  const where = `queued in the ${row.workspace} workspace`
+  return (
+    `A \`[project ${target}]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\n` +
+    `Fact to merge: ${row.text}\n\n` +
+    `Read \`${target}\` (vault-relative, in the ${row.workspace} workspace), merge this fact into the appropriate section without duplicating existing content, and write it back. Keep frontmatter and structure intact.\n\n` +
+    `After the doc is updated, dismiss the queued proposal that contains this exact text (remove its bullet from \`Workspace/Memory-Proposals.md\`). If the fact is already covered, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected merge path when the fold guards refuse.`
+  )
+}
+
+function memoryMergePrompt(row: ProposalRow, errorMsg: string): string {
+  const region = row.region || row.kind
+  const where = `queued in the ${row.workspace} workspace`
+  return (
+    `A \`[${row.kind}]\` proposal is queued (${where}) for region \`${region}\` but direct accept refused: ${errorMsg}\n\n` +
+    `Fact to merge: ${row.text}\n\n` +
+    `Read \`${row.workspace}/CLAUDE.md\` bounded region \`${region}\`, merge this fact there without duplication and within the char limit – curate/consolidate nearby bullets if needed to make room, never exceed the cap.\n\n` +
+    `After the region is updated, dismiss the queued proposal that contains this exact text. If the fact is already present verbatim, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected path when the region is over cap or needs curation.`
+  )
+}
+
+function learningsMergePrompt(row: ProposalRow, errorMsg: string): string {
+  const where = `queued in the ${row.workspace} workspace`
+  return (
+    `A \`[learnings]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\n` +
+    `Fact to merge: ${row.text}\n\n` +
+    `Read \`Workspace/Learnings.md\` in the ${row.workspace} vault, append this fact under \`## Active\` without duplication, and write it back.\n\n` +
+    `After the file is updated, dismiss the queued proposal that contains this exact text. If the fact is already present, just dismiss. Leave other proposals untouched.`
+  )
 }
 
 /** The workspace a justified re-home row would move into. */
@@ -524,7 +665,7 @@ onMounted(() => { void store.fetch() })
           v-for="row in group.rows"
           :key="row.id"
           class="pr-row"
-          :class="{ 'pr-row--leak': row.leak_warning }"
+          :class="{ 'pr-row--leak': row.leak_warning, 'pr-row--busy': store.isBusy(row.id) }"
         >
           <input
             class="pr-row-check"
@@ -562,7 +703,7 @@ onMounted(() => { void store.fetch() })
           <!-- Leak confirm replaces the actions until answered. -->
           <div v-if="confirmLeakId === row.id" class="pr-actions pr-actions--confirm">
             <span class="pr-confirm-text">Writes into a guide every workspace loads. Sure?</span>
-            <button type="button" class="btn-small btn-primary" :disabled="store.busy" @click="doAccept(row)">confirm</button>
+            <button type="button" class="btn-small btn-primary" :disabled="store.isBusy(row.id)" @click="doAccept(row)">{{ store.isBusy(row.id) ? 'working…' : 'confirm' }}</button>
             <button type="button" class="btn-small btn-chip" @click="cancelLeakConfirm">cancel</button>
           </div>
 
@@ -577,10 +718,10 @@ onMounted(() => { void store.fetch() })
               :key="c"
               type="button"
               class="btn-small btn-primary"
-              :disabled="store.busy"
+              :disabled="store.isBusy(row.id)"
               @click="doAccept(row, c)"
-            >{{ c }}</button>
-            <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="doDismiss(row)">dismiss</button>
+            >{{ store.isBusy(row.id) ? 'working…' : c }}</button>
+            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">dismiss</button>
             <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
 
@@ -595,7 +736,7 @@ onMounted(() => { void store.fetch() })
               :disabled="chatBusy"
               @click="implementSkill(row)"
             >implement</button>
-            <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="doDismiss(row)">dismiss</button>
+            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'dismiss' }}</button>
             <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
 
@@ -608,10 +749,10 @@ onMounted(() => { void store.fetch() })
               v-if="canAccept(row)"
               type="button"
               class="btn-small btn-primary"
-              :disabled="store.busy"
+              :disabled="store.isBusy(row.id)"
               @click="confirmAccept(row)"
-            >{{ isRehome(row) ? `move to ${rehomeTarget(row)}` : 'accept' }}</button>
-            <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="doDismiss(row)">dismiss</button>
+            >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `move to ${rehomeTarget(row)}` : 'accept') }}</button>
+            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'dismiss' }}</button>
             <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
         </li>
@@ -850,6 +991,16 @@ onMounted(() => { void store.fetch() })
 
 .pr-row--leak {
   border-color: var(--warning);
+}
+
+.pr-row--busy {
+  opacity: 0.72;
+  pointer-events: none;
+}
+
+.pr-row--busy .pr-row-top,
+.pr-row--busy .pr-row-sub {
+  opacity: 0.6;
 }
 
 .pr-row-check {

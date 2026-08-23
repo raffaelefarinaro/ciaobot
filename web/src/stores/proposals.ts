@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { api } from '../lib/api'
 import type {
   ProposalsResponse,
@@ -18,8 +18,29 @@ import type {
 export const useProposalsStore = defineStore('proposals', () => {
   const rows = ref<ProposalRow[]>([])
   const loading = ref(false)
-  const busy = ref(false)
+  const busyIds = ref<Set<string>>(new Set())
+  const busy = computed(() => busyIds.value.size > 0)
   const error = ref('')
+
+  function isBusy(id: string): boolean {
+    return busyIds.value.has(id)
+  }
+
+  function setBusy(id: string, on: boolean) {
+    const next = new Set(busyIds.value)
+    if (on) next.add(id)
+    else next.delete(id)
+    busyIds.value = next
+  }
+
+  function setBusyMany(ids: string[], on: boolean) {
+    const next = new Set(busyIds.value)
+    for (const id of ids) {
+      if (on) next.add(id)
+      else next.delete(id)
+    }
+    busyIds.value = next
+  }
 
   // Review-view filter and selection state. It lives here, not in the panel,
   // because the sidebar owns the filter controls the way it does on the memory
@@ -88,24 +109,27 @@ export const useProposalsStore = defineStore('proposals', () => {
    * answer, and the picker used to throw the answer away: every candidate button
    * called accept with no destination, so the server had nothing to move into.
    */
-  async function act(id: string, action: 'accept' | 'dismiss', workspace = '') {
-    busy.value = true
+  async function act(id: string, action: 'accept' | 'dismiss', workspace = ''): Promise<{ ok: boolean; error?: string }> {
+    setBusy(id, true)
     error.value = ''
     try {
       const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
       await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`)
       await fetch()
+      return { ok: true }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Action failed'
+      const msg = e instanceof Error ? e.message : 'Action failed'
+      error.value = msg
+      return { ok: false, error: msg }
     } finally {
-      busy.value = false
+      setBusy(id, false)
     }
   }
 
   /** `workspace` names the destination for re-home rows in the selection. */
   async function batch(ids: string[], action: 'accept' | 'dismiss', workspace = '') {
     if (!ids.length) return
-    busy.value = true
+    setBusyMany(ids, true)
     error.value = ''
     try {
       await api.post<ProposalBatchResponse>('/api/proposals/batch', {
@@ -115,12 +139,13 @@ export const useProposalsStore = defineStore('proposals', () => {
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Batch action failed'
     } finally {
-      busy.value = false
+      setBusyMany(ids, false)
     }
   }
 
   async function dismissOlderThan(date: string) {
-    busy.value = true
+    const key = '__dismissOlderThan__'
+    setBusy(key, true)
     error.value = ''
     try {
       await api.post<ProposalDismissOlderResponse>(
@@ -130,12 +155,12 @@ export const useProposalsStore = defineStore('proposals', () => {
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Dismiss failed'
     } finally {
-      busy.value = false
+      setBusy(key, false)
     }
   }
 
   return {
-    rows, loading, busy, error, fetch, act, batch, dismissOlderThan,
+    rows, loading, busy, busyIds, isBusy, setBusy, setBusyMany, error, fetch, act, batch, dismissOlderThan,
     kindFilter, search, selected,
     scopedRows, visibleRows, kindCounts, resetFilters,
   }

@@ -479,7 +479,7 @@ onMounted(() => {
   width: 100%;
 }
 .native-session-warning {
-  color: var(--amber, #b45309);
+  color: var(--warning);
 }
 .device-card-actions {
   display: flex;
