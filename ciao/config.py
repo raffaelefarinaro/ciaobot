@@ -519,9 +519,9 @@ class CiaoConfig:
     # Empty string defaults to the script's built-in panel.
     critique_models: str = ""
     # Advisory caps for the ``ciao:memory`` / ``ciao:profile`` regions in
-    # the workspace CLAUDE.md. Injected as a frozen snapshot into Claude and
-    # Codex system prompts at session start; edited with Edit on the guide.
-    # See ``ciao/memory_injector.py`` and ``ciao/memory_tool.py``.
+    # the workspace CLAUDE.md. Loaded natively by each provider's guide
+    # loader at session start; edited with Edit on the guide.
+    # See ``ciao/memory_tool.py``.
     memory_char_limit: int = 2200
     user_char_limit: int = 1375
     # Ciaobot's managed agent control plane. MCP is the only control surface;

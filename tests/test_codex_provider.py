@@ -100,7 +100,14 @@ def test_codex_entity_context_uses_the_registry_selected_legacy_owner(
     assert "[Alba](./People/Alba.md)" in visible
 
 
-def test_codex_injects_memory_when_workspace_guides_diverge(tmp_path: Path) -> None:
+def test_codex_never_renders_regions_into_the_prompt(tmp_path: Path) -> None:
+    """Bounded memory reaches Codex only through its native AGENTS.md load.
+
+    The injector once re-rendered the CLAUDE.md regions when AGENTS.md was a
+    separate file. That fallback duplicated every entry on installs whose
+    guides diverged, and the symlinked layout it optimized for made it dead
+    code everywhere else, so it was removed: core instructions only, always.
+    """
     from ciao.memory_tool import ensure_regions, write_region
 
     guide = tmp_path / "CLAUDE.md"
@@ -114,7 +121,9 @@ def test_codex_injects_memory_when_workspace_guides_diverge(tmp_path: Path) -> N
         AgentRequest(prompt="test", model="gpt-test", mode="normal", provider="codex")
     )
 
-    assert "remember this workspace fact" in instructions
+    assert "remember this workspace fact" not in instructions
+    # The Ciaobot core block is still appended.
+    assert "Ciaobot core" in instructions
 
 
 def test_codex_does_not_duplicate_memory_for_linked_workspace_guides(

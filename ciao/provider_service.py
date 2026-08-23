@@ -79,11 +79,15 @@ class ProviderService:
         # Native provider guide loaders read CLAUDE.md/AGENTS.md at session
         # start. Remove only entries whose explicit expiry has passed before
         # that happens; memory remains in the guide and is never duplicated
-        # into a provider-specific prompt block.
+        # into a provider-specific prompt block. The guide that loads for this
+        # chat is the one at its agent root, so that is the one pruned.
         try:
-            result = prune_expired_entries(
-                Path(getattr(self._config, "workspace_root", ".")) / "CLAUDE.md"
+            guide_root = (
+                self._agent_root
+                if self._agent_root is not None
+                else Path(getattr(self._config, "workspace_root", "."))
             )
+            result = prune_expired_entries(guide_root / "CLAUDE.md")
             memory_changed = bool(
                 result.get("removed", {}).get("memory", 0)
                 or result.get("removed", {}).get("profile", 0)

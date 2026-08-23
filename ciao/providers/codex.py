@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ciao.context.entity_tagger import find_entities, format_entities
-from ciao.memory_injector import build_memory_block, system_prompt_payload
+from ciao.memory_injector import system_prompt_payload
 from ciao.model_tiers import canonical_tier
 from ciao.models import (
     AgentRequest,
@@ -760,26 +760,12 @@ class CodexProvider(BaseSDKProvider):
     def _memory_instructions(self, request: AgentRequest | None = None) -> str:
         if self._developer_instructions is not None:
             return self._developer_instructions
-        claude_guide = self.workspace_root / "CLAUDE.md"
-        codex_guide = self.workspace_root / "AGENTS.md"
-        memory = ""
-        try:
-            guides_share_file = (
-                claude_guide.is_file()
-                and codex_guide.is_file()
-                and claude_guide.resolve() == codex_guide.resolve()
-            )
-        except (OSError, RuntimeError):
-            guides_share_file = False
-        if not guides_share_file:
-            cfg = self.config
-            memory = build_memory_block(
-                guide_path=claude_guide,
-                memory_char_limit=int(getattr(cfg, "memory_char_limit", 2200)),
-                user_char_limit=int(getattr(cfg, "user_char_limit", 1375)),
-            )
+        # Core instructions only. Codex reads AGENTS.md natively, and on a
+        # re-rooted install AGENTS.md is a symlink to CLAUDE.md, so the
+        # bounded memory regions already load with the guide; rendering them
+        # here duplicated every entry into the system prompt.
         payload = system_prompt_payload(
-            memory,
+            "",
             control_surface=request.control_surface if request is not None else "legacy",
         ) or {}
         return str(payload.get("append") or "")
