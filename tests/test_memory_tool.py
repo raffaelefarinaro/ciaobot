@@ -240,3 +240,61 @@ def test_no_cap_means_no_over_cap_reporting(tmp_path: Path) -> None:
 
     assert "over_cap" not in result
     assert "char_limit" not in result
+
+
+def test_entry_expires_after_its_stated_date() -> None:
+    """An entry is valid through its stated date, expired the day after."""
+    import datetime
+
+    entry = "temporary note [expires: 2026-07-26]"
+    assert mt.is_entry_expired(entry, datetime.date(2026, 7, 26)) is False
+    assert mt.is_entry_expired(entry, datetime.date(2026, 7, 27)) is True
+
+
+def test_expiry_filtering_keeps_storage_intact(tmp_path: Path) -> None:
+    """Expired entries drop out of the active list but stay in storage.
+
+    The injector once rendered this as an '[active N chars; stored M/limit]'
+    header; that renderer is gone, but pruning and audit still need both
+    numbers, so read_region must keep expired text in the stored list.
+    """
+    import datetime
+
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+    mt.write_region(
+        guide,
+        "memory",
+        ["durable fact", "temporary note [expires: 2026-01-01]"],
+    )
+
+    stored, _diags = mt.read_region(guide, "memory")
+    active = [
+        e for e in stored if not mt.is_entry_expired(e, datetime.date(2026, 7, 26))
+    ]
+
+    assert active == ["durable fact"]
+    assert len(stored) == 2
+    assert mt.total_chars(stored) > mt.total_chars(active)
+
+
+def test_noncanonical_expiration_tags_do_not_crash_or_drop(tmp_path: Path) -> None:
+    """Malformed or doubled [expires: ...] tags keep the entry, unexpired.
+
+    A wrong date format must not silently retire a fact someone meant to
+    keep: only a parseable date past `today` expires an entry.
+    """
+    import datetime
+
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+    entries = [
+        "compact [expires: 20260720]",
+        "multiple [expires: 2026-07-20] [expires: someday]",
+    ]
+    mt.write_region(guide, "memory", entries)
+
+    stored, _diags = mt.read_region(guide, "memory")
+
+    assert stored == entries
+    assert all(
+        not mt.is_entry_expired(e, datetime.date(2026, 7, 26)) for e in stored
+    )
