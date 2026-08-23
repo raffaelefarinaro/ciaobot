@@ -31,6 +31,10 @@
             <span class="home-lane-summary" aria-live="polite">
               <template v-if="laneNeedsCount(lane)"><b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you</template>
               <template v-if="laneSummaryRest(lane)"><span v-if="laneNeedsCount(lane)"> · </span>{{ laneSummaryRest(lane) }}</template>
+              <!-- Archiving: the chat panel already closed, but the server hasn't
+                   confirmed the archive yet. Shown as the first muted fragment so
+                   the user sees where the chat went. -->
+              <span v-if="laneArchivingCount(lane)" class="home-lane-archiving"> · <span class="home-lane-archiving-dot" aria-hidden="true" />{{ laneArchivingLabel(lane) }}</span>
               <!-- Third fragment, in the muted register: background tidy-up
                    never needs the user, so it must not read as a demand. -->
               <span v-if="laneTidyCount(lane)" class="home-lane-tidy"> · <span class="home-lane-tidy-dot" aria-hidden="true" />{{ laneTidyLabel(lane) }}</span>
@@ -148,6 +152,31 @@
 
           </template>
 
+          <!-- Chats whose archive POST is in flight. The panel already closed
+               optimistically; this queue is where the chat lives while the engine
+               finishes the transcript write and delegate cascade. -->
+          <div v-if="lane.archivingChats.length" class="home-tier home-tier--archiving">
+            <div class="home-tier-label"><span>archiving</span></div>
+            <div
+              v-for="chat in lane.archivingChats"
+              :key="`archiving-${chat.chat_id}`"
+              class="home-chat-item home-chat-item--archiving"
+              :data-workspace-color="colorOf(chat)"
+              title="Archiving…"
+            >
+              <span class="home-chat-heading">
+                <span class="home-chat-title">{{ chat.title }}</span>
+              </span>
+              <span class="home-chat-meta">
+                <span class="home-chat-tidy-note">
+                  <span class="home-chat-archiving-dot" aria-hidden="true" />
+                  archiving…
+                </span>
+                <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
+              </span>
+            </div>
+          </div>
+
           <!-- Archived chats the workspace is still tidying up. They are not
                part of the priority tiers (jump back in means active chats), but
                the lane header's "N tidying up" count should have rows behind
@@ -235,6 +264,7 @@ const fileViewer = useFileViewerStore()
 const hasMultipleWorkspaces = computed(() => store.workspaceOptions.length > 1)
 const hasHomeActivity = computed(() => (
   store.activeChatsAll.length > 0
+  || store.archivingChatsList().length > 0
   || store.postprocessingChats().length > 0
   || store.insightsFailedChats().length > 0
 ))
@@ -277,6 +307,7 @@ interface HomeLane {
   newAction: NewWorkspaceChatAction | null
   projects: ProjectInfo[]
   tiers: HomeTiers
+  archivingChats: ChatInfo[]
   tidyChats: ChatInfo[]
   failedChats: ChatInfo[]
 }
@@ -299,6 +330,7 @@ function groupChatsByWorkspace(sortedChats: ChatInfo[]): Map<string, ChatInfo[]>
 
 const tidyChatsByWorkspace = computed(() => groupChatsByWorkspace(store.postprocessingChats()))
 const failedChatsByWorkspace = computed(() => groupChatsByWorkspace(store.insightsFailedChats()))
+const archivingChatsByWorkspace = computed(() => groupChatsByWorkspace(store.archivingChatsList()))
 
 // Home is scoped to the selected workspace: switching workspaces swaps this
 // lane's content instead of revealing another column. Chats belonging to other
@@ -383,6 +415,7 @@ function makeLane(
       chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId) || store.chatHasActiveDelegates(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
+    archivingChats: (workspace && workspace !== 'unknown' && archivingChatsByWorkspace.value.get(workspace)) || [],
     tidyChats: (workspace && workspace !== 'unknown' && tidyChatsByWorkspace.value.get(workspace)) || [],
     failedChats: (workspace && workspace !== 'unknown' && failedChatsByWorkspace.value.get(workspace)) || [],
   }
@@ -447,6 +480,15 @@ function laneTidyCount(lane: HomeLane): number {
 
 function laneTidyLabel(lane: HomeLane): string {
   return tidyingSummary(laneTidyCount(lane))
+}
+
+function laneArchivingCount(lane: HomeLane): number {
+  return lane.archivingChats.length
+}
+
+function laneArchivingLabel(lane: HomeLane): string {
+  const n = laneArchivingCount(lane)
+  return n === 1 ? '1 archiving' : `${n} archiving`
 }
 
 /** Insights-failed count for a lane's workspace, for the header fragment. */
@@ -821,6 +863,28 @@ defineExpose({ onArrow })
   animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
 }
 
+/* Archiving: same muted register as tidy-up, but with a spinner rather than
+   a breathing dot — it is a short in-flight request, not background work. */
+.home-lane-archiving {
+  color: var(--fg3);
+}
+
+.home-lane-archiving-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--fg3) 45%, transparent);
+  border-top-color: var(--fg3);
+  vertical-align: middle;
+  animation: home-lane-archiving-spin 0.9s linear infinite;
+}
+
+@keyframes home-lane-archiving-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* A failed extraction is a recovery case, not a quiet background fact, so it
    reads in the warn register — the one tidy signal that can act. */
 .home-lane-failed {
@@ -838,7 +902,9 @@ defineExpose({ onArrow })
 
 @media (prefers-reduced-motion: reduce) {
   .home-lane-tidy-dot,
-  .home-chat-tidy-dot { animation: none; opacity: 0.75; }
+  .home-chat-tidy-dot,
+  .home-lane-archiving-dot,
+  .home-chat-archiving-dot { animation: none; opacity: 0.75; }
 }
 
 .home-lane-new {
@@ -1074,6 +1140,7 @@ defineExpose({ onArrow })
 .home-chat-item--unread,
 .home-chat-item--quiet,
 .home-chat-item--older,
+.home-chat-item--archiving,
 .home-chat-item--tidying,
 .home-chat-item--failed {
   flex-direction: row;
@@ -1091,6 +1158,7 @@ defineExpose({ onArrow })
 .home-chat-item--unread:hover,
 .home-chat-item--quiet:hover,
 .home-chat-item--older:hover,
+.home-chat-item--archiving:hover,
 .home-chat-item--tidying:hover,
 .home-chat-item--failed:hover {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
@@ -1109,6 +1177,7 @@ defineExpose({ onArrow })
 .home-chat-item--unread .home-chat-heading,
 .home-chat-item--quiet .home-chat-heading,
 .home-chat-item--older .home-chat-heading,
+.home-chat-item--archiving .home-chat-heading,
 .home-chat-item--tidying .home-chat-heading,
 .home-chat-item--failed .home-chat-heading {
   flex: 1;
@@ -1136,6 +1205,7 @@ defineExpose({ onArrow })
 .home-chat-item--unread .home-chat-title,
 .home-chat-item--quiet .home-chat-title,
 .home-chat-item--older .home-chat-title,
+.home-chat-item--archiving .home-chat-title,
 .home-chat-item--tidying .home-chat-title,
 .home-chat-item--failed .home-chat-title {
   display: block;
@@ -1211,6 +1281,18 @@ defineExpose({ onArrow })
   background: var(--fg3);
   vertical-align: middle;
   animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
+}
+
+.home-chat-archiving-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--fg3) 45%, transparent);
+  border-top-color: var(--fg3);
+  vertical-align: middle;
+  animation: home-lane-archiving-spin 0.9s linear infinite;
 }
 
 /* A failed extraction is a recovery case, so its note carries the warn colour

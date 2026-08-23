@@ -226,6 +226,13 @@ export const useProjectStore = defineStore('projects', () => {
   // Per-project "new chat is being created" flag so UI can disable buttons
   // and prevent double-clicks while the POST is in flight.
   const creatingChatProjectIds = ref<Record<string, boolean>>({})
+  // Optimistic archiving: chats whose archive POST is in flight. They are
+  // removed from active lists immediately and shown in the home "archiving…"
+  // queue so the chat panel can close without waiting for the server's disk
+  // work (transcript write + delegate cascade). The map is keyed by chat_id
+  // and cleared on success (archived stays true, tidying takes over) or on
+  // failure (archived is rolled back, row reappears).
+  const archivingChats = ref<Record<string, boolean>>({})
   // Not reactive UI state, just an in-flight guard: `creatingChatProjectIds`
   // is a display flag consumers can ignore (a second click landing before
   // Vue re-renders, a duplicated keyboard handler), so a second createChat()
@@ -463,6 +470,111 @@ export const useProjectStore = defineStore('projects', () => {
   let lastEventsFrameAt = 0
   const lastChatFrameAt: Record<string, number> = {}
   const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
+
+  // ── Unacknowledged sends ────────────────────────────────────────────
+  // A send is handed to the per-chat WebSocket fire-and-forget: WS frames
+  // have no delivery guarantee, and WKWebView suspension can close the
+  // socket right after the send frame is written (the server log shows the
+  // message frame arriving and the CLOSE frame in the same instant). The
+  // server never started a turn, the optimistic bubble is the only copy,
+  // and the reconnect's authoritative history reload wipes it — the
+  // "page refreshed and removed my message" report. Track the latest send
+  // per chat until the server proves receipt (a user_echo replay, or the
+  // turn visible in /messages) and re-send it once on reconnect if it
+  // never landed. Only the most recent send is tracked: an earlier frame
+  // in the same burst to a dying socket is rare next to the common
+  // single-message case, and the queue path already persists server-side
+  // when its frame arrives.
+  interface UnackedSend { text: string; images?: string[]; at: number; attempts: number }
+  const unackedSends: Record<string, UnackedSend> = {}
+  const unackedRecoveryTimers: Record<string, number> = {}
+  // Grace before declaring a send lost: a turn that DID start replays its
+  // buffered user_echo immediately after reconnect, and /messages can lag
+  // the provider session write by a moment.
+  const UNACKED_RECOVERY_DELAY_MS = 1500
+
+  function persistUnackedSends() {
+    try {
+      localStorage.setItem('ciao-unacked-sends', JSON.stringify(unackedSends))
+    } catch { /* ignore */ }
+  }
+
+  // Server proof of receipt: the echoed turn (user_echo) or the hydrated
+  // history row. Whichever lands first clears the tracking.
+  function acknowledgeSend(chatId: string, text: string) {
+    const unacked = unackedSends[chatId]
+    if (unacked && unacked.text.trim() === text.trim()) {
+      delete unackedSends[chatId]
+      persistUnackedSends()
+    }
+  }
+
+  function reconcileUnackedSend(chatId: string) {
+    const unacked = unackedSends[chatId]
+    if (!unacked) return
+    const rows = messages.value[chatId] || []
+    // Only a SERVER-stamped row proves delivery: hydrated user bubbles carry
+    // the server-assigned turn_index, while our own optimistic bubble (which
+    // can survive a history reload against an older server, or simply look
+    // identical to an older repeated message) never has one.
+    if (rows.some(m => m.role === 'user' && m.turn_index != null && (m.content || '').trim() === unacked.text.trim())) {
+      delete unackedSends[chatId]
+      persistUnackedSends()
+    }
+  }
+
+  // Called after a reconnect's history reload. Waits out the grace window,
+  // then either recovers the send or gives up visibly — never silently.
+  function scheduleUnackedSendRecovery(chatId: string) {
+    if (!unackedSends[chatId]) return
+    if (unackedRecoveryTimers[chatId]) window.clearTimeout(unackedRecoveryTimers[chatId])
+    unackedRecoveryTimers[chatId] = window.setTimeout(() => {
+      delete unackedRecoveryTimers[chatId]
+      recoverUnackedSend(chatId)
+    }, UNACKED_RECOVERY_DELAY_MS)
+  }
+
+  function recoverUnackedSend(chatId: string) {
+    reconcileUnackedSend(chatId)
+    const unacked = unackedSends[chatId]
+    if (!unacked) return
+    // A running turn owns the answer: either the original frame landed and
+    // the echo/history checks raced it, or a newer send already started.
+    // Never duplicate into a server-reported active stream. The client-local
+    // optimistic `streaming` flag cannot veto here — after a lost message no
+    // result ever arrives to clear it, so it would block recovery forever.
+    if (projectStreaming.value[chatId]) return
+    if (unacked.attempts >= 1) {
+      // One silent recovery is enough; surface the failure rather than loop.
+      delete unackedSends[chatId]
+      persistUnackedSends()
+      const errorMsgs = messages.value[chatId] || []
+      errorMsgs.push({
+        role: 'system',
+        content: "Error: a message didn't reach the engine and its automatic retry failed. Please send it again.",
+        timestamp: new Date().toISOString(),
+      })
+      messages.value[chatId] = errorMsgs
+      return
+    }
+    unacked.attempts += 1
+    persistUnackedSends()
+    // The stale optimistic streaming state belongs to a turn that never
+    // started; leaving it set would route this resend into the local queue
+    // (no server stream will ever drain it) instead of starting a real turn.
+    clearStreamingState(chatId)
+    // The optimistic bubble from the lost send is gone with the history
+    // reload, so this re-renders it fresh; a successful delivery clears the
+    // tracking via the echoed user_echo. Empty comment buckets: the original
+    // send already consumed them via consumePreparedAttachments.
+    sendMessage(chatId, unacked.text, {
+      composed: unacked.text,
+      imageRefs: unacked.images,
+      fileComments: [],
+      chatComments: [],
+    })
+  }
+
   // Per-chat WS auto-reconnect bookkeeping. A dropped per-chat socket used to
   // recover only via the 15s syncLatest poll (up to 15s of stale messages /
   // missed turn result). We now reconnect the *active* chat immediately on an
@@ -750,6 +862,29 @@ export const useProjectStore = defineStore('projects', () => {
   function projectPostprocessingCount(projectId: string): number {
     return chats.value.filter(
       c => c.project_id === projectId && isPostprocessing(c.postprocess),
+    ).length
+  }
+
+  // ── Archiving (optimistic) ────────────────────────────────────────────
+  // Chats whose archive POST is in flight. They are already marked
+  // `archived:true` optimistically (so they vanish from active lists / the
+  // sidebar) but are listed in the home "archiving…" queue until the server
+  // confirms. A failed POST rolls `archived` back and clears the entry.
+  function isArchiving(chatId: string): boolean {
+    return Boolean(archivingChats.value[chatId])
+  }
+
+  function archivingChatsList(): ChatInfo[] {
+    return chatsMatching(c => Boolean(archivingChats.value[c.chat_id]))
+  }
+
+  function workspaceArchivingCount(ws: WorkspaceName): number {
+    return workspaceCountMatching(ws, c => Boolean(archivingChats.value[c.chat_id]))
+  }
+
+  function projectArchivingCount(projectId: string): number {
+    return chats.value.filter(
+      c => c.project_id === projectId && Boolean(archivingChats.value[c.chat_id]),
     ).length
   }
 
@@ -1175,6 +1310,28 @@ export const useProjectStore = defineStore('projects', () => {
       if (pcc) pendingChatCommentsByChat.value = normalizePendingBuckets<PendingChatComment>(JSON.parse(pcc), activeChatId.value)
       const ssa = localStorage.getItem('ciao-stream-started-at')
       if (ssa) streamStartedAt.value = JSON.parse(ssa)
+      const ua = localStorage.getItem('ciao-unacked-sends')
+      if (ua) {
+        // Sends that outlived a full page reload (the suspension → refresh
+        // path). Recovered when the chat's socket reconnects and history
+        // reloads; dropped if the turn meanwhile landed server-side.
+        try {
+          const parsed: unknown = JSON.parse(ua)
+          if (parsed && typeof parsed === 'object') {
+            for (const [cid, entry] of Object.entries(parsed as Record<string, unknown>)) {
+              const row = entry as Partial<UnackedSend> | null
+              if (row && typeof row.text === 'string' && row.text.trim()) {
+                unackedSends[cid] = {
+                  text: row.text,
+                  images: Array.isArray(row.images) ? row.images.map(String) : undefined,
+                  at: typeof row.at === 'number' ? row.at : Date.now(),
+                  attempts: typeof row.attempts === 'number' ? row.attempts : 0,
+                }
+              }
+            }
+          }
+        } catch { /* malformed cache; drop it */ }
+      }
     } catch { /* ignore */ }
   }
 
@@ -2093,6 +2250,9 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function archiveChat(chatId: string) {
+    // Guard against double-clicks: the button is already disabled while the
+    // optimistic state is live, but event handlers can still double-fire.
+    if (archivingChats.value[chatId]) return
     // The server cascades archival to delegate subchats. Note this filter has
     // no `local !== false` guard, unlike activeDelegatesFor(): the cascade
     // covers remote delegates too, so the socket bookkeeping here has to as
@@ -2100,11 +2260,37 @@ export const useProjectStore = defineStore('projects', () => {
     const childIds = chats.value
       .filter(c => c.spawned_from_chat_id === chatId && !c.archived)
       .map(c => c.chat_id)
+    const allIds = [chatId, ...childIds]
     // Remember which sockets we actually closed. If the POST fails these chats
     // are all still live, and a closed socket is marked as an intentional close
     // so nothing auto-reconnects it — the chat would go silent, with no tokens,
     // permission cards or AskUserQuestion prompts, and no sign anything broke.
-    const closedIds = [chatId, ...childIds].filter(id => Boolean(sockets.value[id]))
+    const closedIds = allIds.filter(id => Boolean(sockets.value[id]))
+    // Snapshot for rollback if the POST fails. A failure must not leave the
+    // chat hidden from the sidebar with archived:true and no transcript.
+    const prevArchived = new Map<string, boolean>()
+    for (const id of allIds) {
+      const c = chats.value.find(ch => ch.chat_id === id)
+      if (c) prevArchived.set(id, c.archived)
+    }
+    const wasActive = activeChatId.value === chatId
+    // Optimistic UI: hide from active lists immediately and show in the
+    // home "archiving…" queue so the panel can close without waiting for
+    // the server's disk work (transcript write + delegate cascade).
+    for (const id of allIds) {
+      archivingChats.value[id] = true
+      const c = chats.value.find(ch => ch.chat_id === id)
+      if (c) c.archived = true
+    }
+    if (wasActive) {
+      activeChatId.value = null
+      persistState()
+      // Keep the URL in sync with the optimistically closed pane. Fire-and-
+      // forget so the POST is not blocked on a router import.
+      import('../router').then(({ router }) => {
+        if (router.currentRoute.value.params.chatId === chatId) router.push('/')
+      }).catch(() => {})
+    }
     disconnectWs(chatId)
     for (const childId of childIds) disconnectWs(childId)
 
@@ -2112,7 +2298,22 @@ export const useProjectStore = defineStore('projects', () => {
     try {
       res = await api.post<ArchiveChatResponse>(`/api/chats/${chatId}/archive`)
     } catch (e) {
+      // Roll back optimistic mutation: chat reappears in the sidebar / home
+      // active lanes and its socket is put back so streaming resumes.
+      for (const [id, prev] of prevArchived) {
+        const c = chats.value.find(ch => ch.chat_id === id)
+        if (c) c.archived = prev
+        delete archivingChats.value[id]
+      }
+      for (const id of allIds) delete archivingChats.value[id]
       for (const id of closedIds) connectWs(id)
+      if (wasActive && activeChatId.value === null) {
+        activeChatId.value = chatId
+        persistState()
+        import('../router').then(({ router }) => {
+          if (!router.currentRoute.value.params.chatId) router.push(`/chat/${chatId}`)
+        }).catch(() => {})
+      }
       pushErrorToast('Could not archive chat', `${errorMessage(e)}`)
       throw e
     }
@@ -2120,18 +2321,30 @@ export const useProjectStore = defineStore('projects', () => {
     // Mark only what the server confirms. Flipping every child on a bare 2xx
     // dropped skipped delegates out of the sidebar, recentChats and
     // activeChatsAll while they were still streaming, and listed them in the
-    // archive with no transcript behind them.
+    // archive with no transcript behind them. Optimistic already flipped them,
+    // so revert any id the server did not confirm.
     const confirmed = new Set(
       Array.isArray(res?.archived_chat_ids) ? res.archived_chat_ids : [chatId],
     )
-    for (const chat of chats.value) {
-      if (confirmed.has(chat.chat_id)) {
-        chat.archived = true
-        if (chat.chat_id === chatId && res?.postprocess) {
+    for (const id of allIds) {
+      if (!confirmed.has(id)) {
+        const c = chats.value.find(ch => ch.chat_id === id)
+        if (c) c.archived = prevArchived.get(id) ?? false
+      } else if (id === chatId && res?.postprocess) {
+        const c = chats.value.find(ch => ch.chat_id === id)
+        if (c) {
           // The response closes the race where the chat_postprocess event is
           // emitted after the archive request has already cleared this pane.
-          chat.postprocess = res.postprocess
+          c.postprocess = res.postprocess
         }
+      }
+      delete archivingChats.value[id]
+    }
+    // Any child the entry never listed stays removed from archiving map
+    // (it was not an optimistic id, but guard anyway).
+    for (const chat of chats.value) {
+      if (confirmed.has(chat.chat_id) && chat.chat_id !== chatId && res?.postprocess) {
+        // Delegates' postprocess arrives via /ws/events, not the response.
       }
     }
     if (res?.postprocess?.state === 'running') {
@@ -2156,14 +2369,11 @@ export const useProjectStore = defineStore('projects', () => {
       const toast = archiveFailedToast(failed.length)
       pushErrorToast(toast.title, toast.body)
     }
-    // Clear the active chat instead of auto-jumping to another one.
-    // Auto-jumping caused a half-mounted state where the header showed
-    // the newly-selected chat's title but the message list hadn't
-    // loaded yet. Closing the chat (and letting ChatLayout open the
-    // sidebar on mobile via the `close` event from ChatPanel) lets the
-    // user pick the next chat themselves.
+    // Active already cleared optimistically; keep the guard for races where
+    // the user switched chats between the optimistic clear and the response.
     if (activeChatId.value === chatId) {
       activeChatId.value = null
+      persistState()
     }
   }
 
@@ -2286,6 +2496,37 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number }
+  const toChatMessage = (m: ServerRow) => ({
+    role: m.role as 'user' | 'assistant' | 'system',
+    content: m.content,
+    // sent_at is the persisted send-time (user) or completion-time
+    // (assistant) recorded at the orchestration layer. Empty string for
+    // pre-feature chats — the renderer treats it as "no time".
+    timestamp: m.sent_at || '',
+    tool_name: m.tool_name,
+    images: m.images,
+    // Preserve server-assigned turn_index so user_echo replays (from WS
+    // reconnect mid-turn or right after) can dedup against hydrated
+    // history. Dropping this caused duplicate user bubbles: the dedup at
+    // the user_echo handler matches by turn_index first, and when every
+    // hydrated bubble has turn_index: undefined, the replayed echo falls
+    // through to msgs.push and renders a second copy of the same turn.
+    turn_index: m.turn_index,
+    duration_ms: m.duration_ms,
+    is_error: m.is_error,
+    // _filecard fields. Empty/undefined for non-file rows.
+    file_path: m.file_path,
+    action: m.action,
+    tool: m.tool,
+    phase: m.phase,
+    // Envelope annotations (absolute index + lazy marker). Undefined on
+    // legacy flat responses.
+    i: m.i,
+    lazy: m.lazy,
+    full_length: m.full_length,
+  })
+
   async function loadMessagesFromServer(chatId: string) {
     // Restore the AskUserQuestion picker before touching history. Runs on every
     // chat open / reconnect, so a reloaded chat paused on a question shows the
@@ -2295,6 +2536,10 @@ export const useProjectStore = defineStore('projects', () => {
     rebuildPendingPermission(chatId)
     // Fetch authoritative history from the SDK session on the server.
     // This catches schedule outputs, turns from other devices, etc.
+    // `limit=50` asks for the paginated envelope (newest tail window); an
+    // older server answers with the legacy flat array and the code below
+    // handles both transparently.
+    type ServerEnvelope = { items: ServerRow[]; total: number; offset: number; limit: number; hasMore: boolean; nextOffset: number | null }
     try {
       const serverMsgs = await api.get<ServerRow[] | ServerEnvelope>(
         `/api/chats/${chatId}/messages?limit=50`
@@ -2474,37 +2719,6 @@ export const useProjectStore = defineStore('projects', () => {
             }
           }
           const extraLocalUsers = localUsers.slice(serverUsers.length)
-  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number }
-  const toChatMessage = (m: ServerRow) => ({
-    role: m.role as 'user' | 'assistant' | 'system',
-    content: m.content,
-    // sent_at is the persisted send-time (user) or completion-time
-    // (assistant) recorded at the orchestration layer. Empty string for
-    // pre-feature chats — the renderer treats it as "no time".
-    timestamp: m.sent_at || '',
-    tool_name: m.tool_name,
-    images: m.images,
-    // Preserve server-assigned turn_index so user_echo replays (from WS
-    // reconnect mid-turn or right after) can dedup against hydrated
-    // history. Dropping this caused duplicate user bubbles: the dedup at
-    // the user_echo handler matches by turn_index first, and when every
-    // hydrated bubble has turn_index: undefined, the replayed echo falls
-    // through to msgs.push and renders a second copy of the same turn.
-    turn_index: m.turn_index,
-    duration_ms: m.duration_ms,
-    is_error: m.is_error,
-    // _filecard fields. Empty/undefined for non-file rows.
-    file_path: m.file_path,
-    action: m.action,
-    tool: m.tool,
-    phase: m.phase,
-    // Envelope annotations (absolute index + lazy marker). Undefined on
-    // legacy flat responses.
-    i: m.i,
-    lazy: m.lazy,
-    full_length: m.full_length,
-  })
-
           const allExtraAreOptimistic = extraLocalUsers.every(m => m.turn_index == null)
           if (!isPrefix || !allExtraAreOptimistic) {
             console.warn(
@@ -2514,10 +2728,6 @@ export const useProjectStore = defineStore('projects', () => {
           }
         }
         messages.value[chatId] = mergeMetadata(normalizedServer, normalizedLocal)
-    // `limit=50` asks for the paginated envelope (newest tail window); an
-    // older server answers with the legacy flat array and the code below
-    // handles both transparently.
-    type ServerEnvelope = { items: ServerRow[]; total: number; offset: number; limit: number; hasMore: boolean; nextOffset: number | null }
         persistMessages()
       } else if (historySignature(normalizedLocal) !== historySignature(messages.value[chatId] || [])) {
         messages.value[chatId] = normalizedLocal
@@ -2536,6 +2746,78 @@ export const useProjectStore = defineStore('projects', () => {
     } catch {
       // Server may not have history yet, that's fine
     }
+  }
+
+  // ── Paginated history: older pages + lazy part expansion ────────────
+
+  function canLoadOlder(chatId: string): boolean {
+    return Boolean(historyMeta.value[chatId]?.hasMore)
+  }
+
+  function isLoadingOlder(chatId: string): boolean {
+    return Boolean(loadingOlder.value[chatId])
+  }
+
+  /** Fetch the previous page above the loaded window and prepend it. The
+   * caller (ChatPanel) preserves scroll position across the prepend. */
+  async function loadOlderMessages(chatId: string): Promise<void> {
+    const meta = historyMeta.value[chatId]
+    if (!meta?.hasMore || meta.nextOffset == null || loadingOlder.value[chatId]) return
+    loadingOlder.value[chatId] = true
+    try {
+      const env = await api.get<{ items: Parameters<typeof toChatMessage>[0][]; total: number; limit: number; hasMore: boolean; nextOffset: number | null }>(
+        `/api/chats/${chatId}/messages?offset=${meta.nextOffset}&limit=${meta.limit}`
+      )
+      if (Array.isArray(env)) return
+      const older = normalizeMessages(env.items.map(toChatMessage))
+      historyMeta.value[chatId] = {
+        total: env.total,
+        hasMore: Boolean(env.hasMore),
+        nextOffset: env.nextOffset ?? null,
+        limit: env.limit || meta.limit,
+      }
+      const local = messages.value[chatId] || []
+      const firstIndex = local.length ? local[0].i : undefined
+      if (!older.length || typeof firstIndex !== 'number') return
+      // The page must continue directly above the loaded window; anything
+      // else means the session changed underneath us and the next full
+      // refresh will resync — don't splice misaligned rows in.
+      if (older[0].i === firstIndex - older.length) {
+        messages.value[chatId] = [...older, ...local]
+        persistMessages()
+      }
+    } catch {
+      // Transient failure: leave state so the user can retry by scrolling.
+    } finally {
+      delete loadingOlder.value[chatId]
+    }
+  }
+
+  /** Fetch the full content of one pruned row by absolute index and splice
+   * it back into the timeline. Concurrent expands of the same row dedup. */
+  function expandMessagePart(chatId: string, index: number): Promise<void> {
+    const key = `${chatId}:${index}`
+    const existing = partRequests.get(key)
+    if (existing) return existing
+    const request = (async () => {
+      try {
+        const row = await api.get<{ content: string }>(`/api/chats/${chatId}/messages/part?i=${index}`)
+        const list = messages.value[chatId] || []
+        const pos = list.findIndex(m => m.i === index)
+        if (pos >= 0) {
+          const next = list.slice()
+          next[pos] = { ...next[pos], content: row.content, lazy: false }
+          messages.value[chatId] = next
+          persistMessages()
+        }
+      } catch {
+        // Leave the row collapsed; the marker stays so the user can retry.
+      } finally {
+        partRequests.delete(key)
+      }
+    })()
+    partRequests.set(key, request)
+    return request
   }
 
   // Post-result reconciliation: the SDK session file is sometimes a beat
@@ -2665,78 +2947,6 @@ export const useProjectStore = defineStore('projects', () => {
       await router.push('/')
     } else {
       selectFirstChat()
-  // ── Paginated history: older pages + lazy part expansion ────────────
-
-  function canLoadOlder(chatId: string): boolean {
-    return Boolean(historyMeta.value[chatId]?.hasMore)
-  }
-
-  function isLoadingOlder(chatId: string): boolean {
-    return Boolean(loadingOlder.value[chatId])
-  }
-
-  /** Fetch the previous page above the loaded window and prepend it. The
-   * caller (ChatPanel) preserves scroll position across the prepend. */
-  async function loadOlderMessages(chatId: string): Promise<void> {
-    const meta = historyMeta.value[chatId]
-    if (!meta?.hasMore || meta.nextOffset == null || loadingOlder.value[chatId]) return
-    loadingOlder.value[chatId] = true
-    try {
-      const env = await api.get<{ items: Parameters<typeof toChatMessage>[0][]; total: number; limit: number; hasMore: boolean; nextOffset: number | null }>(
-        `/api/chats/${chatId}/messages?offset=${meta.nextOffset}&limit=${meta.limit}`
-      )
-      if (Array.isArray(env)) return
-      const older = normalizeMessages(env.items.map(toChatMessage))
-      historyMeta.value[chatId] = {
-        total: env.total,
-        hasMore: Boolean(env.hasMore),
-        nextOffset: env.nextOffset ?? null,
-        limit: env.limit || meta.limit,
-      }
-      const local = messages.value[chatId] || []
-      const firstIndex = local.length ? local[0].i : undefined
-      if (!older.length || typeof firstIndex !== 'number') return
-      // The page must continue directly above the loaded window; anything
-      // else means the session changed underneath us and the next full
-      // refresh will resync — don't splice misaligned rows in.
-      if (older[0].i === firstIndex - older.length) {
-        messages.value[chatId] = [...older, ...local]
-        persistMessages()
-      }
-    } catch {
-      // Transient failure: leave state so the user can retry by scrolling.
-    } finally {
-      delete loadingOlder.value[chatId]
-    }
-  }
-
-  /** Fetch the full content of one pruned row by absolute index and splice
-   * it back into the timeline. Concurrent expands of the same row dedup. */
-  function expandMessagePart(chatId: string, index: number): Promise<void> {
-    const key = `${chatId}:${index}`
-    const existing = partRequests.get(key)
-    if (existing) return existing
-    const request = (async () => {
-      try {
-        const row = await api.get<{ content: string }>(`/api/chats/${chatId}/messages/part?i=${index}`)
-        const list = messages.value[chatId] || []
-        const pos = list.findIndex(m => m.i === index)
-        if (pos >= 0) {
-          const next = list.slice()
-          next[pos] = { ...next[pos], content: row.content, lazy: false }
-          messages.value[chatId] = next
-          persistMessages()
-        }
-      } catch {
-        // Leave the row collapsed; the marker stays so the user can retry.
-      } finally {
-        partRequests.delete(key)
-      }
-    })()
-    partRequests.set(key, request)
-    return request
-  }
-
       persistState()
     }
   }
@@ -2890,6 +3100,11 @@ export const useProjectStore = defineStore('projects', () => {
     } finally {
       void loadSubagents(chatId)
     }
+    // History is authoritative now: a send the server never received has no
+    // row here. Give the just-reconnected socket a moment to replay any
+    // buffered user_echo, then recover the provably-lost send.
+    reconcileUnackedSend(chatId)
+    scheduleUnackedSendRecovery(chatId)
   }
 
   // Detect and recover half-open sockets (readyState OPEN, no keepalive for
@@ -3333,8 +3548,10 @@ export const useProjectStore = defineStore('projects', () => {
           chat.archived = true
           if (msg.archive_path) chat.archive_path = msg.archive_path
         }
+        if (archivingChats.value[msg.chat_id]) delete archivingChats.value[msg.chat_id]
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null
+          persistState()
         }
         break
       }
@@ -3596,6 +3813,15 @@ export const useProjectStore = defineStore('projects', () => {
 
     const payload: Record<string, unknown> = { type: 'message', text: composed }
     if (imageRefs) payload.images = imageRefs
+    // Track until the server proves receipt. Cleared by the echoed user_echo,
+    // by the turn showing up in /messages, or recovered once on reconnect.
+    // An identical pending entry (the recovery path resending this very
+    // message) keeps its attempt count so the one-retry cap holds.
+    const tracked = unackedSends[chatId]
+    if (!tracked || tracked.text !== composed) {
+      unackedSends[chatId] = { text: composed, images: imageRefs, at: Date.now(), attempts: 0 }
+      persistUnackedSends()
+    }
     ws.send(JSON.stringify(payload))
     onSent?.()
     return true
@@ -4257,6 +4483,8 @@ export const useProjectStore = defineStore('projects', () => {
         // Queued follow-ups are drained as individual turns. Remove only the
         // entry that just started so later messages remain visible/editable.
         removeEchoedQueued(chatId, event.entry_id, trimmed)
+        // The server received and started the send: drop the recovery copy.
+        acknowledgeSend(chatId, trimmed)
         const turnIndex = event.turn_index
         // Dedup by server-assigned turn_index when available. Covers the
         // mid-stream reload case: /messages hydrates user bubbles with their
@@ -4856,6 +5084,7 @@ export const useProjectStore = defineStore('projects', () => {
     recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasActiveDelegates, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     insightsFailedChats, workspaceInsightsFailedCount,
+    archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
@@ -4873,10 +5102,10 @@ export const useProjectStore = defineStore('projects', () => {
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, setReentrySummaryEnabled,
+    canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs,
-    beginServerRestart,
+    beginServerRestart, restoreState,
     pushToast, pushErrorToast, dismissToast, fixError, restoreDraft,
     packageStatus, checkPackageStatus,
   }
 })
-    canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,

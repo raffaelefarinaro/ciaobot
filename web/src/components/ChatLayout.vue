@@ -486,7 +486,7 @@ const showGlobalNewChatActions = computed(() => !store.activeChatsAll.length)
 // Post-archive work is not part of activeChatsAll, but it is still something
 // the home surface should report before the user starts a new chat.
 const hasHomeActivity = computed(() => (
-  store.activeChatsAll.length > 0 || store.postprocessingChats().length > 0
+  store.activeChatsAll.length > 0 || store.archivingChatsList().length > 0 || store.postprocessingChats().length > 0
 ))
 
 const generalWorkspaceActions = computed(() => {
@@ -521,6 +521,7 @@ const homeStatus = computed(() => {
   // the user, so it reports itself in the same muted register as the lane
   // headers' "N tidying up" fragment.
   const tidying = store.postprocessingChats().length
+  const archiving = store.archivingChatsList().length
   const needVerb = needs === 1 ? 'needs' : 'need'
   const needText = needs
     ? `${needs} chat${needs === 1 ? '' : 's'} ${needVerb} your attention`
@@ -531,7 +532,10 @@ const homeStatus = computed(() => {
   const tidyingText = tidying
     ? `${tidying} chat${tidying === 1 ? '' : 's'} tidying up`
     : ''
-  return [needText, workingText, tidyingText].filter(Boolean).join('. ') + '.'
+  const archivingText = archiving
+    ? `${archiving} chat${archiving === 1 ? '' : 's'} archiving`
+    : ''
+  return [needText, workingText, archivingText, tidyingText].filter(Boolean).join('. ') + '.'
 })
 
 function workspaceLabel(name: string): string {
