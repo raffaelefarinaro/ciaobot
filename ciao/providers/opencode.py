@@ -117,6 +117,37 @@ _SERVER_START_TIMEOUT = 30.0
 _SERVER_START_ATTEMPTS = 3
 _SERVER_START_RETRY_DELAYS = (0.25, 0.75)
 _REQUEST_TIMEOUT = 30.0
+# Mid-turn SSE recovery: re-subscribe attempts after a dropped /event stream,
+# then a bounded message-poll window that replays settled parts idempotently.
+_OPENCODE_SSE_RECONNECTS = 3
+_OPENCODE_RECOVERY_WINDOW_S = 60.0
+_OPENCODE_RECOVERY_POLL_S = 2.5
+
+
+def _opencode_messages_signature(messages: list[Any]) -> str:
+    """Cheap change detector for the reconciliation poll.
+
+    Hashes message count plus each assistant part's id and content length;
+    when two consecutive polls agree, the turn's output has settled.
+    """
+    pieces: list[str] = [str(len(messages))]
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        info = message.get("info")
+        role = str(info.get("role") or "") if isinstance(info, Mapping) else ""
+        parts = message.get("parts")
+        if role != "assistant" or not isinstance(parts, list):
+            continue
+        for part in parts:
+            if not isinstance(part, Mapping):
+                continue
+            text = part.get("text")
+            pieces.append(
+                f"{part.get('id')}/{part.get('type')}/"
+                f"{len(text) if isinstance(text, str) else 0}"
+            )
+    return "|".join(pieces)
 _SHUTDOWN_TIMEOUT = 5.0
 _SERVER_START_LOCKS: dict[str, asyncio.Lock] = {}
 # Lines of the server's stderr kept for error messages. The pipe must be read
@@ -778,6 +809,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._cost = None
         self._answer_parts.clear()
         self._effective_model = ""
+        self._turn_recovered_via_poll = False
 
     # ---------------------------------------------------------------- server
 
@@ -1397,6 +1429,59 @@ class OpencodeProvider(BaseSDKProvider):
         """Accumulate one emitted fragment of the visible reply."""
         self._answer_parts.setdefault(part_id, []).append(text)
 
+    async def _reconcile_interrupted_turn(
+        self, client: httpx.AsyncClient, session_id: str
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Recover a turn whose SSE died after the prompt was accepted.
+
+        Polls ``GET /session/{id}/message`` until the message list stops
+        changing (or the recovery window expires), then replays every settled
+        assistant part through ``message.part.updated``. The accumulator's
+        per-part emitted counts make the replay emit only what the live
+        stream actually missed, so this backfills gaps and repairs a
+        truncated tail without duplicating anything already shown.
+        """
+        deadline = time.monotonic() + _OPENCODE_RECOVERY_WINDOW_S
+        signature = ""
+        while True:
+            messages: list[Any] | None = None
+            try:
+                response = await client.get(f"/session/{session_id}/message")
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, list):
+                    messages = payload
+            except (httpx.HTTPError, ValueError, AttributeError):
+                # Best-effort by design: an unresponsive read endpoint just
+                # means the window expires and the turn finishes degraded.
+                messages = None
+
+            if messages is not None:
+                current = _opencode_messages_signature(messages)
+                quiesced = bool(current) and current == signature
+                signature = current or signature
+                if messages:
+                    for message in messages:
+                        info = message.get("info") if isinstance(message, Mapping) else None
+                        role = str(info.get("role") or "") if isinstance(info, Mapping) else ""
+                        parts = message.get("parts") if isinstance(message, Mapping) else None
+                        if role != "assistant" or not isinstance(parts, list):
+                            continue
+                        for part in parts:
+                            if not isinstance(part, Mapping):
+                                continue
+                            for converted in self._event_to_stream({
+                                "type": "message.part.updated",
+                                "properties": {"part": dict(part)},
+                            }):
+                                yield converted
+                if quiesced:
+                    self._turn_recovered_via_poll = True
+                    return
+            if time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(_OPENCODE_RECOVERY_POLL_S)
+
     def _answer_text(self) -> str:
         """The turn's visible reply, joined across text parts codex-style."""
         parts = (
@@ -1771,30 +1856,37 @@ class OpencodeProvider(BaseSDKProvider):
 
         error: str = ""
         saw_output = False
+        prompt_accepted = False
+        prompt_rejected = False
+        idle_seen = False
 
-        try:
+        async def _pump_once() -> AsyncGenerator[StreamEvent, None]:
+            """One SSE subscription, pumped until idle or premature close."""
+            nonlocal prompt_accepted, prompt_rejected, error, saw_output, idle_seen
             async with client.stream("GET", "/event") as stream:
                 stream.raise_for_status()
                 # Subscribe before prompting: opencode starts emitting as soon
                 # as the prompt is accepted, and a late subscriber loses the
                 # opening deltas.
-                response = await client.post(
-                    f"/session/{session_id}/prompt_async", json=body
-                )
-                if response.status_code >= 400:
-                    detail = _sanitize_error(response.text)
-                    yield ResultEvent(
-                        type="result",
-                        result=f"opencode rejected the prompt: {detail}",
-                        session_id=session_id,
-                        is_error=True,
+                if not prompt_accepted:
+                    response = await client.post(
+                        f"/session/{session_id}/prompt_async", json=body
                     )
-                    return
-                # Once accepted, the replacement session owns the handover
-                # context. Retain it only across a rejected prompt so a retry
-                # can still recover the old conversation.
-                self._session_handover_context = ""
-
+                    if response.status_code >= 400:
+                        detail = _sanitize_error(response.text)
+                        prompt_rejected = True
+                        yield ResultEvent(
+                            type="result",
+                            result=f"opencode rejected the prompt: {detail}",
+                            session_id=session_id,
+                            is_error=True,
+                        )
+                        return
+                    # Once accepted, the replacement session owns the handover
+                    # context. Retain it only across a rejected prompt so a
+                    # retry can still recover the old conversation.
+                    self._session_handover_context = ""
+                    prompt_accepted = True
                 decoder = SSEDecoder()
                 async for sse in decoder.aiter_bytes(stream.aiter_bytes()):
                     try:
@@ -1821,19 +1913,51 @@ class OpencodeProvider(BaseSDKProvider):
                         error = error or error_text(props.get("error"))
                         continue
                     if kind == "session.idle":
+                        idle_seen = True
                         break
 
                     for converted in self._event_to_stream(event):
                         saw_output = saw_output or converted.type in {"text", "tool_use"}
                         yield converted
-        except httpx.HTTPError as exc:
-            yield ResultEvent(
-                type="result",
-                result=f"opencode connection failed: {exc}",
-                session_id=session_id,
-                is_error=True,
-            )
-            return
+
+        # The SSE subscription can drop mid-turn (network blip, server hiccup)
+        # before `session.idle` arrives. Rather than failing the whole turn,
+        # re-subscribe a bounded number of times; if the stream still will not
+        # hold, poll the message list until output quiesces and replay settled
+        # parts through the same accumulator — its `_emitted` bookkeeping makes
+        # the replay idempotent. Poll-backstop design borrowed from conduit.
+        reconnects = 0
+        try:
+            while True:
+                try:
+                    async for converted in _pump_once():
+                        yield converted
+                except httpx.HTTPError as exc:
+                    if not prompt_accepted:
+                        # The turn never started; nothing to recover.
+                        yield ResultEvent(
+                            type="result",
+                            result=f"opencode connection failed: {exc}",
+                            session_id=session_id,
+                            is_error=True,
+                        )
+                        return
+                if prompt_rejected or idle_seen:
+                    break
+                if reconnects >= _OPENCODE_SSE_RECONNECTS - 1:
+                    break
+                reconnects += 1
+                await asyncio.sleep(0.5 * reconnects)
+
+            degraded_final = False
+            if not idle_seen and prompt_accepted and not prompt_rejected:
+                self._turn_recovered_via_poll = False
+                async for converted in self._reconcile_interrupted_turn(
+                    client, session_id
+                ):
+                    saw_output = saw_output or converted.type in {"text", "tool_use"}
+                    yield converted
+                degraded_final = not self._turn_recovered_via_poll
         finally:
             register_handle(None)
 
@@ -1852,7 +1976,7 @@ class OpencodeProvider(BaseSDKProvider):
             # summed per step, so a retried step cannot double-count.
             usage=self._usage,
             cost_usd=self._cost,
-            fallback_final=bool(error) and saw_output,
+            fallback_final=(bool(error) and saw_output) or degraded_final,
         )
 
     async def _augment_context_pct(

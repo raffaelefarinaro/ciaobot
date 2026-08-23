@@ -16,11 +16,12 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence, cast
-from urllib.parse import urlsplit
+from typing import Any, Callable, Iterable, Sequence
+from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -34,6 +35,7 @@ from ciao import provider_registry
 from ciao import vault_rehome
 from ciao.memory_tool import resolve_region
 from ciao.config import WorkspaceConfig
+from ciao.native_sessions import live_sessions_for_workspace
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
@@ -3123,25 +3125,100 @@ def _read_session_segment(session_id: str, directories: list[str]) -> list:
     )
 
 
-async def chat_messages(request: Request) -> JSONResponse:
-    """Return conversation history for a chat.
+_MSG_PAGE_DEFAULT_LIMIT = 50
+_MSG_PAGE_MAX_LIMIT = 200
+_THINKING_KEEP_CHARS = 512
+_PART_CACHE_TTL_SECONDS = 1.2
+_PART_CACHE_MAX_ENTRIES = 256
+_PART_CACHE: dict[str, tuple[float, list[dict]]] = {}
 
-    Claude chats read the SDK session file via ``get_session_messages``.
-    Codex chats read the app-server thread via ``thread/read``; opencode chats
-    read the session history from a short-lived ``opencode serve``. Both fall
-    back to the durable ``.runtime`` transcript when the provider-side session
-    is unreadable.
 
-    When a chat is archived, provider-side session storage is deleted to reclaim
-    disk space (Claude SDK blob, Codex thread). In that case we fall back to the
-    durable markdown transcript in the vault so the PWA can still render the
-    conversation read-only.
+def _prune_rows_for_wire(rows: list[dict]) -> list[dict]:
+    """Annotate every row with its absolute index and prune oversized rows.
+
+    Only ``_thinking`` rows are truncated today (head+tail with a lazy marker);
+    the collapsed ``_activity`` / ``_filecard`` summaries are already small.
+    The unpruned row stays fetchable via the part endpoint using index ``i``.
     """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    chat = pcm.get_chat(chat_id)
-    if chat is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
+    out: list[dict] = []
+    for idx, row in enumerate(rows):
+        item = dict(row)
+        item["i"] = idx
+        if item.get("tool_name") == "_thinking":
+            text = item.get("content") or ""
+            gap = len(text) - 2 * _THINKING_KEEP_CHARS
+            if gap > 64:
+                item["content"] = (
+                    text[:_THINKING_KEEP_CHARS]
+                    + f"\n… ({gap} chars hidden, expand to load)\n"
+                    + text[-_THINKING_KEEP_CHARS:]
+                )
+                item["lazy"] = True
+                item["full_length"] = len(text)
+        out.append(item)
+    return out
+
+
+def _request_params(request: Request) -> dict[str, str]:
+    """Query params tolerant of hand-built request scopes.
+
+    Real HTTP requests always carry ``scope["query_string"]``, but unit tests
+    construct bare scopes; Starlette's ``query_params`` raises KeyError there.
+    """
+    raw = request.scope.get("query_string", b"")
+    return {k: v for k, v in parse_qsl(raw.decode("latin-1"))}
+
+
+def _messages_json_response(request: Request, rows: list[dict]) -> JSONResponse:
+    """Serve history rows, paginated from the newest end when asked.
+
+    Without ``offset``/``limit`` params this returns the legacy flat array so
+    older clients keep working. With either param the response becomes
+    ``{items, total, offset, limit, hasMore, nextOffset}`` where ``offset``
+    counts rows back from the newest end (offset 0 is the live tail), and
+    pruning + lazy markers are applied.
+    """
+    params = _request_params(request)
+    if "offset" not in params and "limit" not in params:
+        return JSONResponse(rows)
+
+    total = len(rows)
+    try:
+        limit = int(params.get("limit", _MSG_PAGE_DEFAULT_LIMIT))
+    except ValueError:
+        limit = _MSG_PAGE_DEFAULT_LIMIT
+    limit = max(1, min(limit, _MSG_PAGE_MAX_LIMIT))
+    try:
+        offset = int(params.get("offset", 0))
+    except ValueError:
+        offset = 0
+    offset = max(0, offset)
+
+    wire = _prune_rows_for_wire(rows)
+    end = max(0, total - offset)
+    start = max(0, end - limit)
+    items = wire[start:end]
+    has_more = start > 0
+    return JSONResponse({
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "hasMore": has_more,
+        "nextOffset": offset + limit if has_more else None,
+    })
+
+
+async def _assemble_chat_messages(
+    pcm: Any, config: Any, chat: Any
+) -> list[dict]:
+    """Build the full chronological history row list for one chat.
+
+    This is the expensive part of ``GET /api/chats/{id}/messages`` — provider
+    session reads plus rendering — split out so the pagination envelope and
+    the per-part endpoint can share one assembly path.
+    """
+    chat_id = chat.chat_id
     handover_messages = list(getattr(chat, "handover_messages", []) or [])
     if not chat.session_id:
         # A provider may fail before creating its session (for example while
@@ -3151,9 +3228,8 @@ async def chat_messages(request: Request) -> JSONResponse:
         current = pcm._transcripts.current_messages(
             ChatContext.for_web(chat_id), getattr(chat, "provider", "claude")
         )
-        return JSONResponse(handover_messages + current)
+        return [*handover_messages, *current]
 
-    config = request.app.state.config
     provider = getattr(chat, "provider", "claude")
     # Every provider stores its sessions per-cwd, and a chat's cwd is its agent
     # root. Reading with the install root found nothing for any chat created since
@@ -3170,7 +3246,7 @@ async def chat_messages(request: Request) -> JSONResponse:
             # session read (for opencode, a throwaway server spawn) first.
             archived = _messages_from_archived_transcript(pcm, config, chat)
             if archived is not None:
-                return JSONResponse(handover_messages + archived)
+                return [*handover_messages, *archived]
         rendered: list[dict] = []
         if provider == "codex":
             thread = await CodexProvider.read_thread(session_root, chat.session_id)
@@ -3200,14 +3276,14 @@ async def chat_messages(request: Request) -> JSONResponse:
                 rendered,
                 current,
             )
-            return JSONResponse(handover_messages + rendered)
+            return [*handover_messages, *rendered]
         if current:
             _overlay_assistant_timings(current, chat.user_turn_timings)
-            return JSONResponse(handover_messages + current)
+            return [*handover_messages, *current]
         archived = _messages_from_archived_transcript(pcm, config, chat)
         if archived is not None:
-            return JSONResponse(handover_messages + archived)
-        return JSONResponse(handover_messages)
+            return [*handover_messages, *archived]
+        return list(handover_messages)
 
     from ciao.transcripts import get_session_messages_full
 
@@ -3262,8 +3338,8 @@ async def chat_messages(request: Request) -> JSONResponse:
     if msgs is None or (not msgs and chat.archived):
         archived = _messages_from_archived_transcript(pcm, config, chat)
         if archived is not None:
-            return JSONResponse(handover_messages + archived)
-        return JSONResponse(handover_messages)
+            return [*handover_messages, *archived]
+        return list(handover_messages)
 
     user_idx = 0
     failed_tool_ids = _failed_tool_use_ids(msgs)
@@ -3456,7 +3532,108 @@ async def chat_messages(request: Request) -> JSONResponse:
             user_idx += 1
         result.append(entry)
     _overlay_assistant_timings(result, chat.user_turn_timings)
-    return JSONResponse(handover_messages + result)
+    return [*handover_messages, *result]
+
+
+async def chat_messages(request: Request) -> JSONResponse:
+    """Return conversation history for a chat.
+
+    Claude chats read the SDK session file via ``get_session_messages``.
+    Codex chats read the app-server thread via ``thread/read``; opencode chats
+    read the session history from a short-lived ``opencode serve``. Both fall
+    back to the durable ``.runtime`` transcript when the provider-side session
+    is unreadable.
+
+    When a chat is archived, provider-side session storage is deleted to reclaim
+    disk space (Claude SDK blob, Codex thread). In that case we fall back to the
+    durable markdown transcript in the vault so the PWA can still render the
+    conversation read-only.
+
+    Pagination: without ``offset``/``limit`` query params the response is the
+    legacy flat array. With either param it becomes a
+    ``{items, total, offset, limit, hasMore, nextOffset}`` envelope where
+    ``offset=0`` is the newest tail; oversized ``_thinking`` rows are pruned
+    and flagged ``lazy`` (fetch the full row from the part endpoint).
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    rows = await _assemble_chat_messages(
+        pcm, request.app.state.config, chat
+    )
+    return _messages_json_response(request, rows)
+
+
+async def _cached_assembled_messages(pcm: Any, config: Any, chat: Any) -> list[dict]:
+    """Assemble full history with a tiny TTL cache for part fetches.
+
+    Expanding a lazy row rebuilds the whole assembly otherwise; consecutive
+    expands within the TTL reuse one build. The list endpoint never uses this
+    cache — polls must stay fresh.
+    """
+    chat_id = chat.chat_id
+    now = time.monotonic()
+    hit = _PART_CACHE.get(chat_id)
+    if hit is not None and now - hit[0] < _PART_CACHE_TTL_SECONDS:
+        return hit[1]
+    rows = await _assemble_chat_messages(pcm, config, chat)
+    if len(_PART_CACHE) >= _PART_CACHE_MAX_ENTRIES:
+        oldest = min(_PART_CACHE, key=lambda k: _PART_CACHE[k][0])
+        _PART_CACHE.pop(oldest, None)
+    _PART_CACHE[chat_id] = (now, rows)
+    return rows
+
+
+async def chat_message_part(request: Request) -> JSONResponse:
+    """Return one unpruned history row by absolute index.
+
+    Serves ``GET /api/chats/{id}/messages/part?i=<index>`` where the index is
+    the ``i`` annotated on paginated list rows. Indices are positions in the
+    full assembled list (handover messages included), stable while history is
+    append-only.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        idx = int(_request_params(request).get("i", ""))
+    except ValueError:
+        return JSONResponse({"error": "invalid i"}, status_code=400)
+    rows = await _cached_assembled_messages(
+        pcm, request.app.state.config, chat
+    )
+    if idx < 0 or idx >= len(rows):
+        return JSONResponse({"error": "out of range"}, status_code=404)
+    row = dict(rows[idx])
+    row["i"] = idx
+    return JSONResponse(row)
+
+
+async def native_sessions(request: Request) -> JSONResponse:
+    """List locally-running Claude Code CLI sessions for a workspace.
+
+    Serves ``GET /api/native/sessions?workspace=<path>``; without the param
+    the configured workspace root is used. Read-only liveness probe used by
+    the node-handover flow to warn about externally-started CLI sessions.
+    """
+    params = _request_params(request)
+    workspace = params.get("workspace") or str(
+        request.app.state.config.workspace_root
+    )
+    try:
+        sessions = live_sessions_for_workspace(workspace)
+    except OSError:
+        logger.exception("Native session scan failed for %s", workspace)
+        sessions = []
+    return JSONResponse({
+        "sessions": sessions,
+        "workspace": workspace,
+        "checked_at": datetime.now(UTC).isoformat(),
+    })
 
 
 async def chat_subagents(request: Request) -> JSONResponse:

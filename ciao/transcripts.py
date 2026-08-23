@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import shutil
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -21,6 +22,115 @@ from ciao.jsonio import read_json_dict
 from ciao.models import AgentRequest, ChatContext
 
 logger = logging.getLogger(__name__)
+
+# Turn-journal flush cadence: buffered event records spill to disk when this
+# many seconds have elapsed since the last write or the buffer grows past the
+# entry cap, whichever comes first. A crash loses at most this much tail.
+_JOURNAL_FLUSH_SECONDS = 0.25
+_JOURNAL_FLUSH_ENTRIES = 32
+
+
+class TurnJournal:
+    """Append-only crash journal for one in-flight turn.
+
+    The normalized transcript (``record_turn``) is written only at end of
+    turn, so a server crash or provider abort mid-turn previously lost the
+    whole exchange. The journal mirrors the stream's user-visible events as
+    JSON lines while the turn runs; on normal completion ``finish()`` deletes
+    the file. A file left behind by a crash is folded back into the transcript
+    as an ``is_partial`` turn by :meth:`TranscriptStore.recover_journals`.
+
+    Writes are synchronous on purpose: cancellation cannot interrupt them
+    mid-line, so no shield wrapper is needed around finalization.
+    """
+
+    def __init__(self, journal_dir: Path, provider: str) -> None:
+        self._dir = journal_dir
+        self._provider = provider
+        self._path: Path | None = None
+        self._handle: Any = None
+        self._buffer: list[str] = []
+        self._last_flush = 0.0
+
+    @property
+    def active(self) -> bool:
+        return self._handle is not None
+
+    def begin(self, header: dict[str, Any]) -> None:
+        """Create the journal file and write the header record.
+
+        Failures are log-only: a broken journal must never break the turn.
+        """
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+            name = f"{_safe_slug(self._provider)}-{stamp}-{id(self):x}.jsonl"
+            self._path = self._dir / name
+            self._handle = self._path.open("a", encoding="utf-8")
+            self._last_flush = time.monotonic()
+            # Header goes straight to disk so a crash before any event still
+            # leaves a recoverable prompt + provider record.
+            self._handle.write(
+                json.dumps({"type": "begin", **header}, ensure_ascii=False) + "\n"
+            )
+            self._handle.flush()
+        except OSError:
+            logger.exception("Failed opening turn journal under %s", self._dir)
+            self._handle = None
+
+    def append(self, record: dict[str, Any]) -> None:
+        if self._handle is None:
+            return
+        self._buffer.append(json.dumps(record, ensure_ascii=False))
+        now = time.monotonic()
+        if (
+            len(self._buffer) >= _JOURNAL_FLUSH_ENTRIES
+            or now - self._last_flush >= _JOURNAL_FLUSH_SECONDS
+        ):
+            self.flush()
+
+    def flush(self) -> None:
+        if self._handle is None or not self._buffer:
+            return
+        try:
+            self._handle.write("\n".join(self._buffer) + "\n")
+            self._handle.flush()
+        except OSError:
+            logger.exception("Failed writing turn journal %s", self._path)
+        finally:
+            self._buffer.clear()
+            self._last_flush = time.monotonic()
+
+    def finish(self) -> None:
+        """Close and delete the journal — the turn completed normally."""
+        self.flush()
+        if self._handle is not None:
+            try:
+                self._handle.close()
+            except OSError:
+                pass
+            self._handle = None
+        if self._path is not None:
+            try:
+                self._path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed removing turn journal %s", self._path)
+            self._path = None
+
+
+def _journal_event_record(event: Any) -> dict[str, Any] | None:
+    """Map a stream event to its compact journal record (None = skip)."""
+    type_name = type(event).__name__
+    if type_name == "AssistantTextDelta":
+        text = getattr(event, "text", "")
+        return {"type": "text", "text": text} if text else None
+    if type_name == "ToolUseEvent":
+        name = getattr(event, "tool_name", "")
+        return {"type": "tool", "name": name} if name else None
+    if type_name == "ResultEvent":
+        return {"type": "result", "is_error": bool(getattr(event, "is_error", False))}
+    # Thinking/system/permission events carry no recoverable reply content.
+    return None
 
 
 def _now_iso() -> str:
@@ -106,6 +216,116 @@ class TranscriptStore:
         )
         self._save_current(ctx, transcript, provider)
 
+    def open_turn_journal(self, ctx: ChatContext, provider: str = "claude") -> TurnJournal:
+        """Create a crash journal for one in-flight turn of this chat."""
+        return TurnJournal(
+            self._runtime_root / "transcripts" / ctx.key / "journal", provider
+        )
+
+    def record_partial_turn(
+        self,
+        ctx: ChatContext,
+        *,
+        provider: str,
+        prompt: str,
+        response_text: str,
+        tool_events: list[dict[str, Any]] | None = None,
+        started_at: str = "",
+        journal_path: Path | None = None,
+    ) -> None:
+        """Append an ``is_partial`` turn recovered from a crash journal."""
+        transcript = self._load_current(ctx, provider)
+        if not transcript:
+            transcript = {
+                "provider": provider,
+                "started_at": started_at or _now_iso(),
+                "selected_model": "",
+                "session_id": "",
+                "context_key": ctx.key,
+                "turns": [],
+            }
+        transcript["updated_at"] = _now_iso()
+        transcript.setdefault("turns", []).append(
+            {
+                "timestamp": started_at or _now_iso(),
+                "input_kind": "recovered",
+                "prompt": prompt,
+                "mode": "",
+                "resume_session": "",
+                "image_count": 0,
+                "response": response_text,
+                "is_error": False,
+                "is_partial": True,
+                "effective_model": "",
+                "usage": {},
+                "quota": {},
+                "tool_events": list(tool_events or []),
+            }
+        )
+        self._save_current(ctx, transcript, provider)
+        if journal_path is not None:
+            try:
+                journal_path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed removing recovered journal %s", journal_path)
+
+    def recover_journals(self) -> int:
+        """Fold journals left behind by crashed turns into their transcripts.
+
+        Runs once at startup. Each leftover journal becomes one ``is_partial``
+        turn (recovered prompt + streamed text + tool names); the journal file
+        is deleted after a successful fold. Returns the number recovered.
+        """
+        journals_root = self._runtime_root / "transcripts"
+        if not journals_root.exists():
+            return 0
+        recovered = 0
+        for journal_file in sorted(journals_root.glob("*/journal/*.jsonl")):
+            try:
+                provider = "claude"
+                prompt = ""
+                started_at = ""
+                texts: list[str] = []
+                tool_events: list[dict[str, Any]] = []
+                with journal_file.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        kind = record.get("type")
+                        if kind == "begin":
+                            provider = str(record.get("provider") or "claude")
+                            prompt = str(record.get("prompt") or "")
+                            started_at = str(record.get("started_at") or "")
+                        elif kind == "text":
+                            texts.append(str(record.get("text") or ""))
+                        elif kind == "tool":
+                            tool_events.append({
+                                "id": "",
+                                "name": str(record.get("name") or "tool"),
+                                "input": {"summary": ""},
+                            })
+                ctx = ChatContext(chat_id=0, key_override=journal_file.parent.parent.name)
+                self.record_partial_turn(
+                    ctx,
+                    provider=provider,
+                    prompt=prompt,
+                    response_text="".join(texts).strip(),
+                    tool_events=tool_events,
+                    started_at=started_at,
+                    journal_path=journal_file,
+                )
+                recovered += 1
+            except (OSError, json.JSONDecodeError):
+                logger.exception("Failed recovering turn journal %s", journal_file)
+        if recovered:
+            logger.info("Recovered %d partial turn(s) from crash journals", recovered)
+        return recovered
+
     def archive_session(
         self,
         *,
@@ -184,6 +404,8 @@ class TranscriptStore:
                 }
                 if turn.get("is_error"):
                     row["is_error"] = True
+                if turn.get("is_partial"):
+                    row["partial"] = True
                 usage = turn.get("usage")
                 if isinstance(usage, dict) and usage:
                     row["usage"] = usage

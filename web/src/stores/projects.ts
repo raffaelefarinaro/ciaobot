@@ -90,6 +90,10 @@ export const useProjectStore = defineStore('projects', () => {
   // authoritative session history is still on the way.
   const loadingMessages = ref<Record<string, boolean>>({})
   const messageLoadGenerations = new Map<string, number>()
+  // Pagination state for envelope-mode history loads (see loadMessagesFromServer).
+  const historyMeta = ref<Record<string, { total: number; hasMore: boolean; nextOffset: number | null; limit: number } | undefined>>({})
+  const loadingOlder = ref<Record<string, boolean>>({})
+  const partRequests = new Map<string, Promise<void>>()
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and
   // after each streaming turn (subagents can be spawned mid-turn).
   const subagents = ref<Record<string, SubagentTranscript[]>>({})
@@ -2292,38 +2296,99 @@ export const useProjectStore = defineStore('projects', () => {
     // Fetch authoritative history from the SDK session on the server.
     // This catches schedule outputs, turns from other devices, etc.
     try {
-      const serverMsgs = await api.get<{ role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer' }[]>(
-        `/api/chats/${chatId}/messages`
+      const serverMsgs = await api.get<ServerRow[] | ServerEnvelope>(
+        `/api/chats/${chatId}/messages?limit=50`
       )
-      if (!serverMsgs.length) {
+      if (Array.isArray(serverMsgs) && !serverMsgs.length) {
         reconcileQueuedWithMessages(chatId)
         return
       }
 
-      let normalizedServer = normalizeMessages(serverMsgs.map(m => ({
-        role: m.role as 'user' | 'assistant' | 'system',
-        content: m.content,
-        // sent_at is the persisted send-time (user) or completion-time
-        // (assistant) recorded at the orchestration layer. Empty string for
-        // pre-feature chats — the renderer treats it as "no time".
-        timestamp: m.sent_at || '',
-        tool_name: m.tool_name,
-        images: m.images,
-        // Preserve server-assigned turn_index so user_echo replays (from WS
-        // reconnect mid-turn or right after) can dedup against hydrated
-        // history. Dropping this caused duplicate user bubbles: the dedup at
-        // the user_echo handler matches by turn_index first, and when every
-        // hydrated bubble has turn_index: undefined, the replayed echo falls
-        // through to msgs.push and renders a second copy of the same turn.
-        turn_index: m.turn_index,
-        duration_ms: m.duration_ms,
-        is_error: m.is_error,
-        // _filecard fields. Empty/undefined for non-file rows.
-        file_path: m.file_path,
-        action: m.action,
-        tool: m.tool,
-        phase: m.phase,
-      })))
+      // ── Envelope mode: merge the newest window into the cached timeline ──
+      if (!Array.isArray(serverMsgs)) {
+        const env = serverMsgs
+        historyMeta.value[chatId] = {
+          total: env.total,
+          hasMore: Boolean(env.hasMore),
+          nextOffset: env.nextOffset ?? null,
+          limit: env.limit || 50,
+        }
+
+        let windowRows = normalizeMessages(env.items.map(toChatMessage))
+
+        // Mid-stream guard, window-scoped version of the legacy rule below:
+        // while the chat streams, the live trace owns the in-flight turn, so
+        // drop trailing history past the last known user bubble unless the
+        // window already ends in a settled reply.
+        if (projectStreaming.value[chatId] && windowRows.length) {
+          const lastServer = windowRows[windowRows.length - 1]
+          const serverTurnSettled = Boolean(
+            lastServer
+            && lastServer.role === 'assistant'
+            && !lastServer.is_error
+            && lastServer.timestamp,
+          )
+          if (!serverTurnSettled) {
+            const localMsgs = messages.value[chatId] || []
+            let lastLocalUserIdx = -1
+            for (let i = localMsgs.length - 1; i >= 0; i--) {
+              if (localMsgs[i].role === 'user') {
+                lastLocalUserIdx = i
+                break
+              }
+            }
+            if (lastLocalUserIdx >= 0) {
+              const lastLocalUser = localMsgs[lastLocalUserIdx]
+              let serverLastUserIdx = -1
+              for (let i = windowRows.length - 1; i >= 0; i--) {
+                if (windowRows[i].role === 'user' && windowRows[i].content === lastLocalUser.content) {
+                  serverLastUserIdx = i
+                  break
+                }
+              }
+              if (serverLastUserIdx >= 0) {
+                windowRows = windowRows.slice(0, serverLastUserIdx + 1)
+              }
+            }
+          }
+        }
+
+        const local = messages.value[chatId] || []
+        const firstIndex = local.length ? local[0].i : undefined
+        if (!local.length || typeof firstIndex !== 'number' || env.total <= firstIndex) {
+          // Empty cache, cache from a pre-envelope server, or the session
+          // reset/shrank below our oldest row: adopt the window wholesale.
+          messages.value[chatId] = windowRows
+        } else {
+          // Index-addressed merge: refresh rows we already hold, append new
+          // tail rows, keep older pages loaded via loadOlderMessages.
+          const merged = local.slice()
+          for (const item of windowRows) {
+            const abs = item.i
+            if (typeof abs !== 'number') continue
+            const pos = abs - firstIndex
+            if (pos >= 0 && pos < merged.length) merged[pos] = item
+            else if (pos === merged.length) merged.push(item)
+            // pos > merged.length would be a gap (cannot happen with a
+            // contiguous suffix window); skip defensively.
+          }
+          messages.value[chatId] = merged
+        }
+        persistMessages()
+        if (streaming.value[chatId]
+          && !projectStreaming.value[chatId]
+          && !queuedMessages.value[chatId]?.length
+        ) {
+          const last = messages.value[chatId]?.at(-1)
+          if (last && ((last.role === 'assistant' && !last.is_error) || (last.role === 'system' && last.tool_name !== '_activity'))) {
+            clearStreamingState(chatId)
+          }
+        }
+        reconcileQueuedWithMessages(chatId)
+        return
+      }
+
+      let normalizedServer = normalizeMessages(serverMsgs.map(toChatMessage))
 
       // While the server declares this chat is actively streaming, don't let
       // /messages pull in the assistant's progress into the historical timeline:
@@ -2409,6 +2474,37 @@ export const useProjectStore = defineStore('projects', () => {
             }
           }
           const extraLocalUsers = localUsers.slice(serverUsers.length)
+  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number }
+  const toChatMessage = (m: ServerRow) => ({
+    role: m.role as 'user' | 'assistant' | 'system',
+    content: m.content,
+    // sent_at is the persisted send-time (user) or completion-time
+    // (assistant) recorded at the orchestration layer. Empty string for
+    // pre-feature chats — the renderer treats it as "no time".
+    timestamp: m.sent_at || '',
+    tool_name: m.tool_name,
+    images: m.images,
+    // Preserve server-assigned turn_index so user_echo replays (from WS
+    // reconnect mid-turn or right after) can dedup against hydrated
+    // history. Dropping this caused duplicate user bubbles: the dedup at
+    // the user_echo handler matches by turn_index first, and when every
+    // hydrated bubble has turn_index: undefined, the replayed echo falls
+    // through to msgs.push and renders a second copy of the same turn.
+    turn_index: m.turn_index,
+    duration_ms: m.duration_ms,
+    is_error: m.is_error,
+    // _filecard fields. Empty/undefined for non-file rows.
+    file_path: m.file_path,
+    action: m.action,
+    tool: m.tool,
+    phase: m.phase,
+    // Envelope annotations (absolute index + lazy marker). Undefined on
+    // legacy flat responses.
+    i: m.i,
+    lazy: m.lazy,
+    full_length: m.full_length,
+  })
+
           const allExtraAreOptimistic = extraLocalUsers.every(m => m.turn_index == null)
           if (!isPrefix || !allExtraAreOptimistic) {
             console.warn(
@@ -2418,6 +2514,10 @@ export const useProjectStore = defineStore('projects', () => {
           }
         }
         messages.value[chatId] = mergeMetadata(normalizedServer, normalizedLocal)
+    // `limit=50` asks for the paginated envelope (newest tail window); an
+    // older server answers with the legacy flat array and the code below
+    // handles both transparently.
+    type ServerEnvelope = { items: ServerRow[]; total: number; offset: number; limit: number; hasMore: boolean; nextOffset: number | null }
         persistMessages()
       } else if (historySignature(normalizedLocal) !== historySignature(messages.value[chatId] || [])) {
         messages.value[chatId] = normalizedLocal
@@ -2565,6 +2665,78 @@ export const useProjectStore = defineStore('projects', () => {
       await router.push('/')
     } else {
       selectFirstChat()
+  // ── Paginated history: older pages + lazy part expansion ────────────
+
+  function canLoadOlder(chatId: string): boolean {
+    return Boolean(historyMeta.value[chatId]?.hasMore)
+  }
+
+  function isLoadingOlder(chatId: string): boolean {
+    return Boolean(loadingOlder.value[chatId])
+  }
+
+  /** Fetch the previous page above the loaded window and prepend it. The
+   * caller (ChatPanel) preserves scroll position across the prepend. */
+  async function loadOlderMessages(chatId: string): Promise<void> {
+    const meta = historyMeta.value[chatId]
+    if (!meta?.hasMore || meta.nextOffset == null || loadingOlder.value[chatId]) return
+    loadingOlder.value[chatId] = true
+    try {
+      const env = await api.get<{ items: Parameters<typeof toChatMessage>[0][]; total: number; limit: number; hasMore: boolean; nextOffset: number | null }>(
+        `/api/chats/${chatId}/messages?offset=${meta.nextOffset}&limit=${meta.limit}`
+      )
+      if (Array.isArray(env)) return
+      const older = normalizeMessages(env.items.map(toChatMessage))
+      historyMeta.value[chatId] = {
+        total: env.total,
+        hasMore: Boolean(env.hasMore),
+        nextOffset: env.nextOffset ?? null,
+        limit: env.limit || meta.limit,
+      }
+      const local = messages.value[chatId] || []
+      const firstIndex = local.length ? local[0].i : undefined
+      if (!older.length || typeof firstIndex !== 'number') return
+      // The page must continue directly above the loaded window; anything
+      // else means the session changed underneath us and the next full
+      // refresh will resync — don't splice misaligned rows in.
+      if (older[0].i === firstIndex - older.length) {
+        messages.value[chatId] = [...older, ...local]
+        persistMessages()
+      }
+    } catch {
+      // Transient failure: leave state so the user can retry by scrolling.
+    } finally {
+      delete loadingOlder.value[chatId]
+    }
+  }
+
+  /** Fetch the full content of one pruned row by absolute index and splice
+   * it back into the timeline. Concurrent expands of the same row dedup. */
+  function expandMessagePart(chatId: string, index: number): Promise<void> {
+    const key = `${chatId}:${index}`
+    const existing = partRequests.get(key)
+    if (existing) return existing
+    const request = (async () => {
+      try {
+        const row = await api.get<{ content: string }>(`/api/chats/${chatId}/messages/part?i=${index}`)
+        const list = messages.value[chatId] || []
+        const pos = list.findIndex(m => m.i === index)
+        if (pos >= 0) {
+          const next = list.slice()
+          next[pos] = { ...next[pos], content: row.content, lazy: false }
+          messages.value[chatId] = next
+          persistMessages()
+        }
+      } catch {
+        // Leave the row collapsed; the marker stays so the user can retry.
+      } finally {
+        partRequests.delete(key)
+      }
+    })()
+    partRequests.set(key, request)
+    return request
+  }
+
       persistState()
     }
   }
@@ -4707,3 +4879,4 @@ export const useProjectStore = defineStore('projects', () => {
     packageStatus, checkPackageStatus,
   }
 })
+    canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,

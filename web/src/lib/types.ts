@@ -275,6 +275,12 @@ export interface ChatMessage {
   // trace; only final_answer is eligible for the terminal response bubble.
   // Undefined keeps the legacy last-assistant-message inference.
   phase?: 'commentary' | 'final_answer'
+  // Paginated-history annotations (envelope mode only). `i` is the row's
+  // absolute index in the server's full assembled history; `lazy` marks a
+  // pruned row whose full content must be fetched from the part endpoint.
+  i?: number
+  lazy?: boolean
+  full_length?: number
 }
 
 // Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent

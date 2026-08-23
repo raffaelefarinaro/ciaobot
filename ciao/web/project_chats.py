@@ -89,7 +89,11 @@ from ciao.providers.opencode import (
 )
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.sessions import StateStore
-from ciao.transcripts import TranscriptStore, _claude_projects_dir
+from ciao.transcripts import (
+    TranscriptStore,
+    _claude_projects_dir,
+    _journal_event_record,
+)
 from ciao.web.chat_broker import (
     ChatStream,
     ChatStreamBroker,
@@ -1153,6 +1157,12 @@ class ProjectChatManager:
         self._broker = ChatStreamBroker()
         self._events = EventsHub()
         # Per-(chat, file) content snapshots taken on Write/Edit/MultiEdit/
+        # Fold turn journals left behind by a crashed process into their
+        # transcripts as is_partial turns before anything reads history.
+        try:
+            transcript_store.recover_journals()
+        except Exception:  # noqa: BLE001 — recovery must never block startup
+            logger.exception("Turn journal recovery failed")
         # NotebookEdit. Backs the file viewer's History and Diff tabs and the
         # `restore` action. See ciao/web/file_snapshots.py for the storage
         # layout and dedup behaviour. The runtime root is wherever the
@@ -5412,11 +5422,32 @@ class ProjectChatManager:
                         return
 
         outcome = _StreamOutcome(effective_model=chat.model)
-        async for event in self._drive_stream(
-            chat_id=chat_id,
-            request=request,
-            outcome=outcome,
-        ):
+        # Crash journal: mirror user-visible events while the turn streams so
+        # a server crash or provider abort mid-turn can be recovered as an
+        # is_partial turn on next startup instead of losing the exchange.
+        # Finalization below is synchronous, so cancellation cannot interrupt
+        # it mid-write; no shield wrapper is needed.
+        journal = self._transcripts.open_turn_journal(
+            ChatContext.for_web(chat_id), chat.provider
+        )
+        journal.begin({
+            "provider": chat.provider,
+            "prompt": (request.display_prompt or request.prompt)[:2000],
+            "started_at": _now_iso(),
+        })
+
+        async def _journalled_stream():
+            async for event in self._drive_stream(
+                chat_id=chat_id,
+                request=request,
+                outcome=outcome,
+            ):
+                record = _journal_event_record(event)
+                if record is not None:
+                    journal.append(record)
+                yield event
+
+        async for event in _journalled_stream():
             yield event
         response_text = outcome.response_text
         had_error = outcome.had_error
@@ -5451,6 +5482,7 @@ class ProjectChatManager:
             self._state.add_cost(cost_usd)
         if usage:
             self._state.set_usage(usage)
+        journal.finish()
         if quota:
             self._state.set_quota(quota)
 

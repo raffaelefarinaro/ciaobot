@@ -365,7 +365,17 @@
                   <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
                   <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
                 </button>
-                <div v-if="thinkingExpanded" class="trace-text trace-thinking" v-html="renderMarkdown(step.content)"></div>
+                <div v-if="thinkingExpanded" class="trace-text trace-thinking">
+                  <button
+                    v-if="step.lazy && typeof step.i === 'number'"
+                    type="button"
+                    class="thinking-load"
+                    @click.stop="expandLazyStep(step)"
+                  >
+                    Load full reasoning…
+                  </button>
+                  <div v-else v-html="renderMarkdown(step.content)"></div>
+                </div>
               </div>
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
@@ -2111,6 +2121,32 @@ function checkScroll() {
   const threshold = 4
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
   onChatScrollReanchor()
+  // Paginated history: near the top of a windowed timeline, pull the older
+  // page in. The store's loadingOlder flag debounces repeat fires.
+  if (el.scrollTop <= 80) {
+    const chatId = store.activeChatId
+    if (chatId && store.canLoadOlder(chatId) && !store.isLoadingOlder(chatId)) {
+      void loadOlderAnchored()
+    }
+  }
+}
+
+// Prepend an older history page while keeping the viewport anchored to the
+// rows the user is looking at: compensate for the height the prepend adds.
+async function loadOlderAnchored() {
+  const el = messagesEl.value
+  const chatId = store.activeChatId
+  if (!el || !chatId) return
+  const prevHeight = el.scrollHeight
+  await store.loadOlderMessages(chatId)
+  await nextTick()
+  if (messagesEl.value === el) el.scrollTop += el.scrollHeight - prevHeight
+}
+
+function expandLazyStep(step: { i?: number }): void {
+  const chatId = store.activeChatId
+  if (!chatId || typeof step.i !== 'number') return
+  void store.expandMessagePart(chatId, step.i)
 }
 
 function scrollToBottom() {
@@ -5290,6 +5326,21 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   font: inherit;
   font-size: var(--text-xs);
   opacity: 0.85;
+}
+
+.thinking-load {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 4px 10px;
+  border-radius: 8px;
+}
+
+.thinking-load:hover {
+  color: var(--fg);
 }
 
 .thinking-toggle:hover { color: var(--fg); }
