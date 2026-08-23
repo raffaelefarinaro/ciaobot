@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -34,13 +34,12 @@ from ciao import desktop_build
 from ciao import provider_registry
 from ciao import vault_rehome
 from ciao.memory_tool import resolve_region
-from ciao.config import WorkspaceConfig
 from ciao.native_sessions import live_sessions_for_workspace
+from ciao.config import WorkspaceConfig
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
-    parse_disallowed_tools_value,
     persist_workspaces,
     workspace_from_request,
     workspace_provider_options,
@@ -51,7 +50,7 @@ from ciao.workspaces import (
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
-from ciao.providers.codex import CodexProvider, codex_login_status
+from ciao.providers.codex import CodexProvider
 from ciao.providers.opencode import (
     OpencodeProvider,
     _file_touches as _opencode_file_touches,
@@ -78,7 +77,6 @@ from ciao.vault_index import (
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import (
-    RestartDrainingError,
     _ALLOWED_IMAGE_EXTENSIONS,
     _PROJECT_UPLOAD_MAX_BYTES,
     _normalize_handover_messages,
@@ -806,14 +804,7 @@ def _local_subagent_transcripts(
 
 
 # ── Auth ────────────────────────────────────────────────────────────────
-
-from ciao.web.routes_auth import (
-    auth_check,
-    auth_login,
-    auth_logout,
-    auth_settings_get,
-    auth_settings_update,
-)
+# Auth handlers live in routes_auth.py; app.py imports them from there.
 
 
 # ── Projects ─────────────────────────────────────────────────────────────
@@ -839,10 +830,6 @@ def _workspaces_payload(config) -> dict:
         "app_default_model": getattr(config, "claude_default_model", "") or "",
         "provider_options": _workspace_provider_options(config),
     }
-
-
-def _parse_disallowed_tools_value(raw: object) -> list[str] | None:
-    return parse_disallowed_tools_value(raw)
 
 
 def _workspace_from_request(
@@ -973,10 +960,6 @@ def _provider_key_auth_method(config, key: str) -> str:
     if key == "ANTHROPIC_API_KEY" and _claude_oauth_ready():
         return "oauth"
     return "missing"
-
-
-def _provider_key_configured(config, key: str) -> bool:
-    return _provider_key_auth_method(config, key) != "missing"
 
 
 def _provider_config_payload(config) -> dict:
@@ -3285,7 +3268,6 @@ async def _assemble_chat_messages(
             return [*handover_messages, *archived]
         return list(handover_messages)
 
-    from ciao.transcripts import get_session_messages_full
 
     result: list[dict] = []
     # A chat can rotate through more than one SDK session file within the
@@ -7149,7 +7131,6 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
     candidate destinations and whether any is justified, and a region accept
     from a foreign workspace carries the leak warning.
     """
-    primary = config.primary_workspace()
     rows: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
     rehome = _rehome_signal(config)

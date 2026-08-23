@@ -1157,18 +1157,18 @@ class ProjectChatManager:
             "chats": {},
         }
         self._providers: dict[str, ProviderService] = {}
-        # Bound by main.py when the embedded MCP control plane is enabled.
-        # Tests and legacy-only instances intentionally leave it unset.
-        self._mcp_service: Optional["CiaoMcpService"] = None
-        self._broker = ChatStreamBroker()
-        self._events = EventsHub()
-        # Per-(chat, file) content snapshots taken on Write/Edit/MultiEdit/
         # Fold turn journals left behind by a crashed process into their
         # transcripts as is_partial turns before anything reads history.
         try:
             transcript_store.recover_journals()
         except Exception:  # noqa: BLE001 — recovery must never block startup
             logger.exception("Turn journal recovery failed")
+        # Bound by main.py when the embedded MCP control plane is enabled.
+        # Tests and legacy-only instances intentionally leave it unset.
+        self._mcp_service: Optional["CiaoMcpService"] = None
+        self._broker = ChatStreamBroker()
+        self._events = EventsHub()
+        # Per-(chat, file) content snapshots taken on Write/Edit/MultiEdit/
         # NotebookEdit. Backs the file viewer's History and Diff tabs and the
         # `restore` action. See ciao/web/file_snapshots.py for the storage
         # layout and dedup behaviour. The runtime root is wherever the
@@ -5482,13 +5482,13 @@ class ProjectChatManager:
             tool_events=tool_events,
             is_error=had_error,
         )
+        journal.finish()
 
         # Update global cost
         if cost_usd > 0:
             self._state.add_cost(cost_usd)
         if usage:
             self._state.set_usage(usage)
-        journal.finish()
         if quota:
             self._state.set_quota(quota)
 
