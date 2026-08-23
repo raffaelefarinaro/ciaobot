@@ -9,7 +9,7 @@ from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 
 
-def test_capsule_contains_routing_and_retrieval_hints(tmp_path: Path) -> None:
+def test_capsule_contains_routing_and_entity_hints(tmp_path: Path) -> None:
     (tmp_path / "INDEX.md").write_text(
         "- [People/Alba](./People/Alba.md) (aliases: Alba)\n", encoding="utf-8"
     )
@@ -25,7 +25,7 @@ def test_capsule_contains_routing_and_retrieval_hints(tmp_path: Path) -> None:
     assert "workspace=personal" in capsule
     assert 'project="Ciaobot"' in capsule
     assert "[Alba](./People/Alba.md)" in capsule
-    assert "retrieval_hint=Use vault_search" in capsule
+    assert "retrieval_hint" not in capsule
 
 
 def test_capsule_can_omit_stable_facts() -> None:

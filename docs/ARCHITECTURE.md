@@ -23,7 +23,7 @@ ciao/                          Python backend (Starlette).
     codex.py                   Persistent Codex app-server adapter, model/account discovery, approvals, questions, history.
     opencode.py                opencode provider over per-chat `opencode serve` (ephemeral loopback port, scoped MCP token, OpenAPI-fail-closed readiness; mid-turn messages queue for the next turn).
     oneshot.py                 Single-turn provider call (max_turns=1, no tools). Used by critique.py and routine-model automations.
-  context/                     Provider-neutral per-turn context capsule (workspace, project, vault hints, retrieval routing).
+  context/                     Provider-neutral per-turn context capsule (workspace, project, vault hints).
   observability/               Hooks: PreToolUse keeps Claude Bash jobs in the active turn. Runtime/entity context is built once in the request capsule.
   schedules.py                 Cron-style schedule dispatch.
   loops.py                     In-chat loops: re-dispatch a prompt into a fixed chat every N minutes.
@@ -292,10 +292,11 @@ write the same guide rather than maintaining a parallel store.
 
 The server registers a Claude `PreToolUse` hook in `ciao/observability/hooks.py`.
 It rewrites only Claude `Bash` calls with `run_in_background: true` to run in
-the foreground. Runtime, workspace, project, retrieval, and vault-entity
-context is built once by `ciao/context/capsule.py` and prepended to the request
-for all three providers; a second Claude `UserPromptSubmit` injection is
-intentionally not installed. The managed SDK CLI owns background shell
+the foreground. Runtime, workspace, project, and vault-entity context is built
+once by `ciao/context/capsule.py` and prepended to the request for all three
+providers; a second Claude `UserPromptSubmit` injection is intentionally not
+installed. Retrieval is driven by the system prompt (`vault_search` tool) rather
+than a per-turn heuristic hint. The managed SDK CLI owns background shell
 processes and stops them when the turn ends, while their terminal notification
 is delayed until a later turn resumes the session. Keeping these calls in the
 active turn makes the real shell result part of the same streamed response.

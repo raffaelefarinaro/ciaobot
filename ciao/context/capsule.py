@@ -8,27 +8,15 @@ only request-scoped routing facts and entity hints; native ``CLAUDE.md`` /
 from __future__ import annotations
 
 import hashlib
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 from ciao.context.entity_tagger import find_entities, format_entities
 
-_RETRIEVAL_RE = re.compile(
-    r"\b(?:remember|recall|what did we|what have we|previously|last time|"
-    r"find|search|look up|decision|decided|note about|notes about)\b",
-    re.IGNORECASE,
-)
-
 
 def _field(value: str, *, limit: int = 1200) -> str:
     """Keep user-controlled routing metadata single-line and bounded."""
     return " ".join(str(value or "").split())[:limit]
-
-
-def needs_retrieval_hint(prompt: str) -> bool:
-    """Return whether the prompt likely needs a vault search before answering."""
-    return bool(_RETRIEVAL_RE.search(prompt or ""))
 
 
 def build_context_capsule(
@@ -53,8 +41,8 @@ def build_context_capsule(
     provider's cwd, so a path the model writes is usable verbatim.
 
     Stable project facts can be omitted after the first turn of a provider
-    session. Date, entity hints, retrieval routing, and handover data remain
-    dynamic and are intentionally calculated from the current prompt.
+    session. Date, entity hints, and handover data remain dynamic and are
+    intentionally calculated from the current prompt.
     """
     stable: list[str] = []
     if workspace:
@@ -91,11 +79,6 @@ def build_context_capsule(
         formatted = format_entities(entities)
         if formatted:
             dynamic.append(formatted)
-    if needs_retrieval_hint(prompt):
-        dynamic.append(
-            "retrieval_hint=Use vault_search snippets as private evidence; do "
-            "not open full vault notes for pure recall."
-        )
     if unattended:
         dynamic.append(
             "unattended=true; this turn was fired automatically. Do not ask "
