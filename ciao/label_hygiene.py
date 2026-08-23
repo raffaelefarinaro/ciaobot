@@ -1,7 +1,7 @@
 """Label-hygiene audit for open GitHub issues.
 
 Checks open issues on ``raffaelefarinaro/ciaobot`` against the title-prefix
-to classification-label convention in ``ciao/system_prompt.md`` and adds
+to classification-label convention in the ``ciao-support`` skill and adds
 missing classification labels. Never removes or replaces a label: removal
 would risk overriding intentional human labeling.
 
@@ -128,7 +128,8 @@ class LabelHygieneReport:
 def plan_label_actions(issues: Iterable[Issue]) -> LabelHygieneReport:
     """Pure decision: map each issue to planned actions, no side effects.
 
-    Rules (from ciao/system_prompt.md and issue #235):
+    Rules (from the ciao-support skill's GitHub issue-label table and
+    issue #235):
     - Known prefix -> add the expected classification label if missing.
     - ``[Agent]`` -> needs human; never auto-apply.
     - ``[Report]`` or other unknown bracket -> needs human; never auto-apply.

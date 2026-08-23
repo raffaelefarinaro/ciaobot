@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import functools
 import logging
-import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -50,6 +49,10 @@ def system_prompt_payload(
     ``SystemPromptPreset`` ``append`` field. ``exclude_dynamic_sections`` moves
     per-session cwd / git / OS / auto-memory paths into the first user message so
     the static preset + append stay cacheable across sessions (Claude SDK ≥0.1.58).
+
+    ``control_surface`` is accepted for call-site compatibility only: the core
+    instructions are transport-agnostic, so the legacy and MCP arms receive
+    identical text and there is nothing left to strip.
     """
     existing_append = ""
     if isinstance(base_system_prompt, dict):
@@ -59,10 +62,7 @@ def system_prompt_payload(
     if existing_append:
         parts.append(existing_append)
     parts.append("[SYSTEM EXPERTISE: Ciaobot core]")
-    instructions = _system_instructions()
-    if control_surface == "mcp":
-        instructions = _mcp_system_instructions(instructions)
-    parts.append(instructions)
+    parts.append(_system_instructions())
     if memory_block:
         parts.append(memory_block.strip())
 
@@ -73,42 +73,3 @@ def system_prompt_payload(
         "append": combined,
         "exclude_dynamic_sections": True,
     }
-
-
-def _mcp_system_instructions(instructions: str) -> str:
-    """Strip legacy transport recipes when the managed process has typed MCP tools.
-
-    The behavioral policy (security, approvals, workspace identity, memory
-    semantics, entity detection, canonical docs, gws security) is identical to
-    the legacy arm. Only the CLI/curl/direct-file recipes are removed: the typed
-    MCP tools are self-describing and the server-level instructions already state
-    the prefer-MCP policy, so repeating transport recipes in the prompt is noise.
-    """
-    # Drop the vault CLI fallback + hygiene recipe lines.
-    text = instructions.replace(
-        "- Direct CLI fallback: `ciao vault-search \"<query>\" --limit 5`; rebuild stale search/entity data with `ciao vault-index`.\n",
-        "",
-    ).replace(
-        "\n- Vault hygiene: `ciao vault-lint` for broken wikilinks, orphans, and near-duplicates.",
-        "",
-    )
-    # Replace the legacy "Other agent CLIs" recipe block with a single MCP nudge.
-    mcp_nudge = (
-        "Use the authenticated Ciaobot MCP tools; prefer them over curl, the "
-        "ciao CLI, or direct `.runtime` edits.\n\n"
-    )
-    text = re.sub(
-        r"\*\*Other agent CLIs\*\*.*?(?=\*\*Background memory routines\*\*)",
-        mcp_nudge,
-        text,
-        flags=re.DOTALL,
-    )
-    # Drop the diagnostics `.runtime` file-path recipe; keep the behavior.
-    text = text.replace(
-        "inspect local runtime evidence before speculating: `.runtime/server_errors.log`, "
-        "`.runtime/job_runs.jsonl`, and, for macOS service/startup problems, "
-        "`.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log` when present. "
-        "Use focused tails or summaries; do not dump full logs.",
-        "gather diagnostic evidence before speculating; keep excerpts focused.",
-    )
-    return text

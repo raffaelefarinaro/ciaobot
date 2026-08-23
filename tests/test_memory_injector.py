@@ -91,26 +91,23 @@ def test_system_prompt_includes_native_memory_and_vault_routing() -> None:
     assert "ciao vault-search" not in append
 
 
-def test_mcp_system_prompt_strips_legacy_control_recipes() -> None:
+def test_mcp_and_legacy_prompts_are_identical() -> None:
+    """The core is transport-agnostic: no CLI/curl recipes in either arm."""
     legacy = mi.system_prompt_payload("memory block")
     mcp = mi.system_prompt_payload("memory block", control_surface="mcp")
     assert legacy is not None and mcp is not None
-    legacy_append = legacy["append"]
-    mcp_append = mcp["append"]
 
-    # The MCP path strips the legacy CLI/curl transport recipes entirely.
-    assert "ciao create-chat" not in mcp_append
-    assert "ciao provider-chat" not in mcp_append
-    assert "ciao vault-search" not in mcp_append
-    assert "ciao vault-lint" not in mcp_append
-    assert "ciao sync-skills" not in mcp_append
-    # Legacy transport recipes are no longer copied into either arm.
-    assert "ciao create-chat" not in legacy_append
-    assert "ciao vault-lint" not in legacy_append
-    assert "ciao create-chat" not in mcp_append
-    assert "Prefer the managed Ciaobot MCP tools" in mcp_append
-    assert "memory_update" in mcp_append
-    assert "there is no `ciao memory` command" not in mcp_append
+    for append in (legacy["append"], mcp["append"]):
+        assert "ciao create-chat" not in append
+        assert "ciao provider-chat" not in append
+        assert "ciao vault-search" not in append
+        assert "ciao vault-lint" not in append
+        assert "ciao sync-skills" not in append
+
+    # The surfaces are byte-identical; there is nothing left to strip.
+    assert legacy["append"] == mcp["append"]
+    assert "Prefer the managed Ciaobot MCP tools" in mcp["append"]
+    assert "memory_update" in mcp["append"]
 
 
 def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
