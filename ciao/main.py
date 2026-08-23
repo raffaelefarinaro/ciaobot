@@ -296,6 +296,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
     setup_error_logging(config.workspace_root)
+    # When CIAO_LOG_LEVEL=debug, also capture DEBUG+ records into a rotating
+    # server_debug.log so verbose runtime detail is inspectable after the fact
+    # (surfaced through the debug issue report). No-op at the default INFO.
+    from ciao.error_log import resolve_log_level, setup_debug_logging
+
+    setup_debug_logging(config.workspace_root)
+    log_level = resolve_log_level()
     # Keep the SDK's benign closed-transport control-task errors out of the
     # error log (asyncio would otherwise log them at ERROR). See issue #163.
     install_asyncio_noise_filter()
@@ -1002,7 +1009,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         app,
         host=config.pwa_host,
         port=config.pwa_port,
-        log_level="info",
+        log_level="debug" if log_level <= logging.DEBUG else "info",
     )
     server = uvicorn.Server(uvi_config)
     tracker.start("server_starting")
@@ -1171,7 +1178,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
 def main() -> None:
     """CLI entrypoint."""
-    logging.basicConfig(level=logging.INFO)
+    from ciao.error_log import resolve_log_level
+
+    logging.basicConfig(level=resolve_log_level())
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:
