@@ -135,10 +135,15 @@ describe('a tile that names an existing surface', () => {
   })
 })
 
-describe('grouping by workspace', () => {
-  it('groups tiles by workspace with shared ones first', async () => {
-    // An action's workspace decides where acting on it writes, so a flat strip
-    // made the reader parse each tile's prose to work out which one it was about.
+describe('scoping to the active workspace', () => {
+  const tileTitles = (wrapper: ReturnType<typeof mount>) =>
+    wrapper.findAll('.housekeeping-title').map((t) => t.text())
+
+  it('hides other workspaces tiles, shows shared plus current unlabeled', async () => {
+    // Another workspace's pile is not this tab's business. The strip used to
+    // sum every workspace's queue into one tile, so the review tile claimed
+    // proposals for a tab whose own queue held fewer — while /proposals, the
+    // page the tile opens, scopes its rows to the active workspace.
     const housekeeping = useHousekeepingStore()
     housekeeping.actions = [
       action({ id: 'w', workspace: 'work', title: 'Work thing' }),
@@ -148,18 +153,55 @@ describe('grouping by workspace', () => {
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
 
-    expect(wrapper.findAll('.housekeeping-group').map((h) => h.text()))
-      .toEqual(['shared', 'personal', 'work'])
+    expect(tileTitles(wrapper)).toEqual(['Install-wide thing', 'Personal thing'])
+    // Both surviving groups concern the reader's own position or the whole
+    // install, so headings would be noise.
+    expect(wrapper.findAll('.housekeeping-group')).toHaveLength(0)
+    wrapper.unmount()
   })
 
-  it('shows no heading when nothing distinguishes the tiles', async () => {
-    // One install, nothing workspace-specific: labelling it "shared" is noise.
+  it('follows the workspace switcher', async () => {
     const housekeeping = useHousekeepingStore()
-    housekeeping.actions = [action({ workspace: '' })]
+    housekeeping.actions = [
+      action({ id: 'w', workspace: 'work', title: 'Work thing' }),
+      action({ id: 'p', workspace: 'personal', title: 'Personal thing' }),
+    ]
+    const { useProjectStore } = await import('../../stores/projects')
+    const projectStore = useProjectStore()
+    projectStore.activeWorkspace = 'work'
+
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
 
-    expect(wrapper.findAll('.housekeeping-group')).toHaveLength(0)
+    expect(tileTitles(wrapper)).toEqual(['Work thing'])
+    wrapper.unmount()
+  })
+
+  it('labels named groups only when no workspace is active', async () => {
+    // With an active workspace, scoping can only leave shared plus that one
+    // workspace, which need no labels. The unscoped fallback (no active
+    // workspace yet) can mix several named groups, and then they need them.
+    const housekeeping = useHousekeepingStore()
+    housekeeping.actions = [
+      action({ id: 'w', workspace: 'work', title: 'Work thing' }),
+      action({ id: 'p', workspace: 'personal', title: 'Personal thing' }),
+      action({ id: 's', workspace: '', title: 'Install-wide thing' }),
+    ]
+    const { useProjectStore } = await import('../../stores/projects')
+    const projectStore = useProjectStore()
+    projectStore.activeWorkspace = ''
+
+    const wrapper = mount(HousekeepingStrip)
+    await nextTick()
+
+    expect(tileTitles(wrapper)).toEqual([
+      'Install-wide thing',
+      'Personal thing',
+      'Work thing',
+    ])
+    expect(wrapper.findAll('.housekeeping-group').map((h) => h.text()))
+      .toEqual(['shared', 'personal', 'work'])
+    wrapper.unmount()
   })
 })
 

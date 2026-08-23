@@ -16,9 +16,25 @@ const chatBusy = ref(false)
  * Anything with no workspace is install-wide, and goes at the top because it
  * applies regardless of which workspace you are looking at.
  */
+/** Actions relevant to the workspace on screen.
+ *
+ * A shared action (no workspace) always applies. A workspace-scoped action
+ * names where acting on it writes, and another workspace's pile is not this
+ * tab's business: the review queue behind /proposals scopes its rows the same
+ * way, so a summed strip made the tile claim more than the opened page showed.
+ * With no active workspace yet, show everything rather than an empty strip.
+ */
+const scopedActions = computed(() => {
+  const active = projectStore.activeWorkspace
+  if (!active) return housekeeping.actions
+  return housekeeping.actions.filter(
+    (action) => !action.workspace || action.workspace === active,
+  )
+})
+
 const groups = computed(() => {
   const byWorkspace = new Map<string, OperatorAction[]>()
-  for (const action of housekeeping.actions) {
+  for (const action of scopedActions.value) {
     const key = action.workspace || ''
     const bucket = byWorkspace.get(key)
     if (bucket) bucket.push(action)
@@ -31,9 +47,13 @@ const groups = computed(() => {
 
 // A single group with no workspace is the common case (one install, nothing
 // workspace-specific); labelling it "shared" there is noise, so headings only
-// appear once there is something to distinguish.
+// appear once there is something to distinguish. After scoping, a named group
+// is by definition the workspace you are standing in, so only a mixed group
+// list — possible while no workspace is active — needs labels.
 const showHeadings = computed(
-  () => groups.value.length > 1 || groups.value.some((g) => g.workspace),
+  () => groups.value.some(
+    (g) => g.workspace && g.workspace !== projectStore.activeWorkspace,
+  ),
 )
 
 onMounted(() => {

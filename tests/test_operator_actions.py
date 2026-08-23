@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from ciao.operator_actions import (
-    _review_queue_depth,
+    _review_queue_depths,
     DetectionContext,
     REVIEW_QUEUE_DEPTH,
     detect_actions,
@@ -276,8 +276,11 @@ def test_review_queue_depth_counts_skill_proposal_files(tmp_path: Path) -> None:
     )
 
     # Depth is reached by files alone, with no bullets in the queue file at all.
-    assert _review_queue_depth(context) == REVIEW_QUEUE_DEPTH
-    assert "review-queue-depth" in [a.id for a in detect_actions(context)]
+    assert _review_queue_depths(context) == {"personal": REVIEW_QUEUE_DEPTH}
+    tiles = [a for a in detect_actions(context) if a.kind == "review-queue-depth"]
+    assert [t.id for t in tiles] == ["review-queue-depth:personal"]
+    assert tiles[0].workspace == "personal"
+    assert str(REVIEW_QUEUE_DEPTH) in tiles[0].title
 
 
 def test_review_queue_depth_fires_above_threshold(tmp_path: Path) -> None:
@@ -295,12 +298,55 @@ def test_review_queue_depth_fires_above_threshold(tmp_path: Path) -> None:
         config=config, runtime_dir=_runtime(tmp_path), schedule_store=_Store([])
     )
     ids = [a.id for a in detect_actions(context)]
-    assert "review-queue-depth" in ids
+    assert "review-queue-depth:personal" in ids
 
     # Below the threshold it is silent.
     queue.write_text("- [memory] One straggler.", encoding="utf-8")
     ids = [a.id for a in detect_actions(context)]
-    assert "review-queue-depth" not in ids
+    assert "review-queue-depth:personal" not in ids
+
+
+def test_review_queue_depth_is_per_workspace_not_summed(tmp_path: Path) -> None:
+    """Each workspace's tile carries its own count, and only past-threshold ones.
+
+    The summed tile let one busy workspace summon a review tile into every
+    other workspace's strip, and the /proposals page it opens scopes its rows
+    to the active workspace, so the number claimed work the page could not
+    show. A sibling under the threshold must stay invisible from here.
+    """
+    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
+    for name, count in (("personal", REVIEW_QUEUE_DEPTH + 2), ("work", 1)):
+        queue = (
+            config.workspace_vault_root(name) / "Workspace" / "Memory-Proposals.md"
+        )
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        queue.write_text(
+            "\n".join(f"- [memory] Pending {name} {i}." for i in range(count)),
+            encoding="utf-8",
+        )
+    context = DetectionContext(
+        config=config, runtime_dir=_runtime(tmp_path), schedule_store=_Store([])
+    )
+
+    tiles = [a for a in detect_actions(context) if a.kind == "review-queue-depth"]
+    assert [t.id for t in tiles] == ["review-queue-depth:personal"]
+    assert tiles[0].workspace == "personal"
+    assert str(REVIEW_QUEUE_DEPTH + 2) in tiles[0].title
+
+    # Work crossing the threshold on its own earns its own tile, still not a sum.
+    queue = config.workspace_vault_root("work") / "Workspace" / "Memory-Proposals.md"
+    queue.write_text(
+        "\n".join(f"- [memory] Pending work {i}." for i in range(REVIEW_QUEUE_DEPTH)),
+        encoding="utf-8",
+    )
+    tiles = [a for a in detect_actions(context) if a.kind == "review-queue-depth"]
+    assert sorted(t.id for t in tiles) == [
+        "review-queue-depth:personal",
+        "review-queue-depth:work",
+    ]
+    for tile in tiles:
+        own = _review_queue_depths(context)[tile.workspace]
+        assert str(own) in tile.title
 
 
 def test_every_action_offers_run_or_chat(tmp_path: Path) -> None:
