@@ -29,18 +29,17 @@ function onDevicePage(): boolean {
 }
 
 // Paths handed to the api wrapper are built from server state (chat ids, file
-// names). Resolve every request against the page origin and refuse anything
+// names). Every request resolves against the page origin and refuses anything
 // that would land on another host or scheme, so a crafted value can never
 // turn a same-origin API call into a cross-origin one.
-function sameOriginUrl(path: string): string {
-  const url = new URL(path, window.location.origin)
-  if (!/^https?:$/.test(url.protocol) || url.origin !== window.location.origin) {
-    throw new ApiError(`Blocked non-same-origin API path: ${path}`)
-  }
-  return `${url.pathname}${url.search}${url.hash}`
-}
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  // The barrier sits here, next to the sink: resolve the caller's path against this page's origin and refuse anything
+  // that would land on another host or scheme before a request can exist.
+  const target = new URL(path, window.location.origin)
+  if (!/^https?:$/.test(target.protocol) || target.origin !== window.location.origin) {
+    throw new ApiError(`Blocked non-same-origin API path: ${path}`)
+  }
   const opts: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json' },
@@ -49,7 +48,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (body !== undefined) {
     opts.body = JSON.stringify(body)
   }
-  const res = await fetch(sameOriginUrl(path), opts)
+  const res = await fetch(`${target.pathname}${target.search}${target.hash}`, opts)
   if (res.status === 401) {
     // Never hard-reload while already on /login — that caused a refresh loop
     // when client mode's /api/auth/check returns 401 (host password needed).
