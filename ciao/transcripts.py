@@ -289,9 +289,33 @@ class TranscriptStore:
         tool_events: list[dict[str, Any]] | None = None,
         started_at: str = "",
         journal_path: Path | None = None,
-    ) -> None:
-        """Append an ``is_partial`` turn recovered from a crash journal."""
+    ) -> bool:
+        """Append an ``is_partial`` turn recovered from a crash journal.
+
+        Returns whether a turn was actually appended, so the caller's count
+        reports recoveries rather than journals seen.
+
+        Idempotent on the journal's own name. `_save_current` and the unlink
+        below are two steps: a death between them - or an unlink that simply
+        raises - leaves a journal whose turn is ALREADY durable, and the next
+        startup folded it in again, duplicating the prompt and the reply after
+        exactly the crash recovery exists to survive.
+
+        A `committed` marker (as the normal turn path uses) would only narrow
+        that window, because a death before the marker still replays a durable
+        turn. Stamping the turn with the journal filename - which is unique per
+        turn - and checking for it first closes the window wherever the crash
+        lands.
+        """
+        source = journal_path.name if journal_path is not None else ""
         transcript = self._load_current(ctx, provider)
+        if source and transcript:
+            for turn in transcript.get("turns") or []:
+                if turn.get("recovered_from") == source:
+                    # Already folded in by an earlier startup; this journal only
+                    # outlived its own unlink.
+                    self._drop_journal(journal_path)
+                    return False
         if not transcript:
             transcript = {
                 "provider": provider,
@@ -317,14 +341,21 @@ class TranscriptStore:
                 "usage": {},
                 "quota": {},
                 "tool_events": list(tool_events or []),
+                # The journal this turn came from, so a replay can recognise it.
+                "recovered_from": source,
             }
         )
         self._save_current(ctx, transcript, provider)
-        if journal_path is not None:
-            try:
-                journal_path.unlink(missing_ok=True)
-            except OSError:
-                logger.exception("Failed removing recovered journal %s", journal_path)
+        self._drop_journal(journal_path)
+        return True
+
+    def _drop_journal(self, journal_path: Path | None) -> None:
+        if journal_path is None:
+            return
+        try:
+            journal_path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed removing recovered journal %s", journal_path)
 
     def recover_journals(self) -> int:
         """Fold journals left behind by crashed turns into their transcripts.
@@ -376,7 +407,7 @@ class TranscriptStore:
                     journal_file.unlink(missing_ok=True)
                     continue
                 ctx = ChatContext(chat_id=0, key_override=journal_file.parent.parent.name)
-                self.record_partial_turn(
+                appended = self.record_partial_turn(
                     ctx,
                     provider=provider,
                     prompt=prompt,
@@ -385,7 +416,10 @@ class TranscriptStore:
                     started_at=started_at,
                     journal_path=journal_file,
                 )
-                recovered += 1
+                # Only a real append counts: a journal that outlived its own
+                # unlink is dropped, not recovered, and reporting it would
+                # claim a turn was restored twice.
+                recovered += 1 if appended else 0
             except (OSError, json.JSONDecodeError):
                 logger.exception("Failed recovering turn journal %s", journal_file)
         if recovered:

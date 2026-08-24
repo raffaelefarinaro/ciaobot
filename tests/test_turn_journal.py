@@ -220,3 +220,63 @@ def test_the_buffered_tail_lands_without_another_append(tmp_path: Path) -> None:
 
     assert "buffered" in journal._path.read_text(encoding="utf-8")
     journal.finish()
+
+
+def test_a_recovered_journal_that_outlives_its_unlink_is_not_replayed(
+    tmp_path: Path,
+) -> None:
+    """Recovery must be idempotent, not merely narrow.
+
+    `_save_current` and the unlink are two steps. A death between them — or an
+    unlink that simply raises — leaves a journal whose turn is already durable,
+    and the next startup folded it in AGAIN: the same prompt and reply twice,
+    after exactly the crash recovery exists to survive. A `committed` marker
+    would only shrink the window; stamping the journal's own name closes it.
+    """
+    runtime = tmp_path / ".runtime"
+    store = _store(tmp_path)
+    records = [
+        {"type": "begin", "provider": "claude", "prompt": "lost mid-turn"},
+        {"type": "text", "text": "half a reply"},
+    ]
+    journal = _write_journal(runtime, _ctx().key, records)
+
+    assert store.recover_journals() == 1
+    first = store.current_messages(_ctx(), "claude")
+
+    # The unlink did not take effect: the same journal is still on disk.
+    _write_journal(runtime, _ctx().key, records, name=journal.name)
+    recovered_again = store.recover_journals()
+
+    assert recovered_again == 0, "the durable turn was folded in twice"
+    assert store.current_messages(_ctx(), "claude") == first
+    assert not journal.exists()
+
+
+def test_a_different_journal_for_the_same_chat_is_still_recovered(
+    tmp_path: Path,
+) -> None:
+    """De-duplication keys on the journal, not the chat — two crashes are two turns."""
+    runtime = tmp_path / ".runtime"
+    store = _store(tmp_path)
+    _write_journal(
+        runtime,
+        _ctx().key,
+        [{"type": "begin", "provider": "claude", "prompt": "first"}],
+        name="claude-20260824T100000-aaa.jsonl",
+    )
+    assert store.recover_journals() == 1
+
+    _write_journal(
+        runtime,
+        _ctx().key,
+        [{"type": "begin", "provider": "claude", "prompt": "second"}],
+        name="claude-20260824T110000-bbb.jsonl",
+    )
+
+    assert store.recover_journals() == 1
+    prompts = [
+        m["content"] for m in store.current_messages(_ctx(), "claude")
+        if m["role"] == "user"
+    ]
+    assert prompts == ["first", "second"]
