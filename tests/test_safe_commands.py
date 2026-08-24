@@ -211,6 +211,11 @@ def test_destructive_commands_are_destructive(command):
     "env FOO=1 rm -rf ~/x",
     "setsid rm -rf ~/x",
     "doas rm -rf /",
+    # A bare `NAME=value` word in command position exports a variable; the
+    # shell runs the word AFTER it, so the classifier must look there too.
+    "KEEP=0 rm -rf /tmp/valuable",
+    "FOO=1 BAR=2 git push --force origin main",
+    "A=x sh -c 'rm -rf ~/x'",
 ])
 def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
     """Every one of these was auto-approved before.

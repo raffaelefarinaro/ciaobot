@@ -289,6 +289,11 @@ _REDIRECT_IN = "\x00<"
 # tokenized, so `echo $(rm -rf ~/x)` cannot hide the removal mid-segment.
 _SUBSTITUTION_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 
+# A leading `NAME=value` word exports an environment variable, and the real
+# command follows it. Only the segment's first word was ever classified, so
+# `KEEP=0 rm -rf /tmp/x` presented `KEEP=0` as the verb and ran approved.
+_ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
 
 def _verb(name: str) -> str:
     """The bare verb behind a possibly path-qualified name.
@@ -538,6 +543,14 @@ def is_destructive_command(command: str) -> bool:
     for segment in segments:
         if not segment:
             continue
-        if _segment_is_destructive(segment[0], segment[1:]):
+        # Assignment prefixes are not the executable; drop them until a word
+        # that cannot be one, or leave the last word standing when every token
+        # is an assignment (`FOO=1 BAR=2` alone sets variables and runs
+        # nothing). `sudo VAR=1 rm ...` needs none of this: `_unwrap` already
+        # steps over `=`-carrying words hunting for the real command.
+        lead = 0
+        while lead < len(segment) - 1 and _ASSIGNMENT_WORD_RE.match(segment[lead]):
+            lead += 1
+        if _segment_is_destructive(segment[lead], segment[lead + 1:]):
             return True
     return False
