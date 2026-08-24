@@ -458,22 +458,6 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces/bro
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/browse-folder" \
   -H 'content-type: application/json' \
   -d '{"path":"/Users/alice","name":"vaults"}'
-
-# Relocate a workspace's vault (Settings → Workspaces → Vault location).
-#   mode = "hook" — re-point the registry to an existing folder; files are not
-#           moved (use it to point at a fresh vault or one you moved yourself).
-#   mode = "move" — physically relocate the vault's contents into `target`
-#           (created if absent; must otherwise be empty) and re-point.
-# The target is validated server-side (never the filesystem root, never nested
-# inside the current vault, never through a symlink). On success the workspace
-# is marked `vault_pinned`, which suppresses the "not in its standard folder"
-# chat action for that workspace.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal/vault" \
-  -H 'content-type: application/json' \
-  -d '{"target":"/Users/you/vaults/personal","mode":"move"}'
-
-# List local subdirectories for the vault picker (authenticated browse).
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces/browse-folder?path=/Users/alice"
 ```
 
 **Schedules and ops**

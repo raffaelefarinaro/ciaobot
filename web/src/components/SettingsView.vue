@@ -1091,7 +1091,10 @@
                       </details>
                     </div>
                     <div class="vault-location-row">
-                      <code class="vault-location-path">{{ workspaceVaultDisplay(form.name) }}</code>
+                      <code
+                        class="vault-location-path"
+                        :class="{ 'vault-location-path--unset': !workspaceVaultPath(form.name) }"
+                      >{{ workspaceVaultDisplay(form.name) }}</code>
                       <button
                         class="btn-small"
                         :disabled="workspacesSaving === form.name"
@@ -1108,7 +1111,15 @@
 
           <!-- VAULT LOCATION PICKER MODAL -->
           <div v-if="vaultPickerOpen" class="picker-overlay" @click.self="closeVaultPicker">
-            <div class="picker-modal" role="dialog" aria-label="Move vault">
+            <div
+              ref="vaultPickerModal"
+              class="picker-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Move vault"
+              tabindex="-1"
+              @keydown="onVaultPickerKeydown"
+            >
               <div class="picker-head">
                 <span class="picker-title">Vault Location</span>
                 <span class="picker-help">
@@ -2119,7 +2130,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
@@ -4173,10 +4184,88 @@ const vaultPickerDirs = ref<Array<{ name: string; path: string }>>([])
 const vaultPickerError = ref('')
 const vaultPickerLoading = ref(false)
 const vaultPickerNewName = ref('')
+const vaultPickerModal = ref<HTMLElement | null>(null)
+// The control that opened the picker, so closing it returns the keyboard where
+// it was instead of dumping focus at the top of the document.
+let vaultPickerReturnFocus: HTMLElement | null = null
+
+// Shown when the vault's real location cannot be worked out yet (the routine
+// settings carrying the roots have not landed, or the registry holds a `~`
+// path only the server can expand). Naming the workspace instead was a lie: it
+// put `personal` where a filesystem path belongs.
+const VAULT_PATH_UNKNOWN = 'not set'
+
+function joinVaultPath(base: string, relative: string): string {
+  const stem = base.replace(/\/+$/, '')
+  const segments = relative.split('/').filter((part) => part && part !== '.')
+  return segments.length ? `${stem}/${segments.join('/')}` : stem
+}
+
+/** Absolute vault directory for a workspace, or '' when it cannot be resolved.
+ *
+ * `vault_root` comes back from the API exactly as the registry stores it, which
+ * is not always a path: an absolute pinned root, `.` for an existing-folder
+ * setup, or a relative root such as `memory-vault/personal`. This mirrors
+ * `CiaoConfig._resolve_vault_root` — one segment resolves against the shared
+ * vault root, anything else against the workspace root — so the label names the
+ * real directory and the picker opens at the vault the user is about to move.
+ */
+function workspaceVaultPath(name: string): string {
+  const form = workspaceForms.value.find((f) => f.name === name)
+  // An empty registry value means "the workspace's own folder", which the
+  // server resolves from the name as a single segment.
+  const raw = (form?.vault_root || '').trim() || name
+  if (!raw || raw.startsWith('~')) return ''
+  if (raw.startsWith('/')) return raw
+  const context = routines.value?.workspace_context
+  if (!context) return ''
+  const segments = raw.split('/').filter((part) => part && part !== '.')
+  const base = segments.length === 1 ? context.vault_root : context.workspace_root
+  if (!base) return ''
+  return joinVaultPath(base, raw)
+}
 
 function workspaceVaultDisplay(name: string): string {
-  const form = workspaceForms.value.find((f) => f.name === name)
-  return form?.vault_root?.trim() ? form.vault_root : name
+  return workspaceVaultPath(name) || VAULT_PATH_UNKNOWN
+}
+
+function vaultPickerFocusables(): HTMLElement[] {
+  const root = vaultPickerModal.value
+  if (!root) return []
+  const selector = 'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  return Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(
+    (el) => !el.hasAttribute('disabled') && el.getAttribute('aria-hidden') !== 'true',
+  )
+}
+
+// Escape closes, and Tab cycles inside the dialog. Without the trap the next
+// Tab out of the last button landed on the Settings page behind the overlay,
+// where a keyboard user cannot tell the dialog is still up.
+function onVaultPickerKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    // Claim the key. ChatLayout's global handler treats an unclaimed Escape as
+    // "go home", so an unclaimed press would leave Settings entirely.
+    event.preventDefault()
+    event.stopPropagation()
+    closeVaultPicker()
+    return
+  }
+  if (event.key !== 'Tab') return
+  const items = vaultPickerFocusables()
+  if (!items.length) {
+    event.preventDefault()
+    vaultPickerModal.value?.focus()
+    return
+  }
+  const active = document.activeElement as HTMLElement | null
+  const inside = active ? items.indexOf(active) : -1
+  if (event.shiftKey && inside <= 0) {
+    event.preventDefault()
+    items[items.length - 1].focus()
+  } else if (!event.shiftKey && (inside === -1 || inside === items.length - 1)) {
+    event.preventDefault()
+    items[0].focus()
+  }
 }
 
 function vaultPickerListing(path?: string): Promise<DirListing> {
@@ -4192,6 +4281,8 @@ function applyVaultPickerListing(listing: DirListing) {
 }
 
 async function openVaultPicker(name: string) {
+  vaultPickerReturnFocus =
+    typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null
   vaultPickerWorkspace.value = name
   vaultPickerOpen.value = true
   vaultPickerPath.value = ''
@@ -4201,10 +4292,17 @@ async function openVaultPicker(name: string) {
   vaultPickerError.value = ''
   vaultPickerNewName.value = ''
   vaultPickerLoading.value = true
+  // The dialog owns the keyboard from here; give it focus before the listing
+  // request so a keyboard user is not left tabbing the page behind the overlay.
+  await nextTick()
+  vaultPickerModal.value?.focus()
   try {
-    const current = workspaceVaultDisplay(name)
+    // Always an absolute path or '' — a bare workspace name or a relative
+    // registry root used to fall through to `~`, so the picker opened nowhere
+    // near the vault being moved.
+    const current = workspaceVaultPath(name)
     let listing: DirListing
-    if (current && /^\//.test(current)) {
+    if (current) {
       try {
         listing = await vaultPickerListing(current)
       } catch {
@@ -4252,6 +4350,11 @@ async function createVaultPickerFolder() {
 
 function closeVaultPicker() {
   vaultPickerOpen.value = false
+  const trigger = vaultPickerReturnFocus
+  vaultPickerReturnFocus = null
+  nextTick(() => {
+    if (trigger?.isConnected) trigger.focus()
+  })
 }
 
 async function confirmVaultMove(target: string, mode: 'move' | 'hook') {
@@ -4271,7 +4374,7 @@ async function confirmVaultMove(target: string, mode: 'move' | 'hook') {
   try {
     await api.post<{ ok: boolean }>(`/api/workspaces/${encodeURIComponent(name)}/vault`, { target, mode })
     notifySaved(`Workspace "${name}" vault ${mode === 'move' ? 'moved' : 're-pointed'}.`, 'Workspaces')
-    vaultPickerOpen.value = false
+    closeVaultPicker()
     await fetchWorkspacesList()
   } catch (e) {
     vaultPickerError.value = errorMessage(e, 'The vault could not be moved.')
@@ -6781,6 +6884,11 @@ a.btn-secondary {
   border-radius: var(--radius-lg);
   box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
 }
+/* The dialog takes focus on open so Escape and the Tab trap have somewhere to
+   start. That is a container, not a control, so it must not draw a focus ring. */
+.picker-modal:focus {
+  outline: none;
+}
 .picker-head {
   display: flex;
   flex-direction: column;
@@ -6899,5 +7007,9 @@ a.btn-secondary {
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 4px 6px;
+}
+.vault-location-path--unset {
+  color: var(--fg3);
+  font-style: italic;
 }
 </style>
