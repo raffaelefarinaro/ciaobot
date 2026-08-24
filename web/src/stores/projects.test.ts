@@ -3709,3 +3709,25 @@ describe('workspaceNeedsInput', () => {
     expect(store.workspaceNeedsInput('missing')).toBe(0)
   })
 })
+
+describe('attentionChatCount', () => {
+  test('counts each non-archived unread or needs-input chat globally', () => {
+    const store = useProjectStore()
+    store.chats = [
+      {
+        chat_id: 'unread', project_id: 'p1', title: 'Unread', archived: false, local: true,
+        last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z',
+      },
+      {
+        chat_id: 'needs-input', project_id: 'p2', title: 'Question', archived: false, local: true,
+        pending_question: JSON.stringify({ questions: [{ question: 'Answer?' }] }),
+      },
+      {
+        chat_id: 'archived-unread', project_id: 'p3', title: 'Archived', archived: true, local: true,
+        last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z',
+      },
+    ] as unknown as ChatInfo[]
+
+    expect(store.attentionChatCount).toBe(2)
+  })
+})

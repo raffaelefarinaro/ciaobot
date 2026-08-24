@@ -1516,6 +1516,16 @@ export const useProjectStore = defineStore('projects', () => {
     chats.value.reduce((sum, c) => sum + (c.archived ? 0 : chatUnread(c.chat_id)), 0),
   )
 
+  // One chat can contribute at most one attention item. Keep this aggregate
+  // global because the rail is not workspace-scoped; workspace toggles expose
+  // the same underlying signals within their selected workspace.
+  const attentionChatCount = computed(() =>
+    chats.value.reduce(
+      (sum, c) => sum + (!c.archived && (chatNeedsInput(c.chat_id) || chatUnread(c.chat_id) > 0) ? 1 : 0),
+      0,
+    ),
+  )
+
   // Cross-device read: optimistic local clear + POST to server. The server
   // publishes `chat_read` over /ws/events so other devices/tabs update too.
   async function markRead(chatId: string) {
@@ -5099,7 +5109,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
-    chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, clearUnread, markRead, markAllRead,
+    chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markAllRead,
     recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasActiveDelegates, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     insightsFailedChats, workspaceInsightsFailedCount,

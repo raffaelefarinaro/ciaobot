@@ -19,12 +19,6 @@ import { useTaskStore } from '../../stores/tasks'
 import BrandMark from '../BrandMark.vue'
 import PaneHeader from '../PaneHeader.vue'
 
-// The bell reaches for stores and a teleport target; neither is what is under
-// test here, and PaneHeader imports it directly so `stubs` cannot reach it.
-vi.mock('../NotificationBell.vue', () => ({
-  default: defineComponent({ name: 'NotificationBell', setup: () => () => h('div', { class: 'bell-stub' }) }),
-}))
-
 const LONG_TITLE = 'A chat title long enough to need every pixel of the header and then a great many more '.repeat(3)
 
 describe('BrandMark', () => {

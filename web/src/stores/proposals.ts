@@ -21,6 +21,8 @@ export const useProposalsStore = defineStore('proposals', () => {
   const busyIds = ref<Set<string>>(new Set())
   const busy = computed(() => busyIds.value.size > 0)
   const error = ref('')
+  const loaded = ref(false)
+  let fetchPromise: Promise<void> | null = null
 
   function isBusy(id: string): boolean {
     return busyIds.value.has(id)
@@ -90,17 +92,38 @@ export const useProposalsStore = defineStore('proposals', () => {
     search.value = ''
   }
 
-  async function fetch() {
-    loading.value = true
-    error.value = ''
+  async function fetch(): Promise<void> {
+    if (fetchPromise) return fetchPromise
+    const request = (async () => {
+      loading.value = true
+      error.value = ''
+      try {
+        const data = await api.get<ProposalsResponse>('/api/proposals')
+        rows.value = data.rows ?? []
+        loaded.value = true
+      } catch (e) {
+        error.value = e instanceof Error ? e.message : 'Could not load proposals'
+      } finally {
+        loading.value = false
+      }
+    })()
+    fetchPromise = request
     try {
-      const data = await api.get<ProposalsResponse>('/api/proposals')
-      rows.value = data.rows ?? []
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Could not load proposals'
+      await request
     } finally {
-      loading.value = false
+      if (fetchPromise === request) fetchPromise = null
     }
+  }
+
+  async function ensureLoaded(): Promise<void> {
+    // Tests and callers may hydrate rows directly before mounting a consumer;
+    // treat that as an already-loaded snapshot rather than replacing it with a
+    // background request.
+    if (loaded.value || rows.value.length > 0) {
+      loaded.value = true
+      return
+    }
+    await fetch()
   }
 
   /** `workspace` names the destination for a re-home accept.
@@ -160,7 +183,7 @@ export const useProposalsStore = defineStore('proposals', () => {
   }
 
   return {
-    rows, loading, busy, busyIds, isBusy, setBusy, setBusyMany, error, fetch, act, batch, dismissOlderThan,
+    rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, fetch, ensureLoaded, act, batch, dismissOlderThan,
     kindFilter, search, selected,
     scopedRows, visibleRows, kindCounts, resetFilters,
   }

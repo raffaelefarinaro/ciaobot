@@ -42,7 +42,7 @@ async function mountSidebar() {
   return mount(ProjectSidebar, {
     attachTo: document.body,
     props: { collapsed: false, mode: 'proposals' },
-    global: { plugins: [router], stubs: { NotificationBell: true } },
+    global: { plugins: [router] },
   })
 }
 
@@ -71,6 +71,12 @@ describe('ProjectSidebar review section', () => {
 
   it('counts the queue for the active workspace and what sits elsewhere', async () => {
     const wrapper = await mountSidebar()
+
+    expect(wrapper.get('a[href="/memory"] .nav-item-badge--count').text()).toBe('4')
+    const workspaceToggle = wrapper.findAll('.workspace-toggle').find(toggle => !toggle.classes().includes('view-toggle'))
+    expect(workspaceToggle).toBeTruthy()
+    expect(workspaceToggle!.findAll('button')[0].text()).toContain('3')
+    expect(workspaceToggle!.findAll('button')[1].text()).toContain('1')
 
     const stats = wrapper.findAll('.mm-stat').map(s => s.text())
     expect(stats[0]).toContain('3')       // shown
@@ -126,7 +132,7 @@ describe('ProjectSidebar review section', () => {
     const wrapper = mount(ProjectSidebar, {
       attachTo: document.body,
       props: { collapsed: false, mode: 'settings' },
-      global: { plugins: [router], stubs: { NotificationBell: true } },
+      global: { plugins: [router] },
     })
 
     expect(wrapper.text()).not.toContain('other workspaces')

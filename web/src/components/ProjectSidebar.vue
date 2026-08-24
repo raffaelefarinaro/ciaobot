@@ -33,20 +33,21 @@
             title="chats"
             :aria-label="store.attentionChatCount > 0 ? `chats — ${store.attentionChatCount} need attention` : (isAnyChatWorking ? 'chats (assistant is working)' : 'chats')"
           >
-            <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="14" />
-              <line x1="6" y1="9" x2="14" y2="9" />
-              <line x1="6" y1="13" x2="18" y2="13" />
-              <polyline points="8 18 8 21 11 18" />
-            </svg>
-                      <span class="nav-item-label" aria-hidden="true">chats</span>
-            <span
-              v-if="store.attentionChatCount > 0"
-              class="nav-item-badge nav-item-badge--count"
-              aria-hidden="true"
-            >{{ store.attentionChatCount }}</span>
+            <span class="nav-item-icon" aria-hidden="true">
+              <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <rect x="3" y="4" width="18" height="14" />
+                <line x1="6" y1="9" x2="14" y2="9" />
+                <line x1="6" y1="13" x2="18" y2="13" />
+                <polyline points="8 18 8 21 11 18" />
+              </svg>
+              <span
+                v-if="store.attentionChatCount > 0"
+                class="nav-item-badge nav-item-badge--count"
+              >{{ store.attentionChatCount }}</span>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">chats</span>
           </router-link>
           <router-link
             to="/schedules"
@@ -58,17 +59,19 @@
             title="automations"
             :aria-label="hasAutomationWarning ? 'automations (attention required)' : 'automations'"
           >
-            <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-              <rect x="3" y="3" width="18" height="18" />
-              <line x1="12" y1="3" x2="12" y2="5" />
-              <line x1="12" y1="19" x2="12" y2="21" />
-              <line x1="3" y1="12" x2="5" y2="12" />
-              <line x1="19" y1="12" x2="21" y2="12" />
-              <polyline points="12 8 12 12 15 14" />
-            </svg>
-                      <span class="nav-item-label" aria-hidden="true">automations</span>
+            <span class="nav-item-icon" aria-hidden="true">
+              <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <rect x="3" y="3" width="18" height="18" />
+                <line x1="12" y1="3" x2="12" y2="5" />
+                <line x1="12" y1="19" x2="12" y2="21" />
+                <line x1="3" y1="12" x2="5" y2="12" />
+                <line x1="19" y1="12" x2="21" y2="12" />
+                <polyline points="12 8 12 12 15 14" />
+              </svg>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">automations</span>
           </router-link>
           <router-link
             to="/memory"
@@ -81,18 +84,19 @@
                  organic-curve brain never was. It also now covers review, since
                  the proposal queue is a segment of this view rather than its own
                  rail entry. -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-              <path d="M4 4h16v12H4z" />
-              <path d="M4 16h16v4H4z" />
-              <line x1="8" y1="8" x2="16" y2="8" />
-            </svg>
-                      <span class="nav-item-label" aria-hidden="true">memory</span>
-            <span
-              v-if="proposals.rows.length > 0"
-              class="nav-item-badge nav-item-badge--count"
-              aria-hidden="true"
-            >{{ proposals.rows.length }}</span>
+            <span class="nav-item-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <path d="M4 4h16v12H4z" />
+                <path d="M4 16h16v4H4z" />
+                <line x1="8" y1="8" x2="16" y2="8" />
+              </svg>
+              <span
+                v-if="proposals.rows.length > 0"
+                class="nav-item-badge nav-item-badge--count"
+              >{{ proposals.rows.length }}</span>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">memory</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/providers, /settings/models, ...) and none of them match
@@ -107,22 +111,23 @@
             :aria-label="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
           >
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-              <line x1="4" y1="7" x2="20" y2="7" />
-              <line x1="4" y1="12" x2="20" y2="12" />
-              <line x1="4" y1="17" x2="20" y2="17" />
-              <rect x="14" y="5" width="4" height="4" fill="currentColor" />
-              <rect x="7" y="10" width="4" height="4" fill="currentColor" />
-              <rect x="15" y="15" width="4" height="4" fill="currentColor" />
-            </svg>
-                      <span class="nav-item-label" aria-hidden="true">settings</span>
-            <span
-              v-if="settingsNeedsAttention"
-              class="nav-item-badge"
-              :class="{ 'nav-item-badge--warning': hasBlockingHousekeeping }"
-              aria-hidden="true"
-            />
+            <span class="nav-item-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <line x1="4" y1="7" x2="20" y2="7" />
+                <line x1="4" y1="12" x2="20" y2="12" />
+                <line x1="4" y1="17" x2="20" y2="17" />
+                <rect x="14" y="5" width="4" height="4" fill="currentColor" />
+                <rect x="7" y="10" width="4" height="4" fill="currentColor" />
+                <rect x="15" y="15" width="4" height="4" fill="currentColor" />
+              </svg>
+              <span
+                v-if="settingsNeedsAttention"
+                class="nav-item-badge"
+                :class="{ 'nav-item-badge--warning': hasBlockingHousekeeping }"
+              />
+            </span>
+            <span class="nav-item-label" aria-hidden="true">settings</span>
           </router-link>
         </div>
       </template>
@@ -1975,6 +1980,16 @@ async function confirmDeleteChat(chatId: string) {
   transition: color 120ms var(--ease);
 }
 
+.nav-item-icon {
+  position: relative;
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+}
+
 /* The page you are on names itself, next to its own icon, instead of a separate
    tag elsewhere in the window. Inactive items stay glyph-only, so the row reads
    as one selected item among icons rather than a list of words. Collapsed with
@@ -1985,8 +2000,8 @@ async function confirmDeleteChat(chatId: string) {
    a numeral for update and blocking-housekeeping warnings. */
 .nav-item-badge {
   position: absolute;
-  top: 2px;
-  right: 2px;
+  top: -5px;
+  right: -6px;
   width: 8px;
   height: 8px;
   border-radius: 999px;

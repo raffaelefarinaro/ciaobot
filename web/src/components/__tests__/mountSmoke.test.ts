@@ -363,7 +363,6 @@ vi.mock('../NewScheduleForm.vue', () => ({ default: NoopStub }))
 vi.mock('../SchedulePanel.vue', () => ({ default: NoopStub }))
 const MemoryMapStub = { name: 'MemoryMapStub', render: () => h('div', { 'data-testid': 'memory-map-stub' }) }
 vi.mock('../MemoryMapView.vue', () => ({ default: MemoryMapStub }))
-vi.mock('../NotificationBell.vue', () => ({ default: NoopStub }))
 vi.mock('../ProjectSidebar.vue', () => ({ default: NoopStub }))
 vi.mock('../InAppToast.vue', () => ({ default: NoopStub }))
 
