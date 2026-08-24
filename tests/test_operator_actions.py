@@ -1008,3 +1008,28 @@ def test_an_emptied_queue_clears_the_rehome_tile(tmp_path: Path) -> None:
     queue.write_text("# Proposals\n\nAll reviewed.\n", encoding="utf-8")
 
     assert "unrehomed-people" not in {a.kind for a in detect_actions(_context(tmp_path, config=config))}
+
+
+def test_a_partial_receipt_does_not_clear_the_rehome_tile(tmp_path: Path) -> None:
+    """A half-finished re-home must not hide the tile as well as a finished one.
+
+    A run that left failures used to write a `migrated` receipt, so the tile went
+    quiet while references were still inconsistent. The receipt now says
+    `partial`, and the tile reports only COMPLETED work as done — a legacy
+    receipt with no status still counts as complete, so installs that finished
+    before the field existed are not turned back into false positives.
+    """
+    _rehome_receipt(
+        tmp_path,
+        {
+            "moves": [1] * 3,
+            "needs_judgement": [],
+            "proposals": [],
+            "status": "partial",
+            "failed": [{"path": "personal/People/Mo.md", "error": "Permission denied"}],
+        },
+    )
+
+    actions = _rehome_actions(tmp_path)
+
+    assert len(actions) == 1, "a partial re-home reported as done"

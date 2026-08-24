@@ -427,9 +427,13 @@ def _detect_unrehomed_people(context: DetectionContext) -> list[OperatorAction]:
     if len(names) <= 1:
         return []
     try:
-        from ciao.vault_rehome import peek_receipt
+        from ciao.vault_rehome import read_receipt
 
-        receipt = peek_receipt(runtime)
+        # Completed-only. A missing status still counts as complete (legacy
+        # receipts predate the field), but a PARTIAL one no longer silences the
+        # tile — a half-finished re-home used to hide it exactly as well as a
+        # finished one.
+        receipt = read_receipt(runtime)
     except Exception:  # noqa: BLE001 — advisory
         logger.exception("operator actions: re-home check failed")
         return []

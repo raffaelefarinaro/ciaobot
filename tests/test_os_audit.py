@@ -984,6 +984,31 @@ def test_rehome_notice_is_silent_on_a_legacy_receipt_with_no_status(
     assert _rehome_notice(report) == []
 
 
+def test_rehome_notice_keeps_asking_after_a_partial_run(tmp_path: Path) -> None:
+    """A half-finished re-home must not silence this as well as a finished one.
+
+    A run that left failures used to write a `migrated` receipt, so the notice
+    went quiet while references were still inconsistent. Now the receipt says
+    `partial`, and the check reports only COMPLETED work as done.
+    """
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    _write_legacy_receipt(runtime)
+    receipt = runtime / "migration" / "vault-rehome.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["status"] = "partial"
+    payload["failed"] = [{"path": "personal/People/A.md", "error": "Permission denied"}]
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    assert _rehome_notice(report) != [], "a partial re-home reported as done"
+
+
 def test_rehome_notice_never_walks_the_vault_for_counts(tmp_path: Path) -> None:
     """The notice is a receipt check, not a vault scan.
 

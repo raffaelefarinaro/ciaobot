@@ -1192,15 +1192,17 @@ def audit_upgrade_notices(
     # operators learn to ignore the whole strip.
     if runtime_dir is not None and len(names) > 1:
         try:
-            from ciao.vault_rehome import peek_receipt
+            from ciao.vault_rehome import read_receipt
 
-            # An absent receipt is the only unfixed state: only an applied
-            # re-home writes one. `peek_receipt`, not `read_receipt`, because a
-            # receipt written before the `status` field existed records a
-            # COMPLETED re-home with no status — gating on `status == "migrated"`
-            # made this notice a permanent false positive on exactly the installs
-            # that had done the work.
-            if peek_receipt(runtime_dir) is None:
+            # `read_receipt` reports only a COMPLETED re-home: a missing status
+            # counts as complete (receipts predating the field record finished
+            # work, and gating on `status == "migrated"` made this notice a
+            # permanent false positive on exactly the installs that had done
+            # it), while an explicitly PARTIAL receipt does not. That second
+            # half is why this moved off `peek_receipt`: a run that half
+            # finished used to silence the notice as thoroughly as a completed
+            # one, so the operator was never told work remained.
+            if read_receipt(runtime_dir) is None:
                 notices.append({
                     "type": "unrehomed_people",
                     "workspace": "",
