@@ -223,8 +223,36 @@ _DESTRUCTIVE_GIT_PUSH_FLAGS = frozenset({
 # leader, which is exactly how it slipped past.
 _DESTRUCTIVE_WRAPPERS = frozenset({
     "sudo", "doas", "command", "env", "time", "timeout", "nohup", "nice",
-    "ionice", "stdbuf", "setsid", "watch", "xargs",
+    "ionice", "stdbuf", "setsid", "watch", "xargs", "exec",
 })
+
+# Options that consume the NEXT token, per wrapper. Deliberately not one shared
+# set: `sudo -n` is a flag while `nice -n` takes a number, so a union would skip
+# the real command after `sudo -n` and wave the removal through. Keyed by
+# wrapper, an unknown option is treated as a plain flag, which is the same
+# fail-open this denylist has everywhere else - but at least it is not a fail
+# introduced by over-skipping.
+_WRAPPER_VALUE_OPTS: dict[str, frozenset[str]] = {
+    "sudo": frozenset({
+        "-u", "--user", "-g", "--group", "-p", "--prompt", "-C", "--close-from",
+        "-D", "--chdir", "-h", "--host", "-r", "--role", "-t", "--type",
+        "-U", "--other-user",
+    }),
+    "doas": frozenset({"-u", "-C"}),
+    "env": frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}),
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "ionice": frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid"}),
+    "stdbuf": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
+    "watch": frozenset({"-n", "--interval", "-d", "--differences"}),
+    "time": frozenset({"-o", "--output", "-f", "--format"}),
+    "exec": frozenset({"-a"}),
+    "xargs": frozenset({
+        "-n", "--max-args", "-P", "--max-procs", "-I", "-i", "--replace",
+        "-d", "--delimiter", "-E", "-e", "--eof", "-a", "--arg-file",
+        "-s", "--max-chars", "-L", "-l", "--max-lines",
+    }),
+}
 
 # A shell re-enters this classifier through its own `-c` payload; without a
 # payload it is reading a script or stdin that cannot be inspected at all,
@@ -272,15 +300,27 @@ def _verb(name: str) -> str:
     return PurePosixPath(cleaned).name
 
 
-def _unwrap(args: list[str]) -> tuple[str, list[str]] | None:
+def _unwrap(wrapper: str, args: list[str]) -> tuple[str, list[str]] | None:
     """The real command inside a wrapper's arguments.
 
     Skips the wrapper's own flags and operands - `timeout 5 rm -rf x`,
     `env FOO=1 rm -rf x`, `xargs -0 rm -f` - and returns the first token that
     can plausibly be a command, with the remainder as its arguments.
+
+    Options that take a SEPARATE value consume it, which is what stopped
+    `sudo -u root rm -rf /tmp/x` from being seen: `root` was picked as the
+    command. The option table is per wrapper, because the same letter means
+    different things (`sudo -n` is a flag, `nice -n` takes a number).
     """
-    for index, arg in enumerate(args):
+    value_opts = _WRAPPER_VALUE_OPTS.get(wrapper, frozenset())
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in value_opts:
+            index += 2  # the option and the value it consumes
+            continue
         if arg.startswith("-") or arg.replace(".", "", 1).isdigit() or "=" in arg:
+            index += 1
             continue
         return arg, args[index + 1 :]
     return None
@@ -350,12 +390,16 @@ def _segment_is_destructive(name: str, args: list[str]) -> bool:
         # because `env` is a wrapper too. Wrappers nest arbitrarily
         # (`sudo nohup env … rm`), so the loop has to as well, and an
         # unresolvable chain fails CLOSED rather than being waved through.
-        inner = _unwrap(args)
+        inner = _unwrap(name, args)
         if inner is None:
             # A wrapper with no command after it (`sudo -l`, a bare `env`) is a
             # query, not a removal.
             return False
         return _segment_is_destructive(inner[0], inner[1])
+    if name == "eval":
+        # `eval "rm -rf x"` runs the string. Same shape as a shell `-c` payload,
+        # so it is judged on the payload rather than on the word `eval`.
+        return is_destructive_command(" ".join(args)) if args else False
     if name in _SHELLS:
         # `sh -c '<code>'` is judged on the code it carries. A shell with no
         # inspectable payload - `curl … | sh`, `bash script.sh` - is opaque,

@@ -216,6 +216,43 @@ def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
 
 
 @pytest.mark.parametrize("command", [
+    # A wrapper option that takes a SEPARATE value used to be skipped while its
+    # value was picked as the command: `sudo -u root rm -rf x` selected `root`.
+    "sudo -u root rm -rf /tmp/x",
+    "sudo -g wheel rm -rf x",
+    "timeout -s KILL 5 rm -rf x",
+    "env -u PATH rm -rf x",
+    "ionice -c 3 -n 7 rm -rf x",
+    "stdbuf -o0 rm -rf x",
+    "sudo -u root env -u PATH rm -rf /",
+    # `exec` replaces the shell with the command, and `eval` runs a string.
+    "exec rm -rf /tmp/valuable",
+    "exec -a fake rm -rf x",
+    'eval "rm -rf /tmp/x"',
+])
+def test_wrapper_operands_and_exec_do_not_hide_the_verb(command):
+    assert is_destructive_command(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    # The option table is per wrapper on purpose: `sudo -n` is a flag while
+    # `nice -n` takes a number, so one shared set would skip `ls` here.
+    "sudo -n ls",
+    "sudo -l",
+    "sudo -u root ls -la",
+    "exec ls",
+    'eval "ls -la"',
+    "timeout 5 git status",
+    "nice -n 10 git log",
+    "env -u PATH ls",
+    "watch -n 2 git status",
+    "xargs -n1 echo",
+])
+def test_wrapped_read_only_commands_stay_approved(command):
+    assert is_destructive_command(command) is False
+
+
+@pytest.mark.parametrize("command", [
     # Wrappers nest, and the unwrap used to stop dead when the next token was
     # also a wrapper — so the removal behind two of them was never seen.
     "sudo env FOO=1 rm -rf /tmp/x",
