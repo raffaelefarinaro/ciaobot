@@ -300,8 +300,14 @@ async def test_archive_postprocess_names_the_guide_promotion_writes(
 # ── Empty-chat cleanup ──────────────────────────────────────────────────
 
 
-def test_create_chat_sweeps_prior_empty_chat(tmp_path: Path) -> None:
-    """Creating a second chat while the first is still empty drops the first."""
+def test_create_chat_preserves_prior_empty_chat(tmp_path: Path) -> None:
+    """Creating a second chat does NOT drop the first, even if it is empty.
+
+    The automatic empty-chat sweep was removed: it raced the just-created
+    chat on every new-chat POST (deleting the chat the user had just opened),
+    which closed the panel and caused the "new chat flashes then opens" bug.
+    Empty chats now live until the user deletes them explicitly.
+    """
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("2026-q2-sweep", workspace="work")
 
@@ -311,13 +317,11 @@ def test_create_chat_sweeps_prior_empty_chat(tmp_path: Path) -> None:
     cap = _EventCapture(pcm)
     fresh = pcm.create_chat(project.project_id)
 
-    assert empty.chat_id not in pcm._chats, "empty chat should have been swept"
+    assert empty.chat_id in pcm._chats, "empty chat must NOT be swept"
     assert fresh.chat_id in pcm._chats
 
     deleted = [e for e in cap.drain() if e.get("type") == "chat_deleted"]
-    assert len(deleted) == 1
-    assert deleted[0]["chat_id"] == empty.chat_id
-    assert deleted[0]["reason"] == "empty"
+    assert len(deleted) == 0, "no chat_deleted event expected"
 
 
 def test_create_chat_preserves_non_empty_chats(tmp_path: Path) -> None:
@@ -338,8 +342,12 @@ def test_create_chat_preserves_non_empty_chats(tmp_path: Path) -> None:
     assert renamed.chat_id in pcm._chats
 
 
-def test_startup_sweeps_empty_chats(tmp_path: Path) -> None:
-    """An empty chat saved to disk should not survive a manager restart."""
+def test_startup_preserves_empty_chats(tmp_path: Path) -> None:
+    """An empty chat saved to disk survives a manager restart.
+
+    The automatic empty-chat sweep was removed (it raced new-chat creation
+    and closed the panel). Empty chats are cleaned up by hand instead.
+    """
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("2026-q2-startup", workspace="work")
     orphan = pcm.create_chat(project.project_id)
@@ -347,7 +355,7 @@ def test_startup_sweeps_empty_chats(tmp_path: Path) -> None:
 
     # Simulate restart by building a fresh manager against the same state dir.
     pcm2 = _make_manager(tmp_path)
-    assert orphan.chat_id not in pcm2._chats
+    assert orphan.chat_id in pcm2._chats
 
 
 def test_delete_chat_publishes_event(tmp_path: Path) -> None:

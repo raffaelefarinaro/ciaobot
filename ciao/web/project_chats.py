@@ -1294,12 +1294,11 @@ class ProjectChatManager:
         self._recover_orphaned_active_chats()
         self._reconcile_half_archived_chats()
         self._rehome_orphaned_chats()
-        # Sweep any empty chats left over from a previous run (user closed the
-        # tab before typing, server crashed mid-compose, etc.). An "empty"
-        # chat has no messages, no SDK session, and still the default title —
-        # it's indistinguishable from no chat at all, so don't leave it in
-        # the sidebar.
-        self._cleanup_empty_chats()
+        # NOTE: the automatic empty-chat sweep is intentionally disabled. It
+        # raced the just-created chat on every new-chat POST (create_chat
+        # swept the empty chat the user had just opened), closing the panel
+        # behind a stale /api/chats poll and causing the "flash". Users can
+        # still delete an empty chat by hand via DELETE ?only_if_empty=1.
         self._ensure_retry_tasks()
 
     # ── Persistence ──────────────────────────────────────────────────────
@@ -3133,12 +3132,11 @@ class ProjectChatManager:
         chat_model = self._resolve_and_validate_chat_model(
             chat_model, chat_provider, project_id
         )
-        # Sweep any other empty chats only after all model and routing-bucket
-        # validation has succeeded. Opening a fresh "New Chat" signals the
-        # user has moved on from whatever they had open and never sent, so we
-        # don't let empty shells pile up; a rejected request must not delete
-        # those drafts as a side effect (#259).
-        self._cleanup_empty_chats()
+        # The empty-chat sweep was removed from create_chat: it deleted the
+        # brand-new chat the user had just opened (racing the POST's own
+        # response), which closed the panel and caused the "new chat flashes
+        # and then opens" bug. Empty chats now live until the user deletes
+        # them explicitly.
         cid = f"chat-{_uuid8()}"
         # Per-provider default thinking level for new chats; a missing entry
         # leaves it to the provider default ("" = auto).

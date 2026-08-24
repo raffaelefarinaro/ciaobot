@@ -1748,6 +1748,34 @@ export const useProjectStore = defineStore('projects', () => {
     persistUnread()
   }
 
+  /**
+   * Reconcile against a lightweight `?active_only=1` poll. The server omits
+   * archived chats (the archive can be thousands of rows), so archived rows are
+   * preserved from what we already hold locally instead of being dropped by a
+   * wholesale array replace. Active rows replace their peers in place.
+   */
+  function reconcileActiveChats(activeChats: ChatInfo[]) {
+    const merged: ChatInfo[] = []
+    const activeById = new Map(activeChats.map(c => [c.chat_id, c]))
+    for (const existing of chats.value) {
+      if (existing.archived) {
+        // Archived rows are kept as-is; an active-only poll must never
+        // resurrect them. Consume any matching payload id so it isn't
+        // re-appended below.
+        merged.push(existing)
+        activeById.delete(existing.chat_id)
+      } else if (activeById.has(existing.chat_id)) {
+        merged.push(activeById.get(existing.chat_id)!)
+        activeById.delete(existing.chat_id)
+      }
+      // else: an active row that vanished server-side is dropped.
+    }
+    for (const c of activeById.values()) merged.push(c)
+    chats.value = merged
+    // Reuse reconcileChatList's side effects (message pruning, unread, overlay).
+    reconcileChatList(merged)
+  }
+
   function hasSettledHistory(chatId: string): boolean {
     // Server still streaming this chat — session files already contain
     // mid-turn assistant progress text, which must not look "settled".
@@ -1786,7 +1814,11 @@ export const useProjectStore = defineStore('projects', () => {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
     latestSyncInFlight = true
     try {
-      const latestChats = await api.get<ChatInfo[]>('/api/chats')
+      // Active-only: the server skips the (possibly thousands of) archived
+      // chats, which this poll never needs — archived rows are held locally.
+      // This keeps the every-15s refresh light instead of re-shipping the
+      // whole registry to the client on each tick.
+      const latestChats = await api.get<ChatInfo[]>('/api/chats?active_only=1')
       // In client mode this request is proxied to the host, so a successful
       // response proves the host is back. The banner was only cleared from a
       // chat WebSocket frame, which never arrives if the socket stays down or
@@ -1794,7 +1826,7 @@ export const useProjectStore = defineStore('projects', () => {
       // working connection until the user reloaded. This poll is the
       // connection-independent recovery signal.
       hostConnectionUnavailable.value = false
-      reconcileChatList(latestChats)
+      reconcileActiveChats(latestChats)
 
       const chatId = activeChatId.value
       const chatStillOpen = chatId
@@ -3593,7 +3625,9 @@ export const useProjectStore = defineStore('projects', () => {
           }
         }
         // Refresh the chats list so last_activity_at + recent ordering update.
-        api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = applyPendingArchived(c) }).catch(() => { /* ignore */ })
+        api.get<ChatInfo[]>('/api/chats?active_only=1')
+          .then(c => reconcileActiveChats(c))
+          .catch(() => { /* ignore */ })
         break
       }
       case 'chat_subagents_ready': {
@@ -3625,7 +3659,9 @@ export const useProjectStore = defineStore('projects', () => {
           void loadSubagents(msg.chat_id)
         }
         // Keep sidebar ordering and last-activity timestamps in sync.
-        api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = applyPendingArchived(c) }).catch(() => { /* ignore */ })
+        api.get<ChatInfo[]>('/api/chats?active_only=1')
+          .then(c => reconcileActiveChats(c))
+          .catch(() => { /* ignore */ })
         break
       }
       case 'chat_read': {

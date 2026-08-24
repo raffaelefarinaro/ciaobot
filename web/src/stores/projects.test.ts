@@ -2248,7 +2248,7 @@ describe('latest status sync', () => {
     store.streamingText[chatId] = 'partial'
 
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve([
           { chat_id: chatId, project_id: 'p1', title: 'Fresh title', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, last_activity_at: '2026-07-06T10:00:00Z' },
         ])
@@ -2386,6 +2386,33 @@ describe('background agents indicator', () => {
       data: JSON.stringify({ type: 'chat_streaming_started', chat_id: chatId, project_id: 'p1' }),
     })
     expect(store.backgroundAgents[chatId]).toBe(4)
+  })
+
+  test('active-only syncLatest preserves locally-held archived chats', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    const activeId = 'c-act'
+    const archivedId = 'c-arch'
+    store.chats = [
+      { chat_id: activeId, project_id: 'p1', title: 'Old', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: archivedId, project_id: 'p1', title: 'Done', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: true },
+    ]
+    store.activeChatId = activeId
+
+    // The server's active-only poll omits archived chats entirely.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats?active_only=1') {
+        return Promise.resolve([
+          { chat_id: activeId, project_id: 'p1', title: 'Fresh', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+        ])
+      }
+      return Promise.resolve([])
+    })
+    await store.syncLatest()
+
+    // Active row refreshed; archived row survived the active-only poll.
+    expect(store.chats.find(c => c.chat_id === activeId)?.title).toBe('Fresh')
+    expect(store.chats.some(c => c.chat_id === archivedId && c.archived)).toBe(true)
   })
 
   test('the events snapshot replaces background-agent counts wholesale', () => {
@@ -2788,7 +2815,7 @@ describe('deep-link chat navigation', () => {
     // Taking it at face value put the row back in the sidebar until the next
     // poll corrected it — the archive flicker.
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats') return Promise.resolve(supervisorWithTwoSubchats())
+      if (path === '/api/chats?active_only=1') return Promise.resolve(supervisorWithTwoSubchats())
       return Promise.resolve([])
     })
     await store.syncLatest()
@@ -2798,7 +2825,7 @@ describe('deep-link chat navigation', () => {
 
     // Once the server agrees, its payload is authoritative again.
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve(supervisorWithTwoSubchats().map(c => ({ ...c, archived: true })))
       }
       return Promise.resolve([])
@@ -2819,7 +2846,7 @@ describe('deep-link chat navigation', () => {
     await expect(store.archiveChat('parent')).rejects.toThrow('archive exploded')
 
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats') return Promise.resolve(supervisorWithTwoSubchats())
+      if (path === '/api/chats?active_only=1') return Promise.resolve(supervisorWithTwoSubchats())
       return Promise.resolve([])
     })
     await store.syncLatest()

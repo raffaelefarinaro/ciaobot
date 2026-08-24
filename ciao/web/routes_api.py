@@ -2726,9 +2726,6 @@ async def create_project_chat(request: Request) -> JSONResponse:
             provider=body.get("provider"),
             control_surface=body.get("control_surface"),
         )
-        _lg.getLogger("ciao.web.routes").info(
-            "create_chat %s total=%.0fms", chat.chat_id, (_t.perf_counter() - _entry) * 1000,
-        )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     return JSONResponse(chat.to_dict(local=True), status_code=201)
@@ -2738,6 +2735,15 @@ async def create_project_chat(request: Request) -> JSONResponse:
 
 async def list_all_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
+    # `?active_only=1` skips archived chats. The PWA's frequent syncLatest poll
+    # uses it: the archive can be huge (thousands of rows) and is not needed to
+    # keep the sidebar/home in sync — archived rows are already held locally and
+    # loaded once at boot. Filter BEFORE the per-chat `is_session_local` probe
+    # (filesystem stat) so the poll never touches the archived rows at all.
+    active_only = request.query_params.get("active_only") in {"1", "true"}
+    if active_only:
+        chats = [c for c in pcm.list_chats() if not c.archived]
+        return JSONResponse([c.to_dict(local=True) for c in chats])
     return JSONResponse(pcm.list_chats_dicts())
 
 
@@ -2745,11 +2751,9 @@ async def chat_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     if request.method == "DELETE":
-        # Trace who deletes a chat: the empty-chat sweep, an explicit close, or
-        # a stray auto-close. The frontend tracer (__CIAO_TRACE) records its
-        # side; this server log line ties the client-side call to the moment
-        # the DELETE lands. # nav-trace
         import logging
+        # Log who deletes a chat so an unexpected deletion is auditable: the
+        # explicit close (only_if_empty) vs a plain DELETE.
         logging.getLogger("ciao.web.routes").info(
             "chat DELETE %s only_if_empty=%r", chat_id,
             request.query_params.get("only_if_empty"),
@@ -2763,7 +2767,6 @@ async def chat_detail(request: Request) -> JSONResponse:
             if not pcm.is_empty_chat(chat_id):
                 return JSONResponse({"ok": False, "deleted": False, "reason": "not empty"})
         ok = pcm.delete_chat(chat_id)
-        import logging
         logging.getLogger("ciao.web.routes").info("chat DELETE %s -> ok=%r", chat_id, ok)
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
