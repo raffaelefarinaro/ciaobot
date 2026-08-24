@@ -41,9 +41,30 @@
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
-              <div class="home-boot-card" role="status" aria-live="polite">
-                <span class="home-boot-spinner" aria-hidden="true"></span>
-                <span>Loading your workspaces…</span>
+              <!-- Skeleton of the home screen this will become (status line,
+                   housekeeping tile, lane header, chat rows) — a spinner pill
+                   read as "nothing is coming", while the shapes promise the
+                   layout that is about to land. -->
+              <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
+                <div class="boot-status">
+                  <span class="boot-face boot-shimmer" aria-hidden="true"></span>
+                  <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
+                </div>
+                <div class="boot-tile" aria-hidden="true">
+                  <span class="boot-line boot-shimmer" style="width: 38%"></span>
+                  <span class="boot-line boot-shimmer" style="width: 88%"></span>
+                  <span class="boot-line boot-shimmer" style="width: 62%"></span>
+                </div>
+                <div class="boot-lane" aria-hidden="true">
+                  <div class="boot-lane-header">
+                    <span class="boot-chip boot-shimmer"></span>
+                    <span class="boot-line boot-shimmer" style="width: 26%"></span>
+                    <span class="boot-pill boot-shimmer"></span>
+                  </div>
+                  <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
+                  <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 68%"></span><span class="boot-meta boot-shimmer"></span></div>
+                  <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 44%"></span><span class="boot-meta boot-shimmer"></span></div>
+                </div>
               </div>
             </div>
           </div>
@@ -138,9 +159,28 @@
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
           <div class="home-boot-body">
-            <div class="home-boot-card" role="status" aria-live="polite">
-              <span class="home-boot-spinner" aria-hidden="true"></span>
-              <span>Loading your workspaces…</span>
+            <!-- Same skeleton as the split-view copy above; only one is ever
+                 mounted, so the two must stay identical. -->
+            <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
+              <div class="boot-status">
+                <span class="boot-face boot-shimmer" aria-hidden="true"></span>
+                <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
+              </div>
+              <div class="boot-tile" aria-hidden="true">
+                <span class="boot-line boot-shimmer" style="width: 38%"></span>
+                <span class="boot-line boot-shimmer" style="width: 88%"></span>
+                <span class="boot-line boot-shimmer" style="width: 62%"></span>
+              </div>
+              <div class="boot-lane" aria-hidden="true">
+                <div class="boot-lane-header">
+                  <span class="boot-chip boot-shimmer"></span>
+                  <span class="boot-line boot-shimmer" style="width: 26%"></span>
+                  <span class="boot-pill boot-shimmer"></span>
+                </div>
+                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
+                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 68%"></span><span class="boot-meta boot-shimmer"></span></div>
+                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 44%"></span><span class="boot-meta boot-shimmer"></span></div>
+              </div>
             </div>
           </div>
         </div>
@@ -1029,32 +1069,117 @@ onBeforeUnmount(() => {
 .home-boot-body {
   flex: 1;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   padding: var(--space-4);
 }
 
-.home-boot-card {
+/* Skeleton of the home screen while workspaces load: the same vertical
+   rhythm as the real thing (status line, tile, lane header, chat rows) so
+   the handover from skeleton to content is a fill-in, not a jump. */
+.home-boot-skeleton {
+  width: 100%;
+  max-width: var(--home-max);
+  margin: 0 auto;
   display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 10px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg, 14px);
-  background: color-mix(in srgb, var(--bg2) 82%, transparent);
-  color: var(--fg2);
-  font-size: var(--text-sm);
+  flex-direction: column;
+  gap: var(--space-4);
   animation: home-boot-enter 220ms ease-out both;
 }
 
-.home-boot-spinner {
-  width: 9px;
-  height: 9px;
+.boot-shimmer {
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: home-boot-shimmer 1.4s ease-in-out infinite;
+}
+
+.boot-line {
+  display: block;
+  height: 13px;
+  border-radius: var(--radius-pill);
+}
+
+.boot-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.boot-face {
+  width: 30px;
+  height: 30px;
   flex: 0 0 auto;
-  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
-  border-top-color: var(--accent);
   border-radius: 50%;
-  animation: home-boot-spin 0.8s linear infinite;
+}
+
+.boot-tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.boot-lane {
+  display: flex;
+  flex-direction: column;
+}
+
+.boot-lane-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.boot-chip {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+}
+
+.boot-pill {
+  width: 64px;
+  height: 28px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong);
+  background: none;
+  animation: none;
+}
+
+.boot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.boot-row:last-child {
+  border-bottom: none;
+}
+
+.boot-row .boot-line {
+  flex: 0 1 auto;
+}
+
+.boot-meta {
+  width: 72px;
+  height: 11px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+}
+
+@keyframes home-boot-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
 }
 
 @keyframes home-boot-enter {
@@ -1062,13 +1187,11 @@ onBeforeUnmount(() => {
   to { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes home-boot-spin {
-  to { transform: rotate(360deg); }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .home-boot-card,
-  .home-boot-spinner {
+  .home-boot-skeleton {
+    animation: none;
+  }
+  .boot-shimmer {
     animation: none;
   }
 }
