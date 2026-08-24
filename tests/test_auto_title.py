@@ -8,7 +8,10 @@ from ciao.web.project_chats import ProjectChatManager
 
 def _manager(config=None, *, chats=None, projects=None) -> ProjectChatManager:
     manager = ProjectChatManager.__new__(ProjectChatManager)
-    manager._config = config or SimpleNamespace(workspace_root="/tmp")
+    # The native-title readers are ROOT-scoped, so the manager resolves the
+    # chat's own agent root. A config stub therefore has to answer the same
+    # three questions `_agent_root_for_chat` asks in production.
+    manager._config = config or _config()
     manager._projects = projects or {}
     manager._chats = chats or {}
     manager._save = lambda: None
@@ -18,6 +21,18 @@ def _manager(config=None, *, chats=None, projects=None) -> ProjectChatManager:
     # the wall-clock cost.
     manager._TITLE_POLL_DELAYS = (0.0, 0.001, 0.001)
     return manager
+
+
+def _config(roots: dict[str, str] | None = None, *, primary: str = "personal"):
+    """A config stub that can resolve per-workspace agent roots."""
+    roots = roots or {}
+
+    return SimpleNamespace(
+        workspace_root="/tmp",
+        workspace_names=lambda: tuple(roots) or (primary,),
+        primary_workspace=lambda: primary,
+        agent_root=lambda name: roots.get(name, "/tmp"),
+    )
 
 
 def _chat(chat_id="chat-1", *, provider="claude", session_id="sess-1", title="New Chat"):
@@ -416,3 +431,65 @@ async def test_auto_title_and_publish_runs_once_per_chat(monkeypatch) -> None:
         manager._auto_title_and_publish("c", "prompt", "reply"),
     )
     assert started == 1
+
+
+@pytest.mark.asyncio
+async def test_native_title_reads_the_chats_own_agent_root(monkeypatch) -> None:
+    """A chat outside the primary workspace must be looked up in ITS root.
+
+    Both readers are root-scoped — Claude Code keys sessions by directory — and
+    the provider that created the session was handed the chat's agent root. The
+    title reader used `config.workspace_root` instead, so after the re-rooting
+    every chat in a non-primary workspace looked up a directory its session was
+    never written under: no native title, ever, and the sidebar sat on the
+    deterministic fallback or "New Chat".
+    """
+    from ciao.web import project_chats as pc
+
+    seen: list[str | None] = []
+
+    class FakeInfo:
+        custom_title = "Work Chat Title"
+        summary = None
+
+    def fake_get_session_info(_sid, directory=None):
+        seen.append(directory)
+        # Only the chat's own root holds the session.
+        return FakeInfo() if directory == "/roots/work" else None
+
+    monkeypatch.setattr(pc, "get_session_info", fake_get_session_info)
+
+    manager = _manager(
+        config=_config({"personal": "/roots/personal", "work": "/roots/work"}),
+        chats={"chat-1": _chat(provider="claude")},
+        projects={"project-1": SimpleNamespace(project_id="project-1", workspace="work")},
+    )
+
+    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Work Chat Title"
+    assert seen == ["/roots/work"]
+
+
+@pytest.mark.asyncio
+async def test_native_title_opencode_also_reads_the_chats_agent_root(monkeypatch) -> None:
+    """`read_thread` caches on (workspace_root, session_id), so it is root-scoped too."""
+    from ciao.web import project_chats as pc
+
+    seen: list[str] = []
+
+    async def fake_read_thread(workspace, _sid):
+        seen.append(str(workspace))
+        return {"info": {"title": "Opencode Work Title"}}
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+
+    manager = _manager(
+        config=_config({"personal": "/roots/personal", "work": "/roots/work"}),
+        chats={"chat-1": _chat(provider="opencode")},
+        projects={"project-1": SimpleNamespace(project_id="project-1", workspace="work")},
+    )
+
+    assert (
+        await manager._native_chat_title(manager._chats["chat-1"])
+        == "Opencode Work Title"
+    )
+    assert seen == ["/roots/work"]

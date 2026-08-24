@@ -47,6 +47,7 @@ from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
     persist_workspaces,
+    vault_root_owner,
     workspace_from_request,
     workspace_provider_options,
     workspace_provider_values,
@@ -1173,6 +1174,15 @@ def _vault_relocation_problems(
     if errors:
         return errors, target
 
+    # The same ownership question workspace creation asks, against every other
+    # configured workspace. Comparing only against the workspace being moved
+    # let `mode="hook"` re-point one workspace at another's vault — or at an
+    # ancestor of it — after which both registry entries name the same notes
+    # and a chat in either workspace can read and rewrite the other's data.
+    owner = vault_root_owner(config, target, ignore=name)
+    if owner is not None:
+        return [f"target vault folder is already owned by '{owner}'"], target
+
     if target.is_symlink():
         errors.append("target path must not be a symlink")
     try:
@@ -1183,11 +1193,41 @@ def _vault_relocation_problems(
     return errors, target
 
 
-def _move_entry(source: Path, destination: Path) -> None:
-    """Move one top-level entry, refusing to overwrite an existing destination."""
-    if destination.exists():
-        raise OSError(f"destination exists: {destination}")
-    source.rename(destination)
+def _move_vault_contents(current: Path, target: Path) -> None:
+    """Move every top-level vault entry into *target*, unwinding on failure.
+
+    `Path.rename` is `os.rename`, which fails with EXDEV the moment the two
+    paths are on different filesystems — and "put my vault on an external
+    disk" is the main reason to use this route at all, so the common case
+    returned a 500. `shutil.move` falls back to copy+unlink across mounts (the
+    same fix as the `shutil.move` call in `ciao/workspace_reroot.py`).
+
+    Copying is not atomic, so a failure part-way through would leave the vault
+    split across the old and new folders, with the registry still naming the
+    old one: half the notes would silently disappear from the workspace. Every
+    completed move is therefore recorded and moved back before the error is
+    reported, so a failed relocation is a no-op.
+    """
+    moved: list[tuple[Path, Path]] = []
+    # Snapshot first: the directory is mutated as entries leave it, and
+    # iterating a directory while removing from it is not reliable.
+    try:
+        for entry in sorted(current.iterdir()):
+            destination = target / entry.name
+            if destination.exists() or destination.is_symlink():
+                raise OSError(f"destination exists: {destination}")
+            shutil.move(str(entry), str(destination))
+            moved.append((entry, destination))
+    except OSError:
+        for source, destination in reversed(moved):
+            try:
+                shutil.move(str(destination), str(source))
+            except OSError:
+                logger.exception(
+                    "could not move %s back after a failed vault relocation",
+                    destination,
+                )
+        raise
 
 
 async def relocate_workspace_vault(request: Request) -> JSONResponse:
@@ -1202,10 +1242,12 @@ async def relocate_workspace_vault(request: Request) -> JSONResponse:
       where they are (the operator moves them, or starts fresh).
 
     The target is resolved and validated server-side (never the filesystem
-    root, never nested inside the current vault, never through a symlink), so a
-    settings call cannot be turned into filesystem-wide writes. On success the
-    workspace is marked ``vault_pinned`` so the "vault not in its standard
-    folder" chat action stops nagging about an intentional relocation.
+    root, never nested inside the current vault, never overlapping another
+    workspace's vault, never through a symlink), so a settings call cannot be
+    turned into filesystem-wide writes or into two workspaces sharing notes.
+    On success the workspace is marked ``vault_pinned`` so the "vault not in
+    its standard folder" chat action stops nagging about an intentional
+    relocation.
     """
     config = request.app.state.config
     name = str(request.path_params.get("name", "")).strip()
@@ -1238,8 +1280,7 @@ async def relocate_workspace_vault(request: Request) -> JSONResponse:
             )
         target.mkdir(parents=True, exist_ok=True)
         try:
-            for entry in current.iterdir():
-                _move_entry(entry, target / entry.name)
+            _move_vault_contents(current, target)
         except OSError as exc:
             return JSONResponse(
                 {"error": f"failed to move vault: {exc}"}, status_code=500

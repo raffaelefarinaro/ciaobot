@@ -87,6 +87,42 @@ def parse_disallowed_tools_value(raw: object) -> list[str] | None:
     raise ValueError("disallowed_tools must be a list, comma-separated string, or null")
 
 
+def vault_root_owner(
+    config: Any, target: Path, *, ignore: str | None = None
+) -> str | None:
+    """Name of the configured workspace that already owns ``target``, if any.
+
+    Ownership is overlap, not equality. A target that is an *ancestor* of
+    another workspace's vault — or that sits inside one — leaves two registry
+    entries pointing into the same notes, so chats and vault writes in either
+    workspace can read and rewrite the other workspace's data. Both surfaces
+    that choose a vault root (creation here, relocation in
+    ``relocate_workspace_vault``) answer that question with this one helper;
+    relocation used to compare the target only against the workspace being
+    moved, which accepted ``mode="hook"`` onto a sibling's vault.
+
+    One nesting is legitimate: the shared vault root itself. On installs where
+    setup pointed a workspace at ``CIAO_VAULT_ROOT`` (see
+    ``CiaoConfig.legacy_entity_workspace``) every standard per-workspace folder
+    lives inside that workspace's vault by design, so counting it as a conflict
+    would refuse every new workspace on those installs.
+    """
+    shared_root = getattr(config, "vault_root", None)
+    for raw_name in config.workspace_names():
+        configured_name = str(raw_name)
+        if ignore is not None and configured_name == ignore:
+            continue
+        try:
+            configured_root = Path(config.workspace_vault_root(configured_name))
+        except ValueError:
+            continue
+        if configured_root == target or configured_root.is_relative_to(target):
+            return configured_name
+        if target.is_relative_to(configured_root) and configured_root != shared_root:
+            return configured_name
+    return None
+
+
 def workspace_from_request(
     data: dict,
     *,
@@ -104,16 +140,11 @@ def workspace_from_request(
                     f"'{configured_name}'"
                 )
         target_root = config.canonical_workspace_vault_root(name)
-        for configured_name in config.workspace_names():
-            try:
-                configured_root = config.workspace_vault_root(configured_name)
-            except ValueError:
-                continue
-            if configured_root == target_root:
-                raise ValueError(
-                    f"workspace vault folder is already owned by "
-                    f"'{configured_name}'"
-                )
+        owner = vault_root_owner(config, Path(target_root))
+        if owner is not None:
+            raise ValueError(
+                f"workspace vault folder is already owned by '{owner}'"
+            )
     if "default_provider" in data:
         requested_provider = str(data["default_provider"]).strip() or "claude"
     else:
@@ -174,6 +205,15 @@ def workspace_from_request(
         allowed_mcp_servers=allowed_mcp_servers,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
         color=color,
+        # Carry the pin over. Rebuilding the entry without it meant any
+        # ordinary save — a color, a model, a gws profile — silently reset
+        # `vault_pinned` to its False default and persisted that, so the next
+        # audit and the "vault not in its standard folder" operator action
+        # flagged a deliberately relocated vault as accidental drift again:
+        # exactly the nag the pin exists to stop. Not settable from the request
+        # body for the same reason `vault_root` is not — only the relocation
+        # route decides that a vault location is intentional.
+        vault_pinned=bool(existing.vault_pinned) if existing is not None else False,
     )
 
 

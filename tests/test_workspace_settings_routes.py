@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
+import shutil
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -1435,6 +1438,159 @@ def test_relocated_vault_is_pinned_for_detectors(tmp_path):
     actions = detect_actions(DetectionContext(config))
     vault_actions = [a for a in actions if a.kind == "vault-location"]
     assert vault_actions == []
+
+
+def test_relocate_refuses_another_workspaces_vault_or_its_parent(tmp_path):
+    """Two registry entries must never name overlapping vaults.
+
+    `mode="hook"` only compared the target against the workspace being moved,
+    so pointing `personal` at `client-b`'s vault (or at the folder above it)
+    was accepted. Both workspaces then read and write the same notes: a chat in
+    `personal` can list, edit, and delete `client-b`'s data.
+    """
+    client, config, _pcm = _client(tmp_path)
+    _make_vault_workspace(tmp_path)
+    sibling = (tmp_path / "clients" / "client-b").resolve()
+    (sibling / "People").mkdir(parents=True)
+    (sibling / "People" / "Grace.md").write_text("# Grace\n", encoding="utf-8")
+    config.workspaces["client-b"] = WorkspaceConfig(
+        name="client-b", vault_root=str(sibling)
+    )
+
+    exact = client.post("/api/workspaces/personal/vault", json={
+        "target": str(sibling),
+        "mode": "hook",
+    })
+    assert exact.status_code == 400, exact.json()
+    assert "already owned by 'client-b'" in exact.json()["error"]
+
+    ancestor = client.post("/api/workspaces/personal/vault", json={
+        "target": str(sibling.parent),
+        "mode": "hook",
+    })
+    assert ancestor.status_code == 400, ancestor.json()
+    assert "already owned by 'client-b'" in ancestor.json()["error"]
+
+    # Registry untouched, and a `move` onto a sibling never got to copy files.
+    assert Path(config.workspace_vault_root("personal")) == (
+        tmp_path / "memory-vault" / "personal"
+    ).resolve()
+    assert config.workspace("personal").vault_pinned is False
+
+    moved = client.post("/api/workspaces/personal/vault", json={
+        "target": str(sibling),
+        "mode": "move",
+    })
+    assert moved.status_code == 400, moved.json()
+    assert (sibling / "People" / "Grace.md").is_file()
+    assert (tmp_path / "memory-vault" / "personal" / "People" / "Ada.md").is_file()
+
+    # A target that overlaps nothing is still accepted.
+    ok = client.post("/api/workspaces/personal/vault", json={
+        "target": str(tmp_path / "clients-elsewhere"),
+        "mode": "move",
+    })
+    assert ok.status_code == 200, ok.json()
+
+
+def test_relocate_move_works_across_filesystems(tmp_path, monkeypatch):
+    """A cross-mount relocation must not 500.
+
+    `Path.rename` raises EXDEV whenever source and target are on different
+    filesystems, which is precisely the "move my vault to an external disk"
+    case this route exists for. `os.rename` is made to fail the way a
+    cross-mount rename does, so `shutil.move`'s copy+unlink fallback is what is
+    under test.
+    """
+    client, config, _pcm = _client(tmp_path)
+    source = _make_vault_workspace(tmp_path)
+    target = tmp_path / "external-disk"
+    real_rename = os.rename
+
+    def _cross_device(src, dst, *args, **kwargs):
+        if str(src).startswith(str(source)):
+            raise OSError(errno.EXDEV, "Cross-device link")
+        return real_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", _cross_device)
+
+    resp = client.post("/api/workspaces/personal/vault", json={
+        "target": str(target),
+        "mode": "move",
+    })
+
+    assert resp.status_code == 200, resp.json()
+    assert (target / "People" / "Ada.md").is_file()
+    assert (target / "INDEX.md").is_file()
+    assert not (source / "People").exists()
+    assert Path(config.workspace_vault_root("personal")).resolve() == target.resolve()
+
+
+def test_relocate_move_unwinds_a_partial_move(tmp_path, monkeypatch):
+    """A vault must never be left split across two folders.
+
+    Across filesystems the move is copy+unlink, so it can fail after some
+    entries have already been relocated. Without an unwind the registry still
+    names the old folder and everything already moved has silently vanished
+    from the workspace.
+    """
+    client, config, _pcm = _client(tmp_path)
+    source = _make_vault_workspace(tmp_path)
+    target = tmp_path / "half-moved"
+    real_move = shutil.move
+    forward: list[str] = []
+
+    def _fails_midway(src, dst, *args, **kwargs):
+        if Path(dst).parent == target:
+            forward.append(str(src))
+            if len(forward) == 2:
+                raise OSError("simulated no space left on device")
+        return real_move(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "move", _fails_midway)
+
+    resp = client.post("/api/workspaces/personal/vault", json={
+        "target": str(target),
+        "mode": "move",
+    })
+
+    assert resp.status_code == 500, resp.json()
+    assert "failed to move vault" in resp.json()["error"]
+    # Everything is back where it started, and the registry still points there.
+    assert (source / "People" / "Ada.md").is_file()
+    assert (source / "INDEX.md").is_file()
+    assert sorted(p.name for p in target.iterdir()) == []
+    assert Path(config.workspace_vault_root("personal")) == source.resolve()
+    assert config.workspace("personal").vault_pinned is False
+
+
+def test_ordinary_workspace_save_keeps_the_vault_pin(tmp_path):
+    """Saving any other setting must not un-pin a relocated vault.
+
+    `workspace_from_request` rebuilt the entry without `vault_pinned`, so a
+    colour change reset the pin to its default and persisted it — and the
+    "vault not in its standard folder" action started nagging again about a
+    relocation the operator had already confirmed.
+    """
+    client, config, _pcm = _client(tmp_path)
+    _make_vault_workspace(tmp_path)
+    target = tmp_path / "external-vault"
+    target.mkdir()
+    relocated = client.post("/api/workspaces/personal/vault", json={
+        "target": str(target),
+        "mode": "hook",
+    })
+    assert relocated.status_code == 200, relocated.json()
+
+    patched = client.patch("/api/workspaces/personal", json={"color": "cyan"})
+
+    assert patched.status_code == 200, patched.json()
+    assert config.workspace("personal").vault_pinned is True
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    entry = next(item for item in stored if item["name"] == "personal")
+    assert entry["vault_pinned"] is True
+    # The relocation itself is also untouched by the save.
+    assert Path(entry["vault_root"]).resolve() == target.resolve()
 
 
 def test_browse_and_create_workspace_folder(tmp_path):

@@ -7883,7 +7883,16 @@ class ProjectChatManager:
         title lands instead of accepting the placeholder as final.
         """
         provider = getattr(chat, "provider", "claude")
-        workspace = self._config.workspace_root
+        # The chat's OWN agent root, not the install root. Both readers below
+        # are root-scoped - Claude Code keys sessions by directory, and
+        # `read_thread` caches on `(workspace_root, session_id)` - and the
+        # provider that created the session was handed the agent root by
+        # `_agent_root_for_chat`. Reading from `workspace_root` therefore looked
+        # up a directory the session was never written under, so after the
+        # re-rooting every chat outside the primary workspace found no native
+        # title and sat on the deterministic fallback (or "New Chat" when the
+        # prompt yielded none) forever.
+        workspace = self._agent_root_for_chat(chat.chat_id)
         try:
             if provider == "opencode":
                 thread = await OpencodeProvider.read_thread(workspace, chat.session_id)
