@@ -2520,6 +2520,35 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
     expect(store.streaming[otherId]).toBe(false)
     expect(store.isChatStreaming(otherId)).toBe(false)
   })
+
+  test('an active chat ending with an empty transcript clears the stuck spinner', async () => {
+    // The image-capability pre-flight aborts before dispatch: no provider
+    // session, no transcript row, so /messages returns nothing. This used to
+    // leave "Thinking…" on screen forever, because every settle path required
+    // a trailing assistant/system row to exist.
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    apiGet.mockImplementation((path: string) =>
+      path.endsWith('/messages') ? Promise.resolve([]) : Promise.resolve([]),
+    )
+    const store = useProjectStore()
+    const chatId = 'c-empty-turn'
+    store.activeChatId = chatId
+    store.streaming[chatId] = true
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done',
+        chat_id: chatId,
+        project_id: 'p1',
+        is_error: false,
+      }),
+    })
+    // reconcileAfterResult is async; let its first (delay-0) pass run.
+    await new Promise(r => setTimeout(r, 0))
+    expect(store.streaming[chatId]).toBe(false)
+    expect(store.isChatStreaming(chatId)).toBe(false)
+  })
 })
 
 describe('server restart overlay', () => {

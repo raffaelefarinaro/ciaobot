@@ -5413,10 +5413,18 @@ class ProjectChatManager:
                         # A pick of the current (disabled) model falls through
                         # to normal dispatch; the ladder handles a rejection.
                     elif action == "picker":
-                        # The PWA opens the model selector and the user
-                        # re-sends through the normal path. This turn ends
-                        # with no result event and no bubble: the user is
-                        # mid-flow.
+                        # The PWA opens the model selector on the answering
+                        # device and the user re-sends through the normal
+                        # path. The turn ends with no result event, but not
+                        # silently: the system bubble tells every connected
+                        # client (this one included — the picker renders above
+                        # it) why the turn closed with nothing on the
+                        # transcript, and gives them a system row so their
+                        # stale "thinking" state can settle.
+                        yield SystemStatusEvent(
+                            type="system",
+                            status=_CAPABILITY_IMAGE_MSG,
+                        )
                         return
                     elif action == "cancel":
                         # The user declined to switch. Tell them the images

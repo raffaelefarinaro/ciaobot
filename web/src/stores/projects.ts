@@ -1710,7 +1710,15 @@ export const useProjectStore = defineStore('projects', () => {
     if (projectStreaming.value[chatId]) return false
     const localMessages = messages.value[chatId] || []
     const last = localMessages[localMessages.length - 1]
-    if (!last) return false
+    if (!last) {
+      // Empty history is settled too: some turns end without producing any
+      // row (the image-capability pre-flight aborts before dispatch, so no
+      // provider session or transcript is ever written). Requiring a trailing
+      // assistant/system row here left the spinner running forever on those
+      // turns — every caller already gates on !projectStreaming, so an empty
+      // transcript with the server idle can only mean the turn is over.
+      return true
+    }
     if (last.role === 'assistant') return true
     return last.role === 'system' && last.tool_name !== '_activity'
   }
@@ -2837,7 +2845,18 @@ export const useProjectStore = defineStore('projects', () => {
       // Stop once the turn is capped by a non-error assistant reply or an
       // explicit error/system note — anything that isn't a trailing user msg
       // or tool-activity entry means the final state is rendered.
-      if (!last) continue
+      if (!last) {
+        // A turn can legitimately end with nothing on the transcript (the
+        // image-capability pre-flight aborts before dispatch, so /messages
+        // stays empty). Retrying cannot change that: clear the stale spinner
+        // instead of running out the retry budget with "Thinking…" on screen.
+        if (!projectStreaming.value[chatId]) {
+          clearStreamingState(chatId)
+          void loadSubagents(chatId)
+          return
+        }
+        continue
+      }
       if (last.role === 'assistant' && !last.is_error) {
         clearStreamingState(chatId)
         void loadSubagents(chatId)
