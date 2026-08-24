@@ -15,7 +15,6 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { config, flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { api } from '../../lib/api'
-import * as confirmModule from '../../lib/confirm'
 
 vi.mock('../../lib/api', () => {
   let routineSettings = {
@@ -916,79 +915,6 @@ describe('component mount smoke', () => {
 
     wrapper.unmount()
     mockApi.setResponse('/api/models', originalModels)
-  })
-
-  it('SettingsView relocates a workspace vault to a picked folder', async () => {
-    const testApi = api as typeof api & {
-      setResponse: (path: string, value: unknown) => void
-      getResponse: (path: string) => unknown
-    }
-    const originalWorkspaces = testApi.getResponse('/api/workspaces')
-    testApi.setResponse('/api/workspaces', {
-      workspaces: [{
-        name: 'personal',
-        vault_root: 'memory-vault/personal',
-        default_provider: 'claude',
-        default_model: '',
-        gws_profile: '',
-      }],
-      active: 'personal',
-      provider_options: [
-        { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'opencode', label: 'opencode' },
-      ],
-    })
-    testApi.setResponse('/api/workspaces/browse-folder', {
-      path: '/Users/alice',
-      display_path: '/Users/alice',
-      parent: '/Users',
-      dirs: [
-        { name: 'Documents', path: '/Users/alice/Documents' },
-        { name: 'vaults', path: '/Users/alice/vaults' },
-      ],
-      home: '/Users/alice',
-    })
-    const postSpy = vi.spyOn(api, 'post')
-    const askConfirmSpy = vi.spyOn(confirmModule, 'askConfirm').mockResolvedValue(true)
-
-    const router = makeRouter()
-    await router.push('/settings/workspaces')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    try {
-      const moveButtons = wrapper.findAll('button').filter((b) => b.text() === 'Move…')
-      expect(moveButtons.length).toBeGreaterThanOrEqual(1)
-      await moveButtons[0].trigger('click')
-      await flushPromises()
-      await nextTick()
-
-      // The picker lists folders from the browse endpoint.
-      const dir = wrapper.findAll('button.picker-dir').find((b) => b.text().startsWith('vaults'))
-      expect(dir).toBeTruthy()
-
-      // "Use this folder" re-points (hook mode) after confirmation.
-      const useButton = wrapper.findAll('.picker-footer button').find((b) => b.text() === 'Use this folder')
-      expect(useButton).toBeTruthy()
-      await useButton!.trigger('click')
-      await flushPromises()
-      await nextTick()
-
-      expect(postSpy).toHaveBeenCalledWith(
-        '/api/workspaces/personal/vault',
-        { target: '/Users/alice', mode: 'hook' },
-      )
-    } finally {
-      wrapper.unmount()
-      postSpy.mockRestore()
-      askConfirmSpy.mockRestore()
-      testApi.setResponse('/api/workspaces', originalWorkspaces)
-    }
   })
 
   it('ProjectView mounts without throwing', async () => {

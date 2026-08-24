@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import errno
 import json
-import os
-import shutil
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -24,9 +21,6 @@ from ciao.web.routes_api import (
     list_workspaces,
     provider_config_settings,
     upsert_workspace_setting,
-    relocate_workspace_vault,
-    browse_workspace_folder_endpoint,
-    create_workspace_folder_endpoint,
 )
 
 
@@ -52,8 +46,7 @@ def _client(
     """`peer` is the SOCKET address the request appears to come from.
 
     Starlette defaults it to the literal "testclient", which is neither
-    loopback nor routable; the filesystem guard reads the peer, so a real
-    local request has to look like one.
+    loopback nor routable, so a real local request has to look like one.
     """
     env = {
         "PWA_AUTH_TOKEN": "t",
@@ -76,21 +69,6 @@ def _client(
                 "/api/workspaces/{name}",
                 delete_workspace_setting,
                 methods=["DELETE"],
-            ),
-            Route(
-                "/api/workspaces/{name}/vault",
-                relocate_workspace_vault,
-                methods=["POST"],
-            ),
-            Route(
-                "/api/workspaces/browse-folder",
-                browse_workspace_folder_endpoint,
-                methods=["GET"],
-            ),
-            Route(
-                "/api/workspaces/browse-folder",
-                create_workspace_folder_endpoint,
-                methods=["POST"],
             ),
             Route(
                 "/api/settings/providers",
@@ -186,7 +164,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "allowed_mcp_servers": None,
         "gws_profile": "work",
         "color": "pink",
-        "vault_pinned": False,
     }
 
 
@@ -222,7 +199,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "allowed_mcp_servers": None,
             "gws_profile": "personal",
             "color": "pink",
-            "vault_pinned": False,
         },
     ]
     assert pcm.refresh_count == 3
@@ -1314,770 +1290,6 @@ def test_a_vault_outside_the_install_refuses_the_deletion(tmp_path):
     assert pcm.reassigned == []
 
 
-# ── Workspace vault relocation ────────────────────────────────────────────
-
-
-def _make_vault_workspace(tmp_path, name="personal", leaf="memory-vault/personal"):
-    """Create a real vault directory for a workspace so relocation has content."""
-    vault = tmp_path / "memory-vault" / name
-    (vault / "People").mkdir(parents=True, exist_ok=True)
-    (vault / "People" / "Ada.md").write_text(
-        "---\ntype: person\ntitle: Ada\ntags: [person]\n---\n\n# Ada\n",
-        encoding="utf-8",
-    )
-    (vault / "INDEX.md").write_text("# Index\n", encoding="utf-8")
-    return vault
-
-
-def test_relocate_vault_hook_repoints_registry_and_pins(tmp_path):
-    client, config, pcm = _client(tmp_path)
-    source = _make_vault_workspace(tmp_path)
-    target = tmp_path / "external-vault"
-    target.mkdir()
-
-    resp = client.post("/api/workspaces/personal/vault", json={
-        "target": str(target),
-        "mode": "hook",
-    })
-
-    assert resp.status_code == 200, resp.json()
-    body = resp.json()
-    assert body["ok"] is True
-    assert body["mode"] == "hook"
-    assert body["pinned"] is True
-    # Files were not moved — only the registry re-pointed.
-    assert (source / "People" / "Ada.md").is_file()
-    assert Path(config.workspace_vault_root("personal")) == target.resolve()
-    assert config.workspace("personal").vault_pinned is True
-    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
-    entry = next(item for item in stored if item["name"] == "personal")
-    assert entry["vault_pinned"] is True
-    assert Path(entry["vault_root"]).resolve() == target.resolve()
-    assert pcm.refresh_count == 1
-
-
-def test_relocate_vault_move_relocates_content(tmp_path):
-    client, config, _pcm = _client(tmp_path)
-    source = _make_vault_workspace(tmp_path)
-    target = tmp_path / "moved-vault"
-
-    resp = client.post("/api/workspaces/personal/vault", json={
-        "target": str(target),
-        "mode": "move",
-    })
-
-    assert resp.status_code == 200, resp.json()
-    # Content physically moved.
-    assert not (source / "People" / "Ada.md").exists()
-    assert (target / "People" / "Ada.md").is_file()
-    assert Path(config.workspace_vault_root("personal")).resolve() == target.resolve()
-    assert config.workspace("personal").vault_pinned is True
-
-
-def test_relocate_move_refuses_nonempty_target(tmp_path):
-    client, _config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-    target = tmp_path / "occupied"
-    target.mkdir()
-    (target / "keep.txt").write_text("x", encoding="utf-8")
-
-    resp = client.post("/api/workspaces/personal/vault", json={
-        "target": str(target),
-        "mode": "move",
-    })
-
-    assert resp.status_code == 400
-    assert "not empty" in resp.json()["error"]
-    assert (target / "keep.txt").is_file()
-
-
-def test_relocate_rejects_dangerous_targets(tmp_path):
-    client, config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-
-    # Filesystem root.
-    r = client.post("/api/workspaces/personal/vault", json={"target": "/", "mode": "hook"})
-    assert r.status_code == 400
-    assert "filesystem root" in r.json()["error"]
-
-    # A relative path is rejected (must be absolute).
-    r = client.post("/api/workspaces/personal/vault", json={"target": "relative", "mode": "hook"})
-    assert r.status_code == 400
-    assert "absolute" in r.json()["error"]
-
-    # Nesting inside the current vault is refused.
-    nested = tmp_path / "memory-vault" / "personal" / "nested"
-    nested.mkdir(parents=True, exist_ok=True)
-    r = client.post("/api/workspaces/personal/vault", json={"target": str(nested), "mode": "hook"})
-    assert r.status_code == 400
-    assert "inside the current vault" in r.json()["error"]
-
-    # Pointing at the current vault's parent is refused (overlap).
-    parent = tmp_path / "memory-vault"
-    r = client.post("/api/workspaces/personal/vault", json={"target": str(parent), "mode": "hook"})
-    assert r.status_code == 400
-
-
-def test_relocate_rejects_bad_mode_and_missing_workspace(tmp_path):
-    client, config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-    target = tmp_path / "v"
-    target.mkdir()
-
-    r = client.post("/api/workspaces/personal/vault", json={"target": str(target), "mode": "teleport"})
-    assert r.status_code == 400
-    assert "mode" in r.json()["error"]
-
-    r = client.post("/api/workspaces/nope/vault", json={"target": str(target), "mode": "hook"})
-    assert r.status_code == 400
-    assert "workspace not found" in r.json()["error"]
-
-
-def test_relocated_vault_is_pinned_for_detectors(tmp_path):
-    """A vault relocated through Settings no longer trips the
-    'not in its standard folder' operator action or audit notice."""
-    from ciao.operator_actions import DetectionContext, detect_actions
-
-    client, config, _pcm = _client(tmp_path)
-    source = _make_vault_workspace(tmp_path)
-    target = tmp_path / "external-vault"
-    target.mkdir()
-    client.post("/api/workspaces/personal/vault", json={"target": str(target), "mode": "hook"})
-    assert config.workspace("personal").vault_pinned is True
-    assert Path(config.workspace_vault_root("personal")).resolve() != source.resolve()
-
-    actions = detect_actions(DetectionContext(config))
-    vault_actions = [a for a in actions if a.kind == "vault-location"]
-    assert vault_actions == []
-
-
-def test_relocate_refuses_another_workspaces_vault_or_its_parent(tmp_path):
-    """Two registry entries must never name overlapping vaults.
-
-    `mode="hook"` only compared the target against the workspace being moved,
-    so pointing `personal` at `client-b`'s vault (or at the folder above it)
-    was accepted. Both workspaces then read and write the same notes: a chat in
-    `personal` can list, edit, and delete `client-b`'s data.
-    """
-    client, config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-    sibling = (tmp_path / "clients" / "client-b").resolve()
-    (sibling / "People").mkdir(parents=True)
-    (sibling / "People" / "Grace.md").write_text("# Grace\n", encoding="utf-8")
-    config.workspaces["client-b"] = WorkspaceConfig(
-        name="client-b", vault_root=str(sibling)
-    )
-
-    exact = client.post("/api/workspaces/personal/vault", json={
-        "target": str(sibling),
-        "mode": "hook",
-    })
-    assert exact.status_code == 400, exact.json()
-    assert "already owned by 'client-b'" in exact.json()["error"]
-
-    ancestor = client.post("/api/workspaces/personal/vault", json={
-        "target": str(sibling.parent),
-        "mode": "hook",
-    })
-    assert ancestor.status_code == 400, ancestor.json()
-    assert "already owned by 'client-b'" in ancestor.json()["error"]
-
-    # Registry untouched, and a `move` onto a sibling never got to copy files.
-    assert Path(config.workspace_vault_root("personal")) == (
-        tmp_path / "memory-vault" / "personal"
-    ).resolve()
-    assert config.workspace("personal").vault_pinned is False
-
-    moved = client.post("/api/workspaces/personal/vault", json={
-        "target": str(sibling),
-        "mode": "move",
-    })
-    assert moved.status_code == 400, moved.json()
-    assert (sibling / "People" / "Grace.md").is_file()
-    assert (tmp_path / "memory-vault" / "personal" / "People" / "Ada.md").is_file()
-
-    # A target that overlaps nothing is still accepted.
-    ok = client.post("/api/workspaces/personal/vault", json={
-        "target": str(tmp_path / "clients-elsewhere"),
-        "mode": "move",
-    })
-    assert ok.status_code == 200, ok.json()
-
-
-def test_relocate_move_works_across_filesystems(tmp_path, monkeypatch):
-    """A cross-mount relocation must not 500.
-
-    `Path.rename` raises EXDEV whenever source and target are on different
-    filesystems, which is precisely the "move my vault to an external disk"
-    case this route exists for. `os.rename` is made to fail the way a
-    cross-mount rename does, so `shutil.move`'s copy+unlink fallback is what is
-    under test.
-    """
-    client, config, _pcm = _client(tmp_path)
-    source = _make_vault_workspace(tmp_path)
-    target = tmp_path / "external-disk"
-    real_rename = os.rename
-
-    def _cross_device(src, dst, *args, **kwargs):
-        if str(src).startswith(str(source)):
-            raise OSError(errno.EXDEV, "Cross-device link")
-        return real_rename(src, dst, *args, **kwargs)
-
-    monkeypatch.setattr(os, "rename", _cross_device)
-
-    resp = client.post("/api/workspaces/personal/vault", json={
-        "target": str(target),
-        "mode": "move",
-    })
-
-    assert resp.status_code == 200, resp.json()
-    assert (target / "People" / "Ada.md").is_file()
-    assert (target / "INDEX.md").is_file()
-    assert not (source / "People").exists()
-    assert Path(config.workspace_vault_root("personal")).resolve() == target.resolve()
-
-
-def test_relocate_move_unwinds_a_partial_move(tmp_path, monkeypatch):
-    """A vault must never be left split across two folders.
-
-    Across filesystems the move is copy+unlink, so it can fail after some
-    entries have already been relocated. Without an unwind the registry still
-    names the old folder and everything already moved has silently vanished
-    from the workspace.
-    """
-    client, config, _pcm = _client(tmp_path)
-    source = _make_vault_workspace(tmp_path)
-    target = tmp_path / "half-moved"
-    real_move = shutil.move
-    forward: list[str] = []
-
-    def _fails_midway(src, dst, *args, **kwargs):
-        if Path(dst).parent == target:
-            forward.append(str(src))
-            if len(forward) == 2:
-                raise OSError("simulated no space left on device")
-        return real_move(src, dst, *args, **kwargs)
-
-    monkeypatch.setattr(shutil, "move", _fails_midway)
-
-    resp = client.post("/api/workspaces/personal/vault", json={
-        "target": str(target),
-        "mode": "move",
-    })
-
-    assert resp.status_code == 500, resp.json()
-    assert "failed to move vault" in resp.json()["error"]
-    # Everything is back where it started, and the registry still points there.
-    assert (source / "People" / "Ada.md").is_file()
-    assert (source / "INDEX.md").is_file()
-    assert sorted(p.name for p in target.iterdir()) == []
-    assert Path(config.workspace_vault_root("personal")) == source.resolve()
-    assert config.workspace("personal").vault_pinned is False
-
-
-def test_ordinary_workspace_save_keeps_the_vault_pin(tmp_path):
-    """Saving any other setting must not un-pin a relocated vault.
-
-    `workspace_from_request` rebuilt the entry without `vault_pinned`, so a
-    colour change reset the pin to its default and persisted it — and the
-    "vault not in its standard folder" action started nagging again about a
-    relocation the operator had already confirmed.
-    """
-    client, config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-    target = tmp_path / "external-vault"
-    target.mkdir()
-    relocated = client.post("/api/workspaces/personal/vault", json={
-        "target": str(target),
-        "mode": "hook",
-    })
-    assert relocated.status_code == 200, relocated.json()
-
-    patched = client.patch("/api/workspaces/personal", json={"color": "cyan"})
-
-    assert patched.status_code == 200, patched.json()
-    assert config.workspace("personal").vault_pinned is True
-    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
-    entry = next(item for item in stored if item["name"] == "personal")
-    assert entry["vault_pinned"] is True
-    # The relocation itself is also untouched by the save.
-    assert Path(entry["vault_root"]).resolve() == target.resolve()
-
-
-def test_browse_and_create_workspace_folder(tmp_path):
-    client, _config, _pcm = _client(tmp_path)
-    listing = client.get(f"/api/workspaces/browse-folder?path={tmp_path}")
-    assert listing.status_code == 200
-    assert listing.json()["path"] == str(tmp_path.resolve())
-
-    created = client.post("/api/workspaces/browse-folder", json={
-        "path": str(tmp_path),
-        "name": "brand-new-vault",
-    })
-    assert created.status_code == 200, created.json()
-    assert (tmp_path / "brand-new-vault").is_dir()
-
-    bad = client.post("/api/workspaces/browse-folder", json={
-        "path": str(tmp_path),
-        "name": "../../escape",
-    })
-    assert bad.status_code == 400
-    assert not (tmp_path / ".." / "escape").exists()
-
-    not_a_dir = client.get("/api/workspaces/browse-folder?path=/nonexistent-xyz")
-    assert not_a_dir.status_code == 400
-
-
-# ---- folder-picker guard ----------------------------------------------------
-
-
-def test_folder_browsing_needs_a_password_from_the_network(tmp_path):
-    """These routes reach outside the workspace, so they need more than nothing.
-
-    `pwa_auth_required` is `bool(pwa_auth_token)`, so an install with no
-    password set leaves every `/api` route open — and `PWA_HOST` defaults to
-    `0.0.0.0`. The rest of the API at least stays inside the workspace; these
-    two enumerate arbitrary directories and create folders anywhere the process
-    can write, which should not be reachable from the network unauthenticated.
-    """
-    client, _config, _pcm = _client(
-        tmp_path, {"PWA_AUTH_TOKEN": ""}, peer=("10.1.2.3", 51234)
-    )
-
-    listed = client.get("/api/workspaces/browse-folder?path=~")
-    made = client.post("/api/workspaces/browse-folder", json={"path": "/", "name": "x"})
-
-    assert listed.status_code == 403
-    assert "password" in listed.json()["error"]
-    assert made.status_code == 403
-
-
-def test_folder_browsing_is_allowed_from_the_machine_itself(tmp_path):
-    """Loopback is the owner at the keyboard, and the tokenless first-run path.
-
-    TestClient's default peer is 127.0.0.1, which is the real signal here.
-    """
-    client, _config, _pcm = _client(tmp_path, {"PWA_AUTH_TOKEN": ""})
-
-    listed = client.get("/api/workspaces/browse-folder?path=~")
-
-    assert listed.status_code == 200
-    assert "entries" in listed.json() or "dirs" in listed.json()
-
-
-def test_a_spoofed_host_header_does_not_pass_for_localhost(tmp_path):
-    """The guard must read the socket, not a header the caller writes.
-
-    `_localhost_request` trusts the `Host` header. With the server bound to
-    0.0.0.0 by default, a remote request carrying `Host: localhost` would walk
-    straight through — which would have made the guard decorative.
-    """
-    # A non-loopback peer: someone else on the network.
-    client, _config, _pcm = _client(
-        tmp_path, {"PWA_AUTH_TOKEN": ""}, peer=("10.1.2.3", 51234)
-    )
-
-    listed = client.get(
-        "/api/workspaces/browse-folder?path=~",
-        headers={"host": "localhost"},
-    )
-
-    assert listed.status_code == 403
-
-
-def test_folder_browsing_is_allowed_once_a_password_is_set(tmp_path):
-    """The picker must keep working for a normal remote Settings session."""
-    client, _config, _pcm = _client(tmp_path)  # fixture sets PWA_AUTH_TOKEN
-
-    listed = client.get("/api/workspaces/browse-folder?path=~")
-
-    assert listed.status_code == 200
-
-
-# ---- vault relocation: review findings -------------------------------------
-
-
-def _vault_rows(prefix: str = "") -> list[str]:
-    """Every vault search key currently in the (per-test) FTS database."""
-    import sqlite3
-
-    from ciao import fts_search
-
-    conn = sqlite3.connect(fts_search.get_db_path())
-    try:
-        fts_search.init_db(conn)
-        return sorted(
-            str(row[0])
-            for row in conn.execute("SELECT path FROM vault_meta").fetchall()
-            if str(row[0]).startswith(prefix)
-        )
-    finally:
-        conn.close()
-
-
-def _index_now(vault: Path, base: Path) -> None:
-    """Index *vault* the way `ControlPlane.vault_search` does."""
-    import sqlite3
-
-    from ciao import fts_search
-
-    conn = sqlite3.connect(fts_search.get_db_path())
-    try:
-        fts_search.init_db(conn)
-        fts_search.index_vault(conn, vault, path_base=base)
-    finally:
-        conn.close()
-
-
-def test_relocate_move_refuses_to_empty_the_install_root(tmp_path):
-    """The "adopted existing folder" layout must not have `.env` moved out of it.
-
-    With `CIAO_VAULT_ROOT` pointing at the install directory (a `.` registry
-    root), the vault root IS the install root, so "move every top-level entry"
-    dragged the operator's credentials, `state.json`, `workspaces.json` and the
-    search database into the notes folder — and `persist_workspace_registry()`
-    then recreated an empty runtime directory at the old root, leaving two.
-    That layout is exactly the one the `vault-location` operator action flags,
-    so it is the one people press "Move vault here" on.
-    """
-    install = tmp_path / "install"
-    (install / ".runtime").mkdir(parents=True)
-    client, config, _pcm = _client(
-        tmp_path,
-        {
-            "CIAO_WORKSPACE": str(install),
-            "CIAO_RUNTIME_ROOT": str(install / ".runtime"),
-        },
-    )
-    config.workspaces["personal"].vault_root = "."
-    (install / ".env").write_text("ANTHROPIC_API_KEY=secret\n", encoding="utf-8")
-    (install / ".runtime" / "state.json").write_text("{}", encoding="utf-8")
-    (install / "People").mkdir()
-    (install / "People" / "Ada.md").write_text("# Ada\n", encoding="utf-8")
-    target = tmp_path / "notes-elsewhere"
-
-    resp = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(target), "mode": "move"}
-    )
-
-    assert resp.status_code == 400, resp.json()
-    assert "runtime directory" in resp.json()["error"]
-    # Nothing left the install root, and the notes are still there too.
-    assert (install / ".env").read_text(encoding="utf-8").startswith("ANTHROPIC")
-    assert (install / ".runtime" / "state.json").is_file()
-    assert (install / "People" / "Ada.md").is_file()
-    assert not (target / ".env").exists()
-    assert not (target / ".runtime").exists()
-    assert config.workspaces["personal"].vault_root == "."
-
-
-def test_relocate_hook_keeps_a_hand_written_index_file(tmp_path):
-    """`hook` points at an EXISTING folder, so its INDEX.md is the operator's.
-
-    The refresh wrote generated output over `<target>/INDEX.md` unconditionally:
-    no prompt, no backup, and a success response that did not mention it.
-    """
-    client, _config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-    target = tmp_path / "existing-notes"
-    target.mkdir()
-    (target / "INDEX.md").write_text("# PRECIOUS EXISTING INDEX\n", encoding="utf-8")
-
-    resp = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(target), "mode": "hook"}
-    )
-
-    assert resp.status_code == 200, resp.json()
-    assert "PRECIOUS EXISTING INDEX" in (target / "INDEX.md").read_text(encoding="utf-8")
-    assert any("INDEX.md" in w for w in resp.json()["warnings"]), resp.json()
-
-
-def test_relocate_regenerates_its_own_index_file(tmp_path):
-    """The guard above must not freeze a Ciao-generated INDEX.md in place.
-
-    An adopted folder that already holds one of OUR index files (a vault the
-    operator moved by hand, then hooked) has nothing to lose by a rewrite, and
-    keeping the stale one would be the new failure.
-    """
-    client, _config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-    target = tmp_path / "already-a-ciao-vault"
-    (target / "People").mkdir(parents=True)
-    (target / "People" / "Grace.md").write_text(
-        "---\ntype: person\ntitle: Grace\n---\n\n# Grace\n", encoding="utf-8"
-    )
-    (target / "INDEX.md").write_text(
-        "<!-- generated by ciao vault-index, do not edit by hand -->\nstale\n",
-        encoding="utf-8",
-    )
-
-    resp = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(target), "mode": "hook"}
-    )
-
-    assert resp.status_code == 200, resp.json()
-    rewritten = (target / "INDEX.md").read_text(encoding="utf-8")
-    assert "# Vault Index" in rewritten
-    assert "Grace" in rewritten
-    assert resp.json()["warnings"] == []
-
-
-def test_relocate_hook_refuses_a_target_that_does_not_exist(tmp_path):
-    """`hook` is documented as re-pointing at an existing folder.
-
-    Only `move` calls `mkdir`, and the sole existence check was "exists and is
-    not a directory", so a typo in the picker's path field persisted a workspace
-    pointing at nothing at all.
-    """
-    client, config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-    typo = tmp_path / "extrenal-vault"
-
-    resp = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(typo), "mode": "hook"}
-    )
-
-    assert resp.status_code == 400, resp.json()
-    assert "does not exist" in resp.json()["error"]
-    assert not typo.exists()
-    assert config.workspaces["personal"].vault_root == "memory-vault/personal"
-    assert config.workspace("personal").vault_pinned is False
-
-
-def test_relocate_outside_the_install_root_warns_that_search_dies(tmp_path):
-    """Search keys are install-root-relative, so an outside vault is unfindable.
-
-    `ControlPlane.vault_search` filters on `fts_search.vault_key_prefix`, which
-    fails closed for a vault outside the key base: the filter matches no row, so
-    that workspace's notes are permanently unsearchable. The endpoint reported
-    plain success and `_reindex_vault` spent the time writing rows nothing can
-    read.
-    """
-    install = tmp_path / "install"
-    install.mkdir()
-    client, _config, _pcm = _client(
-        tmp_path,
-        {
-            "CIAO_WORKSPACE": str(install),
-            "CIAO_RUNTIME_ROOT": str(install / ".runtime"),
-        },
-    )
-    _make_vault_workspace(install)
-    outside = tmp_path / "outside-the-install"
-    outside.mkdir()
-    (outside / "People").mkdir()
-    (outside / "People" / "Grace.md").write_text("# Grace\n", encoding="utf-8")
-
-    resp = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(outside), "mode": "hook"}
-    )
-
-    assert resp.status_code == 200, resp.json()
-    assert any("search" in w for w in resp.json()["warnings"]), resp.json()
-    # No unreachable rows were written for it either.
-    assert _vault_rows() == []
-
-
-def test_relocate_move_prunes_the_old_vaults_search_rows(tmp_path):
-    """Search must stop returning hits for files that were moved away.
-
-    `_index_directory` scopes its prune to the root being indexed, so nothing
-    ever removed the OLD path's rows: after a move, every note stayed in the
-    index under a path that no longer exists on disk.
-    """
-    client, _config, _pcm = _client(tmp_path)
-    source = _make_vault_workspace(tmp_path)
-    base = tmp_path.resolve()
-    _index_now(source, base)
-    assert "memory-vault/personal/People/Ada.md" in _vault_rows()
-
-    target = tmp_path / "moved-vault"
-    resp = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(target), "mode": "move"}
-    )
-
-    assert resp.status_code == 200, resp.json()
-    assert _vault_rows("memory-vault/personal/") == []
-    assert "moved-vault/People/Ada.md" in _vault_rows()
-
-
-def test_relocate_refuses_a_symlinked_target_or_parent(tmp_path):
-    """The symlink guard has to run on the path AS GIVEN.
-
-    It ran on `raw.resolve()`, which has already followed every link, so
-    `target.is_symlink()` was False by construction and the protection the
-    docstring and PWA_API.md advertise never fired once.
-    """
-    client, config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-    real = tmp_path / "real-vault"
-    real.mkdir()
-    link = tmp_path / "linked-vault"
-    link.symlink_to(real, target_is_directory=True)
-
-    leaf = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(link), "mode": "hook"}
-    )
-    assert leaf.status_code == 400, leaf.json()
-    assert "symlink" in leaf.json()["error"]
-
-    holder = tmp_path / "holder"
-    (holder / "inner").mkdir(parents=True)
-    holder_link = tmp_path / "holder-link"
-    holder_link.symlink_to(holder, target_is_directory=True)
-
-    parent = client.post(
-        "/api/workspaces/personal/vault",
-        json={"target": str(holder_link / "inner"), "mode": "hook"},
-    )
-    assert parent.status_code == 400, parent.json()
-    assert "parent" in parent.json()["error"]
-    assert config.workspaces["personal"].vault_root == "memory-vault/personal"
-
-
-def test_relocate_refreshes_logs_from_the_configured_runtime_root(tmp_path, monkeypatch):
-    """The runtime root is configurable and can live outside `workspace_root`.
-
-    `logs_root_for` was handed a hardcoded `workspace_root / ".runtime"`, so on
-    a `CIAO_RUNTIME_ROOT` install it looked for the re-rooting receipt in a
-    directory that does not exist, answered `<vault>/Logs`, and the transcript
-    index was silently never refreshed.
-    """
-    from ciao import config as config_module
-
-    runtime = tmp_path / "runtime-elsewhere"
-    runtime.mkdir()
-    client, config, _pcm = _client(tmp_path, {"CIAO_RUNTIME_ROOT": str(runtime)})
-    _make_vault_workspace(tmp_path)
-    target = tmp_path / "external-vault"
-    target.mkdir()
-    seen: list[Path] = []
-    real_logs_root_for = config_module.logs_root_for
-
-    def _record(workspace_root, vault_root, runtime_root):
-        seen.append(Path(runtime_root))
-        return real_logs_root_for(workspace_root, vault_root, runtime_root)
-
-    monkeypatch.setattr(config_module, "logs_root_for", _record)
-
-    resp = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(target), "mode": "hook"}
-    )
-
-    assert resp.status_code == 200, resp.json()
-    assert seen == [Path(config.state_path).parent]
-    assert seen != [tmp_path / ".runtime"]
-
-
-def test_relocated_index_stamps_the_workspace(tmp_path):
-    """An unstamped scan infers the workspace from the first path segment.
-
-    For a per-workspace root that segment is a FOLDER name, and the inference
-    answers "personal" for every known folder type — so a relocated `client-a`
-    vault was indexed as if it were the personal one, and any `?workspace=`
-    filter looking for `client-a` dropped the lot.
-    """
-    client, config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-    other = _make_vault_workspace(tmp_path, name="client-a")
-    config.workspaces["client-a"] = WorkspaceConfig(
-        name="client-a", vault_root="memory-vault/client-a"
-    )
-    assert Path(config.workspace_vault_root("client-a")) == other.resolve()
-    target = tmp_path / "moved-client-a"
-
-    resp = client.post(
-        "/api/workspaces/client-a/vault", json={"target": str(target), "mode": "move"}
-    )
-
-    assert resp.status_code == 200, resp.json()
-    index = (target / "INDEX.md").read_text(encoding="utf-8")
-    assert "## Client-a" in index
-    assert "## Personal" not in index
-
-
-def test_relocate_move_accepts_a_target_holding_only_finder_metadata(tmp_path):
-    """`.DS_Store` must not make a folder permanently unusable as a target.
-
-    `any(target.iterdir())` counted dotfiles, so a folder the operator had only
-    OPENED in Finder was rejected as "not empty" — with no way forward, because
-    the picker offers no delete.
-    """
-    client, _config, _pcm = _client(tmp_path)
-    source = _make_vault_workspace(tmp_path)
-    (source / ".DS_Store").write_bytes(b"\x00")
-    target = tmp_path / "looked-at-in-finder"
-    target.mkdir()
-    (target / ".DS_Store").write_bytes(b"\x00")
-
-    resp = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(target), "mode": "move"}
-    )
-
-    assert resp.status_code == 200, resp.json()
-    assert (target / "People" / "Ada.md").is_file()
-    assert not (source / "People").exists()
-
-
-def test_relocate_move_answers_400_for_an_unreadable_target(tmp_path, monkeypatch):
-    """Every sibling check answers 400 for a path it cannot read.
-
-    This `iterdir()` sat outside any `try`, so a permission-denied target came
-    back as an unhandled 500 instead.
-    """
-    client, _config, _pcm = _client(tmp_path)
-    _make_vault_workspace(tmp_path)
-    target = tmp_path / "locked"
-    target.mkdir()
-    resolved = str(target.resolve())
-    real_iterdir = Path.iterdir
-
-    def _denied(self):
-        if str(self) == resolved:
-            raise PermissionError(errno.EACCES, "Permission denied")
-        return real_iterdir(self)
-
-    monkeypatch.setattr(Path, "iterdir", _denied)
-
-    resp = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(target), "mode": "move"}
-    )
-
-    assert resp.status_code == 400, resp.json()
-    assert "could not read target folder" in resp.json()["error"]
-
-
-def test_relocate_unwinds_the_move_when_the_registry_write_fails(tmp_path, monkeypatch):
-    """The registry write is what makes a relocation real, so it has to unwind.
-
-    The rollback stopped at `_move_vault_contents`. Once that returned, a failed
-    `persist_workspace_registry()` left the files under `target`, the old vault
-    empty, and the DURABLE registry still naming the old location: the request
-    reported failure and the next restart showed an empty workspace.
-    """
-    client, config, _pcm = _client(tmp_path)
-    source = _make_vault_workspace(tmp_path)
-    target = tmp_path / "moved-vault"
-
-    def _read_only(self):
-        raise OSError(errno.EROFS, "Read-only file system")
-
-    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _read_only)
-
-    resp = client.post(
-        "/api/workspaces/personal/vault", json={"target": str(target), "mode": "move"}
-    )
-
-    assert resp.status_code == 500, resp.json()
-    assert "failed to record" in resp.json()["error"]
-    # Files back where they started, and the live config unwound with them.
-    assert (source / "People" / "Ada.md").is_file()
-    assert (source / "INDEX.md").is_file()
-    assert sorted(p.name for p in target.iterdir()) == []
-    assert Path(config.workspace_vault_root("personal")) == source.resolve()
-    assert config.workspace("personal").vault_pinned is False
-
-
 def test_chat_creation_carries_no_debug_instrumentation():
     """Leftover perf tracing must not ship and run on every request."""
     import inspect
@@ -2134,3 +1346,62 @@ def test_proposal_action_rejects_an_unknown_action_before_touching_the_queue(tmp
     assert "accept|dismiss" in resp.json()["error"]
     # The fact is still queued.
     assert bullet in queue.read_text(encoding="utf-8")
+
+
+# ---- vault ownership overlap ------------------------------------------------
+
+
+def _owner_config(roots: dict[str, str], *, shared: str = ""):
+    """Config stub answering the three questions `vault_root_owner` asks."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        vault_root=Path(shared) if shared else None,
+        workspace_names=lambda: tuple(roots),
+        workspace_vault_root=lambda name: Path(roots[name]),
+    )
+
+
+def test_vault_ownership_is_overlap_not_equality(tmp_path):
+    """A target that merely CONTAINS or sits inside another vault still collides.
+
+    Two registry entries covering the same notes let chats and vault writes in
+    either workspace read and rewrite the other's data. Equality alone would
+    miss both nestings.
+
+    This is covered directly because the overlap cases were previously only
+    exercised through the vault-relocation endpoint, which has been cut from
+    this release — the guard itself predates relocation and still runs on every
+    workspace creation, so it must not lose its coverage with the feature.
+    """
+    from ciao.workspaces import vault_root_owner
+
+    clients = tmp_path / "clients"
+    config = _owner_config({"alpha": str(clients / "alpha")})
+
+    # Exact.
+    assert vault_root_owner(config, clients / "alpha") == "alpha"
+    # The target is an ANCESTOR of alpha's vault.
+    assert vault_root_owner(config, clients) == "alpha"
+    # The target sits INSIDE alpha's vault.
+    assert vault_root_owner(config, clients / "alpha" / "People") == "alpha"
+    # Unrelated.
+    assert vault_root_owner(config, tmp_path / "elsewhere") is None
+
+
+def test_the_shared_vault_root_is_not_treated_as_an_owner(tmp_path):
+    """One nesting is legitimate and must stay so.
+
+    Where setup pointed a workspace at `CIAO_VAULT_ROOT` itself, every standard
+    `<shared>/<name>` folder is inside that workspace's vault by design.
+    Counting it as a conflict would refuse every new workspace on those
+    installs.
+    """
+    from ciao.workspaces import vault_root_owner
+
+    shared = tmp_path / "memory-vault"
+    config = _owner_config({"legacy": str(shared)}, shared=str(shared))
+
+    assert vault_root_owner(config, shared / "newcomer") is None
+    # The shared root itself is still owned — that is equality, not nesting.
+    assert vault_root_owner(config, shared) == "legacy"

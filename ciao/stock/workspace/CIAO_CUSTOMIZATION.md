@@ -52,8 +52,6 @@ Example `.runtime/workspaces.json`:
 
 `color` is an optional PWA accent preset (`pink`, `cyan`, `amber`, `emerald`, `violet`). Missing values default to Ciao pink. Only accent tokens change; canvas colors stay fixed.
 
-A workspace's vault can be relocated in Settings → Workspaces → **Vault location** (pick a folder, then choose *Use this folder* to re-point, or *Move vault here* to physically move the notes and projects there). This is the supported way to change a vault folder — the generic `PATCH /api/workspaces/{name}` deliberately ignores `vault_root`. A relocated vault is marked `vault_pinned`, which suppresses the "vault not in its standard folder" chat action for that workspace.
-
 ## Providers and Models
 
 Ciaobot supports two chat providers, each authenticating through its own CLI:
