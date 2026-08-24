@@ -1079,6 +1079,22 @@ def _read_env_lines(path: Path) -> list[str]:
 # ── Workspace vault relocation ──────────────────────────────────────────
 
 
+def _loopback_peer(request: Request) -> bool:
+    """Whether the TCP peer is the local machine.
+
+    Deliberately NOT `_localhost_request`, which trusts the `Host` header the
+    caller sends. Anything that gates on trust has to read the socket instead.
+    An absent client (ASGI transports that omit it) is treated as NOT local:
+    failing closed is the only safe default for a filesystem guard.
+    """
+    client = request.client
+    host = (client.host if client else "") or ""
+    if host in {"::1", "localhost"}:
+        return True
+    # IPv4 loopback is a whole /8, and IPv4-mapped IPv6 shows up as ::ffff:127.x.
+    return host.startswith("127.") or host.startswith("::ffff:127.")
+
+
 def _workspace_fs_guard(request: Request) -> JSONResponse | None:
     """Gate the Settings folder-picker routes on a password or localhost.
 
@@ -1091,7 +1107,13 @@ def _workspace_fs_guard(request: Request) -> JSONResponse | None:
     the workspace; filesystem enumeration of the whole machine should not be
     reachable from the network without a password.
 
-    Localhost is still allowed unauthenticated, because that is the owner at the
+    Locality is decided by the SOCKET PEER, not by `_localhost_request`, which
+    reads the `Host` header. That header is caller-controlled, so with the server
+    bound to `0.0.0.0` a remote request carrying `Host: localhost` would have
+    walked straight through this guard - which would have made it decorative.
+    The peer address cannot be spoofed without control of the network path.
+
+    Loopback is still allowed unauthenticated, because that is the owner at the
     keyboard and it is how the tokenless first-run flow reaches the picker.
     Deliberately NOT the setup guard: that one also demands `bootstrap_mode`,
     which is false once the install is configured, so reusing it would make the
@@ -1100,7 +1122,7 @@ def _workspace_fs_guard(request: Request) -> JSONResponse | None:
     config = request.app.state.config
     if getattr(config, "pwa_auth_required", False):
         return None
-    if _localhost_request(request):
+    if _loopback_peer(request):
         return None
     return JSONResponse(
         {

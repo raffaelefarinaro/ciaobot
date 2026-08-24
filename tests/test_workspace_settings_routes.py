@@ -43,7 +43,18 @@ class _PCM:
         return 2
 
 
-def _client(tmp_path: Path, env_extra: dict[str, str] | None = None):
+def _client(
+    tmp_path: Path,
+    env_extra: dict[str, str] | None = None,
+    *,
+    peer: tuple[str, int] = ("127.0.0.1", 50000),
+):
+    """`peer` is the SOCKET address the request appears to come from.
+
+    Starlette defaults it to the literal "testclient", which is neither
+    loopback nor routable; the filesystem guard reads the peer, so a real
+    local request has to look like one.
+    """
     env = {
         "PWA_AUTH_TOKEN": "t",
         "CIAO_WORKSPACE": str(tmp_path),
@@ -130,7 +141,7 @@ def _client(tmp_path: Path, env_extra: dict[str, str] | None = None):
     )
     app.state.config = config
     app.state.project_chat_manager = pcm
-    return TestClient(app), config, pcm
+    return TestClient(app, client=peer), config, pcm
 
 
 def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_path):
@@ -1629,7 +1640,9 @@ def test_folder_browsing_needs_a_password_from_the_network(tmp_path):
     two enumerate arbitrary directories and create folders anywhere the process
     can write, which should not be reachable from the network unauthenticated.
     """
-    client, _config, _pcm = _client(tmp_path, {"PWA_AUTH_TOKEN": ""})
+    client, _config, _pcm = _client(
+        tmp_path, {"PWA_AUTH_TOKEN": ""}, peer=("10.1.2.3", 51234)
+    )
 
     listed = client.get("/api/workspaces/browse-folder?path=~")
     made = client.post("/api/workspaces/browse-folder", json={"path": "/", "name": "x"})
@@ -1640,15 +1653,36 @@ def test_folder_browsing_needs_a_password_from_the_network(tmp_path):
 
 
 def test_folder_browsing_is_allowed_from_the_machine_itself(tmp_path):
-    """Localhost is the owner at the keyboard, and the tokenless first-run path."""
+    """Loopback is the owner at the keyboard, and the tokenless first-run path.
+
+    TestClient's default peer is 127.0.0.1, which is the real signal here.
+    """
     client, _config, _pcm = _client(tmp_path, {"PWA_AUTH_TOKEN": ""})
 
-    listed = client.get(
-        "/api/workspaces/browse-folder?path=~", headers={"host": "localhost"}
-    )
+    listed = client.get("/api/workspaces/browse-folder?path=~")
 
     assert listed.status_code == 200
     assert "entries" in listed.json() or "dirs" in listed.json()
+
+
+def test_a_spoofed_host_header_does_not_pass_for_localhost(tmp_path):
+    """The guard must read the socket, not a header the caller writes.
+
+    `_localhost_request` trusts the `Host` header. With the server bound to
+    0.0.0.0 by default, a remote request carrying `Host: localhost` would walk
+    straight through — which would have made the guard decorative.
+    """
+    # A non-loopback peer: someone else on the network.
+    client, _config, _pcm = _client(
+        tmp_path, {"PWA_AUTH_TOKEN": ""}, peer=("10.1.2.3", 51234)
+    )
+
+    listed = client.get(
+        "/api/workspaces/browse-folder?path=~",
+        headers={"host": "localhost"},
+    )
+
+    assert listed.status_code == 403
 
 
 def test_folder_browsing_is_allowed_once_a_password_is_set(tmp_path):

@@ -216,6 +216,43 @@ def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
 
 
 @pytest.mark.parametrize("command", [
+    # Wrappers nest, and the unwrap used to stop dead when the next token was
+    # also a wrapper — so the removal behind two of them was never seen.
+    "sudo env FOO=1 rm -rf /tmp/x",
+    "sudo nohup env A=1 rm -rf /tmp/x",
+    "env FOO=1 sudo rm -rf /",
+    "sudo timeout 5 nohup rm -rf x",
+])
+def test_nested_wrappers_do_not_hide_the_verb(command):
+    assert is_destructive_command(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    # `checkout` is two commands wearing one name; these are the forms that
+    # throw uncommitted work away, as unrecoverably as `restore`.
+    "git checkout -- .",
+    "git checkout -f HEAD -- important.txt",
+    "git checkout .",
+    "git switch --discard-changes",
+])
+def test_gits_discarding_checkouts_are_destructive(command):
+    assert is_destructive_command(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    # Moving between refs destroys nothing and must not start needing a card.
+    "git checkout main",
+    "git checkout -b feature",
+    "git switch main",
+    # A wrapper with no command after it is a query.
+    "sudo -l",
+    "env",
+])
+def test_branch_work_and_bare_wrappers_stay_approved(command):
+    assert is_destructive_command(command) is False
+
+
+@pytest.mark.parametrize("command", [
     # The program arrives on stdin, so there is no flag to notice. This is how
     # the inline-code check was bypassed after it was added.
     "python3 - <<'PY'\nimport shutil; shutil.rmtree('/tmp/valuable')\nPY",

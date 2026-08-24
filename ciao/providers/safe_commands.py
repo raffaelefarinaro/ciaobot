@@ -296,6 +296,17 @@ def _git_is_destructive(args: list[str]) -> bool:
     subcommand, *rest = args
     if subcommand == "push":
         return any(a.startswith(f) for a in rest for f in _DESTRUCTIVE_GIT_PUSH_FLAGS)
+    if subcommand in {"checkout", "switch"}:
+        # `checkout` is two commands wearing one name. Moving between refs
+        # (`git checkout main`, `-b feature`) destroys nothing, but the pathspec
+        # and force forms discard every uncommitted change they touch - which is
+        # exactly as unrecoverable as `restore`, already listed below. Only the
+        # discarding forms are flagged, so branch work is not carded.
+        if any(a in {"-f", "--force", "--discard-changes"} for a in rest):
+            return True
+        # `--` introduces a pathspec: `git checkout -- .` throws the worktree
+        # away. A bare `.` does the same without the separator.
+        return "--" in rest or "." in rest
     if subcommand in _DESTRUCTIVE_GIT_SUBCOMMANDS:
         return True
     return False
@@ -306,10 +317,17 @@ def _segment_is_destructive(name: str, args: list[str]) -> bool:
     name = _verb(name)
     if name in _DESTRUCTIVE_WRAPPERS:
         # `sudo <destructive>` still destroys; drop wrappers and re-look.
+        # RECURSE, rather than giving up when the next token is also a wrapper:
+        # stopping there meant `sudo env FOO=1 rm -rf /tmp/x` classified clean,
+        # because `env` is a wrapper too. Wrappers nest arbitrarily
+        # (`sudo nohup env … rm`), so the loop has to as well, and an
+        # unresolvable chain fails CLOSED rather than being waved through.
         inner = _unwrap(args)
-        if inner is not None and _verb(inner[0]) not in _DESTRUCTIVE_WRAPPERS:
-            return _segment_is_destructive(inner[0], inner[1])
-        return False
+        if inner is None:
+            # A wrapper with no command after it (`sudo -l`, a bare `env`) is a
+            # query, not a removal.
+            return False
+        return _segment_is_destructive(inner[0], inner[1])
     if name in _SHELLS:
         # `sh -c '<code>'` is judged on the code it carries. A shell with no
         # inspectable payload - `curl … | sh`, `bash script.sh` - is opaque,
