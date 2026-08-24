@@ -287,12 +287,11 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/ws')) return
 
   // Hashed / immutable UI assets (vite outputs /assets/* with content hash,
-  // plus fonts/icons) — serve cache-first so they are not re-fetched every
+  // plus icons) — serve cache-first so they are not re-fetched every
   // navigation. The hash in the filename makes them immutable; the versioned
   // CACHE_NAME busts them on each release.
   const isImmutableAsset =
     url.pathname.startsWith('/assets/') ||
-    url.pathname.startsWith('/fonts/') ||
     url.pathname.startsWith('/icons/') ||
     /\.(woff2|woff|ttf|otf|png|jpg|jpeg|svg|webp)$/i.test(url.pathname)
 

@@ -14,19 +14,6 @@
       </template>
       <template #actions>
         <button
-          v-if="kind === 'excalidraw'"
-          class="btn-icon"
-          :class="{ active: isEditingExcalidraw }"
-          @click="isEditingExcalidraw = !isEditingExcalidraw"
-          :title="isEditingExcalidraw ? 'Disable editing' : 'Enable editing'"
-          aria-label="Edit Diagram"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"></path>
-          </svg>
-        </button>
-        <button
           v-if="(kind === 'text' || (kind === 'html' && htmlView === 'code' && sourceLoaded)) && !isEditingText"
           class="btn-icon"
           @click="startEditingText"
@@ -70,7 +57,7 @@
       </template>
     </PaneHeader>
     <div class="pfp-main" ref="mainEl">
-      <div class="pfp-body" :class="{ 'pfp-body-excalidraw': kind === 'excalidraw', 'pfp-body-csv': isCsv }" ref="bodyEl">
+      <div class="pfp-body" :class="{ 'pfp-body-csv': isCsv }" ref="bodyEl">
         <div v-if="loading" class="pfp-loading">Loading…</div>
         <div v-else-if="error" class="pfp-error">{{ error }}</div>
         <img
@@ -105,16 +92,6 @@
           :source-loading="sourceLoading"
           :source-error="sourceError"
           @update:view="setHtmlView"
-        />
-        <ExcalidrawViewer
-          v-else-if="kind === 'excalidraw'"
-          :content="content"
-          :name="basename"
-          :file-path="cleanPath"
-          :chat-id="projectsStore.activeChatId || ''"
-          :read-only="!isEditingExcalidraw"
-          @change="content = $event"
-          style="flex: 1; min-height: 0; height: auto;"
         />
         <template v-else>
           <!-- Text Editing Mode -->
@@ -303,7 +280,6 @@ import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
 import type { FileViewerKind, HtmlArtifactView } from '../stores/fileViewer'
-const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
@@ -327,7 +303,6 @@ const sourceError = ref('')
 const sourceLoaded = ref(false)
 const refreshed = ref(false)
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
-const isEditingExcalidraw = ref(false)
 const isEditingText = ref(false)
 const editBuffer = ref('')
 const editSaving = ref(false)
@@ -1175,10 +1150,6 @@ watch(() => props.filePath, () => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-}
-.pfp-body-excalidraw {
-  padding: 0 !important;
-  overflow: hidden !important;
 }
 .pfp-body-csv {
   overflow: hidden !important;

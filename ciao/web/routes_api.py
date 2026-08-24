@@ -3953,7 +3953,7 @@ _WORKSPACE_FILE_EXTS = frozenset({
     ".css", ".html", ".json",
     ".yaml", ".yml", ".toml",
     ".sh", ".rs", ".go", ".java", ".xml", ".sql",
-    ".cfg", ".ini", ".log", ".csv", ".excalidraw",
+    ".cfg", ".ini", ".log", ".csv",
 })
 # Intentionally excluded: .env, .example — these commonly hold secrets or
 # sample secrets. The viewer is a read-only inspector and should not serve

@@ -156,7 +156,7 @@ _SHELL_COPY_RE = re.compile(r"(?:^|[\s;|&])(?:cp|mv|install)\s+([^\n;&|]+)")
 _SHELL_PATH_EXT_RE = re.compile(
     r"\.(?:md|markdown|txt|py|ts|tsx|js|jsx|vue|css|html|json|yaml|yml|toml|"
     r"sh|bash|zsh|rs|go|java|xml|sql|cfg|ini|log|csv|tsv|env|example|"
-    r"excalidraw|pdf|pptx|png|jpe?g|gif|webp|svg|avif|bmp|ico|lock|sum)$",
+    r"pdf|pptx|png|jpe?g|gif|webp|svg|avif|bmp|ico|lock|sum)$",
     re.IGNORECASE,
 )
 _EXTENSIONLESS_SHELL_NAMES = frozenset({

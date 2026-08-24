@@ -114,7 +114,7 @@
       </nav>
 
       <div class="fv-main">
-        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-excalidraw': store.kind === 'excalidraw', 'fv-body-csv': isCsv }" ref="bodyEl">
+        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv }" ref="bodyEl">
           <div v-if="store.loading" class="fv-loading">Loading…</div>
           <div v-else-if="store.error" class="fv-error">{{ store.error }}</div>
           <img
@@ -127,18 +127,8 @@
                No history/diff while editing — finish or cancel first. -->
           <template v-else-if="store.editing">
             <div class="fv-edit-shell">
-              <ExcalidrawViewer
-                v-if="store.kind === 'excalidraw'"
-                :content="store.editBuffer"
-                :name="basename"
-                :file-path="store.path"
-                :chat-id="store.chatId"
-                :read-only="false"
-                @change="store.editBuffer = $event"
-                style="flex: 1; min-height: 0; height: auto;"
-              />
               <CsvViewer
-                v-else-if="isCsv"
+                v-if="isCsv"
                 :content="store.editBuffer"
                 :read-only="false"
                 @change="store.editBuffer = $event"
@@ -217,15 +207,7 @@
 
           <template v-else>
             <!-- Metadata card synthesized from YAML frontmatter -->
-            <ExcalidrawViewer
-              v-if="store.kind === 'excalidraw'"
-              :content="store.content"
-              :name="basename"
-              :file-path="store.path"
-              :chat-id="store.chatId"
-              :read-only="true"
-            />
-            <div v-else-if="store.kind === 'pdf' && store.pptxNeedsLibreoffice" class="fv-libreoffice-notice hint hint--warn">
+            <div v-if="store.kind === 'pdf' && store.pptxNeedsLibreoffice" class="fv-libreoffice-notice hint hint--warn">
               <strong>LibreOffice is required to preview PowerPoint files.</strong>
               <span v-if="store.libreofficeInstallError"> {{ store.libreofficeInstallError }}</span>
               <button
@@ -418,7 +400,6 @@ import { askConfirm } from '../lib/confirm'
 import { useFileComments } from '../composables/useFileComments'
 import { writeClipboard } from '../lib/codeCopy'
 import CommentComposePopover from './CommentComposePopover.vue'
-const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
@@ -460,7 +441,7 @@ const canEdit = computed(() => {
   // Editing an artifact edits its source, which only exists once Code view has
   // fetched it. Preview view has nothing to put in the textarea.
   if (store.kind === 'html') return store.htmlView === 'code' && store.sourceLoaded
-  return store.kind === 'text' || store.kind === 'excalidraw'
+  return store.kind === 'text'
 })
 
 // History tab timestamp formatting. Snapshots store ISO 8601; we want a

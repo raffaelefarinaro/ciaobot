@@ -134,7 +134,7 @@ _PROJECT_TEXT_EXTS = frozenset({
     ".css", ".html", ".json",
     ".yaml", ".yml", ".toml",
     ".sh", ".rs", ".go", ".java", ".xml", ".sql",
-    ".cfg", ".ini", ".log", ".csv", ".excalidraw",
+    ".cfg", ".ini", ".log", ".csv",
 })
 _PROJECT_IMAGE_EXTS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".ico",

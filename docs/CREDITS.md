@@ -18,4 +18,3 @@ Ciaobot is glue around a lot of excellent open tools.
 
 - [Starlette](https://www.starlette.io) + [Uvicorn](https://www.uvicorn.org)
 - [Vue](https://vuejs.org), [Vite](https://vite.dev), and [Pinia](https://pinia.vuejs.org)
-- [Excalidraw](https://excalidraw.com) — in-app diagram previews

@@ -18,7 +18,7 @@ const EXTS = [
   'yaml', 'yml', 'toml',
   'sh', 'rs', 'go', 'java', 'xml', 'sql',
   'cfg', 'ini', 'log', 'csv',
-  'env', 'example', 'excalidraw',
+  'env', 'example',
   // Binary / office types served by /api/workspace-binary (inline PDF preview).
   'pdf', 'pptx', 'mht', 'mhtml',
   // Images served by /api/workspace-image.

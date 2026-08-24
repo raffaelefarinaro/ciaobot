@@ -15,7 +15,7 @@ import { askConfirm } from '../lib/confirm'
 // Plus an editing mode that POSTs to /api/workspace-file to save user edits
 // and snapshot them via the active chat's history.
 
-export type FileViewerKind = 'text' | 'image' | 'excalidraw' | 'pdf' | 'html'
+export type FileViewerKind = 'text' | 'image' | 'pdf' | 'html'
 export type FileViewerTab = 'preview' | 'history' | 'diff' | 'backlinks'
 // Artifacts render by default and show their source on demand. Code view is
 // also the only place they can be edited, since editing needs the source.
@@ -32,7 +32,6 @@ export interface SnapshotMeta {
 
 export function fileViewerKindForPath(filePath: string): FileViewerKind {
   const cleaned = filePath.replace(/:\d+$/, '').toLowerCase()
-  if (/\.excalidraw$/i.test(cleaned)) return 'excalidraw'
   if (/\.(pdf|pptx)$/i.test(cleaned)) return 'pdf'
   if (/\.html?$/i.test(cleaned)) return 'html'
   return 'text'
@@ -373,7 +372,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       // Editing an artifact edits its source, so only from Code view and only
       // once the source is actually in hand.
       if (htmlView.value !== 'code' || !sourceLoaded.value) return
-    } else if (kind.value !== 'text' && kind.value !== 'excalidraw') return
+    } else if (kind.value !== 'text') return
     editing.value = true
     editBuffer.value = content.value
     editError.value = ''
