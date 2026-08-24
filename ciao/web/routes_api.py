@@ -901,10 +901,27 @@ async def delete_workspace_setting(request: Request) -> JSONResponse:
         )
     # The chats outlive the registry entry, so they are MOVED rather than left
     # pointing at a workspace that no longer exists - which resolved them to
-    # the primary agent root by accident of the fallback. Notes move first: a
-    # collision refuses that note instead of overwriting it, and a refusal
-    # must not be discovered after the registry entry is already gone.
+    # the primary agent root by accident of the fallback.
     vault = _migrate_workspace_vault(config, name, target)
+    if vault["refused"]:
+        # ALL OR NOTHING, and nothing has moved yet - the scan above was a dry
+        # run. Completing a partial migration would strand the refused notes:
+        # once the registry entry is gone the old vault drops out of
+        # `vault_scan_targets`, and the response's `refused` list is not
+        # surfaced by the PWA, so those notes would simply vanish from the app
+        # while still sitting on disk. Refusing the whole delete keeps the
+        # workspace registered and every note reachable.
+        return JSONResponse(
+            {
+                "error": (
+                    "cannot delete: some notes would collide in "
+                    f"{target} and were not migrated"
+                ),
+                "refused": vault["refused"],
+            },
+            status_code=409,
+        )
+    vault = _migrate_workspace_vault(config, name, target, apply=True)
     moved_projects = _reassign_project_manager_workspace(request, name, target)
     config.workspaces.pop(name, None)
     _persist_workspaces(config)
@@ -925,13 +942,20 @@ def _reassign_project_manager_workspace(request: Request, old: str, new: str) ->
     return int(reassign(old, new)) if callable(reassign) else 0
 
 
-def _migrate_workspace_vault(config, name: str, target: str) -> dict[str, Any]:
+def _migrate_workspace_vault(
+    config, name: str, target: str, *, apply: bool = False
+) -> dict[str, Any]:
     """Move a workspace's notes into *target*, taking their links with them.
 
     Per-note rather than a directory rename, because both directions of every
     link have to be rewritten - a bulk move would leave every reference to
     these notes pointing at a path that no longer exists. A note whose
     destination is already taken is REFUSED and reported, never overwritten.
+
+    Called twice by the delete route: once with ``apply=False`` to find out
+    whether every note CAN move, and only then for real. Discovering a
+    collision halfway through would leave the vault split across two roots,
+    one of which is about to stop being registered.
     """
     from ciao.vault_rehome import move_note_between_roots
 
@@ -957,9 +981,9 @@ def _migrate_workspace_vault(config, name: str, target: str) -> dict[str, Any]:
             target,
             targets=targets,
             workspaces=workspaces,
-            apply=True,
+            apply=apply,
         )
-        if result.get("applied"):
+        if not result.get("refusals"):
             moved.append(relative)
         else:
             refused.append({"note": relative, "refusals": result.get("refusals", [])})
@@ -4346,6 +4370,7 @@ async def vault_delete_note(request: Request) -> JSONResponse:
     # exactly one vault can own the note, and it must be under that one.
     vault_root = None
     resolved = None
+    vault_prefix = None
     for target, _name, prefix in config.vault_scan_targets():
         marker = f"{prefix.as_posix()}/"
         if not raw.startswith(marker):
@@ -4356,14 +4381,19 @@ async def vault_delete_note(request: Request) -> JSONResponse:
             candidate.relative_to(candidate_root)
         except (OSError, ValueError):
             continue
-        vault_root, resolved = candidate_root, candidate
+        vault_root, resolved, vault_prefix = candidate_root, candidate, prefix
         break
     if resolved is None or vault_root is None:
         return JSONResponse({"error": "not a vault note"}, status_code=400)
     if not resolved.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    edited = await asyncio.to_thread(strip_references, vault_root, raw)
+    # The prefix the id was rendered with, not the helper's default: without it
+    # the cleanup scan compares `memory-vault/...` against a `<root>/...` id,
+    # matches nothing, and leaves every backlink dangling.
+    edited = await asyncio.to_thread(
+        functools.partial(strip_references, vault_root, raw, path_prefix=vault_prefix)
+    )
     try:
         await asyncio.to_thread(resolved.unlink)
     except OSError as exc:
@@ -6737,6 +6767,28 @@ def _skill_proposals_dir(config, workspace: str) -> Path:
     return Path(config.workspace_vault_root(workspace)).joinpath(*_SKILL_PROPOSALS_REL)
 
 
+def _remove_bullet_line(lines: list[str], line_index: int, raw: str) -> bool:
+    """Drop the bullet *raw*, verifying the index before trusting it.
+
+    `_scan_proposal_rows` captures a line index, and an accept can then await an
+    unbounded model call before the queue file is rewritten - with no lock
+    anywhere. A second accept or dismiss landing in that window shifts every
+    later index, so deleting by index alone removed an UNRELATED proposal and
+    left the accepted one queued. The index is now only a hint: the content has
+    to match, otherwise the bullet is located by text, and a bullet that is
+    already gone is a no-op rather than someone else's line.
+    """
+    wanted = raw.strip()
+    if 0 <= line_index < len(lines) and lines[line_index].strip() == wanted:
+        del lines[line_index]
+        return True
+    for index, line in enumerate(lines):
+        if line.strip() == wanted:
+            del lines[index]
+            return True
+    return False
+
+
 def _stable_proposal_id(workspace: str, path: str, kind: str, text: str, source: str, dup: int) -> str:
     """A content-derived, stable id for one queued proposal.
 
@@ -6958,6 +7010,10 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     "workspace": workspace,
                     "path": rel_path,
                     "line": line_index,
+                    # The line as read. The index alone is not enough to delete
+                    # by: an accept can await a model call, and a concurrent
+                    # accept/dismiss rewrites the file underneath it.
+                    "raw": raw,
                 }
                 if bullet.target:
                     # The payload a destination kind acts on: the person name
@@ -7276,12 +7332,15 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     keep_lines.add(int(row["line"]))
 
         lines = queue.read_text(encoding="utf-8").splitlines()
-        # Remove highest index first so lower indices stay valid.
-        for line_index in sorted(entry["lines"], reverse=True):
-            if line_index in keep_lines:
+        # Highest index first so the lower ones stay valid, and each removal
+        # verifies the content at that index - a promotion above may have
+        # awaited a model call while another request rewrote this same file.
+        for row in sorted(
+            entry["rows"], key=lambda r: int(r.get("line", -1)), reverse=True
+        ):
+            if int(row.get("line", -1)) in keep_lines:
                 continue
-            if 0 <= line_index < len(lines):
-                del lines[line_index]
+            _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or ""))
         queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         for row in entry["rows"]:
             if action == "accept":
@@ -7541,9 +7600,7 @@ async def proposal_action(request: Request) -> JSONResponse:
 
     queue = Path(ctx["path"])
     lines = queue.read_text(encoding="utf-8").splitlines()
-    line_index = ctx["line"]
-    if 0 <= line_index < len(lines):
-        del lines[line_index]
+    _remove_bullet_line(lines, ctx["line"], str(ctx["row"].get("raw") or ""))
     queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
     if action == "accept":

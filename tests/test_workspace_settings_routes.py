@@ -1074,8 +1074,14 @@ def test_the_primary_workspace_cannot_be_deleted(tmp_path):
     assert pcm.reassigned == []
 
 
-def test_a_colliding_note_is_refused_rather_than_overwritten(tmp_path):
-    """Migration must never destroy a note that is already at the destination."""
+def test_a_colliding_note_aborts_the_whole_deletion(tmp_path):
+    """A note that cannot move must block the delete, not be left behind.
+
+    Refusing the note but completing the delete stranded it: once the registry
+    entry is gone the old vault drops out of `vault_scan_targets`, and the
+    response's `refused` list is not surfaced by the PWA, so the note vanished
+    from the app while still sitting on disk. All or nothing.
+    """
     client, config, pcm = _client(tmp_path)
     client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
     primary = config.primary_workspace()
@@ -1088,8 +1094,23 @@ def test_a_colliding_note_is_refused_rather_than_overwritten(tmp_path):
     kept = Path(config.workspace_vault_root(primary)) / "People" / "Mo.md"
     before = kept.read_text(encoding="utf-8")
 
+    source = Path(config.workspace_vault_root("client-a")) / "People" / "Mo.md"
+    source_before = source.read_text(encoding="utf-8")
+    # A note that COULD have moved. It must not, or the vault ends up split
+    # across two roots with one of them about to be deregistered.
+    innocent = Path(config.workspace_vault_root("client-a")) / "People" / "Ada.md"
+    innocent.write_text("---\ntype: person\n---\n# Ada\n", encoding="utf-8")
+
     deleted = client.delete("/api/workspaces/client-a")
 
-    assert deleted.status_code == 200
-    assert kept.read_text(encoding="utf-8") == before, "the note was overwritten"
-    assert deleted.json()["migrated"]["refused"], "the collision was not reported"
+    assert deleted.status_code == 409
+    assert deleted.json()["refused"], "the collision was not reported"
+    # Nothing moved, nothing was overwritten, and the workspace is still there.
+    assert kept.read_text(encoding="utf-8") == before
+    assert source.read_text(encoding="utf-8") == source_before
+    assert config.workspace("client-a") is not None
+    assert pcm.reassigned == []
+    assert innocent.is_file(), "a movable note was migrated despite the abort"
+    assert not (
+        Path(config.workspace_vault_root(primary)) / "People" / "Ada.md"
+    ).exists()

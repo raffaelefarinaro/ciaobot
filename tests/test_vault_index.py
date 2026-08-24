@@ -422,6 +422,39 @@ def test_strip_references_end_to_end_edits_backlinks_before_delete(tmp_path: Pat
     assert (tmp_path / "People" / "Mo.md").exists()
 
 
+def test_strip_references_matches_a_re_rooted_id(tmp_path: Path):
+    """A per-root id has to be compared in its own path space.
+
+    After the re-rooting an id reads `<root>/memory-vault/...`, but a bare scan
+    of one vault renders `memory-vault/...`. The two never compared equal, so
+    nothing was stripped while the delete went ahead anyway - every migrated
+    install accumulated dangling `related:` entries and markdown links, and the
+    endpoint cheerfully reported `edited_backlinks: []`.
+    """
+    _write(tmp_path / "People" / "Mo.md", "---\nname: Mo\ntype: person\n---\n# Mo\n")
+    _write(
+        tmp_path / "Projects" / "Foo.md",
+        "---\n"
+        "name: Foo\n"
+        "type: project\n"
+        "related:\n"
+        "  - People/Mo\n"
+        "---\n"
+        "# Foo\n\n"
+        "Worked with [Mo](../People/Mo.md) on this.\n",
+    )
+    prefix = Path("personal/memory-vault")
+
+    edited = vi.strip_references(
+        tmp_path, "personal/memory-vault/People/Mo.md", path_prefix=prefix
+    )
+
+    assert edited == ["personal/memory-vault/Projects/Foo.md"]
+    foo_text = (tmp_path / "Projects" / "Foo.md").read_text(encoding="utf-8")
+    assert "People/Mo" not in foo_text
+    assert "Worked with Mo on this." in foo_text
+
+
 # ---- INDEX.md rendering -----------------------------------------------------
 
 

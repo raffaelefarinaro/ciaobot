@@ -694,7 +694,9 @@ def _strip_all_references(
     return text, changed
 
 
-def strip_references(vault_root: Path, deleted_path: str) -> list[str]:
+def strip_references(
+    vault_root: Path, deleted_path: str, *, path_prefix: Path | None = None
+) -> list[str]:
     """Remove literal references to `deleted_path` from every note linking to it.
 
     Must run BEFORE the target file is deleted from disk: resolution depends
@@ -705,15 +707,23 @@ def strip_references(vault_root: Path, deleted_path: str) -> list[str]:
     `deleted_path` is the `Entry.path` string form (e.g.
     "memory-vault/work/People/Mo.md"). Returns the repo-relative paths of the
     files actually edited on disk.
+
+    ``path_prefix`` must be the prefix the CALLER's id was rendered with. After
+    the re-rooting an id reads `<root>/memory-vault/...`, while a bare scan of
+    one vault renders `memory-vault/...`: the two never compared equal, so
+    every reference was left untouched and the note was deleted anyway -
+    dangling `related:` entries and markdown links on every migrated install,
+    reported as `edited_backlinks: []`.
     """
     vault_root = vault_root.resolve()
-    entries = scan_vault(vault_root)
+    prefix = path_prefix or Path("memory-vault")
+    entries = scan_vault(vault_root, path_prefix=path_prefix)
     filename_idx = _build_filename_index(entries)
     edited: list[str] = []
     for e in entries:
         if str(e.path) == deleted_path or deleted_path not in e.related:
             continue
-        rel_from_vault = _strip_prefix(e.path, Path("memory-vault"))
+        rel_from_vault = _strip_prefix(e.path, prefix)
         abs_path = vault_root / rel_from_vault
         try:
             text = abs_path.read_text(encoding="utf-8")

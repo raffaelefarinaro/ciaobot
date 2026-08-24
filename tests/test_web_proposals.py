@@ -747,3 +747,35 @@ def test_a_batch_keeps_the_rows_whose_move_failed(tmp_path: Path) -> None:
     assert len(left) == 1
     assert "Ida" in left[0]["rehome"]["note"]
     assert (config.workspace_vault_root("personal") / "People" / "Ida.md").is_file()
+
+
+# ---- concurrent queue rewrites ---------------------------------------------
+
+
+def test_a_shifted_line_index_does_not_delete_a_bystander():
+    """The captured index is a hint, not an address.
+
+    `_scan_proposal_rows` records a line index, and an accept then awaits an
+    unbounded model call before rewriting the queue - with no lock anywhere. A
+    second accept or dismiss landing in that window removes a line and shifts
+    every later index, so deleting by index alone took out an UNRELATED
+    proposal and left the accepted one sitting in the queue.
+    """
+    from ciao.web.routes_api import _remove_bullet_line
+
+    # The bullet was at index 1 when it was scanned; a concurrent dismiss has
+    # since removed the line above it, so index 1 now holds someone else.
+    lines = ["- [memory] mine", "- [memory] a bystander"]
+
+    assert _remove_bullet_line(lines, 2, "- [memory] mine") is True
+    assert lines == ["- [memory] a bystander"], "it deleted the wrong bullet"
+
+
+def test_removing_a_bullet_that_is_already_gone_is_a_no_op():
+    """Whoever removed it got there first; nothing else may be taken instead."""
+    from ciao.web.routes_api import _remove_bullet_line
+
+    lines = ["- [memory] someone else's"]
+
+    assert _remove_bullet_line(lines, 0, "- [memory] already dismissed") is False
+    assert lines == ["- [memory] someone else's"]
