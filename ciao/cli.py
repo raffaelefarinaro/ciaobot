@@ -1322,7 +1322,15 @@ def _vault_search_command(args: argparse.Namespace) -> int:
         # whoever ran `ciao vault-search` here. Same filter the control plane's
         # vault_search applies.
         results = (
-            fts_search.search_logs(conn, args.query, limit=args.limit)
+            fts_search.search_logs(
+                conn,
+                args.query,
+                limit=args.limit,
+                # Same reason the vault query is scoped: the FTS database
+                # deliberately holds rows from every re-rooted root, so an
+                # unscoped search returns another workspace's transcripts.
+                path_prefix=fts_search.logs_key_prefix(logs_root, key_base),
+            )
             if args.logs
             else fts_search.search_vault(
                 conn,
@@ -1599,9 +1607,17 @@ def _vault_rehome_command(args: argparse.Namespace) -> int:
             print(f"  written to {path}")
 
     if summary["conflicts"]:
-        print("\nSkipped — a note already exists at the destination:", file=sys.stderr)
+        # Each conflict carries its own reason, and there are now two: a note
+        # already at the destination, or two candidates in this run racing for
+        # it. The old fixed header asserted the first and so mis-described the
+        # second - printing the reason is what the `failed` block below does.
+        print("\nSkipped:", file=sys.stderr)
         for candidate in summary["conflicts"]:
-            print(f"  {candidate['path']} -> {candidate['destination']}", file=sys.stderr)
+            print(
+                f"  {candidate['path']} -> {candidate['destination']}: "
+                f"{candidate.get('error') or 'destination unavailable'}",
+                file=sys.stderr,
+            )
 
     if summary["failed"]:
         print("\nFailed:", file=sys.stderr)

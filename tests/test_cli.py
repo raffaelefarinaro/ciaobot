@@ -1200,6 +1200,58 @@ def _search_note(vault: Path, name: str) -> None:
     )
 
 
+def test_cli_vault_search_logs_never_returns_a_sibling_agent_roots_chat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The same cross-workspace leak, by way of `--logs`.
+
+    Scoping the note query left the transcript query unscoped, because
+    `search_logs` had no `path_prefix` at all — so `vault-search --logs` still
+    printed another workspace's archived chats out of the shared database.
+    """
+    from ciao import fts_search
+
+    install = tmp_path / "install"
+    work_vault = install / "work" / "memory-vault"
+    personal_vault = install / "personal" / "memory-vault"
+    work_vault.mkdir(parents=True)
+    personal_logs = personal_vault / "Logs" / "Chats"
+    personal_logs.mkdir(parents=True)
+    (personal_logs / "chat-alba.md").write_text(
+        "# Chat\n\nWe talked about kiteboarding with Alba.\n", encoding="utf-8"
+    )
+
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+
+    # The sibling root's transcripts are already indexed, as the migration
+    # rebuild leaves them.
+    conn = sqlite3.connect(fts_search.get_db_path())
+    try:
+        fts_search.init_db(conn)
+        fts_search.index_logs(
+            conn,
+            personal_vault,
+            logs_root=personal_logs,
+            path_base=install,
+        )
+    finally:
+        conn.close()
+
+    assert (
+        cli.main(
+            ["vault-search", "kiteboarding", "--logs", "--vault-root", str(work_vault)]
+        )
+        == 0
+    )
+
+    assert "Alba" not in capsys.readouterr().out
+
+
 def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
