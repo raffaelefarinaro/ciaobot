@@ -1002,9 +1002,32 @@ def _migrate_workspace_vault(
         return {"moved": moved, "refused": refused}
     if not source_root.is_dir():
         return {"moved": moved, "refused": refused}
+    # Only a RE-ROOTED install needs this. There the deleted workspace's vault
+    # is its own scan target, so losing the registry entry makes those notes
+    # unreachable and they have to move. On the shared layout the vault is
+    # `memory-vault/<name>` under the single scan target that covers every
+    # workspace, so the notes stay visible either way - and the cross-root
+    # mover refuses that shape by design, which would have refused every note
+    # and made the workspace undeletable.
+    try:
+        relative_vault = source_root.relative_to(install_root)
+    except ValueError:
+        return {"moved": moved, "refused": refused}
+    if len(relative_vault.parts) != 2 or relative_vault.parts[0] != name:
+        return {"moved": moved, "refused": refused}
     targets = config.vault_scan_targets()
     workspaces = config.workspace_names()
+    from ciao.workspace_reroot import _REGENERATED_ROOT_NOTES
+
     for note in sorted(source_root.rglob("*.md")):
+        # `rebuild_indexes` writes these per root, so the primary already has
+        # its own copy of each and every one collided - which, with the delete
+        # now all-or-nothing, meant a workspace could NEVER be deleted even
+        # when every user-authored note could move. They are regenerated, not
+        # authored, so they are not migrated at all: the deleted root's copies
+        # go away with it.
+        if note.parent == source_root and note.name in _REGENERATED_ROOT_NOTES:
+            continue
         try:
             relative = note.relative_to(install_root).as_posix()
         except ValueError:

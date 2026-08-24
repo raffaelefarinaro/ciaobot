@@ -168,6 +168,38 @@ describe('stale responses', () => {
     return { promise, release }
   }
 
+  test('reopening the same file discards the earlier pending response', async () => {
+    // The path-only check could not see this: open A, open B, open A again, and
+    // A's FIRST response still matches `path.value`, so it overwrote the newer
+    // one — and saveEdits would then post those stale bytes back over the file.
+    const firstA = gate()
+    let aCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/vault-markdown-paths') {
+        return new Response(JSON.stringify({ paths: [] }), {
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url.includes('a.md')) {
+        aCalls += 1
+        return aCalls === 1 ? firstA.promise : new Response('A SECOND')
+      }
+      return new Response('B CONTENT')
+    }))
+
+    const store = useFileViewerStore()
+    const staleOpen = store.open('notes/a.md')
+    expect(await store.open('notes/b.md')).toBe(true)
+    expect(await store.open('notes/a.md')).toBe(true)
+
+    firstA.release(new Response('A STALE'))
+    await staleOpen
+
+    expect(store.path).toBe('notes/a.md')
+    expect(store.content).toBe('A SECOND')
+  })
+
   test('a slow file response cannot repaint the file opened after it', async () => {
     const slowFile = gate()
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {

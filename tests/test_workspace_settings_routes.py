@@ -1042,6 +1042,21 @@ def test_gws_personal_purpose_keeps_the_separation_warning_once_connected(tmp_pa
     assert personal["purpose"].endswith("Connected to Gmail.")
 
 
+def _reroot(tmp_path: Path) -> None:
+    """Make the install look migrated, so vaults live at `<install>/<name>`.
+
+    Note migration on delete only applies to the re-rooted layout: there each
+    vault is its own scan target, so losing the registry entry would make those
+    notes unreachable.
+    """
+    from ciao.config import reset_reroot_cache
+
+    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
+    reset_reroot_cache()
+
+
 def test_deleting_a_workspace_migrates_its_chats_instead_of_rerouting_them(tmp_path):
     """A deleted workspace's chats must not resolve to the primary by accident.
 
@@ -1082,6 +1097,7 @@ def test_a_colliding_note_aborts_the_whole_deletion(tmp_path):
     response's `refused` list is not surfaced by the PWA, so the note vanished
     from the app while still sitting on disk. All or nothing.
     """
+    _reroot(tmp_path)
     client, config, pcm = _client(tmp_path)
     client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
     primary = config.primary_workspace()
@@ -1159,3 +1175,71 @@ def test_seeding_failure_does_not_undo_the_created_workspace(tmp_path, monkeypat
     assert created.status_code == 201
     assert created.json()["bootstrapped"] is False
     assert config.workspace("client-c") is not None
+
+
+def test_generated_aggregates_do_not_block_the_deletion(tmp_path, monkeypatch):
+    """`INDEX.md` and friends are regenerated per root, so they always collide.
+
+    `rebuild_indexes` writes them into every workspace vault, so the primary
+    already holds its own copy of each. With the delete made all-or-nothing,
+    that guaranteed collision meant a workspace could never be deleted at all,
+    even when every user-authored note could move.
+    """
+    _reroot(tmp_path)
+    client, config, pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "client-d", "vault_root": "client-d"})
+    primary = config.primary_workspace()
+    for workspace in ("client-d", primary):
+        vault = Path(config.workspace_vault_root(workspace))
+        (vault / "People").mkdir(parents=True, exist_ok=True)
+        for name in ("INDEX.md", "MEMORY.md", "VOCABULARY.md"):
+            (vault / name).write_text(f"# {name} for {workspace}\n", encoding="utf-8")
+    (Path(config.workspace_vault_root("client-d")) / "People" / "Ada.md").write_text(
+        "---\ntype: person\n---\n# Ada\n", encoding="utf-8"
+    )
+    kept_index = (Path(config.workspace_vault_root(primary)) / "INDEX.md").read_text(
+        encoding="utf-8"
+    )
+    assert "for client-d" not in kept_index
+
+    deleted = client.delete("/api/workspaces/client-d")
+
+    assert deleted.status_code == 200, deleted.json()
+    migrated = deleted.json()["migrated"]
+    assert migrated["refused"] == []
+    # The user's note moved; the primary's own aggregate was not touched.
+    assert (
+        Path(config.workspace_vault_root(primary)) / "People" / "Ada.md"
+    ).is_file()
+    # The primary's own aggregate is REGENERATED to include the arriving note -
+    # not replaced by the deleted workspace's copy of the same filename, which
+    # is what moving it would have done.
+    primary_index = (
+        Path(config.workspace_vault_root(primary)) / "INDEX.md"
+    ).read_text(encoding="utf-8")
+    assert "for client-d" not in primary_index
+    assert "Ada" in primary_index
+
+
+def test_a_shared_vault_delete_moves_no_notes(tmp_path):
+    """Pre-migration installs have one scan target, so nothing has to move.
+
+    The cross-root mover refuses the `memory-vault/<name>` shape by design, so
+    attempting a migration here refused EVERY note and made the workspace
+    undeletable. The notes stay reachable through the single shared target
+    either way, so the delete simply reassigns the chats.
+    """
+    client, config, pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "client-e", "vault_root": "client-e"})
+    vault = Path(config.workspace_vault_root("client-e"))
+    (vault / "People").mkdir(parents=True, exist_ok=True)
+    note = vault / "People" / "Ada.md"
+    note.write_text("---\ntype: person\n---\n# Ada\n", encoding="utf-8")
+
+    deleted = client.delete("/api/workspaces/client-e")
+
+    assert deleted.status_code == 200, deleted.json()
+    migrated = deleted.json()["migrated"]
+    assert migrated["notes"] == 0 and migrated["refused"] == []
+    assert note.is_file(), "a shared-vault note must not be moved"
+    assert pcm.reassigned == [("client-e", config.primary_workspace())]
