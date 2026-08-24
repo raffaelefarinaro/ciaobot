@@ -937,6 +937,8 @@ async def delete_workspace_setting(request: Request) -> JSONResponse:
     # pointing at a workspace that no longer exists - which resolved them to
     # the primary agent root by accident of the fallback.
     vault = _migrate_workspace_vault(config, name, target)
+    if vault["unsupported"]:
+        return JSONResponse({"error": vault["unsupported"]}, status_code=409)
     if vault["refused"]:
         # ALL OR NOTHING, and nothing has moved yet - the scan above was a dry
         # run. Completing a partial migration would strand the refused notes:
@@ -995,13 +997,14 @@ def _migrate_workspace_vault(
 
     moved: list[str] = []
     refused: list[dict[str, Any]] = []
+    unsupported = ""
     install_root = Path(config.workspace_root)
     try:
         source_root = Path(config.workspace_vault_root(name))
     except (ValueError, TypeError):
-        return {"moved": moved, "refused": refused}
+        return {"moved": moved, "refused": refused, "unsupported": unsupported}
     if not source_root.is_dir():
-        return {"moved": moved, "refused": refused}
+        return {"moved": moved, "refused": refused, "unsupported": unsupported}
     # Only a RE-ROOTED install needs this. There the deleted workspace's vault
     # is its own scan target, so losing the registry entry makes those notes
     # unreachable and they have to move. On the shared layout the vault is
@@ -1012,9 +1015,23 @@ def _migrate_workspace_vault(
     try:
         relative_vault = source_root.relative_to(install_root)
     except ValueError:
-        return {"moved": moved, "refused": refused}
+        # `CIAO_VAULT_MODE=existing` can point a workspace at an absolute vault
+        # outside the install. Nothing here can move it: every note fails the
+        # same `relative_to`, so both passes reported no refusals and no moves
+        # and the delete went ahead - leaving the whole external vault on disk
+        # while it dropped out of every scan with the registry entry. Refuse
+        # rather than silently orphan somebody's vault.
+        return {
+            "moved": moved,
+            "refused": refused,
+            "unsupported": (
+                f"'{name}' uses a vault outside the install "
+                f"({source_root}); move or unlink it before deleting the "
+                "workspace"
+            ),
+        }
     if len(relative_vault.parts) != 2 or relative_vault.parts[0] != name:
-        return {"moved": moved, "refused": refused}
+        return {"moved": moved, "refused": refused, "unsupported": unsupported}
     targets = config.vault_scan_targets()
     workspaces = config.workspace_names()
     from ciao.workspace_reroot import _REGENERATED_ROOT_NOTES
@@ -1044,7 +1061,7 @@ def _migrate_workspace_vault(
             moved.append(relative)
         else:
             refused.append({"note": relative, "refusals": result.get("refusals", [])})
-    return {"moved": moved, "refused": refused}
+    return {"moved": moved, "refused": refused, "unsupported": unsupported}
 
 
 def _env_path(config) -> Path:

@@ -7,7 +7,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web.routes_api import (
     delete_workspace_setting,
     gws_integration_settings,
@@ -154,6 +154,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "allowed_mcp_servers": None,
         "gws_profile": "work",
         "color": "pink",
+        "vault_pinned": False,
     }
 
 
@@ -189,6 +190,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "allowed_mcp_servers": None,
             "gws_profile": "personal",
             "color": "pink",
+            "vault_pinned": False,
         },
     ]
     assert pcm.refresh_count == 3
@@ -1243,3 +1245,38 @@ def test_a_shared_vault_delete_moves_no_notes(tmp_path):
     assert migrated["notes"] == 0 and migrated["refused"] == []
     assert note.is_file(), "a shared-vault note must not be moved"
     assert pcm.reassigned == [("client-e", config.primary_workspace())]
+
+
+def test_a_vault_outside_the_install_refuses_the_deletion(tmp_path):
+    """An external vault must not be orphaned by a delete.
+
+    `CIAO_VAULT_MODE=existing` can point a workspace at an absolute vault
+    outside the install. Nothing here can move it — every note failed the same
+    `relative_to(install_root)` — so both passes reported no refusals and no
+    moves and the delete went ahead, leaving the whole vault on disk while it
+    dropped out of every scan along with the registry entry.
+    """
+    _reroot(tmp_path)
+    client, config, pcm = _client(tmp_path)
+    outside = tmp_path.parent / "external-vault"
+    (outside / "People").mkdir(parents=True, exist_ok=True)
+    note = outside / "People" / "Ada.md"
+    note.write_text("---\ntype: person\n---\n# Ada\n", encoding="utf-8")
+    # Registered directly, as setup or a legacy pin leaves it: the POST route
+    # rewrites an absolute path to `<name>/memory-vault`, so this state is not
+    # reachable through the API — only through setup, a pinned legacy vault, or
+    # a hand-edited registry. `workspace_vault_root` preserves an absolute
+    # registered root by contract.
+    config.workspaces["client-f"] = WorkspaceConfig(
+        name="client-f", vault_root=str(outside)
+    )
+    assert Path(config.workspace_vault_root("client-f")) == outside
+
+    deleted = client.delete("/api/workspaces/client-f")
+
+    assert deleted.status_code == 409, deleted.json()
+    assert "outside the install" in deleted.json()["error"]
+    # Nothing orphaned: the vault is intact and the workspace still registered.
+    assert note.is_file()
+    assert config.workspace("client-f") is not None
+    assert pcm.reassigned == []
