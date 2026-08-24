@@ -446,7 +446,6 @@ class CiaoConfig:
     vault_root: Path = Path("memory-vault")
     max_image_size_bytes: int = 10 * 1024 * 1024
     max_voice_size_bytes: int = 25 * 1024 * 1024
-    media_ttl_hours: int = 72
     # BCP-47 language for the on-device voice engines. Dictation needs a
     # matching language installed in System Settings → Keyboard → Dictation;
     # the synthesizer uses it to choose a voice.
@@ -510,12 +509,6 @@ class CiaoConfig:
     # weekly ``ciao.skill_evolution`` pass mines this directory.
     # Disable with ``CIAO_TRAJECTORIES_DISABLED=1``.
     trajectories_enabled: bool = True
-    trajectory_retention_months: int = 6
-    # Skill evolution scheduled pass. The schedule entry itself is the
-    # primary on/off switch; this flag exists so ops can hard-disable from
-    # the env (``CIAO_SKILL_EVOLUTION_DISABLED=1``) without editing
-    # schedules.json.
-    skill_evolution_enabled: bool = True
 
     # Comma-separated list of models for the adversarial_review MCP tool.
     # Empty string defaults to the script's built-in panel.
@@ -1391,9 +1384,6 @@ class CiaoConfig:
             max_voice_size_bytes=int(
                 source.get("CIAO_MAX_VOICE_BYTES", str(25 * 1024 * 1024))
             ),
-            media_ttl_hours=int(
-                source.get("CIAO_MEDIA_TTL_HOURS", "72")
-            ),
             transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
             or "en-US",
             tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
@@ -1425,13 +1415,6 @@ class CiaoConfig:
             not in {"0", "false", "no", "off"},
             trajectories_enabled=source.get(
                 "CIAO_TRAJECTORIES_DISABLED", ""
-            ).strip().lower()
-            in {"", "0", "false", "no", "off"},
-            trajectory_retention_months=int(
-                source.get("CIAO_TRAJECTORY_RETENTION_MONTHS", "").strip() or "6"
-            ),
-            skill_evolution_enabled=source.get(
-                "CIAO_SKILL_EVOLUTION_DISABLED", ""
             ).strip().lower()
             in {"", "0", "false", "no", "off"},
 
