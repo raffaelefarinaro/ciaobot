@@ -1518,14 +1518,15 @@ class CiaoMcpService:
                 provider: Empty inherits the target workspace's default
                     provider at dispatch time; override only when necessary.
                 archive_policy: "manual" (default) | "auto".
-                workspace: Target workspace name (see workspaces_list). Omit to
-                    create in this chat's workspace. Naming another registered
-                    workspace creates the schedule THERE: each run starts a
-                    fresh chat in that workspace with its default model/provider,
-                    landing in its General project unless project_id names one.
-                    Cross-workspace targets cannot bind chat_id, and the caller's
-                    project is not inherited. Use this to give a second workspace
-                    its own copy of an automation without switching context.
+                workspace: Omit in almost every case — the schedule is created
+                    in this chat's workspace. Any other name is refused unless
+                    it restates this chat's workspace: schedules are
+                    auto-approved model input and their unattended runs execute
+                    in bypass, so planting one in another workspace would run
+                    there with that workspace's guide, integrations, and file
+                    authority and no operator approval. To automate a second
+                    workspace, work from a chat scoped to it or ask the
+                    operator.
                 schedule_id: (update only) The schedule to update.
 
             An enabled schedule with a missed latest occurrence (e.g. the

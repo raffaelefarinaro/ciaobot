@@ -264,9 +264,9 @@ class CiaoControlPlane:
         """Resolve a project reference against one explicit workspace.
 
         Like ``_resolve_project`` but both the name lookup and the ownership
-        check target ``workspace`` instead of the caller's own, so a caller can
-        name a project in a workspace its principal is not scoped to (used by
-        cross-workspace schedule targeting).
+        check target ``workspace`` instead of the caller's own (used by
+        ``schedule_update`` to resolve a project inside its settled
+        destination workspace).
         """
         exact = self.pcm.get_project(ref)
         if exact is not None:
@@ -1170,23 +1170,19 @@ class CiaoControlPlane:
         active project (same as ``chat_create``) so MCP-created schedules land
         in the chat's workspace+project instead of an unscoped Personal fallback.
 
-        An explicit ``workspace`` may name any registered workspace. Dispatch is
-        global and every run starts a fresh chat inside the entry's workspace,
-        so a schedule is safe to create from any principal — but a
-        cross-workspace target never inherits the caller's active project and
-        never binds to the caller's chat: without an explicit project the run
-        lands in the target workspace's General project at dispatch time.
+        An explicit ``workspace`` may only restate the principal's own. Unlike a
+        chat turn, a schedule is auto-approved model input that persists a
+        prompt and runs unattended — and unattended dispatch forces the target
+        chat into bypass — so honoring a foreign workspace would let an
+        injected or compromised managed chat execute there with that
+        workspace's guide, integrations, and filesystem authority, without
+        operator approval. Giving a second workspace an automation is operator
+        business, done from a chat scoped to it.
         """
-        requested = str(values.get("workspace") or "").strip().lower()
-        cross_workspace = bool(requested) and requested != principal.workspace
-        if cross_workspace:
-            if self.config.workspace(requested) is None:
-                raise ControlPlaneError(
-                    "workspace_not_found", f"Workspace '{requested}' was not found."
-                )
-            workspace: str = requested
-        else:
-            workspace = self._workspace(principal)
+        # One boundary for explicit and omitted targets alike: ``_workspace``
+        # refuses any name other than the principal's own and still validates
+        # that the scoped workspace exists.
+        workspace = self._workspace(principal, str(values.get("workspace") or ""))
 
         chat_ref = values.get("chat_id")
         project_ref = values.get("project_id")
@@ -1194,43 +1190,11 @@ class CiaoControlPlane:
         project: Any | None = None
 
         if chat_ref:
-            if cross_workspace:
-                raise ControlPlaneError(
-                    "workspace_mismatch",
-                    "chat_id binds the schedule to this workspace's chat history; "
-                    "omit it when targeting another workspace.",
-                )
             chat = self._chat(principal, str(chat_ref))
             web_chat_id = chat.chat_id
 
         if project_ref:
-            if cross_workspace:
-                project = self._resolve_project_in_workspace(
-                    principal, str(project_ref), workspace
-                )
-            else:
-                project = self._resolve_project(principal, str(project_ref))
-        elif cross_workspace:
-            # An unqualified cross-workspace target means the destination's
-            # General project. Leaving both bindings unset was silently fatal:
-            # `prepare_schedule_chat` skips a user schedule with no web target,
-            # so the schedule was created, listed, and never ran once - while
-            # this method's own docstring promised the General fallback. That
-            # fallback only ever applied to `scope == "system"` entries.
-            general = next(
-                (
-                    item for item in self.pcm.list_projects(workspace)
-                    if item.name == "General"
-                ),
-                None,
-            )
-            if general is None:
-                raise ControlPlaneError(
-                    "project_required",
-                    f"Workspace '{workspace}' has no General project, so name "
-                    "one with project_id.",
-                )
-            project = general
+            project = self._resolve_project(principal, str(project_ref))
         elif not web_chat_id:
             # Inherit the active project when omitted — preferred for vault-aware
             # automation and keeps the schedule in the same workspace as this chat.
@@ -1239,10 +1203,8 @@ class CiaoControlPlane:
         web_project_id: str | None = None
         if project is not None:
             web_project_id = project.project_id
-            if not cross_workspace:
-                # Re-stamp from the resolved project (same as the HTTP route);
-                # a cross-workspace project was already verified above.
-                workspace = self._workspace(principal, project.workspace)
+            # Re-stamp from the resolved project (same as the HTTP route).
+            workspace = self._workspace(principal, project.workspace)
 
         now = datetime.now(UTC).isoformat(timespec="seconds")
         entry = ScheduleEntry(
@@ -1311,15 +1273,14 @@ class CiaoControlPlane:
         bound = self.pcm.get_project(entry.web_project_id) if entry.web_project_id else None
         origin = str(getattr(bound, "workspace", "") or entry.workspace or principal.workspace)
         # Settle the destination workspace *before* resolving the project, and
-        # validate it here: a reassignment must name a registered workspace
-        # because dispatch-time routing and provider/model inheritance both hang
-        # off this field, so silently storing garbage would strand the schedule.
+        # validate it here: dispatch-time routing and provider/model inheritance
+        # both hang off this field, so silently storing garbage would strand the
+        # schedule. The destination is scoped like every other tool too: an
+        # unattended run executes its prompt in bypass inside the target
+        # workspace, so a move there is operator business, not something a
+        # managed chat can talk a token into.
         if changes.get("workspace") is not None:
-            target = str(changes["workspace"]).strip().lower()
-            if self.config.workspace(target) is None:
-                raise ControlPlaneError(
-                    "workspace_not_found", f"Workspace '{target}' was not found."
-                )
+            target = self._workspace(principal, str(changes["workspace"]).strip().lower())
             changes["workspace"] = target
         else:
             target = origin
