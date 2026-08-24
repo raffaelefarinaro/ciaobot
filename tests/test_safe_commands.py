@@ -209,9 +209,47 @@ def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
     classifier does not call destructive, so each of these ran with the
     operator's full filesystem access and no approval card. This is a denylist
     and therefore still fails OPEN on a form nobody has thought of - the
-    deliberate trade-off recorded in `auto_approves_permission`.
+    deliberate trade-off recorded in `auto_approves_permission`. The stdin-fed
+    interpreters in the next test were exactly such a form.
     """
     assert is_destructive_command(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    # The program arrives on stdin, so there is no flag to notice. This is how
+    # the inline-code check was bypassed after it was added.
+    "python3 - <<'PY'\nimport shutil; shutil.rmtree('/tmp/valuable')\nPY",
+    "python3 <<'PY'\nimport shutil\nPY",
+    "python3 -",
+    "perl - <<'PL'\nunlink glob q{*};\nPL",
+    "awk -f /dev/stdin <<'AWK'\nBEGIN{}\nAWK",
+    "ruby -",
+    "node <<'JS'\nx\nJS",
+    "python < script.py",
+    "cat payload | python3 -",
+    # A bare interpreter reads stdin too.
+    "python",
+])
+def test_an_interpreter_fed_on_stdin_is_opaque(command):
+    """Auto approves any bash command this does not call destructive.
+
+    A heredoc carries no `-c`, and the `<<` was stripped as punctuation before
+    anything could see it - so the delimiter word looked like an ordinary script
+    filename and the whole program ran with no approval card.
+    """
+    assert is_destructive_command(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    # Running a script FILE is ordinary use and must not start needing a card.
+    "python manage.py migrate",
+    "python3 -m pytest",
+    "node server.js",
+    "Rscript analyse.R",
+    "awk '{print $1}' file",
+])
+def test_an_interpreter_running_a_script_file_is_still_approved(command):
+    assert is_destructive_command(command) is False
 
 
 @pytest.mark.parametrize("command", [

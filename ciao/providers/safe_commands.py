@@ -244,6 +244,16 @@ _INTERPRETERS = frozenset({
 })
 _INLINE_CODE_FLAGS = frozenset({"-c", "-e", "-E", "-r", "--eval", "--exec", "-p", "-n"})
 
+# Operands that mean "the program arrives on stdin", which is just as opaque as
+# `-c` and was the way round the inline-code check: `python3 - <<'PY' … PY`
+# carries no flag at all.
+_STDIN_OPERANDS = frozenset({"-", "/dev/stdin", "/dev/fd/0"})
+
+# Sentinel kept in a segment when input redirection was stripped as punctuation.
+# The `<<` of a heredoc otherwise vanished, leaving the delimiter word looking
+# like an ordinary script filename.
+_REDIRECT_IN = "\x00<"
+
 # `$(…)` and backticks carry a whole command inside another one. They are
 # pulled out and classified in their own right before the outer command is
 # tokenized, so `echo $(rm -rf ~/x)` cannot hide the removal mid-segment.
@@ -308,9 +318,19 @@ def _segment_is_destructive(name: str, args: list[str]) -> bool:
             if arg == "-c" and index + 1 < len(args):
                 return is_destructive_command(args[index + 1])
         return not (args and all(a in _DESTRUCTIVE_QUERY_FLAGS for a in args))
-    if name in _INTERPRETERS and any(a in _INLINE_CODE_FLAGS for a in args):
-        # Arbitrary code as an argument; nothing here can read it.
-        return True
+    if name in _INTERPRETERS:
+        # Arbitrary code, and no way to read it. Three shapes, all opaque:
+        # a `-c`/`-e` payload, a program arriving on stdin (`python3 -`, a
+        # heredoc, or `< script`), and a bare interpreter, which also reads
+        # stdin. Running a script FILE stays approved - `python manage.py` is
+        # ordinary use and carding it would card nearly every project command.
+        if any(a in _INLINE_CODE_FLAGS for a in args):
+            return True
+        if any(a in _STDIN_OPERANDS for a in args) or _REDIRECT_IN in args:
+            return True
+        return not any(
+            not a.startswith("-") and a != _REDIRECT_IN for a in args
+        )
     if name == "git":
         return _git_is_destructive(args)
     if name == "find":
@@ -359,7 +379,11 @@ def is_destructive_command(command: str) -> bool:
             # segment's arguments, where only segment[0] is ever classified.
             segments.append([])
         elif all(char in _PUNCTUATION for char in token):
-            # Redirection, background `&`: unknown but not removal.
+            if "<" in token:
+                # Keep the fact that input was redirected: an interpreter fed a
+                # heredoc or a file is running code nothing here can inspect.
+                segments[-1].append(_REDIRECT_IN)
+            # Otherwise redirection out, background `&`: unknown but not removal.
             continue
         else:
             segments[-1].append(token)
