@@ -140,9 +140,15 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    * Orphans are 21% of a real vault and have no edges, so in the layout they
    * only feel centering and repulsion — they push the connected structure
    * apart while carrying no relational information themselves. Hiding them is
-   * the single biggest legibility win available from a toggle.
+   * the single biggest legibility win available from a toggle, but showing
+   * *only* them is the to-do view for linking or deleting.
    */
-  const hideOrphans = ref(false)
+  const orphanFilter = ref<'all' | 'hide' | 'only'>('all')
+  // Backward-compat: existing UI/tests address `hideOrphans` as a boolean.
+  const hideOrphans = computed({
+    get: () => orphanFilter.value === 'hide',
+    set: (v: boolean) => { orphanFilter.value = v ? 'hide' : 'all' },
+  })
   /** 'category' is the note's own type; 'cluster' is detected community. */
   const colorMode = ref<'category' | 'cluster'>('category')
   /**
@@ -203,7 +209,8 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   function passesFilters(n: MemoryGraphNode): boolean {
     if (!activeCats.has(catKeyFor(n))) return false
     if (search.value.trim() && !matchesSearch(n, search.value)) return false
-    if (hideOrphans.value && n.degree === 0) return false
+    if (orphanFilter.value === 'hide' && n.degree === 0) return false
+    if (orphanFilter.value === 'only' && n.degree !== 0) return false
     return true
   }
 
@@ -351,7 +358,13 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     colorMode.value = mode
   }
   function toggleHideOrphans() {
-    hideOrphans.value = !hideOrphans.value
+    orphanFilter.value = orphanFilter.value === 'hide' ? 'all' : 'hide'
+  }
+  function toggleOnlyOrphans() {
+    orphanFilter.value = orphanFilter.value === 'only' ? 'all' : 'only'
+  }
+  function setOrphanFilter(v: 'all' | 'hide' | 'only') {
+    orphanFilter.value = v
   }
   /** Show only one cluster, the cluster-space equivalent of "only" on a category. */
   function isolateCluster(clusterId: number) {
@@ -429,13 +442,13 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
 
   return {
     nodes, edges, loading, loadError, search, activeCats, selectedId, pathStart, pathEnd, focusSignal,
-    hideOrphans, colorMode, view,
+    hideOrphans, orphanFilter, colorMode, view,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode, pathIds, pathHint,
     clusters, clusterById, orphanNotes, bridgeNotes, recentNotes, staleNotes, ageLabelOf,
     clusterOf, clusterSlotOf, betweennessOf,
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
-    setColorMode, toggleHideOrphans, isolateCluster,
+    setColorMode, toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter, isolateCluster,
     selectNode, requestFocus, resetPath, handleNodeClick, deleteNote,
   }
 })

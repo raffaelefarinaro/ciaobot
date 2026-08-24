@@ -21,17 +21,17 @@
             <line x1="162" y1="92" x2="130" y2="118" class="mm-brain-edge" />
             <line x1="70" y1="118" x2="100" y2="128" class="mm-brain-edge" />
             <line x1="130" y1="118" x2="100" y2="128" class="mm-brain-edge" />
-            <circle cx="45" cy="38" r="10" class="mm-brain-node mm-brain-node--1" />
-            <circle cx="82" cy="52" r="7" class="mm-brain-node mm-brain-node--2" />
-            <circle cx="118" cy="42" r="8" class="mm-brain-node mm-brain-node--3" />
-            <circle cx="155" cy="58" r="9" class="mm-brain-node mm-brain-node--4" />
-            <circle cx="92" cy="92" r="8" class="mm-brain-node mm-brain-node--2" />
-            <circle cx="108" cy="92" r="7" class="mm-brain-node mm-brain-node--1" />
-            <circle cx="38" cy="86" r="6" class="mm-brain-node mm-brain-node--3" />
-            <circle cx="162" cy="92" r="6" class="mm-brain-node mm-brain-node--2" />
-            <circle cx="70" cy="118" r="7" class="mm-brain-node mm-brain-node--4" />
-            <circle cx="130" cy="118" r="7" class="mm-brain-node mm-brain-node--1" />
-            <circle cx="100" cy="128" r="6" class="mm-brain-node mm-brain-node--3" />
+            <circle cx="45" cy="38" r="13" class="mm-brain-node mm-brain-node--1" />
+            <circle cx="82" cy="52" r="10" class="mm-brain-node mm-brain-node--2" />
+            <circle cx="118" cy="42" r="11" class="mm-brain-node mm-brain-node--3" />
+            <circle cx="155" cy="58" r="12" class="mm-brain-node mm-brain-node--4" />
+            <circle cx="92" cy="92" r="11" class="mm-brain-node mm-brain-node--2" />
+            <circle cx="108" cy="92" r="10" class="mm-brain-node mm-brain-node--1" />
+            <circle cx="38" cy="86" r="9" class="mm-brain-node mm-brain-node--3" />
+            <circle cx="162" cy="92" r="9" class="mm-brain-node mm-brain-node--2" />
+            <circle cx="70" cy="118" r="10" class="mm-brain-node mm-brain-node--4" />
+            <circle cx="130" cy="118" r="10" class="mm-brain-node mm-brain-node--1" />
+            <circle cx="100" cy="128" r="9" class="mm-brain-node mm-brain-node--3" />
           </svg>
         </div>
         <div class="mm-skeleton-text"><span class="history-loading-spinner" aria-hidden="true"></span> Mapping your vault…</div>
@@ -76,11 +76,19 @@
           <button
             type="button"
             class="mm-toggle"
-            :class="{ on: mm.hideOrphans }"
-            :aria-pressed="mm.hideOrphans"
+            :class="{ on: mm.orphanFilter === 'hide' }"
+            :aria-pressed="mm.orphanFilter === 'hide'"
             :title="`${mm.orphanCount} notes have no links; hiding them declutters the layout`"
             @click="mm.toggleHideOrphans()"
-          >{{ mm.hideOrphans ? 'Orphans hidden' : 'Hide orphans' }}</button>
+          >{{ mm.orphanFilter === 'hide' ? 'Orphans hidden' : 'Hide orphans' }}</button>
+          <button
+            type="button"
+            class="mm-toggle"
+            :class="{ on: mm.orphanFilter === 'only' }"
+            :aria-pressed="mm.orphanFilter === 'only'"
+            :title="mm.orphanFilter === 'only' ? 'Showing only unlinked notes' : 'Show only unlinked notes — useful when you want to link them up'"
+            @click="mm.toggleOnlyOrphans()"
+          >{{ mm.orphanFilter === 'only' ? 'Only orphans ✓' : 'Only orphans' }}</button>
         </div>
 
         <div class="mm-hint-overlay">
@@ -230,7 +238,7 @@ const themeColors = reactive({
   light: false,
   label: 'rgba(231,232,240,0.85)',
   edge: 'rgba(150,160,190,0.35)',
-  edgeDim: 'rgba(120,126,150,0.08)',
+  edgeDim: 'rgba(120,126,150,0.14)',
   selectRing: '#fff',
 })
 function refreshThemeColors() {
@@ -238,7 +246,7 @@ function refreshThemeColors() {
   themeColors.light = light
   themeColors.label = light ? 'rgba(32,33,48,0.88)' : 'rgba(231,232,240,0.85)'
   themeColors.edge = light ? 'rgba(80,86,120,0.35)' : 'rgba(150,160,190,0.35)'
-  themeColors.edgeDim = light ? 'rgba(120,126,150,0.12)' : 'rgba(120,126,150,0.08)'
+  themeColors.edgeDim = light ? 'rgba(120,126,150,0.18)' : 'rgba(120,126,150,0.14)'
   themeColors.selectRing = light ? '#1a1a2e' : '#fff'
 }
 function colorForNode(n: MemoryGraphNode): string {
@@ -352,6 +360,7 @@ watch(() => mm.focusSignal.seq, () => {
   if (n) {
     camera.x = -n.x * camera.scale
     camera.y = -n.y * camera.scale
+    requestRedraw()
   }
 })
 
@@ -477,7 +486,7 @@ function screenToWorld(sx: number, sy: number): [number, number] {
   return [(sx - W / 2 - camera.x) / camera.scale, (sy - H / 2 - camera.y) / camera.scale]
 }
 function nodeRadius(n: MemoryGraphNode): number {
-  return 4 + Math.min(10, Math.sqrt(n.degree + 1) * 2.4)
+  return 5 + Math.min(12, Math.sqrt(n.degree + 1) * 2.7)
 }
 function hexToRgba(hex: string, a: number): string {
   const v = hex.replace('#', '')
@@ -525,10 +534,10 @@ watch(() => mm.visibleIds, () => wakeSimulation())
 watch(() => [mm.selectedId, mm.pathStart, mm.pathEnd], () => wakeSimulation())
 // Colour mode changes nothing about positions, so it needs a paint, not physics.
 watch(() => mm.colorMode, () => requestRedraw())
-// Hiding orphans changes *which* nodes exist in the layout, so the graph has
-// to be re-framed as well as re-settled — otherwise hiding them leaves the
-// camera zoomed into empty space.
-watch(() => mm.hideOrphans, async () => {
+// Hiding orphans or showing only orphans changes *which* nodes exist in the
+// layout, so the graph has to be re-framed as well as re-settled — otherwise
+// filtering leaves the camera zoomed into empty space.
+watch(() => mm.orphanFilter, async () => {
   await nextTick()
   warmupSimulation(warmupStepsFor(mm.visibleNodes.length))
   fitCamera()
@@ -1172,14 +1181,14 @@ onBeforeUnmount(() => {
 }
 .mm-brain-edge {
   stroke: var(--border);
-  stroke-width: 1.5;
+  stroke-width: 2;
   stroke-linecap: round;
   opacity: 0.55;
 }
 .mm-brain-node {
   fill: var(--bg3);
   stroke: var(--border);
-  stroke-width: 1.2;
+  stroke-width: 1.6;
 }
 .mm-brain-node--1 { animation: mm-brain-pulse 1.6s ease-in-out infinite; }
 .mm-brain-node--2 { animation: mm-brain-pulse 1.6s ease-in-out infinite 0.2s; }

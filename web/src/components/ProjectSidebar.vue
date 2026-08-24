@@ -579,14 +579,7 @@
              hue and the palette's residual CVD/contrast warnings are only
              relieved by labelling, so identity must never be colour-alone. -->
         <template v-if="mm.clusters.length">
-          <div class="mm-row-between">
-            <h3>Clusters</h3>
-            <button
-              type="button"
-              class="mm-link"
-              @click="mm.setColorMode(mm.colorMode === 'cluster' ? 'category' : 'cluster')"
-            >{{ mm.colorMode === 'cluster' ? 'colour by type' : 'colour by cluster' }}</button>
-          </div>
+           <h3>Clusters</h3>
           <div class="mm-link-list">
             <div
               v-for="c in mm.clusters"
@@ -640,9 +633,22 @@
         <template v-if="mm.orphanNotes.length">
           <div class="mm-row-between">
             <h3>Unlinked ({{ mm.orphanNotes.length }})</h3>
-            <button type="button" class="mm-link" @click="mm.toggleHideOrphans()">
-              {{ mm.hideOrphans ? 'show in graph' : 'hide in graph' }}
-            </button>
+            <div class="mm-row-actions">
+              <button
+                type="button"
+                class="mm-link"
+                :class="{ 'mm-link--active': mm.orphanFilter === 'only' }"
+                :title="mm.orphanFilter === 'only' ? 'Show all notes in graph' : 'Show only unlinked notes in graph'"
+                @click="mm.toggleOnlyOrphans()"
+              >{{ mm.orphanFilter === 'only' ? 'show all' : 'only' }}</button>
+              <span class="mm-sep" aria-hidden="true">·</span>
+              <button
+                type="button"
+                class="mm-link"
+                :title="mm.orphanFilter === 'hide' ? 'Show unlinked notes in graph' : 'Hide unlinked notes from graph'"
+                @click="mm.toggleHideOrphans()"
+              >{{ mm.orphanFilter === 'hide' ? 'show in graph' : 'hide in graph' }}</button>
+            </div>
           </div>
           <div class="mm-link-list">
             <div
@@ -2956,8 +2962,13 @@ async function confirmDeleteChat(chatId: string) {
   align-items: baseline;
   justify-content: space-between;
   margin-top: var(--space-4);
+  margin-bottom: var(--space-2);
 }
 .mm-row-between h3 { margin: 0; }
+.mm-row-between:first-child { margin-top: 0; }
+.mm-row-actions { display: inline-flex; align-items: baseline; gap: 6px; }
+.mm-sep { color: var(--fg3); font-size: var(--text-xs); }
+.mm-link--active { color: var(--fg); font-weight: 600; }
 .mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
 .mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
 
