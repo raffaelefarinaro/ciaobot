@@ -5,7 +5,8 @@ an agent-facing adapter over the same Python managers used by the PWA; it is
 not a second API implementation and it never asks a model to edit `.runtime`
 JSON directly.
 
-MCP is the default control surface for both providers. `legacy` (the
+MCP is the default control surface for the two supported providers, Claude and
+OpenCode. `legacy` (the
 CLI/direct-file path) is retained as a hidden fallback: it is still selectable
 via `CIAO_CONTROL_SURFACE=legacy` or the per-chat `control_surface` field, and
 it is used automatically when the MCP server is unavailable. The PWA no longer
@@ -20,9 +21,9 @@ flowchart LR
     PWA["PWA chat"] --> PCM["ProjectChatManager"]
     PCM --> TOKEN["Scoped, short-lived token"]
     TOKEN --> CLAUDE["Managed Claude Code process"]
-    TOKEN --> CODEX["Managed Codex app-server process"]
+    TOKEN --> OPENCODE["Managed opencode process"]
     CLAUDE --> MCP["/mcp/ authenticated MCP"]
-    CODEX --> MCP
+    OPENCODE --> MCP
     MCP --> CP["CiaoControlPlane"]
     CP --> MANAGERS["PWA domain managers and stores"]
 ```
@@ -31,9 +32,9 @@ flowchart LR
   provider, and role. Tokens are reused only for that scope, expire, and are
   revoked on session reset, handover, archive, or deletion.
 - Ciaobot injects credentials only while it launches the provider process.
-  They are not placed in the normal model shell environment. Codex receives
-  the token through a dedicated environment variable that its shell policy
-  excludes; Claude receives it in the SDK MCP header configuration.
+  They are not placed in the normal model shell environment. Claude receives
+  the token in the SDK MCP header configuration; opencode receives equivalent
+  scoped process configuration.
 - Because MCP is the default transport, a chat whose MCP server or token is
   unavailable degrades gracefully to the legacy path with a logged WARNING,
   rather than failing the turn. This keeps the app usable during bootstrap or
@@ -89,41 +90,23 @@ always allowed and stay loaded. A Ciaobot server that is unavailable at spawn
 time already degrades to the legacy surface (above), so strict mode is not
 needed to surface that case.
 
-## Managed Codex configuration
+## Managed opencode configuration
 
-For Codex, Ciaobot launches its persistent app-server with per-process config
-overrides equivalent to:
-
-```text
-codex \
-  -c 'mcp_servers.ciaobot.url="http://127.0.0.1:<pwa-port>/mcp/"' \
-  -c 'mcp_servers.ciaobot.bearer_token_env_var="CIAO_MCP_SESSION_TOKEN"' \
-  -c 'mcp_servers.ciaobot.enabled=true' \
-  -c 'mcp_servers.ciaobot.required=true' \
-  -c 'shell_environment_policy.exclude=["CIAO_MCP_SESSION_TOKEN"]' \
-  app-server --stdio
-```
-
-Only that child process receives `CIAO_MCP_SESSION_TOKEN`. A model-created
-shell command does not. The app-server is restarted when the token changes.
-
-Project-scoped servers declared in the workspace `.mcp.json` are projected
-automatically into the workspace `.codex/config.toml` by `ciao sync-skills`.
-The projection preserves user-owned Codex server tables, excludes the
-dynamically injected `ciaobot` server, and copies credentials only as
-environment-variable references.
+For opencode, Ciaobot launches a per-chat server with the scoped MCP endpoint
+and token. Project-scoped servers remain in the workspace `.mcp.json`; generated
+provider assets are marker-owned and are pruned only when their markers match.
 
 Static configuration in an unrelated terminal is intentionally unsupported:
 the token is a live chat capability, not an operator credential. Use Ciaobot's
-Claude Code or Codex process so scope, revocation, deferred self-actions, and
-telemetry remain enforced.
+managed Claude Code or opencode process so scope, revocation, deferred
+self-actions, and telemetry remain enforced.
 
 ## Tool catalog
 
 The catalog contains 34 explicit tools. The MCP `tools/list` response is the
 live list, so clients do not need to infer it from documentation. The catalog
 holds *capabilities* — orchestration and search that a shell can't cheaply
-replicate. Plain plumbing that the managed Claude Code/Codex session can do
+replicate. Plain plumbing that the managed Claude Code/opencode session can do
 with its own shell and filesystem is not duplicated as an MCP tool:
 
 - **Bounded memory** → The native source remains the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. Use `memory_status` for usage, `memory_update` for a typed bounded edit, and the proposal tools for review/dismissal.
@@ -237,11 +220,11 @@ MCP replaces transport recipes, not behavioral knowledge.
 
 ## Validation status
 
-### Default cutover (2026-07-19)
+### Current status (2026-07-19)
 
-The default control surface was flipped from `legacy` to `mcp` for both
-providers on the strength of two independent 120-turn paired runs on the
-`claude` managed provider, both of which decisively favored MCP:
+The default control surface is `mcp` for both supported providers, Claude and
+OpenCode. The cutover was based on two independent 120-turn paired runs on the
+Claude managed provider, both of which decisively favored MCP:
 
 - Ollama `minimax-m3:cloud` (production opus-tier): legacy 51/60 (85%) vs MCP
   59/60 (98.3%), higher score, zero quota blocks. The legacy hand-editing path
@@ -251,13 +234,20 @@ providers on the strength of two independent 120-turn paired runs on the
   with 75% fewer tool calls (+9.56).
 
 MCP is at least as correct, materially faster, and far cheaper on tool calls.
-Codex has no decisive benchmark yet (credit-blocked), so the legacy recipes are
-kept as a hidden fallback rather than deleted, and the default flip applies
-server-wide via `config.control_surface` rather than per provider.
+The default applies server-wide via `config.control_surface` rather than per
+provider. `legacy` remains the hidden fallback described above.
 
-### Promotion / `auto` status (2026-07-18)
+### Historical / retired provider evaluation (2026-07-18)
 
-`auto` is a per-chat value, not a server default: a chat on `auto` resolves at
+> Historical record only. The provider evaluated below is retired and is not a
+> current Ciaobot runtime provider. It does not describe current setup,
+> settings, MCP configuration, or provider availability.
+
+This is the historical Codex provider evaluation; Codex is no longer a
+supported Ciaobot runtime provider.
+
+The former `auto` path was a per-chat value, not a server default: a chat on
+`auto` resolved at
 dispatch through `.runtime/control_surface_decision.json`
 (`ciao/control_surfaces.py`), which records the promoted per-provider decision
 from the latest release evaluation, and falls back to `legacy` when no provider
@@ -266,7 +256,7 @@ the formal 240-turn release evaluation, so `auto` resolves to `legacy`. This is
 independent of the default
 above: the default governs chats that do not opt into `auto`.
 
-The Codex release run attempted all 120 turns. Three final scenario pairs were
+The retired-provider release run attempted all 120 turns. Three final scenario pairs were
 hard-blocked after the workspace exhausted its credits, leaving 57 evaluable
 pairs per arm. Reclassified results are:
 
@@ -285,4 +275,5 @@ provider credits are available. The three credit-blocked pairs also make the
 overall provider decision `blocked`, independently of eligibility.
 
 The Claude smoke run completed no evaluable pair because both arms immediately
-hit the organization's monthly spend limit. It likewise has no decision.
+hit the organization's monthly spend limit. It likewise has no decision. These
+results are retained only as historical benchmark material.

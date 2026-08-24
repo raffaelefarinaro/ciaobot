@@ -124,7 +124,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
 | GET, PATCH | `/api/settings/providers` | Read or update provider/service key status and the GitHub-skill refresh setting; credentials are redacted |
-| POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or Codex CLI |
+| POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or opencode CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
 | POST | `/api/integrations/gws/client-secret` | Upload GCP client_secret.json for a profile |
@@ -222,7 +222,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agen
 
 # Create a workspace-owned slash command.
 # Writes commands/<name>.md, mirrors a vault note under memory-vault/Workspace/Commands/,
-# then syncs it into .claude/commands/ plus a Codex .agents/skills/ wrapper.
+# then syncs it into the provider-native command locations.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands" \
   -H 'content-type: application/json' \
   -d '{"name":"decision-record","description":"Turn notes into a decision record.","argument_hint":"<notes>","prompt":"Convert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
@@ -296,7 +296,7 @@ downloads rather than executable inline content.
 
 ```bash
 # Create — title/model/mode/provider all optional.
-# provider is any id from the registry (`claude`, `codex`, `opencode`); see
+# provider is any id from the registry (`claude`, `opencode`); see
 # GET /api/models -> providers[] for the live list and per-provider
 # '' = auto from the project's configured workspace bucket. Legacy
 # configured names. Unknown buckets are rejected unless a workspace config
@@ -318,7 +318,7 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
 
 # Handover — switch model/backend inside the same visible chat.
-# Body keys: provider = claude|codex|opencode, model, messages
+# Body keys: provider = claude|opencode, model, messages
 # (visible rows). Starts the next provider turn as a fresh session seeded
 # with those messages.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/handover" \
@@ -379,7 +379,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # Create Provider Sub-chat.
 # Body keys: parent_turn_index, owner (object with provider, model, label), participant (object), task_prompt (optional), user_authorized (optional).
   -H 'content-type: application/json' \
-  -d '{"parent_turn_index":0,"owner":{"provider":"claude","model":"opus","label":"Claude"},"participant":{"provider":"codex","model":"gpt-4","label":"Codex"},"task_prompt":"Analyze this issue"}'
+  -d '{"parent_turn_index":0,"owner":{"provider":"claude","model":"opus","label":"Claude"},"participant":{"provider":"opencode","model":"provider/model","label":"opencode"},"task_prompt":"Analyze this issue"}'
 
 # Read Sub-chat Events.
 
@@ -528,7 +528,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # provider_default_models, provider_default_thinking, provider_insights_models.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"codex":"gpt-5.6-terra"}}'
+  -d '{"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Project MCP servers (Settings → MCP tab)**
@@ -655,7 +655,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `loops_changed`: a loop was created, edited, started, stopped, or deleted (REST route, Schedules page, or the `loop_*` MCP tools mid-turn). No payload; the client refetches `GET /api/loops`, which is where the computed `running` / `next_run` fields are assembled. Without it a loop created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
 
-Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, `host_unreachable`, and `server_restarting`. A `message` frame that reaches the server always starts its turn: the stream is registered before any socket write, so a client that disconnects right after sending (mobile/webview suspension) still gets the turn, and the reconnecting socket replays the buffered `user_echo` from the broker. The client-mode proxy emits `host_unreachable` when it cannot open the remote host socket; the PWA treats it as one ephemeral reconnecting state with a force-become-host action, never as a chat error. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; Codex structured questions use `question_response {request_id, answers: {question_id: string[]}}` so the answer resolves inside the still-running app-server turn.
+Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, `host_unreachable`, and `server_restarting`. A `message` frame that reaches the server always starts its turn: the stream is registered before any socket write, so a client that disconnects right after sending (mobile/webview suspension) still gets the turn, and the reconnecting socket replays the buffered `user_echo` from the broker. The client-mode proxy emits `host_unreachable` when it cannot open the remote host socket; the PWA treats it as one ephemeral reconnecting state with a force-become-host action, never as a chat error. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; structured questions use `question_response {request_id, answers: {question_id: string[]}}`.
 
 **Image-capability pre-flight**: when a turn carries images and the selected model cannot see them, the server pauses before dispatch and emits `model_capability_question {request_id, missing: "image_input", current_model, candidates: [{id, label, supports_vision?, disabled?}], timeout_s: 30}`. `candidates` leads with the current model (disabled) followed by up to 3 same-backend vision models. The client answers with `capability_response {request_id, action, model_id?}`: `switch` re-dispatches the turn on `model_id` (the chat model is persisted and a `model_changed` event is emitted), `picker` closes the question so the PWA can open the model selector and the user re-sends, and `cancel` (or the 30s timeout) closes the turn with a `status` bubble telling the user the images were not sent. The question is skipped entirely for text-only turns and for unattended (loop/schedule) turns, which close with the bubble instead of waiting.
 
@@ -667,7 +667,7 @@ Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (w
 
 Each user turn carries timing metadata, computed in `ciao/web/project_chats.py` (provider-agnostic) and persisted under `ChatInfo.user_turn_timings` as `{ "<turn_index>": {sent_at, completed_at, duration_ms} }`.
 
-- `GET /api/chats/{chat_id}/messages`: user entries include `sent_at`; the last assistant entry per turn includes `sent_at` (= `completed_at`) and `duration_ms`. Overlay is applied to both Claude SDK and Codex app-server history. Pre-feature chats with no recorded timings get no extra fields. With an `offset` and/or `limit` query param the endpoint returns a `{items, total, offset, limit, hasMore, nextOffset}` envelope instead of a flat array; `offset=0` is the newest tail. Envelope rows carry `i` (absolute index) and long `_thinking` rows are truncated head+tail with `lazy: true`; the full row is fetchable from `GET /api/chats/{chat_id}/messages/part?i=<index>`. Without params the legacy flat array is returned unchanged.
+- `GET /api/chats/{chat_id}/messages`: user entries include `sent_at`; the last assistant entry per turn includes `sent_at` (= `completed_at`) and `duration_ms`. Overlay is applied to provider history. Pre-feature chats with no recorded timings get no extra fields. With an `offset` and/or `limit` query param the endpoint returns a `{items, total, offset, limit, hasMore, nextOffset}` envelope instead of a flat array; `offset=0` is the newest tail. Envelope rows carry `i` (absolute index) and long `_thinking` rows are truncated head+tail with `lazy: true`; the full row is fetchable from `GET /api/chats/{chat_id}/messages/part?i=<index>`. Without params the legacy flat array is returned unchanged.
 - WS `/ws/chat/{chat_id}` `user_echo` event: adds optional `sent_at`.
 - WS `/ws/chat/{chat_id}` `result` event: adds optional `sent_at`, `completed_at`, `duration_ms`.
 

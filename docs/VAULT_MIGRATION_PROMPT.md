@@ -99,14 +99,14 @@ on input it cannot classify, or when you want to decide the mapping yourself.
 > region unwritable — every later memory write fails. Give the shared regions'
 > entries to the workspace they actually describe; leave the other workspace's
 > regions present but empty. Then link `AGENTS.md` to `CLAUDE.md` in each root
-> (`ln -s CLAUDE.md AGENTS.md`), because Codex reads that name.
+> (`ln -s CLAUDE.md AGENTS.md`) so the remaining providers share the guide.
 >
 > **6. Tell the install it is migrated, then rebuild what is derived.** Run the
 > commands; do not hand-edit.
 > ```
 > ciao workspace-reroot --mark-migrated   # records the layout; verifies it first
 > ciao workspace-reroot --repair          # per-root INDEX.md, VOCABULARY.md, search index
-> ciao sync-skills                        # per-root .claude/, .agents/, .codex/ catalogs
+> ciao sync-skills                        # per-root .claude/ and .agents/ catalogs
 > ```
 > The first command is not optional and must come first: `agent_root()` answers
 > "per-root" only when a receipt says so, and `--repair` refuses without one. It

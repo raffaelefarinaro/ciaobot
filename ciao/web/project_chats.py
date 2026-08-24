@@ -76,12 +76,6 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.model_tiers import canonical_tier, is_tier
-from ciao.providers.codex import (
-    CODEX_FABLE_THINKING_LEVEL,
-    CodexProvider,
-    is_codex_fable,
-    codex_collab_tree_counts,
-)
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import (
     OpencodeProvider,
@@ -102,7 +96,6 @@ from ciao.web.chat_broker import (
     remove_pending_list,
     reorder_pending_list,
 )
-from ciao.web.commands import expand_slash_command
 from ciao.web.file_snapshots import SnapshotStore
 
 logger = logging.getLogger(__name__)
@@ -379,9 +372,9 @@ def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
     if "reached your session usage limit" in low:
         return True
-    # Codex reports temporary model saturation as a capacity error rather
-    # than a 429/quota error. Treat it as hourly retryable so the user does
-    # not have to keep the chat open and press Retry manually.
+    # Temporary model saturation is a capacity error rather than a 429/quota
+    # error. Treat it as hourly retryable so the user does not have to keep the
+    # chat open and press Retry manually.
     if "at capacity" in low:
         return True
     if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
@@ -3085,7 +3078,7 @@ class ProjectChatManager:
 
         # Only Claude has a local session-file contract we can probe
         # (a ``<session>.jsonl`` under ``.claude/projects``). Every other
-        # provider (codex, opencode, pi, ...) owns its sessions and resumes
+        # non-Claude provider owns its sessions and resumes
         # them by id through its own server, so treat those as local.
         if chat.provider in ("", "claude"):
             return self._claude_session_exists(
@@ -3165,8 +3158,6 @@ class ProjectChatManager:
             spawned_from_chat_id=spawned_from_chat_id,
             delegation_id=delegation_id,
         )
-        if is_codex_fable(chat_provider, chat_model):
-            chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
         self._chats[cid] = chat
         self._save()
         self._events.publish({"type": "chat_created", "chat": chat.to_dict(local=True)})
@@ -3260,7 +3251,6 @@ class ProjectChatManager:
             raise ValueError(
                 f"Unknown mode '{mode}' (allowed: normal, plan, auto, bypass)"
             )
-        was_codex_fable = is_codex_fable(chat.provider, chat.model)
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
         target_provider = provider or chat.provider
@@ -3327,14 +3317,7 @@ class ProjectChatManager:
             chat.provider = new_provider
         if mode is not None:
             chat.mode = mode  # type: ignore[assignment]
-        chat_is_codex_fable = is_codex_fable(chat.provider, chat.model)
-        if chat_is_codex_fable:
-            chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
-        elif was_codex_fable and thinking_level is None:
-            # Leaving the Fable preset restores the target model's default
-            # effort unless the caller explicitly chose another level.
-            chat.thinking_level = ""
-        elif thinking_level is not None:
+        if thinking_level is not None:
             chat.thinking_level = thinking_level
         self._save()
         if moved_from is not None:
@@ -3603,13 +3586,8 @@ class ProjectChatManager:
         chat.handover_context_pending = True
         chat.provider = provider
         chat.model = resolved_model
-        # Thinking levels are provider-native and don't carry across, except
-        # that the Codex Fable preset is defined as Sol with Ultra effort.
-        chat.thinking_level = (
-            CODEX_FABLE_THINKING_LEVEL
-            if is_codex_fable(provider, resolved_model)
-            else ""
-        )
+        # Thinking levels are provider-native and don't carry across a handover.
+        chat.thinking_level = ""
         chat.session_id = ""
         chat.context_digest = ""
         chat.context_session_id = ""
@@ -3642,9 +3620,8 @@ class ProjectChatManager:
     ) -> None:
         """Drop provider-side session blobs/threads for abandoned chats.
 
-        Claude deletes the SDK JSONL blob. Codex calls ``thread/delete`` so
-        rollouts under ``~/.codex/sessions`` are reclaimed the same way.
-        OpenCode deletes its persisted session through ``DELETE /session/{id}``.
+        Claude deletes the SDK JSONL blob. OpenCode deletes its persisted
+        session through ``DELETE /session/{id}``.
         Provider cleanup is fail-open: the Ciaobot archive remains durable even
         when an external provider is unavailable.
         """
@@ -3663,8 +3640,6 @@ class ProjectChatManager:
             try:
                 if chat.provider == "claude":
                     deleted = self._transcripts.delete_sdk_session_blob(workspace, sid)
-                elif chat.provider == "codex":
-                    deleted = await CodexProvider.delete_thread(workspace, sid)
                 elif chat.provider == "opencode":
                     deleted = await OpencodeProvider.delete_thread(workspace, sid)
                 else:
@@ -3677,7 +3652,7 @@ class ProjectChatManager:
                     chat.chat_id,
                 )
                 continue
-            if chat.provider in {"codex", "opencode"} and not deleted:
+            if chat.provider == "opencode" and not deleted:
                 logger.warning(
                     "Provider returned no cleanup confirmation for %s session %s "
                     "(chat %s)",
@@ -3759,7 +3734,7 @@ class ProjectChatManager:
         """Archive a chat's transcript and mark it as archived.
 
         Also disconnects any live provider and reclaims provider-side session
-        storage (Claude SDK JSONL blob, Codex ``thread/delete``). The markdown
+        storage (Claude SDK JSONL blob or an opencode session). The markdown
         transcript in the vault is the durable record. Active delegate
         subchats are archived as part of the same operation, so a supervisor
         cannot leave its nested work chats running or visible on their own.
@@ -3940,7 +3915,7 @@ class ProjectChatManager:
                     "Failed to pre-filter JSONL for chat %s", chat_id
                 )
                 filtered_jsonl = None
-        elif chat.provider in {"codex", "opencode"}:
+        elif chat.provider == "opencode":
             filtered_jsonl = self._transcripts.current_filtered_jsonl(
                 ctx, chat.provider
             ) or None
@@ -4702,8 +4677,8 @@ class ProjectChatManager:
         Two limits stated plainly. This scopes REACHABILITY, not authority: a
         shared account behind a reachable server still holds that account's full
         authority. And ``disallowed_tools`` is only applied when the chat's
-        provider is ``claude`` (see the guard below); it does NOT constrain codex
-        or opencode chats at all. Closing that non-Claude gap needs a
+        provider is ``claude`` (see the guard below); it does NOT constrain
+        opencode chats at all. Closing that non-Claude gap needs a
         per-provider mechanism and is out of scope.
         """
         if chat.provider != "claude":
@@ -4842,12 +4817,11 @@ class ProjectChatManager:
         resolved one — sending the alias straight through gets rejected by
         that provider's own backend. Fall back to the provider's operator
         default instead (empty is fine: dispatch already treats an empty
-        model as "let the provider pick its own"). Codex's own "fable" is a
-        real, meaningful preset (see CODEX_FABLE_THINKING_LEVEL) rather than
-        a foreign alias, so it is preserved rather than resolved away.
+        model as "let the provider pick its own"). Tier aliases are resolved
+        to the provider's configured default on non-Claude providers.
         """
         resolved = (model or "").strip()
-        if provider != "claude" and is_tier(resolved) and not is_codex_fable(provider, resolved):
+        if provider != "claude" and is_tier(resolved):
             return self._config.default_model_for_provider(provider)
         return _normalize_tier(resolved)
 
@@ -4872,7 +4846,7 @@ class ProjectChatManager:
         which every provider resolves against its own catalog, or a member of
         ``config.claude_models``.
 
-        Providers that discover their own catalog (Codex, opencode) are exempt:
+        Providers that discover their own catalog (opencode) are exempt:
         that catalog is async, so this synchronous validator has nothing to
         check against, and those CLIs reject an unknown id with a clear error on
         the first turn anyway. Keyed on the capability rather than a provider
@@ -4901,8 +4875,6 @@ class ProjectChatManager:
         before a guard fix). Dispatch falls back to the provider default
         instead of failing the turn.
         """
-        if is_codex_fable(chat.provider, chat.model):
-            return CODEX_FABLE_THINKING_LEVEL
         if chat.thinking_level in THINKING_LEVELS.get(chat.provider, ()):
             return chat.thinking_level
         return ""
@@ -5057,7 +5029,7 @@ class ProjectChatManager:
                 outcome.had_error = bool(event.is_error)
                 outcome.effective_model = event.effective_model or chat.model
                 if (
-                    chat.provider in {"codex", "opencode"}
+                    chat.provider == "opencode"
                     and not chat.model
                     and outcome.effective_model
                 ):
@@ -5134,12 +5106,7 @@ class ProjectChatManager:
         if not prefix:
             context_digest = ""
             context_session_id = ""
-        if chat.provider == "codex":
-            provider_prompt = (
-                expand_slash_command(prompt, self._config.workspace_root) or prompt
-            )
-        else:
-            provider_prompt = prompt
+        provider_prompt = prompt
         full_prompt = prefix + provider_prompt if prefix else provider_prompt
         final_display_prompt = prefix + display_prompt if prefix else display_prompt
 
@@ -6248,11 +6215,9 @@ class ProjectChatManager:
                                 if cm_q is not None:
                                     cm_q.pending_question = question_payload
                                     self._save()
-                                # Codex exposes a native blocking app-server
-                                # request. Keep consuming the turn while the
-                                # PWA answers that request in-band. Claude's
-                                # SDK picker still requires the interrupt and
-                                # next-turn answer flow documented above.
+                                # Provider-native requests can be answered in
+                                # band; the Claude SDK picker still requires
+                                # the interrupt and next-turn answer flow.
                                 if event.request_id:
                                     if unattended:
                                         q_provider = self._providers.get(chat_id)
@@ -6920,9 +6885,6 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None or not chat.session_id:
             return
-        if chat.provider == "codex":
-            await self._watch_codex_subagent_completion(chat_id, project_id)
-            return
         if chat.provider == "opencode":
             await self._watch_opencode_subagent_completion(chat_id, project_id)
             return
@@ -6994,48 +6956,6 @@ class ProjectChatManager:
                     # no longer watching, so announce zero. Cancellation by a
                     # replacement watcher skips this: it already owns the slot
                     # and will publish the real count on its first tick.
-                    self._publish_subagent_count(chat_id, project_id, 0)
-            self._background_agents_last.pop(chat_id, None)
-
-    async def _watch_codex_subagent_completion(
-        self, chat_id: str, project_id: str
-    ) -> None:
-        """Poll app-server thread state while Codex collaboration children run."""
-        last_count = -1
-        deadline = time.perf_counter() + 3600
-        try:
-            while time.perf_counter() < deadline:
-                chat = self._chats.get(chat_id)
-                if chat is None or chat.provider != "codex" or not chat.session_id:
-                    break
-                thread = await CodexProvider.read_thread(
-                    self._config.workspace_root, chat.session_id
-                )
-                if thread is None:
-                    break
-                tree = await CodexProvider.read_collab_tree(
-                    self._config.workspace_root, thread
-                )
-                count, had_subagents = codex_collab_tree_counts(tree)
-                if count != last_count:
-                    if count == 0 and last_count > 0:
-                        chat.last_activity_at = _now_iso()
-                        self._save()
-                        # No separate "Background agents finished" push — the
-                        # chat's own result notification covers it; the extra
-                        # generic ping was redundant (user feedback).
-                    self._publish_subagent_count(chat_id, project_id, count, nudged=False)
-                    last_count = count
-                if not had_subagents or count == 0:
-                    break
-                await asyncio.sleep(3)
-        finally:
-            current = self._pending_subagent_watchers.get(chat_id)
-            if current is asyncio.current_task():
-                self._pending_subagent_watchers.pop(chat_id, None)
-                if last_count > 0:
-                    # See the Claude watcher: never leave clients holding a
-                    # count we have stopped maintaining.
                     self._publish_subagent_count(chat_id, project_id, 0)
             self._background_agents_last.pop(chat_id, None)
 
@@ -7755,18 +7675,17 @@ class ProjectChatManager:
             stream.resolve_permission(request_id)
             if not approved:
                 # The refused call never ran, so retract any file card it
-                # already painted. On the SDK providers `request_id` *is* the
-                # tool_use_id; Codex mints its own `codex-N` request ids, so ask
-                # it which tool call the id belongs to or the retraction would
-                # silently match nothing. Done before the provider is told, so
-                # the mapping is still there to look up.
+                # already painted. Custom adapters may use a request id that
+                # differs from the tool id, so resolve it before retracting.
+                # Done before the provider is told, so the mapping is still
+                # there to look up.
                 resolver = getattr(provider, "tool_use_id_for_request", None)
                 retract_id = resolver(request_id) if callable(resolver) else ""
                 stream.deny_tool_use(retract_id or request_id)
 
         if provider_service is None or provider is None:
             return False
-        # Provider adapters with custom permission handling (e.g. Codex)
+        # Provider adapters may expose custom permission handling.
         if hasattr(provider, "send_permission_response"):
             return cast(bool, provider.send_permission_response(request_id, approved))
         # permission_gate is defined on the concrete SDK providers, not on
@@ -7841,8 +7760,8 @@ class ProjectChatManager:
 
     # A provider writes its session title asynchronously, *after* the turn it
     # was derived from: opencode's `title` agent runs once the first exchange
-    # lands, Claude Code writes `aiTitle` after the turn is persisted, and
-    # Codex names the thread on its own schedule. A single read at turn end
+    # lands, and Claude Code writes `aiTitle` after the turn is persisted. A
+    # single read at turn end
     # therefore almost always finds nothing, which left every chat stuck on
     # "New Chat". Poll instead, with a bounded backoff, and fall back to a
     # deterministic truncation so the sidebar never stays on "New Chat".
@@ -7855,7 +7774,7 @@ class ProjectChatManager:
         """If chat title is still the default, read the provider's native title.
 
         Each provider generates its own session title for free (opencode's
-        ``title`` agent, Claude Code's ``aiTitle``, Codex's thread ``name``), so
+        ``title`` agent or Claude Code's ``aiTitle``), so
         there is no separate model call or title-model setting. Returns the new
         title or None if nothing was changed.
 
@@ -7933,10 +7852,7 @@ class ProjectChatManager:
                 info = thread.get("info") if isinstance(thread, dict) else None
                 title = str(info.get("title") or "") if isinstance(info, dict) else ""
                 return _real_title(title)
-            if provider == "codex":
-                codex_thread = await CodexProvider.read_thread(workspace, chat.session_id)
-                if isinstance(codex_thread, dict):
-                    return _real_title(str(codex_thread.get("name") or ""))
+            if provider != "claude":
                 return None
             # Claude Code: custom title wins, else the AI-generated title.
             session_info = get_session_info(chat.session_id, directory=str(workspace))
@@ -7970,25 +7886,6 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None or not chat.session_id:
             return True, False
-        if chat.provider == "codex":
-            deadline = time.perf_counter() + timeout_s
-            had_async = False
-            running = 0
-            while time.perf_counter() < deadline:
-                thread = await CodexProvider.read_thread(
-                    self._config.workspace_root, chat.session_id
-                )
-                if thread is None:
-                    return True, had_async
-                tree = await CodexProvider.read_collab_tree(
-                    self._config.workspace_root, thread
-                )
-                running, had_now = codex_collab_tree_counts(tree)
-                had_async = had_async or had_now
-                if running == 0:
-                    return True, had_async
-                await asyncio.sleep(3)
-            return running == 0, had_async
         if chat.provider == "opencode":
             deadline = time.perf_counter() + timeout_s
             had_async = False
@@ -8118,26 +8015,15 @@ class ProjectChatManager:
                 else getattr(entry, "provider", "")
                 or self.schedule_default_provider(project_id)
             )
-            if classifier_provider == "codex":
-                model = (
-                    fixed_chat.model if fixed_chat is not None
-                    else getattr(entry, "model", "")
-                    or self.schedule_default_model(project_id, classifier_provider)
-                )
-                env = (
-                    self._build_extra_env(fixed_chat)
-                    if fixed_chat is not None
-                    else {"CIAO_PROVIDER": "codex"}
-                )
-                note = None
-            else:
-                insights_model = resolve_insights_model(self._config, workspace)
-                env = {}
-                model, classifier_provider, note = _resolve_insights_call(
-                    self._config,
-                    insights_model,
-                    provider=classifier_provider,
-                )
+            if classifier_provider not in supported_providers():
+                return True
+            insights_model = resolve_insights_model(self._config, workspace)
+            env = {}
+            model, classifier_provider, note = _resolve_insights_call(
+                self._config,
+                insights_model,
+                provider=classifier_provider,
+            )
         except Exception:  # noqa: BLE001
             logger.exception("Schedule attention classifier setup failed; keeping chat visible")
             return True

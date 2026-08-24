@@ -1045,7 +1045,7 @@ def clear_stranded_sessions(runtime_root: Path, chat_ids: list[str]) -> int:
 
 # -- P10.4 applied: give every root its own guide ----------------------------
 
-# The shared guide and its Codex alias both move to the primary root, so history
+# The shared guide and its native alias both move to the primary root, so history
 # follows and the primary's regions are byte-identical to what its sessions read
 # today. They must not be left behind: providers walk UP from cwd for a guide, so
 # a surviving `<install>/CLAUDE.md` would re-inject the primary's memory regions

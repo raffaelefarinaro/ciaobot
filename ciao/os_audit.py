@@ -171,7 +171,7 @@ def audit_skills(workspace_dir: Path) -> dict[str, Any]:
                 )
                 continue
             if is_directory and not child.name.startswith("."):
-                # Canonical skills win, followed by Claude and Codex projections.
+                # Canonical skills win, followed by provider projections.
                 skill_dirs.setdefault(child.name, child)
 
     for name, skill_dir in sorted(skill_dirs.items()):

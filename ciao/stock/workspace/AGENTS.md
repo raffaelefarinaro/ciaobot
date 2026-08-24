@@ -20,11 +20,8 @@ Useful local files:
 - `.runtime/workspaces.json`: logical workspace registry.
 - `.runtime/server_errors.log`: rotating runtime error log.
 - `.runtime/job_runs.jsonl`: recent background automation runs.
-- `.agents/skills/`: Codex workspace skills, including Ciaobot command and
-  named-agent compatibility wrappers.
-- `.codex/agents/` and `.codex/config.toml`: generated native Codex agent
-  definitions, registrations, and project MCP entries; edit `subagents/` and
-  `.mcp.json` instead.
+- `.agents/skills/`: shared workspace skills discovered by the supported
+  runtimes.
 - `.claude/agents/`, `.claude/commands/`, `.claude/skills/`: Claude Code assets.
 - `skills/`, `commands/`, and `subagents/`: canonical workspace-authored assets.
 - `memory-vault/`: durable markdown memory, projects, logs, and references.

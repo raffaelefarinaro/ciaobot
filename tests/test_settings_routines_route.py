@@ -123,15 +123,21 @@ def test_patch_applies_provider_default_models(tmp_path):
     client, config = _make_client(tmp_path)
     resp = client.patch(
         "/api/settings/routines",
-        json={"provider_default_models": {"codex": "gpt-5.6-sol"}},
+        json={"provider_default_models": {"opencode": "anthropic/claude-sonnet-4-6"}},
     )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["provider_default_models"] == {"codex": "gpt-5.6-sol"}
-    assert config.provider_default_models == {"codex": "gpt-5.6-sol"}
+    assert data["provider_default_models"] == {
+        "opencode": "anthropic/claude-sonnet-4-6"
+    }
+    assert config.provider_default_models == {
+        "opencode": "anthropic/claude-sonnet-4-6"
+    }
     fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.settings.provider_default_models == {"codex": "gpt-5.6-sol"}
+    assert fresh.settings.provider_default_models == {
+        "opencode": "anthropic/claude-sonnet-4-6"
+    }
 
 
 def test_patch_applies_provider_routine_models(tmp_path):

@@ -1,6 +1,6 @@
 """Render the Ciaobot core into provider system prompts.
 
-Used by Claude, Codex, and OpenCode at session start. Native provider guide
+Used by Claude and OpenCode at session start. Native provider guide
 loaders read ``CLAUDE.md``/``AGENTS.md`` separately, bounded memory included,
 so nothing here renders the regions. The returned block is appended to Claude
 Code's default system prompt via the SDK's ``SystemPromptPreset`` ``append``

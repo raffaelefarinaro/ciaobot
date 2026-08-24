@@ -6,7 +6,7 @@ export type WorkspaceName = string
  * autocomplete for the providers that ship today while still accepting any id
  * the backend reports, so adding a provider does not mean editing this union.
  */
-export type RuntimeProvider = 'claude' | 'codex' | (string & {})
+export type RuntimeProvider = 'claude' | 'opencode' | (string & {})
 
 /**
  * What a runtime provider supports, mirroring `ProviderCapabilities` in
@@ -271,7 +271,7 @@ export interface ChatMessage {
   file_path?: string
   action?: string
   tool?: string
-  // Codex-native assistant-message phase. Commentary stays in the reasoning
+  // Provider-native assistant-message phase. Commentary stays in the reasoning
   // trace; only final_answer is eligible for the terminal response bubble.
   // Undefined keeps the legacy last-assistant-message inference.
   phase?: 'commentary' | 'final_answer'
@@ -521,27 +521,19 @@ export interface StatusResponse {
 export interface ModelsResponse {
   models: string[]
   default: string
-  // Keyed by provider id: claude, codex, opencode.
+  // Keyed by provider id: claude, opencode.
   provider_models: Record<string, string[]>
   provider_defaults: Record<string, string>
-  // Account-visible Codex models and their app-server metadata.
-  codex_models?: string[]
   // Models reachable through opencode's connected backends, already
   // namespaced as `providerID/modelID`. Empty when nothing is authenticated.
   opencode_models?: string[]
   // Registry-driven provider descriptors, so the PWA never has to hard-code
   // the set of runtime providers. See `ciao/provider_registry.py`.
   providers?: ProviderDescriptor[]
-  codex_model_metadata?: Record<string, {
-    display_name: string
-    description: string
-    default_reasoning_effort: string
-    input_modalities: string[]
-  }>
   model_reasoning_levels?: Record<string, string[]>
   backends?: Record<string, boolean>
-  // Keyed by runtime provider; Claude buckets share the SDK effort levels,
-  // while Codex is additionally narrowed by model_reasoning_levels.
+  // Keyed by runtime provider; Claude and opencode levels may be narrowed by
+  // model_reasoning_levels.
   thinking_levels?: Record<string, string[]>
 }
 

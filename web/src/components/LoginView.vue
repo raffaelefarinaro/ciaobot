@@ -46,7 +46,7 @@
           <ul class="tour-list">
             <li>
               <strong>Bring your own backend.</strong>
-              <span>Use Claude Code, OpenAI Codex, or opencode — which reaches everything else, including local models.</span>
+              <span>Use Claude Code or opencode, which reaches everything else, including local models.</span>
             </li>
             <li>
               <strong>Split your life into workspaces.</strong>
@@ -168,13 +168,10 @@
 
         <div class="form-group">
           <label>AI Provider Choice</label>
-          <span class="hint">Pick one to get started — you can add more providers later in Settings.</span>
+             <span class="hint">Pick one to get started — you can add more providers later in Settings.</span>
           <div class="provider-choices">
             <label class="choice-label">
               <input type="radio" v-model="provider" value="claude" :disabled="loading" /> Claude Code
-            </label>
-            <label class="choice-label">
-              <input type="radio" v-model="provider" value="codex" :disabled="loading" /> OpenAI Codex
             </label>
             <label class="choice-label">
               <input type="radio" v-model="provider" value="opencode" :disabled="loading" /> opencode
@@ -661,9 +658,6 @@ const providerInstruction = computed(() => {
     return status.app_path
       ? 'The desktop app is installed, but Ciaobot drives the CLI. Install it in your Terminal:'
       : 'Not installed yet. Run this in your Terminal to install it:'
-  }
-  if (provider.value === 'codex' && setupStatus.value?.providers?.codex?.auth === 'missing') {
-    return 'Install Codex if needed, then run `ciao auth codex` and refresh this check:'
   }
   if (provider.value === 'opencode' && setupStatus.value?.providers?.opencode?.auth === 'missing') {
     return 'Install opencode if needed, then run `ciao auth opencode` and refresh this check:'

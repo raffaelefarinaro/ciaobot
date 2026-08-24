@@ -396,11 +396,9 @@ def workspace_health(config: Any) -> dict:
             (root / "commands", "Canonical commands directory"),
             (root / ".claude" / "agents", "Generated .claude agents directory"),
             (root / ".claude" / "commands", "Generated .claude commands directory"),
-            (root / ".agents" / "skills", "Generated Codex skills directory"),
-            (root / ".codex" / "agents", "Generated Codex native agents directory"),
-            (root / ".codex" / "config.toml", "Generated Codex agent registrations"),
-            # opencode reads .claude/skills, .agents/skills, AGENTS.md and
-            # CLAUDE.md natively, so only these two directories are generated.
+            (root / ".claude" / "skills", "Generated skills directory"),
+            # OpenCode reads the shared Claude skills catalog, workspace guides,
+            # and its own optional projections natively.
             (root / ".opencode" / "agents", "Generated opencode subagents directory"),
             (root / ".opencode" / "commands", "Generated opencode commands directory"),
         ])
@@ -417,20 +415,20 @@ def workspace_health(config: Any) -> dict:
             )
 
         claude_guide = root / "CLAUDE.md"
-        codex_guide = root / "AGENTS.md"
-        if claude_guide.is_file() and (codex_guide.exists() or codex_guide.is_symlink()):
+        shared_guide = root / "AGENTS.md"
+        if claude_guide.is_file() and (shared_guide.exists() or shared_guide.is_symlink()):
             try:
-                guides_linked = codex_guide.resolve() == claude_guide.resolve()
+                guides_linked = shared_guide.resolve() == claude_guide.resolve()
             except OSError:
                 guides_linked = False
             add(
                 f"guides-linked{id_suffix}",
                 "Linked workspace guides" + suffix,
                 "ok" if guides_linked else "warn",
-                "AGENTS.md links to CLAUDE.md, so Claude Code and Codex share one workspace guide."
+                "AGENTS.md links to CLAUDE.md, so Claude Code and opencode share one workspace guide."
                 if guides_linked
-                else "AGENTS.md is a separate file, so Claude Code and Codex read different workspace instructions.",
-                codex_guide,
+                else "AGENTS.md is a separate file, so Claude Code and opencode read different workspace instructions.",
+                shared_guide,
                 "" if guides_linked else "Merge AGENTS.md into CLAUDE.md, delete AGENTS.md, then run sync-skills to relink.",
             )
 
@@ -473,7 +471,7 @@ def workspace_health(config: Any) -> dict:
             (root / ".claude" / "agents", "agent"),
             (root / ".claude" / "commands", "command"),
             (root / ".claude" / "skills", "skill"),
-            (root / ".agents" / "skills", "Codex skill"),
+            (root / ".agents" / "skills", "provider skill"),
         ]:
             if not link_dir.exists():
                 continue

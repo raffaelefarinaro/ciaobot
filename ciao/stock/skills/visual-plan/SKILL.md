@@ -7,7 +7,7 @@ description: Turn important work into a local, reviewable Markdown plan with an 
 
 Produce a disciplined, local, reviewable plan before implementation begins. Markdown is the canonical plan because it supports comments, editing, history, backlinks, and durable storage. A self-contained HTML companion is optional and answers a specific review question, including a diagram drawn as inline SVG. The plan is the approval gate: research and write it, then stop before source edits until the user approves.
 
-This skill is provider-neutral. It works the same on Claude, Codex, and later providers. It does not depend on any hosted plan application, MDX, or a second review service.
+This skill is provider-neutral. It works the same on Claude and OpenCode. It does not depend on any hosted plan application, MDX, or a second review service.
 
 ## When to use this skill
 

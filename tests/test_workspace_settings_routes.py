@@ -135,7 +135,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     assert pcm.refresh_count == 1
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
-        {"value": "codex", "label": "OpenAI (via Codex)"},
         {"value": "opencode", "label": "opencode"},
     ]
 
@@ -279,7 +278,6 @@ def test_workspace_provider_options_are_the_runtime_providers(tmp_path):
     data = client.get("/api/workspaces").json()
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
-        {"value": "codex", "label": "OpenAI (via Codex)"},
         {"value": "opencode", "label": "opencode"},
     ]
 
@@ -476,7 +474,7 @@ def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
     assert data["auto_update_github_skills"] is False
     assert "sk-anthropic" not in json.dumps(data)
     # The connection rows survive: they are how a provider is signed in.
-    assert set(data["connections"]) == {"claude", "codex", "opencode"}
+    assert set(data["connections"]) == {"claude", "opencode"}
 
     resp = client.patch(
         "/api/settings/providers",

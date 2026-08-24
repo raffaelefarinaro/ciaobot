@@ -220,7 +220,7 @@ def test_literal_secrets_are_dropped_not_copied(tmp_path):
 
 
 def test_local_server_credentials_use_opencode_interpolation(tmp_path):
-    """`${VAR}` is Claude/Codex syntax and opencode passes it through verbatim,
+    """`${VAR}` is another provider's syntax and opencode passes it through verbatim,
     so a projected Notion token arrived as the literal string `${NOTION_TOKEN}`
     and every call 401'd. The remote branch was always right; local servers,
     whose credentials live in `environment`, were not.
@@ -239,21 +239,6 @@ def test_local_server_credentials_use_opencode_interpolation(tmp_path):
     config = json.loads((root / "opencode.json").read_text(encoding="utf-8"))
     assert config["mcp"]["notion"]["environment"] == {"NOTION_TOKEN": "{env:NOTION_TOKEN}"}
     assert "${NOTION_TOKEN}" not in (root / "opencode.json").read_text(encoding="utf-8")
-
-
-def test_codex_keeps_its_own_placeholder_syntax(tmp_path):
-    """The shared helper now has two formatters; Codex must not follow opencode."""
-    from ciao.sync_skills import _codex_mcp_block
-
-    root = _workspace(tmp_path)
-    _write_mcp(root, {
-        "thing": {"command": "npx", "env": {"TOK": "${TOK}"}},
-    })
-
-    rendered, _ = _codex_mcp_block(root)
-
-    assert "${TOK}" in rendered
-    assert "{env:TOK}" not in rendered
 
 
 def test_user_declared_servers_survive(tmp_path):

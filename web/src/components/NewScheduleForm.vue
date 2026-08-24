@@ -130,7 +130,7 @@ const inheritedModelLabel = computed(() => {
     option => option.value === workspace?.default_provider,
   )?.label || workspace?.default_provider || 'provider'
   const model = workspace?.default_model
-    || (workspace?.default_provider === 'codex' ? '' : projectStore.workspaceAppDefaultModel)
+    || projectStore.workspaceAppDefaultModel
     || store.models?.default
     || ''
   return model ? `Inherit ${provider} / ${model}` : `Inherit ${provider} default`

@@ -1,5 +1,7 @@
 # OpenAI Codex CLI provider plan
 
+> Historical, superseded plan. Codex is no longer a Ciaobot runtime provider; this document is retained as implementation history.
+
 Status: implemented and verified (2026-07-11)  
 Research date: 2026-07-10  
 Target repository: `raffaelefarinaro/ciaobot`

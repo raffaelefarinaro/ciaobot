@@ -285,7 +285,7 @@ class CiaoControlPlane:
         mode from model-authored tool arguments would let a normal/auto chat
         manufacture a bypass session without an operator approval. The
         provider enforces the returned mode as its session permission rules;
-        keeping the clamp here also covers Codex and Claude child chats.
+        keeping the clamp here also covers provider child chats.
         """
         parent_mode = self.chat_mode(principal)
         if parent_mode not in {"normal", "plan", "auto", "bypass"}:
@@ -1435,4 +1435,3 @@ class CiaoControlPlane:
             refresh_upstream=refresh_upstream,
         )
         return _ok(asdict(result))
-

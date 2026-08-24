@@ -9,7 +9,7 @@ There is deliberately no ``UserPromptSubmit`` hook. Runtime context (date,
 active workspace, GWS profile, cwd) and vault entity tags are built once by
 ``ciao.context.capsule`` and prepended to the request for every provider, so a
 Claude-only second injection would duplicate them. ``_runtime_lines`` stays
-here because the Codex provider and the Settings context view render the same
+here because the provider and the Settings context view render the same
 block from it.
 
 Kept small and fail-open: any exception becomes a DEBUG log and the

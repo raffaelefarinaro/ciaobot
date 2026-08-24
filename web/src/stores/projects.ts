@@ -282,7 +282,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   // Stable identity for a picker, computable identically from the live
   // `activeQuestions` entry (at resolve time) and from a rebuilt `pending_question`
-  // (at rebuild time). Native providers (Codex) carry a `requestId`; Claude's
+  // (at rebuild time). Some providers carry a `requestId`; Claude's
   // picker has none, so fall back to the question content.
   function questionsSignature(qs: ActiveQuestion[] | undefined): string {
     if (!qs || !qs.length) return ''
@@ -313,7 +313,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (!Array.isArray(parsed?.questions)) return []
       const resolvedRequestId = requestId || String(parsed?.request_id ?? '')
       if (parsed.questions.length === 0) {
-        // Some Codex/Claude-compatible turns emit the AskUserQuestion tool
+        // Some provider turns emit the AskUserQuestion tool
         // with an empty questions array. Do not silently demote that event to
         // a trace row: surface a free-form response so the user can unblock
         // the turn and the provider still receives the native request id.
@@ -4692,7 +4692,7 @@ export const useProjectStore = defineStore('projects', () => {
         // Visible text starts: any pending thinking block has ended, lock it
         // into the timeline so the Reasoning bubble renders it after the turn.
         _commitStreamingThinkingToTimeline(chatId)
-        // Codex starts a new agent-message item when it moves from progress
+        // Some providers start a new agent-message item when moving from progress
         // commentary to the terminal answer. Preserve that boundary instead
         // of concatenating both items into the final response buffer.
         if (
@@ -4869,7 +4869,7 @@ export const useProjectStore = defineStore('projects', () => {
         // trailing thinking/text deltas into the timeline so they render
         // in the correct order.
         _commitStreamingThinkingToTimeline(chatId)
-        // A completed/interrupted Codex turn may legitimately end after a
+        // A completed/interrupted turn may legitimately end after a
         // commentary item with no final answer. Keep that text in the trace;
         // never promote it into the response bubble via the defensive merge.
         //

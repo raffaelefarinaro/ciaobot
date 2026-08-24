@@ -75,19 +75,6 @@ async def test_native_title_opencode_placeholder_is_not_final(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_native_title_codex(monkeypatch) -> None:
-    from ciao.web import project_chats as pc
-
-    manager = _manager(chats={"chat-1": _chat(provider="codex")})
-
-    async def fake_read_thread(_workspace, _sid):
-        return {"name": "Codex Thread Name", "turns": []}
-
-    monkeypatch.setattr(pc.CodexProvider, "read_thread", fake_read_thread)
-    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Codex Thread Name"
-
-
-@pytest.mark.asyncio
 async def test_native_title_claude(monkeypatch) -> None:
     from ciao.web import project_chats as pc
 

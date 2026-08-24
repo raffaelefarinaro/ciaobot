@@ -123,7 +123,7 @@ def test_system_schedule_default_inherits_first_workspace_routing(
             "personal": WorkspaceConfig(
                 name="personal",
                 vault_root="personal",
-                default_provider="codex",
+                default_provider="opencode",
                 default_model="",
             ),
             "work": WorkspaceConfig(
@@ -153,7 +153,7 @@ def test_system_schedule_default_inherits_first_workspace_routing(
     provider, model, workspace = pcm.schedule_effective_routing(entry)
 
     assert workspace == "personal"
-    assert provider == "codex"
+    assert provider == "opencode"
     assert model == ""
 
 
@@ -165,7 +165,7 @@ def test_schedule_inheritance_is_resolved_again_after_workspace_change(
     workspace = WorkspaceConfig(
         name="personal",
         vault_root="personal",
-        default_provider="codex",
+        default_provider="opencode",
         default_model="",
     )
     config = CiaoConfig(
@@ -192,7 +192,7 @@ def test_schedule_inheritance_is_resolved_again_after_workspace_change(
         workspace="personal",
     )
 
-    assert pcm.schedule_effective_routing(entry) == ("codex", "", "personal")
+    assert pcm.schedule_effective_routing(entry) == ("opencode", "", "personal")
 
     workspace.default_provider = "claude"
     workspace.default_model = "sonnet"

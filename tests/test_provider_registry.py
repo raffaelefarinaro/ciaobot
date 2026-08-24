@@ -2,7 +2,7 @@
 
 These tests guard the contract the rest of the app now relies on: every
 descriptor's dotted paths resolve, and the enumerations that used to be
-``{"claude", "codex"}`` literals derive from the registry.
+``{"claude", "opencode"}`` literals derive from the registry.
 """
 
 from __future__ import annotations

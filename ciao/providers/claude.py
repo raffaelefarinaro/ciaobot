@@ -145,8 +145,8 @@ def _is_connection_drop_text(text: str) -> bool:
 # ANTHROPIC_BASE_URL...) or whether it was DNS, a refused connection, a timeout,
 # or auth. We know the endpoint the turn was pointed at, so annotate the error
 # with it and classify the failure. See issues #162 and #178. The annotation
-# helpers are shared with the Codex provider in ``ciao.providers.connect_errors``
-# so every provider a schedule can dispatch through surfaces the same context.
+# Connection-error annotations are shared with the provider layer, so every
+# provider a schedule can dispatch through surfaces the same context.
 from ciao.providers.connect_errors import (  # noqa: E402
     annotate_connection_host as _annotate_connection_host,
 )
@@ -594,8 +594,7 @@ class ClaudeProvider(BaseSDKProvider):
             # on them); they must stay loaded so they remain reachable. The
             # ciaobot server is still injected above, and a server that is
             # unavailable at spawn time already degrades to the legacy surface
-            # in ProjectChatManager. ``request.mcp_required`` is still honored
-            # on the Codex path, which has a non-exclusive per-server flag.
+            # in ProjectChatManager.
 
             # Pre-approve the non-destructive half of our own control plane.
             # Auto mode's classifier escalates every MCP tool that isn't

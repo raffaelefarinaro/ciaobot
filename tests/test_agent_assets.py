@@ -307,7 +307,7 @@ def test_workspace_health_reports_linked_workspace_guides(tmp_path: Path) -> Non
 
 def test_workspace_health_warns_when_workspace_guides_diverge(tmp_path: Path) -> None:
     (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
-    (tmp_path / "AGENTS.md").write_text("# Custom Codex guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Custom runtime guide\n", encoding="utf-8")
 
     data = _client(tmp_path).get("/api/workspace-health").json()
 

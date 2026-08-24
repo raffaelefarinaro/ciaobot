@@ -21,10 +21,6 @@ vi.mock('../../lib/api', () => {
     insights_model: '',
 
     critique_models: '',
-    codex_haiku_model: '',
-    codex_sonnet_model: '',
-    codex_opus_model: '',
-    codex_fable_model: '',
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
@@ -63,7 +59,7 @@ vi.mock('../../lib/api', () => {
       service_keys: {
         OPENAI_API_KEY: {
           label: 'OpenAI voice API key',
-          description: 'Used directly by Ciaobot for cloud transcription and speech, not for Codex login.',
+          description: 'Used directly by Ciaobot for cloud transcription and speech.',
           configured: false,
         },
       },
@@ -78,17 +74,6 @@ vi.mock('../../lib/api', () => {
           protocol: 'Agent SDK ready',
           label: 'Claude Code',
           short_label: 'Claude',
-        },
-        codex: {
-          name: 'codex',
-          ok: true,
-          auth: 'chatgpt',
-          command: 'ciao auth codex',
-          version: 'codex-cli 0.144.0-alpha.4',
-          account: 'ChatGPT account',
-          protocol: 'app-server protocol compatible',
-          label: 'OpenAI Codex',
-          short_label: 'Codex',
         },
         opencode: {
           name: 'opencode',
@@ -184,25 +169,11 @@ vi.mock('../../lib/api', () => {
       default: 'sonnet',
       provider_models: {
         claude: ['haiku', 'sonnet', 'opus', 'fable'],
-        codex: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'],
+        opencode: ['opus', 'sonnet', 'haiku'],
       },
-      provider_defaults: { claude: 'sonnet', codex: 'gpt-5.6-terra' },
-      codex_models: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'],
-      alias_tiers: {
-        codex: {
-          haiku: 'gpt-5.6-luna',
-          sonnet: 'gpt-5.6-terra',
-          opus: 'gpt-5.6-sol',
-          fable: 'gpt-5.6-sol',
-        },
-      },
-      codex_tier_defaults: {
-        haiku: 'gpt-5.6-luna',
-        sonnet: 'gpt-5.6-terra',
-        opus: 'gpt-5.6-sol',
-        fable: 'gpt-5.6-sol',
-      },
-      backends: { codex: true },
+      provider_defaults: { claude: 'sonnet', opencode: 'opus' },
+      opencode_models: ['opus', 'sonnet', 'haiku'],
+      backends: { opencode: true },
     },
     '/api/projects': [],
     '/api/chats': [],
@@ -213,7 +184,6 @@ vi.mock('../../lib/api', () => {
       active: null,
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'codex', label: 'OpenAI (via Codex)' },
         { value: 'opencode', label: 'opencode' },
       ],
     },
@@ -572,13 +542,13 @@ describe('component mount smoke', () => {
     expect(select.exists()).toBe(true)
     // Default keeps the configured model; options are concrete model ids.
     expect(select.findAll('option')[0].text()).toContain('Configured')
-    await select.setValue('gpt-5.6-terra')
+    await select.setValue('opus')
     await failing.find('.btn-run').trigger('click')
     await flushPromises()
 
     expect(api.post).toHaveBeenCalledWith(
       '/api/automation/backfill-insights',
-      { model: 'gpt-5.6-terra' },
+      { model: 'opus' },
     )
     wrapper.unmount()
   })
@@ -605,20 +575,20 @@ describe('component mount smoke', () => {
     // entry routes to that provider's app-server.
     const opusOption = critiqueSelector.findAll('.model-selector__item')
       .find((el) => el.text() === 'opus')
-    const codexOption = critiqueSelector.findAll('.model-selector__item')
-      .find((el) => el.text() === 'codex:opus')
+    const opencodeOption = critiqueSelector.findAll('.model-selector__item')
+      .find((el) => el.text() === 'opencode:opus')
     expect(opusOption).toBeTruthy()
-    expect(codexOption).toBeTruthy()
+    expect(opencodeOption).toBeTruthy()
 
     await opusOption!.trigger('click')
     await flushPromises()
-    await codexOption!.trigger('click')
+    await opencodeOption!.trigger('click')
     await flushPromises()
 
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      critique_models: 'opus,codex:opus',
+      critique_models: 'opus,opencode:opus',
     })
-    expect(wrapper.text()).toContain('codex:opus')
+    expect(wrapper.text()).toContain('opencode:opus')
     wrapper.unmount()
   })
 
@@ -640,7 +610,6 @@ describe('component mount smoke', () => {
 
     const providerOptions = wrapper.findAll('select.routine-input option').map((option) => option.text())
     expect(providerOptions).toContain('Anthropic (via Claude Code)')
-    expect(providerOptions).toContain('OpenAI (via Codex)')
     expect(providerOptions).toContain('opencode')
     // Provider and GWS profile are native selects; Default model uses the
     // custom ModelSelector component, not a third native <select>.
@@ -649,7 +618,7 @@ describe('component mount smoke', () => {
     const providerField = wrapper.findAll('label.settings-field')
       .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
     expect(providerField).toBeTruthy()
-    await providerField!.find('select').setValue('codex')
+    await providerField!.find('select').setValue('opencode')
     await nextTick()
     wrapper.unmount()
   })
@@ -671,7 +640,6 @@ describe('component mount smoke', () => {
       active: 'legacy',
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'codex', label: 'OpenAI (via Codex)' },
         { value: 'opencode', label: 'opencode' },
       ],
     })
@@ -718,14 +686,13 @@ describe('component mount smoke', () => {
       active: 'personal',
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'codex', label: 'OpenAI (via Codex)' },
         { value: 'opencode', label: 'opencode' },
       ],
     })
 
     const patchSpy = vi.spyOn(api, 'patch').mockRejectedValueOnce(Object.assign(
       new Error('HTTP 400'),
-      { payload: { error: 'default_provider must be one of: claude, codex, opencode' } },
+      { payload: { error: 'default_provider must be one of: claude, opencode' } },
     ))
     const router = makeRouter()
     await router.push('/settings/workspaces')
@@ -744,11 +711,11 @@ describe('component mount smoke', () => {
       const result = wrapper.find('.action-result[role="alert"]')
       expect(result.exists()).toBe(true)
       expect(result.classes()).toContain('action-result--error')
-      expect(result.text()).toContain('default_provider must be one of: claude, codex, opencode')
+      expect(result.text()).toContain('default_provider must be one of: claude, opencode')
       const store = (await import('../../stores/projects')).useProjectStore()
       expect(store.toasts).toContainEqual(expect.objectContaining({
         title: 'Workspace "personal" not saved',
-        body: 'default_provider must be one of: claude, codex, opencode',
+        body: 'default_provider must be one of: claude, opencode',
         variant: 'error',
       }))
     } finally {
@@ -772,11 +739,11 @@ describe('component mount smoke', () => {
     const names = wrapper.findAll('.provider-connections .routine-name').map((el) => el.text())
     // Names come from the payload, so a provider the PWA has never heard of
     // still gets its own card rather than another provider's label.
-    expect(names).toEqual(['Claude Code', 'OpenAI Codex', 'opencode'])
+    expect(names).toEqual(['Claude Code', 'opencode'])
 
     // The unauthenticated provider offers Connect but not Log out.
     const rows = wrapper.findAll('.provider-connections .credential-row')
-    const opencodeRow = rows[2]!
+    const opencodeRow = rows[1]!
     expect(opencodeRow.text()).toContain('Not connected')
     const actions = opencodeRow.findAll('.provider-connection-actions button').map((b) => b.text())
     expect(actions).toEqual(['Connect', 'Verify'])
@@ -818,19 +785,19 @@ describe('component mount smoke', () => {
 
     expect(wrapper.text()).toContain('defaults per provider')
     expect(wrapper.text()).not.toContain('model routing')
-    // Codex exposes an editable default-model selector.
-    const codexSelector = wrapper.find('.model-selector')
-    expect(codexSelector.exists()).toBe(true)
-    await codexSelector.find('.model-selector__trigger').trigger('click')
+    // opencode exposes an editable default-model selector.
+    const opencodeSelector = wrapper.find('.model-selector')
+    expect(opencodeSelector.exists()).toBe(true)
+    await opencodeSelector.find('.model-selector__trigger').trigger('click')
     await flushPromises()
-    const codexOption = codexSelector.findAll('.model-selector__item')
-      .find((el) => el.attributes('data-model') === 'gpt-5.6-terra')
-    expect(codexOption).toBeTruthy()
-    await codexOption!.trigger('click')
+    const opencodeOption = opencodeSelector.findAll('.model-selector__item')
+      .find((el) => el.attributes('data-model') === 'opus')
+    expect(opencodeOption).toBeTruthy()
+    await opencodeOption!.trigger('click')
     await flushPromises()
     // Per-provider default models go through the provider_default_models map.
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      provider_default_models: { codex: 'gpt-5.6-terra' },
+      provider_default_models: { opencode: 'opus' },
     })
 
     wrapper.unmount()
@@ -849,7 +816,7 @@ describe('component mount smoke', () => {
 
     // The default execution mode is fixed at auto for every provider; the
     // per-provider "Default mode" selector is gone.
-    const modeSelect = wrapper.find('.routine-select[data-provider="codex"]')
+    const modeSelect = wrapper.find('.routine-select[data-provider="opencode"]')
     expect(modeSelect.exists()).toBe(false)
     expect(wrapper.findAll('span.ws-label').some((el) => el.text() === 'Default mode')).toBe(false)
 
@@ -862,6 +829,16 @@ describe('component mount smoke', () => {
     // /api/settings/routines' backends field. The shared fixture already
     // omits opencode there, so it is "signed out" by default: its
     // "defaults per provider" row must not render at all.
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const originalModels = testApi.getResponse('/api/models') as Record<string, unknown>
+    testApi.setResponse('/api/models', {
+      ...originalModels,
+      provider_models: { claude: ['haiku', 'sonnet', 'opus', 'fable'] },
+      opencode_models: [],
+    })
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -872,12 +849,14 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const rowTitles = wrapper.findAll('.provider-defaults-row .provider-defaults-title').map((el) => el.text())
-    expect(rowTitles).toContain('Anthropic (via Claude Code)')
-    expect(rowTitles).toContain('OpenAI (via Codex)')
-    expect(rowTitles).not.toContain('opencode')
-
-    wrapper.unmount()
+    try {
+      const rowTitles = wrapper.findAll('.provider-defaults-row .provider-defaults-title').map((el) => el.text())
+      expect(rowTitles).toContain('Anthropic (via Claude Code)')
+      expect(rowTitles).not.toContain('opencode')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/models', originalModels)
+    }
   })
 
   it('SettingsView saves routine models by provider', async () => {
@@ -926,7 +905,7 @@ describe('component mount smoke', () => {
     const patchMock = api.patch as unknown as { mock: { calls: Array<[string, unknown]> } }
     const last = patchMock.mock.calls[patchMock.mock.calls.length - 1]
     const body = last[1] as Record<string, string>
-    expect(body.insights_model).toMatch(/^opencode:anthropic\/claude-(opus|sonnet|haiku)-4\.5$/)
+    expect(body.insights_model).toBe('opencode:opus')
 
     wrapper.unmount()
     mockApi.setResponse('/api/models', originalModels)

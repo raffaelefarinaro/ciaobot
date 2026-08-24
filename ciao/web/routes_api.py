@@ -50,7 +50,6 @@ from ciao.workspaces import (
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
-from ciao.providers.codex import CodexProvider
 from ciao.providers.opencode import (
     OpencodeProvider,
     _file_touches as _opencode_file_touches,
@@ -446,7 +445,14 @@ def _strip_image_manifest(content: str) -> str:
 
 
 def _strip_injected_context(content: str) -> str:
-    stripped = _CONTEXT_BLOCK_RE.sub("", content, count=1)
+    # A continuation / handover turn can stack two [CIAO_CONTEXT_BEGIN] blocks
+    # (e.g. stable context + today). Strip them all, not just the first one.
+    stripped = content
+    while True:
+        nxt = _CONTEXT_BLOCK_RE.sub("", stripped, count=1)
+        if nxt == stripped:
+            break
+        stripped = nxt
     if stripped != content:
         return _strip_image_manifest(stripped).strip() or content
     legacy = _strip_legacy_context_prefix(content)
@@ -2244,63 +2250,6 @@ async def create_project_chat(request: Request) -> JSONResponse:
 
 # ── Chats ────────────────────────────────────────────────────────────────
 
-def _codex_reasoning_levels(catalog: list[dict]) -> dict[str, list[str]]:
-    """Per-model reasoning levels from the codex catalog."""
-    levels: dict[str, list[str]] = {}
-    for item in catalog:
-        if item.get("hidden"):
-            continue
-        model_id = str(item.get("model") or item.get("id") or "")
-        if not model_id:
-            continue
-        efforts = item.get("supportedReasoningEfforts")
-        levels[model_id] = [
-            str(option.get("reasoningEffort"))
-            for option in efforts or []
-            if isinstance(option, dict) and option.get("reasoningEffort")
-        ]
-    return levels
-
-
-async def _unsupported_codex_level_error(
-    config, pcm, chat_id: str, body: dict
-) -> JSONResponse | None:
-    """Reject a codex thinking level the target model doesn't support.
-
-    ``update_chat`` validates against the static ``THINKING_LEVELS`` union;
-    the model catalog is authoritative when discovery works, so narrow the
-    check to the target model here. Fails open when the catalog is
-    unavailable or has no levels for the model, leaving the union check as
-    the backstop.
-    """
-    level = body.get("thinking_level")
-    if not level:
-        return None
-    chat = pcm.get_chat(chat_id)
-    if chat is None:
-        return None
-    provider = body.get("provider") or chat.provider
-    if provider != "codex":
-        return None
-    model = body.get("model") or chat.model
-    try:
-        catalog = await CodexProvider.model_catalog(config.workspace_root)
-    except Exception:
-        return None
-    allowed = _codex_reasoning_levels(catalog).get(model)
-    if allowed and level not in allowed:
-        return JSONResponse(
-            {
-                "error": (
-                    f"Unknown thinking level '{level}' for codex model "
-                    f"'{model}' (allowed: {', '.join(allowed)})"
-                )
-            },
-            status_code=400,
-        )
-    return None
-
-
 async def list_all_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     return JSONResponse(pcm.list_chats_dicts())
@@ -2329,11 +2278,6 @@ async def chat_detail(request: Request) -> JSONResponse:
                 {"error": "control_surface must be legacy, mcp, auto, or empty"},
                 status_code=400,
             )
-    level_error = await _unsupported_codex_level_error(
-        request.app.state.config, pcm, chat_id, body
-    )
-    if level_error is not None:
-        return level_error
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2654,205 +2598,9 @@ def _overlay_assistant_timings(
             entries[idx]["duration_ms"] = int(duration)
 
 
-def _codex_content_text(raw: object) -> str:
-    """Extract text from a Codex app-server user-message content array."""
-    if isinstance(raw, str):
-        return raw
-    if not isinstance(raw, list):
-        return ""
-    parts: list[str] = []
-    for block in raw:
-        if isinstance(block, str):
-            parts.append(block)
-        elif isinstance(block, dict) and str(block.get("type") or "") in {
-            "text",
-            "inputText",
-        }:
-            parts.append(str(block.get("text") or ""))
-    return "\n".join(part for part in parts if part)
-
-
-def _strip_codex_command_expansion(content: str) -> str:
-    if not content.startswith("[CIAO_COMMAND_BEGIN]\n"):
-        return content
-    for line in content.splitlines()[1:4]:
-        if not line.startswith("user_input_json="):
-            continue
-        try:
-            original = json.loads(line.split("=", 1)[1])
-        except (json.JSONDecodeError, ValueError):
-            return content
-        return str(original) if isinstance(original, str) else content
-    return content
-
-
-def _render_codex_thread(thread: dict, chat) -> list[dict]:
-    """Render Codex thread items into the provider-neutral PWA row shape."""
-    result: list[dict] = []
-    turns = thread.get("turns")
-    if not isinstance(turns, list):
-        turns = []
-    user_idx = 0
-    for turn in turns:
-        if not isinstance(turn, dict):
-            continue
-        items = turn.get("items")
-        if not isinstance(items, list):
-            continue
-        agent_message_items = [
-            item
-            for item in items
-            if isinstance(item, dict)
-            and item.get("type") == "agentMessage"
-            and str(item.get("text") or "").strip()
-        ]
-        has_final_answer = any(
-            isinstance(item, dict)
-            and item.get("type") == "agentMessage"
-            and str(item.get("phase") or "") == "final_answer"
-            and str(item.get("text") or "").strip()
-            for item in items
-        )
-        fallback_agent_message_id = ""
-        commentary_only = bool(agent_message_items) and all(
-            str(item.get("phase") or "") == "commentary"
-            for item in agent_message_items
-        )
-        if (
-            str(turn.get("status") or "") == "completed"
-            and not has_final_answer
-            and commentary_only
-        ):
-            # A completed Codex turn can contain only a substantive commentary
-            # item. Match the live provider fallback so reopening the chat does
-            # not fold the completed response back into Activity.
-            for item in reversed(items):
-                if (
-                    isinstance(item, dict)
-                    and item.get("type") == "agentMessage"
-                    and str(item.get("text") or "").strip()
-                ):
-                    fallback_agent_message_id = str(item.get("id") or "")
-                    break
-        pending_tools: list[str] = []
-
-        def flush_tools() -> None:
-            if pending_tools:
-                result.append({
-                    "role": "system",
-                    "content": "\n".join(pending_tools),
-                    "tool_name": "_activity",
-                })
-                pending_tools.clear()
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            kind = str(item.get("type") or "")
-            if kind == "userMessage":
-                flush_tools()
-                content = _strip_injected_context(
-                    _codex_content_text(item.get("content"))
-                ).strip()
-                content = _strip_codex_command_expansion(content).strip()
-                if not content:
-                    continue
-                entry: dict = {
-                    "role": "user",
-                    "content": content,
-                    "turn_index": user_idx,
-                }
-                refs = chat.user_turn_images.get(str(user_idx))
-                if refs:
-                    entry["images"] = list(refs)
-                timing = chat.user_turn_timings.get(str(user_idx)) or {}
-                if timing.get("sent_at"):
-                    entry["sent_at"] = timing["sent_at"]
-                if chat.user_turn_unattended.get(str(user_idx)):
-                    entry["unattended"] = True
-                result.append(entry)
-                user_idx += 1
-                continue
-            if kind == "agentMessage":
-                flush_tools()
-                text = str(item.get("text") or "").strip()
-                if text:
-                    entry = {"role": "assistant", "content": text}
-                    phase = str(item.get("phase") or "")
-                    if (
-                        fallback_agent_message_id
-                        and str(item.get("id") or "") == fallback_agent_message_id
-                    ):
-                        phase = "final_answer"
-                    if phase in {"commentary", "final_answer"}:
-                        entry["phase"] = phase
-                    result.append(entry)
-                continue
-            if kind == "fileChange":
-                flush_tools()
-                changes = item.get("changes")
-                for change in changes if isinstance(changes, list) else []:
-                    if not isinstance(change, dict):
-                        continue
-                    file_path = str(change.get("path") or "")
-                    if file_path:
-                        kind_name = str(change.get("kind") or "update").lower()
-                        action = (
-                            "created"
-                            if kind_name in {"add", "create"}
-                            else "edited"
-                        )
-                        result.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": file_path,
-                            "file_path": file_path,
-                            "action": action,
-                            "tool": "Write" if action == "created" else "Edit",
-                        })
-                continue
-            if kind == "commandExecution":
-                command = item.get("command")
-                if isinstance(command, list):
-                    label = " ".join(str(part) for part in command)
-                else:
-                    label = str(command or "")
-                touches = extract_file_touches("Bash", {"command": label})
-                if touches:
-                    flush_tools()
-                    for touch in touches:
-                        result.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": touch["file_path"],
-                            "file_path": touch["file_path"],
-                            "action": touch.get("action") or "touched",
-                            "tool": "Bash",
-                        })
-                else:
-                    pending_tools.append(
-                        f"{_tool_icon('Bash')} Bash {label}".strip()
-                    )
-                continue
-            if kind in {"mcpToolCall", "dynamicToolCall"}:
-                name = str(item.get("tool") or item.get("name") or kind)
-                server = str(item.get("server") or "")
-                label = f"{server}/{name}" if server else name
-                pending_tools.append(f"{_tool_icon(name)} {label}")
-                continue
-            if kind == "collabAgentToolCall":
-                status = str(item.get("status") or "")
-                prompt = str(item.get("prompt") or "").strip()
-                detail = f" {prompt[:180]}" if prompt else ""
-                pending_tools.append(
-                    f"{_tool_icon('Task')} Agent {status}{detail}".strip()
-                )
-        flush_tools()
-    _overlay_assistant_timings(result, chat.user_turn_timings)
-    return result
-
-
-def _render_opencode_thread(thread: dict, chat, *, metadata: bool = True) -> list[dict]:
+def _render_opencode_thread(
+    thread: dict, chat, *, metadata: bool = True, start_user_idx: int = 0
+) -> list[dict]:
     """Render opencode session messages into the provider-neutral PWA row shape.
 
     ``thread`` is :meth:`OpencodeProvider.read_thread`'s ``{"info", "messages"}``
@@ -2862,12 +2610,15 @@ def _render_opencode_thread(thread: dict, chat, *, metadata: bool = True) -> lis
     onto the rows. Pass ``False`` when ``thread`` is a *child* session: its
     turn numbering restarts at 0, so the parent chat's turn metadata does not
     apply to it.
+
+    ``start_user_idx`` offsets per-session user numbering when stitching
+    ``previous_session_ids``.
     """
     messages = thread.get("messages")
     if not isinstance(messages, list):
         messages = []
     result: list[dict] = []
-    user_idx = 0
+    user_idx = int(start_user_idx) if isinstance(start_user_idx, int) else 0
     pending_tools: list[str] = []
 
     def flush_tools() -> None:
@@ -3211,18 +2962,33 @@ async def _assemble_chat_messages(
         current = pcm._transcripts.current_messages(
             ChatContext.for_web(chat_id), getattr(chat, "provider", "claude")
         )
+        if current:
+            return [*handover_messages, *current]
+        archived = _messages_from_archived_transcript(pcm, config, chat)
+        if archived is not None:
+            return [*handover_messages, *archived]
         return [*handover_messages, *current]
 
     provider = getattr(chat, "provider", "claude")
     # Every provider stores its sessions per-cwd, and a chat's cwd is its agent
     # root. Reading with the install root found nothing for any chat created since
-    # the re-rooting — for Claude that rendered an empty conversation, and codex
-    # and opencode were reading from the wrong root for the same reason.
+    # the re-rooting — for Claude and opencode alike.
     _resolver = getattr(pcm, "_agent_root_for_chat", None)
     session_root = Path(
         _resolver(chat_id) if _resolver is not None else config.workspace_root
     )
-    if provider in ("codex", "opencode"):
+    if provider not in {"claude", "opencode"}:
+        current = pcm._transcripts.current_messages(
+            ChatContext.for_web(chat_id), provider
+        )
+        if current:
+            _overlay_assistant_timings(current, chat.user_turn_timings)
+            return [*handover_messages, *current]
+        archived = _messages_from_archived_transcript(pcm, config, chat)
+        if archived is not None:
+            return [*handover_messages, *archived]
+        return list(handover_messages)
+    if provider == "opencode":
         if getattr(chat, "archived", False):
             # An archived chat is read-only and its provider-side session may
             # be gone; serve the vault markdown without paying a provider
@@ -3230,17 +2996,40 @@ async def _assemble_chat_messages(
             archived = _messages_from_archived_transcript(pcm, config, chat)
             if archived is not None:
                 return [*handover_messages, *archived]
+        # Stitch the same lineage Claude uses: each provider keeps its turns
+        # only in the session that wrote them, and ciaobot rotates via
+        # ``_rotate_session_id`` (autocompact / resume-fallback / continuation).
+        # Reading only ``chat.session_id`` blanked every chat that had rotated
+        # — exactly the bug that hid the first turn of chat-a495fc8f.
+        session_ids: list[str] = []
+        seen: set[str] = set()
+        for sid in (*getattr(chat, "previous_session_ids", []), chat.session_id):
+            sid_str = str(sid or "").strip()
+            if not sid_str or sid_str in seen:
+                continue
+            seen.add(sid_str)
+            session_ids.append(sid_str)
         rendered: list[dict] = []
-        if provider == "codex":
-            thread = await CodexProvider.read_thread(session_root, chat.session_id)
-            if thread is not None:
-                rendered = _render_codex_thread(thread, chat)
-        else:
-            opencode_thread = await OpencodeProvider.read_thread(
-                session_root, chat.session_id
-            )
-            if opencode_thread:
-                rendered = _render_opencode_thread(opencode_thread, chat)
+        start_user_idx = 0
+        for sid in session_ids:
+            try:
+                opencode_thread = await OpencodeProvider.read_thread(
+                    session_root, sid
+                )
+                if not opencode_thread:
+                    continue
+                segment = _render_opencode_thread(
+                    opencode_thread, chat, start_user_idx=start_user_idx
+                )
+            except Exception:  # noqa: BLE001 — one missing segment must not blank siblings
+                continue
+            if segment:
+                # Advance the global turn offset by the user-bubble count in
+                # this segment so the next segment's ``turn_index`` + timings
+                # stay aligned with ``chat.user_turn_timings``.
+                user_count = sum(1 for row in segment if row.get("role") == "user")
+                rendered.extend(segment)
+                start_user_idx += user_count
         current = pcm._transcripts.current_messages(
             ChatContext.for_web(chat_id), provider
         )
@@ -3521,13 +3310,12 @@ async def chat_messages(request: Request) -> JSONResponse:
     """Return conversation history for a chat.
 
     Claude chats read the SDK session file via ``get_session_messages``.
-    Codex chats read the app-server thread via ``thread/read``; opencode chats
-    read the session history from a short-lived ``opencode serve``. Both fall
+    opencode chats read the session history from a short-lived ``opencode serve``. Both fall
     back to the durable ``.runtime`` transcript when the provider-side session
     is unreadable.
 
     When a chat is archived, provider-side session storage is deleted to reclaim
-    disk space (Claude SDK blob, Codex thread). In that case we fall back to the
+    disk space (Claude SDK blob or opencode session). In that case we fall back to the
     durable markdown transcript in the vault so the PWA can still render the
     conversation read-only.
 
@@ -3648,40 +3436,6 @@ async def chat_subagents(request: Request) -> JSONResponse:
         return JSONResponse([])
 
     config = request.app.state.config
-    if getattr(chat, "provider", "claude") == "codex":
-        parent = await CodexProvider.read_thread(
-            config.workspace_root, chat.session_id
-        )
-        if parent is None:
-            return JSONResponse([])
-        entries: list[dict] = []
-        for item in await CodexProvider.read_collab_tree(
-            config.workspace_root, parent
-        ):
-            thread = item.get("thread")
-            if not isinstance(thread, dict):
-                continue
-            agent_id = str(item["agent_id"])
-            raw_status = str(item.get("status") or "")
-            if raw_status in {"pendingInit", "running"}:
-                status = "running"
-            elif raw_status in {"errored", "interrupted", "notFound"}:
-                status = "failed"
-            else:
-                status = "completed"
-            entries.append({
-                "agent_id": agent_id,
-                "parent_agent_id": str(item.get("parent_agent_id") or ""),
-                "messages": _render_codex_thread(thread, chat),
-                "tool_use_id": str(item.get("tool_use_id") or ""),
-                "description": str(item.get("description") or ""),
-                "subagent_type": "codex",
-                "is_async": True,
-                "status": status,
-                "turn_index": int(item.get("root_turn_index") or 0),
-            })
-        return JSONResponse(entries)
-
     if getattr(chat, "provider", "claude") == "opencode":
         opencode_entries: list[dict] = []
         provider_service = pcm._providers.get(chat_id)
@@ -3720,6 +3474,9 @@ async def chat_subagents(request: Request) -> JSONResponse:
                 "turn_index": _opencode_child_turn_index(info, chat),
             })
         return JSONResponse(opencode_entries)
+
+    if getattr(chat, "provider", "claude") not in {"claude", "opencode"}:
+        return JSONResponse([])
 
     workspace = str(config.workspace_root)
     resolver = getattr(pcm, "_agent_root_for_chat", None)
@@ -5454,39 +5211,14 @@ async def run_loop_now(request: Request) -> JSONResponse:
 
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
-    # `?refresh=1` bypasses the provider catalog caches. Each provider serves its
-    # own catalog on demand, so there is nothing to warm at startup; this is the
-    # on-demand equivalent, used by the Settings tab so a provider connected in
-    # another window shows up without waiting out the TTL.
+    # `?refresh=1` bypasses the opencode catalog cache. The catalog is served on
+    # demand so a provider connected in another window shows up immediately.
     refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
-    # Independent per-provider discovery calls (each may spin up an app-server
-    # and round-trip an RPC) — sequential awaits summed their latencies, so a
-    # cold cache (the 5-minute TTL lapses between normal chat-creation gaps)
-    # stalled every "New Chat" for as long as both providers took combined.
-    codex_catalog, opencode_catalog = await asyncio.gather(
-        CodexProvider.model_catalog(config.workspace_root, force=refresh),
-        OpencodeProvider.model_catalog(config.workspace_root, force=refresh),
+    opencode_catalog = await OpencodeProvider.model_catalog(
+        config.workspace_root, force=refresh
     )
-    visible_codex = [item for item in codex_catalog if not item.get("hidden")]
-    codex_models = [
-        str(item.get("model") or item.get("id") or "")
-        for item in visible_codex
-        if str(item.get("model") or item.get("id") or "")
-    ]
-    codex_default = next(
-        (
-            str(item.get("model") or item.get("id") or "")
-            for item in visible_codex
-            if item.get("isDefault")
-        ),
-        codex_models[0] if codex_models else "",
-    )
-    # The operator's per-provider default model wins over the catalog default.
-    codex_operator_default = config.default_model_for_provider("codex")
-    if codex_operator_default in codex_models:
-        codex_default = codex_operator_default
     # opencode is bring-your-own-provider: its catalog is whatever backends the
     # user has connected, so an empty list simply means "not signed in yet".
     opencode_models = [
@@ -5497,30 +5229,13 @@ async def list_models(request: Request) -> JSONResponse:
         opencode_default = opencode_operator_default
     else:
         opencode_default = opencode_models[0] if opencode_models else ""
-    # Per-model reasoning-effort variants, merged into the same map the PWA
-    # already reads for Codex so the picker needs no provider-specific branch.
+    # Per-model reasoning-effort variants for opencode.
     opencode_reasoning_levels = {
         str(item.get("model")): list(item.get("variants") or [])
         for item in opencode_catalog
         if item.get("model")
     }
-    model_reasoning_levels = {
-        **opencode_reasoning_levels,
-        **_codex_reasoning_levels(codex_catalog),
-    }
-    codex_model_metadata: dict[str, dict] = {}
-    for item in visible_codex:
-        model_id = str(item.get("model") or item.get("id") or "")
-        if not model_id:
-            continue
-        codex_model_metadata[model_id] = {
-            "display_name": str(item.get("displayName") or model_id),
-            "description": str(item.get("description") or ""),
-            "default_reasoning_effort": str(
-                item.get("defaultReasoningEffort") or ""
-            ),
-            "input_modalities": list(item.get("inputModalities") or []),
-        }
+    model_reasoning_levels = opencode_reasoning_levels
     # Claude Code serves one upstream, so its models are a single list rather
     # than the work/personal split the routing-backend era needed.
     claude_models = list(config.claude_models)
@@ -5535,21 +5250,16 @@ async def list_models(request: Request) -> JSONResponse:
         "default": config.claude_default_model,
         "provider_models": {
             "claude": claude_models,
-            "codex": codex_models,
             "opencode": opencode_models,
         },
         "provider_defaults": {
             "claude": claude_default,
-            "codex": codex_default,
             "opencode": opencode_default,
         },
         "backends": {
             "anthropic": True,
-            "codex": bool(codex_models),
             "opencode": bool(opencode_models),
         },
-        "codex_models": codex_models,
-        "codex_model_metadata": codex_model_metadata,
         "opencode_models": opencode_models,
         # Registry-driven descriptors so the PWA can build its provider list
         # (labels, buckets, capabilities) without a hard-coded union.

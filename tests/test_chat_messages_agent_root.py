@@ -1,6 +1,6 @@
 """A chat's transcript lives under the root the session RAN in.
 
-Claude Code (and codex, and opencode) key their session storage on a slug of the
+Claude Code and opencode key their session storage on a slug of the
 cwd. After the re-rooting a chat runs with its workspace's agent root as cwd, so a
 session started today is recorded under `-Users-me-repos-ciao-work` — while
 `/messages` was reading `-Users-me-repos-ciao`, the install root.

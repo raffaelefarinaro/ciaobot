@@ -1376,7 +1376,7 @@
           </div>
 
           <p class="hint hint--info skill-scope-note">
-            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock, custom, and GitHub/package skills — see
+             Ciaobot runs chats through Claude Code or opencode. Ciaobot-managed skills are synchronized into both runtimes where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock, custom, and GitHub/package skills — see
             <RouterLink to="/settings/providers">Providers</RouterLink> for what each CLI brings on its own.
           </p>
 
@@ -1534,7 +1534,7 @@
             <div>
               <p class="section-title">subagents</p>
               <p class="hint">
-                Shared subagents available to Claude Code and Codex. Custom definitions are saved in <code>subagents/</code>, mirrored into the vault, and synchronized into each CLI's native format.
+                 Shared subagents available to Claude Code and opencode. Custom definitions are saved in <code>subagents/</code>, mirrored into the vault, and synchronized into each runtime's native format.
               </p>
             </div>
             <button class="btn-small" @click="toggleAddSubagent">
@@ -1634,7 +1634,7 @@
             <div>
               <p class="section-title">commands</p>
               <p class="hint">
-                Shared commands available to Claude Code and Codex. Custom commands are saved in <code>commands/</code>, mirrored into the vault, and exposed to Codex through generated skill wrappers.
+                 Shared commands available to Claude Code and opencode. Custom commands are saved in <code>commands/</code>, mirrored into the vault, and exposed through each runtime's native format.
               </p>
             </div>
             <div class="settings-card-header-actions">
@@ -2594,7 +2594,7 @@ function serializeModelList(models: string[]): string {
 }
 
 // A panel entry may name the provider that runs it. Anthropic tiers are bare
-// aliases; Codex and opencode entries carry a `<provider>:` prefix, matching
+// aliases; opencode entries carry a `<provider>:` prefix, matching
 // what `ciao/critique.py::_split_provider` dispatches on.
 const critiqueModelSections = computed<ModelSection[]>(() => {
   const options = routines.value?.model_options
@@ -2602,15 +2602,9 @@ const critiqueModelSections = computed<ModelSection[]>(() => {
   const tiers = options.anthropic || []
   const prefixed = (provider: string, models: string[]) =>
     models.filter((m) => tiers.includes(m)).map((m) => `${provider}:${m}`)
-  const codexModels = workspaceModels.value?.codex_models || []
   const opencodeModels = workspaceModels.value?.opencode_models || []
   return [
     { key: 'anthropic', label: 'Anthropic', models: tiers },
-    {
-      key: 'codex',
-      label: 'OpenAI (via Codex)',
-      models: codexModels.length ? prefixed('codex', tiers) : [],
-    },
     {
       key: 'opencode',
       label: 'opencode',
@@ -2645,22 +2639,7 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
       available: true,
     },
   ]
-  // Codex and opencode can serve routines too (see `_run_codex_oneshot` /
-  // `_run_opencode_oneshot`), so offer them once their catalog is non-empty.
-  const codexModels = parseModelList((
-    workspaceModels.value?.codex_models
-    || workspaceModels.value?.provider_models?.codex
-    || []
-  ).join(','))
-  if (codexModels.length) {
-    sections.push({
-      key: 'codex',
-      label: 'OpenAI (via Codex)',
-      options: codexModels,
-      configurable: true,
-      available: true,
-    })
-  }
+  // opencode can serve routines once its catalog is non-empty.
   const opencodeModels = parseModelList((
     workspaceModels.value?.opencode_models
     || workspaceModels.value?.provider_models?.opencode
@@ -2780,7 +2759,7 @@ async function saveProviderDefaultThinking(provider: AliasProviderKey, value: st
 function serializeRoutineModel(provider: RoutineProviderValue, model: string): string {
   // Runtime-provider models need an explicit qualifier so the backend does not
   // send a global routine override through Claude by default.
-  if (provider === 'codex' || provider === 'opencode') {
+  if (provider === 'opencode') {
     return `${provider}:${model}`
   }
   return model
@@ -2803,7 +2782,7 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; mod
   if (!raw) return { provider: 'automatic', model: '' }
   // 'apfel' is the legacy id from when this shelled out to the apfel CLI.
   if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', model: '' }
-  for (const provider of ['codex', 'opencode'] as const) {
+  for (const provider of ['opencode'] as const) {
     const prefix = `${provider}:`
     if (raw.startsWith(prefix)) {
       return { provider, model: raw.slice(prefix.length) }
@@ -2884,7 +2863,6 @@ function routineModelSummary(key: RoutineModelKey): string {
   }
   if (provider === 'apple') return 'Local (free)'
   const model = routineModelValue(key)
-  if (provider === 'codex') return `OpenAI (via Codex): ${model || 'default'}`
   if (provider === 'opencode') return `opencode: ${model || 'default'}`
   return `${aliasProviderLabel(provider)}: ${model || 'default'}`
 }
@@ -3194,7 +3172,7 @@ async function fetchMcpUsage() {
 
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
-  if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`, {
+  if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'opencode' ? 'opencode' : 'Claude Code'} on this computer?`, {
     title: 'Log out',
     confirmLabel: 'Log out',
     destructive: true,
@@ -3207,7 +3185,7 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
     const result = await api.post<ProviderActionResult>(`/api/settings/providers/${provider}/${action}`)
     if (action === 'connect') {
       providerConnectionResult.value = result.opened
-        ? `Opened ${provider === 'codex' ? 'Codex' : 'Claude Code'} login in Terminal.`
+        ? `Opened ${provider === 'opencode' ? 'opencode' : 'Claude Code'} login in Terminal.`
         : `Run ${result.command} in Terminal.`
     } else if (action === 'logout') {
       providerConnectionResult.value = 'Logged out.'
@@ -3865,7 +3843,7 @@ function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentM
     if (currentModelValue && !models.includes(currentModelValue)) models.push(currentModelValue)
     return [{ ...section, models }]
   }
-  if (provider === 'codex' || provider === 'opencode') {
+  if (provider === 'opencode') {
     const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === provider)
     if (!section) return []
     const models = [...section.models]

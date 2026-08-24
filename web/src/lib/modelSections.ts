@@ -40,15 +40,6 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
     models: orderedUnique(response.models || []),
   })
 
-  const codexModels = orderedUnique(response.codex_models || response.provider_models?.codex || [])
-  if (codexModels.length) {
-    sections.push({
-      key: 'codex',
-      label: 'OpenAI Codex',
-      models: codexModels,
-    })
-  }
-
   // opencode is bring-your-own-provider: its catalog is whatever backends the
   // user connected, already namespaced as `providerID/modelID`.
   const opencodeModels = orderedUnique(

@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS
 from ciao.models import BridgeMode
-from ciao.providers.codex import CodexSettings
 from ciao.providers.opencode import OpencodeSettings
 
 if TYPE_CHECKING:
@@ -479,10 +478,7 @@ class CiaoConfig:
     pwa_host: str = "127.0.0.1"
     gws_default_profile: str = "personal"
     # Per-provider default model for new chats, set from the PWA Settings →
-    # Models tab. A missing entry uses the provider's own catalog default.
-    codex: CodexSettings = field(default_factory=CodexSettings)
-    # Per-provider default model for new chats, same shape and meaning as the
-    # Codex one. Empty means the provider's own default applies.
+    # Models tab. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
     # Post-archive insights extraction: when a chat is archived, run the raw
     # Claude Code session JSONL through a fast cheap model and append a
@@ -1024,8 +1020,8 @@ class CiaoConfig:
                     return workspace_config.default_model
                 if descriptor.default_model_config_key:
                     return str(getattr(self, descriptor.default_model_config_key, "") or "")
-                # A provider with an operator-settable default model (Codex,
-                # opencode) uses it; otherwise "use that provider account's
+                # A provider with an operator-settable default model uses it;
+                # otherwise "use that provider account's
                 # current catalog default": the provider resolves it and the
                 # chat records the effective model.
                 operator_default = self._operator_default_model(descriptor)
@@ -1145,7 +1141,7 @@ class CiaoConfig:
         account's full authority. Second, ``disallowed_tools`` is only applied
         when the chat's provider is ``claude`` (see the ``if chat.provider !=
         "claude": return []`` guard in project_chats); it does NOT constrain
-        codex or opencode chats at all. Closing that non-Claude gap needs a
+         opencode chats at all. Closing that non-Claude gap needs a
         per-provider mechanism and is out of scope here.
 
         When ``.mcp.json`` exists but cannot be parsed, every server any

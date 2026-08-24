@@ -72,7 +72,7 @@ def _client(service: CiaoMcpService) -> TestClient:
         lifespan=lifespan,
     )
     # FastMCP intentionally rejects arbitrary Host headers. This is the same
-    # loopback host used by the managed Claude/Codex process configuration.
+    # loopback host used by the managed Claude/opencode process configuration.
     return TestClient(app, base_url="http://127.0.0.1:18443")
 
 
@@ -196,7 +196,7 @@ def test_plan_mode_rejects_mutation_before_control_plane_call(tmp_path: Path) ->
         chat_id="chat-1",
         project_id="project-1",
         workspace="personal",
-        provider="codex",
+        provider="opencode",
     )
 
     with _client(service) as client:
@@ -297,7 +297,7 @@ def test_usage_aggregates_telemetry_by_tool(tmp_path: Path) -> None:
     service, _control_plane = _service(tmp_path)
     records = [
         {"tool": "memory_read", "status": "ok", "duration_ms": 8, "provider": "claude", "timestamp": "2026-07-19T10:00:00Z"},
-        {"tool": "memory_read", "status": "ok", "duration_ms": 12, "provider": "codex", "timestamp": "2026-07-19T11:00:00Z"},
+        {"tool": "memory_read", "status": "ok", "duration_ms": 12, "provider": "opencode", "timestamp": "2026-07-19T11:00:00Z"},
         {"tool": "vault_search", "status": "error", "error_code": "invalid_request", "duration_ms": 40, "provider": "claude", "timestamp": "2026-07-19T09:00:00Z"},
     ]
     service._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -316,7 +316,7 @@ def test_usage_aggregates_telemetry_by_tool(tmp_path: Path) -> None:
     assert by_tool["memory_read"]["calls"] == 2
     assert by_tool["memory_read"]["errors"] == 0
     assert by_tool["memory_read"]["avg_ms"] == 10
-    assert by_tool["memory_read"]["providers"] == ["claude", "codex"]
+    assert by_tool["memory_read"]["providers"] == ["claude", "opencode"]
     assert by_tool["memory_read"]["last_used"] == "2026-07-19T11:00:00Z"
     assert by_tool["vault_search"]["errors"] == 1
     # Registered-but-never-called tools appear with zero counts.
@@ -339,7 +339,7 @@ def test_schedule_handler_does_not_forward_closed_over_service(tmp_path: Path) -
         chat_id="chat-1",
         project_id="project-1",
         workspace="personal",
-        provider="codex",
+        provider="opencode",
     )
 
     with _client(service) as client:
@@ -403,7 +403,7 @@ async def _assert_current_project_action_is_deferred(action: str) -> None:
         chat_id="chat-1",
         project_id="project-1",
         workspace="personal",
-        provider="codex",
+        provider="opencode",
     )
 
     result = getattr(control_plane, action)(principal, "project-1")
@@ -501,7 +501,7 @@ def _chat_create_principal(**overrides) -> McpPrincipal:
         chat_id="chat-1",
         project_id="project-1",
         workspace="personal",
-        provider="codex",
+        provider="opencode",
     )
     defaults.update(overrides)
     return McpPrincipal(**defaults)
@@ -1094,7 +1094,7 @@ def test_file_surface_returns_honest_signal_fields(tmp_path: Path) -> None:
         chat_id="chat-1",
         project_id="p",
         workspace="personal",
-        provider="codex",
+        provider="opencode",
     )
     result = plane.file_surface(principal, "note.md")
     assert result["ok"] is True

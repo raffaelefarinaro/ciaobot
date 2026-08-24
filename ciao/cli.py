@@ -2827,7 +2827,7 @@ def build_parser() -> argparse.ArgumentParser:
     auth_parser.add_argument(
         "--device-auth",
         action="store_true",
-        help="Use Codex device authorization (useful on a headless machine).",
+        help="Use provider device authorization when supported.",
     )
     auth_parser.set_defaults(func=_auth_command)
 

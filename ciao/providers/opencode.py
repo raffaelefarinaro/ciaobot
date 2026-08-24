@@ -1,6 +1,6 @@
 """opencode provider over the local HTTP + SSE server.
 
-Unlike Claude (in-process SDK) and Codex (stdio JSON-RPC), opencode ships a
+Unlike Claude (in-process SDK), opencode ships a
 real multi-session HTTP server. Ciaobot runs ``opencode serve`` on an ephemeral
 loopback port and drives it over ``httpx``, consuming the ``/event`` SSE stream.
 
@@ -70,8 +70,7 @@ logger = logging.getLogger(__name__)
 
 # Operations Ciaobot cannot work without. Checked against the server's own
 # OpenAPI paths at connect time so an incompatible build fails closed. This is
-# the machine-checkable equivalent of Codex's hand-maintained
-# ``_REQUIRED_PROTOCOL_TOKENS``.
+# the machine-checkable equivalent of the provider's protocol requirements.
 REQUIRED_PATHS: frozenset[str] = frozenset({
     "/global/health",
     "/event",
@@ -88,7 +87,7 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
 })
 
 # The catalog needs a throwaway `opencode serve` (~1-2s), and /api/models is
-# hit on every model-picker open. Cache it like Codex does rather than paying
+# hit on every model-picker open. Cache it rather than paying
 # a server spawn per request.
 _MODEL_CACHE_TTL = 300.0
 # An empty catalog is cached far more briefly: it usually means "nothing
@@ -245,8 +244,7 @@ class OpencodeSettings:
 
     Empty string means "no override": the default falls through to whatever
     model the session's configured provider resolves. Mirrors
-    ``CodexSettings`` so ``AppSettings.provider_default_models`` can drive
-    both the same way.
+    so ``AppSettings.provider_default_models`` can drive it the same way.
     """
 
     default_model: str = ""
@@ -736,7 +734,7 @@ class OpencodeProvider(BaseSDKProvider):
         dynamic_models=True,
         # Reasoning effort is per model (opencode calls it a model `variant`),
         # so the level list is narrowed per model from the catalog rather than
-        # being a fixed ladder — same arrangement as Codex.
+        # being a fixed ladder.
         thinking_levels=True,
         usage=True,
         # opencode is bring-your-own-provider: there is no unified quota or
@@ -795,7 +793,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._usage: dict[str, str] = {}
         self._cost: float | None = None
         # Visible assistant text, accumulated per part so the terminal
-        # ResultEvent can carry the turn's answer (codex-style). `record_turn`
+        # ResultEvent can carry the turn's answer. `record_turn`
         # persists that as the durable transcript's response, so leaving it
         # empty made replayed opencode chats render blank turns (#295).
         # Dict insertion order doubles as the part order.
@@ -1084,8 +1082,8 @@ class OpencodeProvider(BaseSDKProvider):
     async def _register_control_plane(self, request: AgentRequest) -> None:
         """Attach Ciaobot's own MCP server to this chat's opencode process.
 
-        Claude gets this through ``options.mcp_servers`` and Codex through
-        ``-c mcp_servers.ciaobot.*``. opencode takes it over the running
+        Claude gets this through ``options.mcp_servers``. opencode takes it over
+        the running
         server's API, which is what makes the per-chat process worth having:
         the token is scoped to this chat and never written to
         ``opencode.json``, where it would be workspace-wide and on disk.
@@ -1498,7 +1496,7 @@ class OpencodeProvider(BaseSDKProvider):
             await asyncio.sleep(_OPENCODE_RECOVERY_POLL_S)
 
     def _answer_text(self) -> str:
-        """The turn's visible reply, joined across text parts codex-style."""
+        """The turn's visible reply, joined across text parts."""
         parts = (
             "".join(chunks).strip() for chunks in self._answer_parts.values()
         )
@@ -1763,7 +1761,7 @@ class OpencodeProvider(BaseSDKProvider):
             return []
         self._permission_requests[request_id] = pending
         return [PermissionRequestEvent(
-            # `system`, and "Approve use of X?", to match the Claude and Codex
+            # `system`, and "Approve use of X?", to match the Claude
             # providers. A different type and a restated "opencode wants to
             # use bash" rendered as an extra transcript line beside the card.
             type="system",
@@ -1987,7 +1985,7 @@ class OpencodeProvider(BaseSDKProvider):
 
         yield ResultEvent(
             type="result",
-            # A successful turn carries the accumulated answer (codex-style):
+            # A successful turn carries the accumulated answer:
             # `record_turn` persists it as the durable transcript's response,
             # which is what the PWA replays when the session is unreadable.
             result=error or self._answer_text(),
@@ -2008,8 +2006,7 @@ class OpencodeProvider(BaseSDKProvider):
 
         Mirrors opencode's own UI: total turn tokens over the model's declared
         ``limit.context`` from ``GET /provider``. Silent on failure — the field
-        is simply left off the usage payload, matching Claude/Codex where the
-        CLI cannot answer.
+        is simply left off the usage payload when the CLI cannot answer.
         """
         if not self._usage:
             return

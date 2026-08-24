@@ -6,19 +6,6 @@ SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the modu
 
 ## CLI Tools
 
-### `codex`: OpenAI Codex CLI
-
-Codex-backed chats use the official app-server protocol and the account owned by the CLI. Install and authenticate once:
-
-```bash
-npm install -g @openai/codex@latest
-ciao auth codex              # opens the Codex / ChatGPT login flow
-ciao auth codex --device-auth # device-code flow for a headless machine
-codex login status           # credential-free readiness check
-```
-
-The bundled CLI inside the ChatGPT desktop app is detected on macOS as well. Its updates follow the desktop app; standalone installs use `codex update`. `CIAO_CODEX_BIN` can point at an absolute Codex binary when launchd cannot discover it. Readiness also generates the installed app-server schema in a temporary directory and verifies the protocol methods Ciaobot needs, so a logged-in but incompatible CLI is reported as needing an update. Ciaobot gets the account-specific model catalog and reasoning efforts from `model/list`; no OpenAI API key is required for Codex subscription chats. The Ciaobot `fable` preset selects the discovered Sol-family Codex model with Ultra reasoning effort. Ciaobot itself no longer uses an OpenAI API key at all — voice moved on-device and nothing else read it.
-
 ## opencode
 
 ```bash
@@ -57,9 +44,8 @@ fail-open if the provider is unavailable.
 
 `ciao eval` uses the selected provider's existing CLI authentication and the
 same managed chat path as a normal turn. Claude runs require a working Claude
-Code login. Codex runs require `codex login`; no `OPENAI_API_KEY` is needed for
-subscription-backed Codex chats. Live evals may call external tools and spend
-provider tokens, so run the opt-in fixtures in `tests/fixtures/evals/`
+Code login. Live evals may call external tools and spend provider tokens, so
+run the opt-in fixtures in `tests/fixtures/evals/`
 individually and write reports to a disposable directory. Normal pytest and CI
 coverage for the eval framework mocks provider execution and requires no
 provider credentials.
@@ -190,7 +176,7 @@ If a connector's tools don't show up, the fix is on the claude.ai side: toggle t
 
 `n8n_mcp` is not a claude.ai connector. It can be registered in `.mcp.json` as an HTTP MCP server and authenticated with a bearer token read from the `N8N_MCP_TOKEN` env var (never inline the token in `.mcp.json`). `scripts/run-ciao.sh` sources `.env` so ciao-spawned `claude` subprocesses inherit the token. Like the claude.ai connectors, n8n is usually workspace-scoped: add it to the denylist for workspaces where it should not be available.
 
-Project MCP servers in `.mcp.json` are automatically projected into the workspace `.codex/config.toml` by `ciao sync-skills`, so Claude and Codex chats share the same project MCP source. The projection excludes the dynamically injected `ciaobot` server, preserves user-owned Codex tables, and keeps credentials as `${ENV_VAR}` references.
+Project MCP servers in `.mcp.json` are consumed by the provider runtimes from the shared project source. Ciaobot preserves user-owned provider configuration and keeps credentials as `${ENV_VAR}` references.
 
 The one-line macOS installer preserves a configured workspace discovered from
 the current LaunchAgent. On a clean installation it starts the packaged
@@ -204,7 +190,7 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 
 **Required for a configured workspace:** `PWA_AUTH_TOKEN` — the dashboard password. Password protection is on by default; see `PWA_AUTH_REQUIRED` below for the opt-out. `CIAO_PUSH_CONTACT` is optional: leave it empty to run without Web Push notifications until you set a contact in Settings.
 
-`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`CLAUDE.md`, `AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|codex|opencode>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code, Codex, and opencode readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
+`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`CLAUDE.md`, `AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|opencode>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code and opencode readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
 
 **Runtime:** `CIAO_WORKSPACE`, `CIAO_PORT`
 
@@ -212,13 +198,13 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 
 - `CIAO_MCP_ENABLED`: enables the embedded authenticated MCP endpoint and managed-process integration. Default `true`.
 - `CIAO_CONTROL_SURFACE`: `legacy` or `mcp` (default `mcp`). `legacy` preserves CLI/skill/direct-file adapters; `mcp` is fail-closed. `auto` is a per-chat setting, not an env value: a chat left on `auto` reads the promoted per-provider result from `.runtime/control_surface_decision.json` and falls back to `legacy` when there is no promoted winner.
-- `CIAO_MCP_SESSION_TOKEN`: internal, short-lived bearer capability injected only into a Ciaobot-managed Codex app-server process. Ciaobot sets it automatically and excludes it from model-created shell commands; operators must not configure or persist it.
+- `CIAO_MCP_SESSION_TOKEN`: internal, short-lived bearer capability injected only into a Ciaobot-managed provider process. Ciaobot sets it automatically and excludes it from model-created shell commands; operators must not configure or persist it.
 
-The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json` or Codex config: Ciaobot generates a scoped short-lived token and configures its managed Claude Code/Codex child process. See [docs/MCP.md](docs/MCP.md).
+The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json`: Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/MCP.md](docs/MCP.md).
 
 The embedded server pins the Python MCP SDK at `mcp>=1.29.0,<2.0`, bumped for the MCP spec release `2026-07-28`. v1.29.0 is a compatibility release that speaks both the prior wire format and `2026-07-28`; Ciaobot stays on the v1 SDK line and does not migrate to the `2.0.0` rewrite. The `2026-07-28` spec opens a 12-month deprecation window for Roots, Sampling, Logging, and the legacy HTTP+SSE transport. `ciao/mcp_server.py` already runs `stateless_http=True`, `json_response=True`, with no session id and no Roots/Sampling/Elicitation usage, so none of that deprecated surface is in play here.
 
-**Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for Codex. They are not environment variables and should not be configured.
+**Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for a managed provider. They are not environment variables and should not be configured.
 
 **Optional direct-service keys:** none. Every provider owns its own authentication through its own CLI (`ciao auth <provider>`), so Settings → Providers has no API-key fields; Ciaobot consumes no model API key of its own.
 
@@ -232,19 +218,19 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **BigQuery:** `GOOGLE_APPLICATION_CREDENTIALS`
 
-**OpenAI:** Ciaobot does not use an OpenAI API key. Codex chats authenticate through the Codex CLI's own subscription login, and voice is on-device.
+**OpenAI:** Ciaobot does not use an OpenAI API key. OpenAI-compatible models are reached through opencode, and voice is on-device.
 
 **n8n MCP:** `N8N_MCP_TOKEN` (bearer token for the self-hosted `n8n_mcp` HTTP server in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`.
 
-**Notion MCP:** `NOTION_TOKEN` (internal integration secret from https://www.notion.so/profile/integrations, used by the official `@notionhq/notion-mcp-server` stdio MCP registered in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`. `ciao sync-skills` mirrors the project entry into Codex's `.codex/config.toml` automatically. Workspace-scoped: add `mcp__notion` to a workspace's `disallowed_tools` to keep it out of that workspace — for example, to make Notion personal-only, set the **work** workspace's denylist to the harness defaults plus `mcp__notion`. Tools surface as `mcp__notion__*`.
+**Notion MCP:** `NOTION_TOKEN` (internal integration secret from https://www.notion.so/profile/integrations, used by the official `@notionhq/notion-mcp-server` stdio MCP registered in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`. Workspace-scoped: add `mcp__notion` to a workspace's `disallowed_tools` to keep it out of that workspace — for example, to make Notion personal-only, set the **work** workspace's denylist to the harness defaults plus `mcp__notion`. Tools surface as `mcp__notion__*`.
 
 **Provider connections.** Settings → Providers launches, verifies, and logs out
-Claude Code, Codex, and opencode through their own CLIs; Ciaobot stores none of
+Claude Code and opencode through their own CLIs; Ciaobot stores none of
 their credentials, and there are no API-key fields to fill in. Voice and Apple
 Intelligence are on-device and need no provider key.
 
-**Reaching any other model.** Ciaobot talks to exactly three providers: Claude
-Code (Anthropic), Codex (OpenAI), and opencode (everything else). opencode is
+**Reaching any other model.** Ciaobot talks to exactly two providers: Claude
+Code (Anthropic) and opencode (everything else). opencode is
 bring-your-own-provider, so Ollama, OpenRouter, LM Studio, or any
 OpenAI-compatible endpoint is configured *in opencode* — see its own docs — and
 Ciaobot picks it up automatically: `GET /api/models` lists whatever opencode
@@ -255,7 +241,7 @@ panel with no Ciaobot configuration at all.
 This replaces three earlier mechanisms — `CIAO_OLLAMA_*` routing, an
 `OPENROUTER_API_KEY` backend, and user-registered "custom compatible providers"
 in `.ciao/custom_providers.json`. All three worked by pointing the Claude Code or
-Codex CLI at a third-party upstream through `ANTHROPIC_BASE_URL` /
+provider CLI at a third-party upstream through `ANTHROPIC_BASE_URL` /
 `OPENAI_BASE_URL` env injection. Those variables and that file are no longer
 read; leftover values are ignored rather than erroring.
 
@@ -301,7 +287,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 ### Optional env vars
 
-- `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** Execution mode is fixed at `auto` for every provider (Claude Code, Codex, opencode). Auto lets safe reads and edits run silently and asks before destructive operations. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
+- `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** Execution mode is fixed at `auto` for every provider (Claude Code and opencode). Auto lets safe reads and edits run silently and asks before destructive operations. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
 - `PWA_AUTH_REQUIRED`: password protection for the PWA dashboard. **Enabled by default** — an unset value protects the dashboard whenever `PWA_AUTH_TOKEN` is present (without a token there is no password a human could type, so protection stays off until one is set in Settings). Set it to `false` to run unprotected on a machine nobody else can reach; that is the only way to turn protection off, since Settings can only change the password. `ciao setup` writes the value explicitly (`--no-auth` writes `false`).
 - `CIAO_ALLOWED_ORIGINS`: comma-separated extra hostnames/origins accepted for state-changing HTTP and WebSocket handshakes when the app is reached under a host it doesn't bind to (reverse proxy, tunnel, or host alias). Without it, such setups get their `/ws/*` upgrades rejected (403) and live updates stall. A proxy-supplied `X-Forwarded-Host` is honored automatically. Example: `app.example.com,ciao.tailnet.ts.net`.
 - `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button), the `/api/debug/issues` report, and the desktop-app rebuild step in Settings → Restart.
@@ -310,7 +296,6 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
 - `CIAO_WORKSPACE`: filesystem workspace root for operational state, `.runtime/`, `.env`, `.claude/`, `.agents/skills/`, `CLAUDE.md`, and `AGENTS.md`. Default `.`.
-- `CIAO_CODEX_BIN`: optional absolute path to the Codex CLI. Normally unnecessary because Ciaobot checks the login-shell PATH and the macOS ChatGPT app bundle.
 - `CIAO_OPENCODE_BIN`: optional absolute path to the opencode CLI. Normally unnecessary because Ciaobot checks the login-shell PATH.
 - `CIAO_VAULT_ROOT`: durable memory/vault root. Default `<CIAO_WORKSPACE>/memory-vault`. Set this to an external notes folder when operational state should stay out of synced notes.
 - `CIAO_WORKSPACES`: JSON workspace registry. Preferred shape is a list of objects with `name`, `vault_root`, `default_provider`, `default_model`, `disallowed_tools`, and `gws_profile`. `vault_root` is relative to `CIAO_WORKSPACE` unless absolute. It is an internal/setup migration field: fresh setup and ordinary PWA workspace creation derive `<CIAO_VAULT_ROOT>/<name>`, while existing-folder setup preserves the selected root until a model-guided migration updates the registry. Later Settings updates preserve the stored path. If unset, Ciaobot reads `.runtime/workspaces.json`; if that is also missing, Ciaobot bootstraps one registry entry per directory in the vault that looks like a workspace (a folder containing `People/`, `Projects/`, `journal/` or a `MEMORY.md`), falling back to a single `personal` workspace when none do. It used to manufacture `personal` and `work` unconditionally, which left an install unable to re-root: a registered workspace with no vault directory refuses the plan. Schedules assigned to a workspace inherit its current `default_provider` and `default_model` on every run unless an explicit override is stored. Example: `[{"name":"default","vault_root":"memory-vault/default","default_provider":"claude","default_model":"opus","gws_profile":"personal"}]`.
@@ -331,7 +316,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_INSIGHTS_BACKFILL_MAX`: most archives a single backfill run will process when the caller supplies no explicit limit — which is what both the startup job and the Settings → Automations button do. Default `200`. One archive is one model call, so on an aged vault an uncapped run from a single click is hours of work and a large bill; when the cap trims a run, the job record carries `capped_at` and `remaining_after_cap` rather than implying it finished everything. `scripts/backfill_insights.py --limit 0` still opts into a genuinely unbounded pass.
 - `CIAO_TRAJECTORIES_DISABLED`: set to `true`/`yes`/`on` to disable structured trajectory capture after a chat is archived (skills loaded, tools used, errors, decisions). Default enabled. Trajectories are written to `~/.ciao/trajectories/YYYY-MM/<session-id>.json` and mined by the weekly skill-evolution pass.
 - `CIAO_SKILL_EVOLUTION_DISABLED`: set to `true`/`yes`/`on` to hard-disable the weekly skill-evolution pass even if the schedule entry remains. Default enabled. The schedule entry itself is the primary on/off switch.
-- `CIAO_REVIEW_MODELS`: comma-separated list of model IDs for the `adversarial_review` MCP tool (`ciao.critique`). Overrides the default panel. An entry may name the provider that runs it: `codex:<tier>` and `opencode:<tier>` route to those providers' app-servers, and a bare tier alias runs through Claude Code. The default panel lists one voice per signed-in vendor. Runtime-overridable from the PWA (Settings → Models, persisted in `.runtime/app_settings.json` under `critique_models`).
+- `CIAO_REVIEW_MODELS`: comma-separated list of model IDs for the `adversarial_review` MCP tool (`ciao.critique`). Overrides the default panel. An entry may name the provider that runs it: `opencode:<tier>` routes to that provider's app-server, and a bare tier alias runs through Claude Code. The default panel lists one voice per signed-in vendor. Runtime-overridable from the PWA (Settings → Models, persisted in `.runtime/app_settings.json` under `critique_models`).
 - `CIAO_ADVERSARIAL_MODELS`: legacy alias for `CIAO_REVIEW_MODELS`.
 - `CIAO_TRAJECTORY_RETENTION_MONTHS`: number of months of trajectory JSON files to keep under `~/.ciao/trajectories/`. Older `YYYY-MM/` directories are pruned by the skill-evolution pass. Default `6`.
 - `CIAO_MEMORY_CHAR_LIMIT`: advisory cap (chars) on the `ciao:memory` region in the workspace `CLAUDE.md`. Default `2200`. Nothing refuses a write at edit time — `memory_update` writes over the cap and reports `over_cap` with `used_chars` — and `os_audit` plus nightly memory curation report and consolidate when over cap. It was enforced as a hard refusal until 2026-08-20, which made accepting a queued proposal impossible once the region filled up, without shrinking the region.
@@ -349,7 +334,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_PATH`: baked into the launchd plist's `EnvironmentVariables` at setup time so developer-mode subprocesses (npm, node, git) are found despite launchd's minimal default PATH. Not an operator env var; it's a `com.ciao.server.plist.tmpl` placeholder rendered from the user's shell PATH.
 - `CLAUDE_MODELS`: comma-separated list of Anthropic models in the picker. Default `opus,sonnet,haiku,fable`.
 - `CIAO_TITLE_MODEL`: model used to auto-title Anthropic chats. Default `haiku`.
-- `CIAO_TITLE_MODEL_OVERRIDE`: env-level default for the title-model override normally set from the PWA (Settings → Models tab, persisted in `.runtime/app_settings.json`). When set (either way), it wins over `CIAO_TITLE_MODEL`. A `codex:` or `opencode:` prefix routes titles through that provider. Empty = automatic.
+- `CIAO_TITLE_MODEL_OVERRIDE`: env-level default for the title-model override normally set from the PWA (Settings → Models tab, persisted in `.runtime/app_settings.json`). When set (either way), it wins over `CIAO_TITLE_MODEL`. An `opencode:` prefix routes titles through that provider. Empty = automatic.
 - `CIAO_NATIVE_SIDECAR`: absolute path to the `ciaobot-native` binary that backs both on-device voice engines. Normally unset — the engine finds it inside the installed `Ciaobot.app`. Point it at `desktop/src-tauri/binaries/ciaobot-native-aarch64-apple-darwin` to test a locally built sidecar (`npm run build:native` in `desktop/`) without installing the app.
 - Installer and release-build variables: `CIAO_APP_DIR` overrides the per-user app directory, `CIAO_ARCHIVE_NAME` and `CIAO_VERIFIER_NAME` override release asset names, and `CIAO_RELEASE_BASE_URL` selects a private release mirror for an explicit `--version` (the embedded archive signature is still mandatory). `CIAO_BUNDLED_APP` marks the embedded runtime for internal mode detection. `CIAO_PYTHON_ARM64_URL`, `CIAO_PYTHON_ARM64_SHA256`, `CIAO_PYTHON_X86_64_URL`, and `CIAO_PYTHON_X86_64_SHA256` are required only by the release workflow when assembling the embedded runtimes. `CIAO_EXECUTABLE` is a LaunchAgent template token, not an operator environment variable.
 - `CIAO_TRANSCRIPTION_LOCALE`: BCP-47 language for both on-device engines — dictation matches it against the installed dictation languages, and the synthesizer picks a voice for it. Default `en-US`.
@@ -362,13 +347,13 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 ### Injected CLI context variables
 
-The Ciaobot server injects the following environment variables into every spawned agent CLI subprocess (`claude`, `codex app-server`, or `opencode serve`):
+The Ciaobot server injects the following environment variables into every spawned agent CLI subprocess (`claude` or `opencode serve`):
 
 - `CIAO_WORKSPACE`: the filesystem workspace root path. This is operator config forwarded for compatibility; it is not the logical chat workspace.
 - `CIAO_ACTIVE_WORKSPACE`: the logical workspace name derived per turn from `chat -> project -> project.workspace`.
 - `CIAO_ACTIVE_PROJECT`: the active project ID.
 - `CIAO_MODEL`: the model ID configured for the chat.
-- `CIAO_PROVIDER`: the provider name (`claude`, `codex`, or `opencode`).
+- `CIAO_PROVIDER`: the provider name (`claude` or `opencode`).
 - `CIAO_CHAT_ID`: the ID of the active chat.
 - `GWS_PROFILE`: resolved from the active workspace's `gws_profile`, falling back to `GWS_PROFILE` / the default profile.
 - `CLAUDE_CODE_DISABLE_AUTO_MEMORY`: set to `1` to disable Claude Code's native auto-memory system since Ciaobot implements its own memory layer.

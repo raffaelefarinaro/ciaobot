@@ -1,7 +1,7 @@
 """Descriptors for the runtime agent providers Ciaobot can run.
 
 A *runtime provider* is a CLI or SDK that executes a whole agentic turn:
-``claude``, ``codex``, and ``opencode``. Every model Ciaobot can run belongs to
+``claude`` and ``opencode``. Every model Ciaobot can run belongs to
 one of them, and each authenticates itself -- there is no separate notion of a
 model-routing backend layered underneath.
 
@@ -13,7 +13,7 @@ processes that never start a turn.
 
 ``ciao/provider_service.py`` resolves the factories and owns the live provider
 instance; everything that merely needs to *enumerate* or *label* providers
-should read from here instead of repeating a ``{"claude", "codex"}`` literal.
+should read from here instead of repeating a provider-id literal.
 """
 
 from __future__ import annotations
@@ -114,21 +114,6 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         status_probe_path="ciao.setup_status:claude_status_probe",
         thinking_levels=("low", "medium", "high", "xhigh", "max"),
         default_model_config_key="claude_default_model",
-    ),
-    ProviderDescriptor(
-        id="codex",
-        label="OpenAI (via Codex)",
-        short_label="Codex",
-        cli_label="OpenAI Codex",
-        factory_path="ciao.providers.codex:CodexProvider",
-        auth_command_path="ciao.providers.codex:auth_command",
-        system_skills_path="ciao.providers.codex:codex_system_skills",
-        status_probe_path="ciao.setup_status:codex_status_probe",
-        default_model_settings_attr="codex",
-        # The model catalog is authoritative and the API narrows this per
-        # model. This union is the validation fallback when discovery is
-        # unavailable.
-        thinking_levels=("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
     ),
     ProviderDescriptor(
         id="opencode",

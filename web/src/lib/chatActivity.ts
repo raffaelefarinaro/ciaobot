@@ -69,7 +69,7 @@ function isAssistantTextStep(
 
 /** True when a buffered step is substantive assistant answer text that should
  *  render as its own bubble — not an Activity marker (`_activity`/`_thinking`/
- *  `_filecard`, all emitted with role `system`) and not Codex `commentary`
+ *  `_filecard`, all emitted with role `system`) and not provider `commentary`
  *  narration (which stays folded into the reasoning trace). */
 export function isAnswerBubble(
   m: Pick<ChatMessage, 'role' | 'tool_name' | 'phase'>,
@@ -78,7 +78,7 @@ export function isAnswerBubble(
 }
 
 /**
- * Heuristic for Claude mid-turn progress narration (Codex already stamps
+ * Heuristic for Claude mid-turn progress narration (some providers stamp
  * `phase: commentary`). Validated against real Ciao multi-text turns:
  * fold "Now let me…", "Let me…", trailing-colon status lines; keep long
  * updates, blockers/decisions, and answer-shaped openings.
@@ -143,7 +143,7 @@ function shouldRenderAnswerBubble(
  *  turn's outputs/subchats attached).
  *
  *  Substantive assistant text renders as its own message bubble. Claude
- *  progress narration (`Now let me…`, short status lines) and Codex
+ *  progress narration (`Now let me…`, short status lines) and
  *  `phase: commentary` fold into the Activity trace with the tool/thinking
  *  steps between them. Bookkeeping tool calls after the final answer
  *  (`buffer` indices past `finalIdx`) fold into the trace that precedes the
@@ -263,5 +263,4 @@ export function traceSummaryMetaParts(steps: ChatMessage[], subs?: SubagentTrans
   }
   return parts
 }
-
 

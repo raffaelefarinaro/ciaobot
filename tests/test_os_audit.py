@@ -59,12 +59,12 @@ def test_audit_skills_deduplicates_provider_projections(tmp_path: Path) -> None:
     claude_demo.mkdir()
     (claude_demo / "SKILL.md").write_text("# Stale projection\n", encoding="utf-8")
 
-    codex = tmp_path / ".agents" / "skills"
-    codex.mkdir(parents=True)
-    (codex / "demo").symlink_to(canonical, target_is_directory=True)
-    codex_only = codex / "codex-only"
-    codex_only.mkdir()
-    (codex_only / "SKILL.md").write_text("# Codex only\n", encoding="utf-8")
+    agents = tmp_path / ".agents" / "skills"
+    agents.mkdir(parents=True)
+    (agents / "demo").symlink_to(canonical, target_is_directory=True)
+    agents_only = agents / "agents-only"
+    agents_only.mkdir()
+    (agents_only / "SKILL.md").write_text("# Shared agents skill\n", encoding="utf-8")
 
     res = audit_skills(tmp_path)
     assert res["total_skills"] == 2

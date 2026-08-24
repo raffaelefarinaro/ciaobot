@@ -93,7 +93,7 @@ def test_provider_command_entries_reads_native_command_dir(tmp_path: Path) -> No
 
 
 def test_provider_command_entries_ignores_unknown_provider(tmp_path: Path) -> None:
-    assert list_provider_command_entries(tmp_path, "codex") == []
+    assert list_provider_command_entries(tmp_path, "unknown") == []
 
 
 def test_picker_merges_provider_commands_and_deduplicates(tmp_path: Path) -> None:
@@ -123,7 +123,7 @@ def test_picker_merges_provider_commands_and_deduplicates(tmp_path: Path) -> Non
     assert skills == []
 
 
-def test_list_skill_entries_filters_to_provider_install_target(tmp_path: Path) -> None:
+def test_list_skill_entries_uses_current_provider_install_targets(tmp_path: Path) -> None:
     _write_cmd(
         tmp_path / "skills" / "claude-only",
         "SKILL",
@@ -146,7 +146,10 @@ def test_list_skill_entries_filters_to_provider_install_target(tmp_path: Path) -
     )
 
     assert [skill.name for skill in list_skill_entries(tmp_path, "claude")] == ["claude-only"]
-    assert [skill.name for skill in list_skill_entries(tmp_path, "codex")] == ["both"]
+    # opencode can discover both the shared catalog and Claude's projection.
+    assert [skill.name for skill in list_skill_entries(tmp_path, "opencode")] == [
+        "both", "claude-only"
+    ]
 
 
 def test_picker_merges_provider_page_skills_and_deduplicates_workspace_skills(
@@ -165,12 +168,12 @@ def test_picker_merges_provider_page_skills_and_deduplicates_workspace_skills(
     monkeypatch.setattr(
         commands_module,
         "_discover_provider_skill_names",
-        lambda provider: ["browser", "shared"] if provider == "codex" else [],
+        lambda provider: ["browser", "shared"] if provider == "opencode" else [],
     )
 
-    commands, skills = list_picker_entries(tmp_path, "codex")
+    commands, skills = list_picker_entries(tmp_path, "opencode")
 
     assert commands == []
     assert [skill.name for skill in skills] == ["browser", "shared"]
-    assert skills[0].description == "Loaded by OpenAI Codex"
+    assert skills[0].description == "Loaded by opencode"
     assert skills[1].description == "Workspace description"

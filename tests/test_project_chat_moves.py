@@ -251,39 +251,6 @@ async def test_archive_postprocess_runs_insights_for_multiturn_chats(
     assert bool(calls) is expected
 
 
-@pytest.mark.asyncio
-async def test_codex_archive_uses_configured_insights_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pcm = _make_manager(tmp_path)
-    pcm._config.insights_model_override = "opencode:vendor/insights-model"
-    project = pcm.create_project("insights-codex-project", workspace="work")
-    chat = pcm.create_chat(
-        project.project_id, title="codex insights", provider="codex", model="gpt-chat"
-    )
-    calls: list[dict] = []
-
-    async def fake_extract_and_append(**kwargs: object) -> None:
-        calls.append(kwargs)
-
-    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
-
-    pcm.run_archive_postprocess(
-        chat.chat_id,
-        ArchiveOutcome(
-            path=tmp_path / "archive.md",
-            session_id="session-1",
-            turn_count=2,
-            filtered_jsonl="filtered transcript",
-        ),
-        chat,
-        project,
-    )
-    await asyncio.sleep(0)
-
-    assert calls[0]["model"] == "opencode:vendor/insights-model"
-
-
 # ── Empty-chat cleanup ──────────────────────────────────────────────────
 
 
@@ -629,40 +596,12 @@ async def test_archive_route_reports_the_cascade_per_subchat(
     assert "transcript write failed" in rows[bad.chat_id]["error"]
 
 
-async def test_delete_and_archive_reclaim_provider_sessions(
+async def test_delete_and_archive_reclaim_opencode_sessions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("provider-reclaim", workspace="work")
     deleted: list[tuple[str, str]] = []
-
-    async def _fake_codex_delete(_workspace, thread_id: str, command=None) -> bool:
-        deleted.append(("codex", thread_id))
-        return True
-
-    monkeypatch.setattr(
-        "ciao.web.project_chats.CodexProvider.delete_thread",
-        _fake_codex_delete,
-    )
-
-    chat = pcm.create_chat(project.project_id, title="to-delete")
-    chat.provider = "codex"
-    chat.session_id = "thread-delete"
-    chat.user_turn_count = 1
-    assert pcm.delete_chat(chat.chat_id) is True
-    await asyncio.sleep(0)
-    assert deleted == [("codex", "thread-delete")]
-
-    archived = pcm.create_chat(project.project_id, title="to-archive")
-    archived.provider = "codex"
-    archived.session_id = "thread-archive"
-    archived.previous_session_ids = ["thread-archive-old"]
-    await pcm.archive_chat(archived.chat_id)
-    assert deleted == [
-        ("codex", "thread-delete"),
-        ("codex", "thread-archive-old"),
-        ("codex", "thread-archive"),
-    ]
 
     async def _fake_opencode_delete(_workspace, session_id: str) -> bool:
         deleted.append(("opencode", session_id))
@@ -687,39 +626,3 @@ async def test_delete_and_archive_reclaim_provider_sessions(
     opencode_archived.session_id = "opencode-archive-session"
     await pcm.archive_chat(opencode_archived.chat_id)
     assert deleted[-1] == ("opencode", "opencode-archive-session")
-
-
-def test_new_session_reclaims_codex_thread_lineage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("codex-new-session", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="rotate")
-    chat.provider = "codex"
-    chat.session_id = "thread-current"
-    chat.previous_session_ids = ["thread-old"]
-    chat.user_turn_count = 1
-
-    deleted_ids: list[str] = []
-
-    async def _fake_delete(_workspace, thread_id: str, command=None) -> bool:
-        deleted_ids.append(thread_id)
-        return True
-
-    monkeypatch.setattr(
-        "ciao.web.project_chats.CodexProvider.delete_thread",
-        _fake_delete,
-    )
-
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        pcm.new_session(chat.chat_id)
-        loop.run_until_complete(asyncio.sleep(0))
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
-
-    assert deleted_ids == ["thread-old", "thread-current"]
-    assert chat.session_id == ""
-    assert chat.previous_session_ids == []

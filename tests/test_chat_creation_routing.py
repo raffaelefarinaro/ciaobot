@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from ciao.config import CiaoConfig, WorkspaceConfig
-from ciao.providers.codex import CodexSettings
 from ciao.providers.opencode import OpencodeSettings
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -50,24 +49,24 @@ def _config(tmp_path: Path, **kwargs) -> CiaoConfig:
 def test_new_chat_uses_the_requested_model(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
-        codex=CodexSettings(default_model="gpt-5.6-terra"),
+        opencode=OpencodeSettings(default_model="gpt-5.6-terra"),
     )
     manager = _make_manager(tmp_path, config)
     project = manager.create_project("Models", workspace="work")
 
     # An explicit model wins over the provider default.
-    chat = manager.create_chat(project.project_id, model="gpt-5.6-sol", provider="codex")
+    chat = manager.create_chat(project.project_id, model="gpt-5.6-sol", provider="opencode")
     assert chat.model == "gpt-5.6-sol"
 
 
 def test_new_chat_resolves_foreign_alias_without_a_default(tmp_path: Path) -> None:
-    # "sonnet" is Claude Code's own vocabulary; Codex's real backend rejects
+    # "sonnet" is Claude Code's own vocabulary; opencode's real backend rejects
     # it outright. With no operator default configured either, the request
     # resolves to "" (the provider picks its own), not the foreign alias.
     manager = _make_manager(tmp_path, _config(tmp_path))
     project = manager.create_project("No default", workspace="work")
 
-    chat = manager.create_chat(project.project_id, model="sonnet", provider="codex")
+    chat = manager.create_chat(project.project_id, model="sonnet", provider="opencode")
     assert chat.model == ""
 
     # Claude has no operator-settable default; the alias passes through.
@@ -90,7 +89,7 @@ def test_new_chat_uses_app_default_mode_on_every_provider(tmp_path: Path) -> Non
 
     # opencode has no built-in exception: it starts on the env-backed default
     # (auto) like every other provider.
-    for provider in ("opencode", "codex", "claude"):
+    for provider in ("opencode", "claude"):
         chat = manager.create_chat(project.project_id, provider=provider)
         assert chat.mode == "auto", provider
 

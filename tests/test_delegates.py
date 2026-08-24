@@ -828,20 +828,6 @@ def test_delegate_spawn_preserves_non_model_errors(tmp_path: Path) -> None:
     assert "Unknown provider 'bogus'" in str(excinfo.value)
 
 
-def test_create_chat_codex_exemption_only_for_native_ids(tmp_path: Path) -> None:
-    """A bare id on the codex provider stays exempt.
-
-    The native Codex catalog is async, so plain ids pass through to the
-    Codex CLI, which rejects unknown ones with a clear error at the first
-    turn (#259).
-    """
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Delegates", workspace="work")
-
-    chat = manager.create_chat(project.project_id, provider="codex", model="gpt-5.6")
-    assert chat.model == "gpt-5.6"
-
-
 # ── model validation ────────────────────────────────────────────────────
 # Every model now belongs to a runtime provider that owns its own catalog, so
 # validation is a much smaller question than it was under env-routed backends.
@@ -866,7 +852,7 @@ def test_create_chat_accepts_a_tier_alias_and_a_configured_model(tmp_path: Path)
 def test_create_chat_exempts_providers_that_serve_their_own_catalog(
     tmp_path: Path,
 ) -> None:
-    """Codex and opencode discover models asynchronously.
+    """opencode discovers models asynchronously.
 
     A synchronous validator has nothing to check them against, and both CLIs
     reject an unknown id with a clear error on the first turn, so an id Ciaobot
@@ -874,10 +860,7 @@ def test_create_chat_exempts_providers_that_serve_their_own_catalog(
     """
     manager = _make_manager(tmp_path, claude_models=["opus"])
     project = manager.create_project("p", workspace="work")
-    for provider, model in (
-        ("codex", "gpt-5.6-terra"),
-        ("opencode", "some-provider/some-model"),
-    ):
+    for provider, model in (("opencode", "some-provider/some-model"),):
         chat = manager.create_chat(
             project.project_id, provider=provider, model=model
         )

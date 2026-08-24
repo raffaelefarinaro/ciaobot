@@ -307,8 +307,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # error log (asyncio would otherwise log them at ERROR). See issue #163.
     install_asyncio_noise_filter()
 
-    # No model discovery at startup: each provider serves its own catalog on
-    # demand (Codex and opencode) or has a fixed tier vocabulary (Claude Code),
+    # No model discovery at startup: opencode serves its catalog on demand and
+    # Claude Code has a fixed tier vocabulary,
     # so there is no allowlist to warm here.
 
     # Runtime-mutable settings overlay (PWA Settings → Models tab). Applied

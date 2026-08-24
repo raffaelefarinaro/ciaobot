@@ -12,7 +12,7 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. Setup no longer generates the retired rumps agent or `Ciaobot Server.app`; it removes them when an older install left them behind. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
+`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for shared runtime discovery, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. Setup no longer generates the retired rumps agent or `Ciaobot Server.app`; it removes them when an older install left them behind. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
 The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
 
@@ -38,7 +38,6 @@ ciao public-preflight export . /tmp/ciao-public-export
 ciao public-preflight scan /tmp/ciao-public-export --private-patterns /tmp/private-patterns.txt
 ciao package-smoke --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
-ciao auth codex --print-only               # show Codex / ChatGPT login command
 ciao auth opencode --print-only            # show opencode login command
 ciao auth opencode                         # run provider login helper
 ```
@@ -366,7 +365,7 @@ exit code). Exit 0 clean, 1 findings, 2 a region could not be read.
 
 ## Skills, subagents, and slash commands
 
-Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories and projects `.mcp.json` MCP servers into `.codex/config.toml` for Codex chats. The generated MCP block preserves user-owned Codex server tables and copies only environment references, never literal credentials. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
+Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
 
 The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions live in `gws-shared`; only the short profile-wrapper routing rule belongs in the compact core (`ciao/system_prompt.md`).
 
@@ -377,13 +376,13 @@ The stock `visual-plan` skill produces local Markdown plans with an optional sel
 Normal chats send one compact provider-neutral context capsule containing the
 active workspace/project, canonical document, date, retrieval hint, entity
 matches, and unattended-turn marker. Stable routing facts are sent once per
-provider session; handovers use a separate bounded excerpt. Claude, Codex, and
-OpenCode receive the same compact Ciaobot core, while their native
+provider session; handovers use a separate bounded excerpt. Claude and OpenCode
+receive the same compact Ciaobot core, while their native
 `CLAUDE.md`/`AGENTS.md` loaders remain the only source of bounded memory.
 `memory_tool.py` prunes valid expired entries before provider startup and
 exposes `memory_status`/`memory_update` without creating a second memory store.
 
-Edit canonical sources, not the generated `.claude/`, `.agents/`, or `.codex/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
+Edit canonical sources, not the generated `.claude/` or `.agents/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
 
 ## DAG-style schedules (maintainers)
 
@@ -409,7 +408,7 @@ workspace/project/chat access, and have focused protocol plus domain tests.
 Self-affecting operations must defer until the caller chat drains. Provider
 tokens must never enter the model's shell environment or telemetry arguments.
 
-See `docs/MCP.md` for the catalog and Claude/Codex configuration.
+See `docs/MCP.md` for the catalog and provider configuration.
 
 ## Change guidelines
 

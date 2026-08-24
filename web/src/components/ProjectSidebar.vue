@@ -428,7 +428,11 @@
           :aria-pressed="mm.view === 'review'"
           @click="setMemoryView('review')"
         >
-          Review<span v-if="proposals.rows.length" class="view-count">{{ proposals.rows.length }}</span>
+          <!-- Scoped, not the global tally: the workspace toggle directly
+               above scopes the queue, so a global count here claimed items the
+               Review list would not show — 12 next to a selected workspace
+               whose list is empty. -->
+          Review<span v-if="reviewScoped" class="view-count">{{ reviewScoped }}</span>
         </button>
       </div>
 

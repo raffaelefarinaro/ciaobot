@@ -453,9 +453,6 @@ def test_resolve_insights_call_routes_qualified_runtime_provider() -> None:
     assert insights._resolve_insights_call(
         config, "opencode:anthropic/claude-sonnet-4.5"
     ) == ("anthropic/claude-sonnet-4.5", "opencode", None)
-    assert insights._resolve_insights_call(
-        config, "codex:gpt-5.6-terra"
-    ) == ("gpt-5.6-terra", "codex", None)
 
 
 # ── project doc update wiring ────────────────────────────────────────────

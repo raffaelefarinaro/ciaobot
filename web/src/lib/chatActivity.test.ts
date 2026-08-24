@@ -139,14 +139,6 @@ describe('findFinalAnswerIndex', () => {
     expect(findFinalAnswerIndex(buffer)).toBe(2)
   })
 
-  it('respects Codex final_answer phase', () => {
-    const buffer = [
-      text('working', { phase: 'commentary' }),
-      text('Done.', { phase: 'final_answer' }),
-      text('Now tidy up:'),
-    ]
-    expect(findFinalAnswerIndex(buffer)).toBe(1)
-  })
 })
 
 describe('isAnswerBubble', () => {
@@ -229,13 +221,6 @@ describe('buildTurnParts', () => {
     ])
   })
 
-  it('keeps Codex commentary folded in the trace, not promoted to a bubble', () => {
-    const buffer = [text('narration', { phase: 'commentary' }), activity('Read'), text('final')]
-    expect(buildTurnParts(buffer, 2)).toEqual([
-      { kind: 'trace', steps: [buffer[0], buffer[1]] },
-    ])
-  })
-
   it('emits no trailing trace when adjacent text blocks precede the final answer', () => {
     const buffer = [text('t1'), text('t2')]
     expect(buildTurnParts(buffer, 1)).toEqual([
@@ -293,5 +278,4 @@ describe('traceSummaryMeta', () => {
     ])).toBe('2 thoughts · 2 notes · 2 files · 2 subagents')
   })
 })
-
 

@@ -53,9 +53,9 @@ def resolve_insights_model(
     without workspace context fall back to ``config.insights_model``.
 
     ``provider``, when given, is the chat's actual provider; it is passed
-    through to ``default_model_for_workspace`` so a Codex/opencode chat in a
+    through to ``default_model_for_workspace`` so an opencode chat in a
     Claude-default workspace resolves that provider's own default model
-    instead of a Claude tier alias (which those providers cannot run).
+    instead of a Claude tier alias.
     """
     if config.insights_model_override:
         return config.insights_model_override
@@ -170,12 +170,12 @@ def _resolve_insights_call(
     """
     # Routine settings qualify runtime-provider overrides so a global choice
     # is not accidentally sent through Claude (the default one-shot provider).
-    for routed_provider in ("codex", "opencode"):
+    for routed_provider in ("opencode",):
         prefix = f"{routed_provider}:"
         if model.startswith(prefix):
             return model[len(prefix):] or "sonnet", routed_provider, None
 
-    if provider in ("codex", "opencode") and not native_sidecar.is_apple_model(model):
+    if provider == "opencode" and not native_sidecar.is_apple_model(model):
         return model, provider, None
 
     # An insights_model that is itself the sentinel cannot serve as the
@@ -505,7 +505,7 @@ async def extract_and_append(
     must never crash the route or leave the archive corrupted.
 
     The model call goes through ``run_oneshot``, which dispatches to the
-    runtime provider that owns the model (Claude Code, Codex, or opencode) or
+    runtime provider that owns the model (Claude Code or opencode) or
     to the bundled Apple helper.
 
     When ``trajectories_enabled" and ``session_id`` are set, a JSON
@@ -1152,8 +1152,8 @@ async def backfill_insights_task(
         """
         found: list[tuple[Path, str, bool]] = []
         # Sorted for a deterministic order (oldest first / alphabetic).
-        # All providers (claude, opencode, codex) — the previous
-        # `*/claude/*.md` made opencode/codex transcripts invisible to
+        # All providers (claude and opencode) — the previous
+        # `*/claude/*.md` made opencode transcripts invisible to
         # backfill and to the scheduled insights run.
         archives = sorted(base.glob("*/*/*.md"))
         done = 0

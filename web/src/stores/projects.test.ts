@@ -1637,192 +1637,7 @@ describe('optimistic user bubble reconciliation', () => {
   })
 })
 
-describe('Codex structured questions', () => {
-  test('answers a native request inside the active websocket turn', () => {
-    const store = useProjectStore()
-    const chatId = 'codex-chat'
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Codex',
-      model: 'gpt-test',
-      provider: 'codex',
-      mode: 'auto',
-      session_id: 'thread-1',
-      created_at: '',
-      archived: false,
-    }]
-    store.connectWs(chatId)
-    const socket = fakeSockets[0]
-    socket.onmessage?.({
-      data: JSON.stringify({
-        type: 'tool_use',
-        tool_name: 'AskUserQuestion',
-        request_id: 'codex-1',
-        tool_input: JSON.stringify({
-          questions: [{
-            id: 'choice',
-            header: 'Choice',
-            question: 'Pick one',
-            isOther: false,
-            isSecret: false,
-            options: [{ label: 'A', description: 'first' }],
-          }],
-        }),
-      }),
-    })
-
-    expect(store.activeQuestions[chatId][0]).toMatchObject({
-      id: 'choice',
-      requestId: 'codex-1',
-      allowOther: false,
-      question: 'Pick one',
-    })
-
-    store.respondQuestion(chatId, 'codex-1', { choice: ['A'] })
-
-    expect(store.activeQuestions[chatId]).toBeUndefined()
-    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
-      type: 'question_response',
-      request_id: 'codex-1',
-      answers: { choice: ['A'] },
-    }))
-  })
-
-  test('does not resurrect an answered picker from a stale server snapshot', async () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'codex-stale'
-    // The persisted payload carries the request id, exactly as the backend
-    // embeds it into pending_question for native providers.
-    const pending = JSON.stringify({
-      request_id: 'codex-1',
-      questions: [{
-        id: 'choice',
-        header: 'Choice',
-        question: 'Pick one',
-        isOther: false,
-        options: [{ label: 'A', description: 'first' }],
-      }],
-    })
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Codex',
-      model: 'gpt-test',
-      provider: 'codex',
-      mode: 'auto',
-      session_id: 'thread-1',
-      created_at: '',
-      archived: false,
-      pending_question: pending,
-    }]
-    store.activeChatId = chatId
-    store.connectWs(chatId)
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'tool_use',
-        tool_name: 'AskUserQuestion',
-        request_id: 'codex-1',
-        tool_input: JSON.stringify({
-          questions: [{
-            id: 'choice',
-            header: 'Choice',
-            question: 'Pick one',
-            isOther: false,
-            options: [{ label: 'A', description: 'first' }],
-          }],
-        }),
-      }),
-    })
-    expect(store.activeQuestions[chatId]).toHaveLength(1)
-
-    store.respondQuestion(chatId, 'codex-1', { choice: ['A'] })
-    expect(store.activeQuestions[chatId]).toBeUndefined()
-
-    // A poll/reconnect races the server clear: the snapshot still carries the
-    // now-answered pending_question. loadMessages runs rebuildPendingQuestion,
-    // which must refuse to bring the picker back.
-    store.chats[0].pending_question = pending
-    await store.loadMessages(chatId)
-    expect(store.activeQuestions[chatId]).toBeUndefined()
-  })
-
-  test('rebuilds a genuinely new question after an earlier one was answered', async () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'codex-next'
-    const mkPayload = (rid: string) => JSON.stringify({
-      request_id: rid,
-      questions: [{ id: 'choice', header: 'Choice', question: 'Pick one', options: [{ label: 'A' }] }],
-    })
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Codex',
-      model: 'gpt-test',
-      provider: 'codex',
-      mode: 'auto',
-      session_id: 'thread-1',
-      created_at: '',
-      archived: false,
-    }]
-    store.activeChatId = chatId
-    store.connectWs(chatId)
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'tool_use',
-        tool_name: 'AskUserQuestion',
-        request_id: 'codex-1',
-        tool_input: mkPayload('codex-1'),
-      }),
-    })
-    store.respondQuestion(chatId, 'codex-1', { choice: ['A'] })
-    expect(store.activeQuestions[chatId]).toBeUndefined()
-
-    // A distinct later question (new request id) must still surface on rebuild.
-    store.chats[0].pending_question = mkPayload('codex-2')
-    await store.loadMessages(chatId)
-    expect(store.activeQuestions[chatId]?.[0]).toMatchObject({ requestId: 'codex-2' })
-  })
-
-  test('chatNeedsInput reflects live and persisted AskUserQuestion state', () => {
-    const store = useProjectStore()
-    const chatId = 'question-chat'
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Question',
-      model: 'gpt-test',
-      provider: 'codex',
-      mode: 'auto',
-      session_id: 'thread-1',
-      created_at: '',
-      archived: false,
-      pending_question: JSON.stringify({
-        questions: [{ id: 'q1', question: 'Pick one', options: [{ label: 'A' }] }],
-      }),
-    }]
-
-    expect(store.chatNeedsInput(chatId)).toBe(true)
-
-    store.activeQuestions[chatId] = [{
-      id: 'q1',
-      question: 'Pick one',
-      header: '',
-      multiSelect: false,
-      allowOther: false,
-      isSecret: false,
-      requestId: 'req-1',
-      options: [{ label: 'A', description: '' }],
-    }]
-    expect(store.chatNeedsInput(chatId)).toBe(true)
-
-    delete store.activeQuestions[chatId]
-    store.chats[0].pending_question = ''
-    expect(store.chatNeedsInput(chatId)).toBe(false)
-  })
-
+describe('provider-neutral input state', () => {
   test('chatNeedsInput reflects live and persisted permission-approval state', () => {
     const store = useProjectStore()
     const chatId = 'approval-chat'
@@ -1983,7 +1798,7 @@ describe('Codex structured questions', () => {
       project_id: 'p1',
       title: 'Empty question',
       model: 'gpt-test',
-      provider: 'codex',
+       provider: 'opencode',
       mode: 'auto',
       session_id: 'thread-1',
       created_at: '',
@@ -1995,7 +1810,7 @@ describe('Codex structured questions', () => {
       data: JSON.stringify({
         type: 'tool_use',
         tool_name: 'AskUserQuestion',
-        request_id: 'codex-empty-1',
+         request_id: 'question-empty-1',
         tool_input: JSON.stringify({ questions: [] }),
       }),
     })
@@ -2004,20 +1819,20 @@ describe('Codex structured questions', () => {
     expect(store.activeQuestions[chatId][0]).toMatchObject({
       id: '__freeform__',
       allowOther: true,
-      requestId: 'codex-empty-1',
+       requestId: 'question-empty-1',
     })
     expect(store.activeQuestions[chatId][0].question).toContain('needs your input')
   })
 
-  test('surfaces approval requests and preserves Codex quota metadata', () => {
+  test('surfaces approval requests and preserves quota metadata', () => {
     const store = useProjectStore()
-    const chatId = 'codex-gates'
+    const chatId = 'provider-gates'
     store.chats = [{
       chat_id: chatId,
       project_id: 'p1',
-      title: 'Codex',
+      title: 'Provider',
       model: 'gpt-test',
-      provider: 'codex',
+      provider: 'opencode',
       mode: 'normal',
       session_id: 'thread-1',
       created_at: '',
@@ -2194,86 +2009,6 @@ describe('image-capability questions', () => {
     store.sendMessage(chatId, 'hello')
 
     expect(store.activeCapabilityQuestions[chatId]).toBeUndefined()
-  })
-})
-
-describe('Codex assistant message phases', () => {
-  test('keeps commentary in the trace and the final answer separate', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'codex-phases'
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Codex phases',
-      model: 'gpt-test',
-      provider: 'codex',
-      mode: 'normal',
-      session_id: 'thread-1',
-      created_at: '',
-      archived: false,
-    }]
-    store.connectWs(chatId)
-    const socket = fakeSockets[0]
-
-    socket.onmessage?.({ data: JSON.stringify({
-      type: 'text_delta',
-      text: "I'll check that now.",
-      phase: 'commentary',
-    }) })
-    socket.onmessage?.({ data: JSON.stringify({
-      type: 'text_delta',
-      text: 'Done.',
-      phase: 'final_answer',
-    }) })
-    socket.onmessage?.({ data: JSON.stringify({
-      type: 'result',
-      text: 'Done.',
-      is_error: false,
-      effective_model: 'gpt-test',
-      usage: {},
-      session_id: 'thread-1',
-    }) })
-
-    expect(store.messages[chatId].map(message => ({
-      content: message.content,
-      phase: message.phase,
-    }))).toEqual([
-      { content: "I'll check that now.", phase: 'commentary' },
-      { content: 'Done.', phase: 'final_answer' },
-    ])
-  })
-
-  test('renders a commentary-only completed turn as its fallback final', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'codex-commentary-fallback'
-    store.connectWs(chatId)
-    const socket = fakeSockets[0]
-
-    socket.onmessage?.({ data: JSON.stringify({
-      type: 'text_delta',
-      text: 'The checks completed successfully.',
-      phase: 'commentary',
-    }) })
-    socket.onmessage?.({ data: JSON.stringify({
-      type: 'result',
-      text: 'The checks completed successfully.',
-      fallback_final: true,
-      is_error: false,
-      effective_model: 'gpt-test',
-      usage: {},
-      session_id: 'thread-fallback',
-    }) })
-
-    expect(store.messages[chatId].map(message => ({
-      content: message.content,
-      phase: message.phase,
-    }))).toEqual([{
-      content: 'The checks completed successfully.',
-      phase: 'final_answer',
-    }])
-    expect(store.streaming[chatId]).toBe(false)
   })
 })
 

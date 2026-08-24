@@ -81,7 +81,7 @@ def test_prompt_prefix_reads_the_top_level_entity_index(tmp_path: Path) -> None:
     `vault-index --write` writes exactly one index, at the top-level vault
     root. Passing the per-workspace vault root here made `find_entities` read
     a non-existent (in practice, a stale empty stub) index, so every PWA turn
-    silently matched nothing while the Codex provider path still worked.
+    silently matched nothing while another provider path still worked.
     """
     vault = tmp_path / "memory-vault"
     (vault / "personal").mkdir(parents=True)

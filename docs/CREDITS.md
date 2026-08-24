@@ -5,7 +5,11 @@ Ciaobot is glue around a lot of excellent open tools.
 ## Agent engine and models
 
 - [Claude Code](https://github.com/anthropics/claude-code) and the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python)
-- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/)
+- [OpenCode](https://opencode.ai)
+
+## Historical / retired integrations
+
+- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) — historical Ciaobot runtime integration; no longer supported.
 
 ## Integrations and CLIs
 

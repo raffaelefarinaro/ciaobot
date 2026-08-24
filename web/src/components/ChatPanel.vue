@@ -1216,14 +1216,6 @@ import { archiveActionLabel as archiveLabel, archiveConfirmMessage } from '../li
 import AppIcon, { type AppIconName } from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
-import {
-  CODEX_FABLE_LEVEL,
-  CODEX_FABLE_PSEUDO_MODEL,
-  CODEX_FABLE_REAL_MODEL,
-  isFableSelection,
-  selectableThinkingLevels,
-  selectedModelEntry,
-} from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError } from '../lib/errorAttribution'
@@ -2063,7 +2055,6 @@ type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
   { key: 'claude', label: 'Claude', provider: 'claude' },
-  { key: 'codex', label: 'Codex', provider: 'codex' },
   { key: 'opencode', label: 'opencode', provider: 'opencode' },
 ]
 
@@ -2071,7 +2062,6 @@ const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = 
 // the runner is Claude Code), so the two vocabularies need one hop between them.
 const SECTION_BY_BUCKET: Record<BucketKey, string> = {
   claude: 'anthropic',
-  codex: 'codex',
   opencode: 'opencode',
 }
 
@@ -2171,10 +2161,8 @@ const pendingApprovals = computed(() => {
 })
 
 // The backend's `message` field is almost always the templated
-// "Approve use of {tool_name}?" (see permission_gate.py / codex.py), which
-// just repeats the tool-name badge shown right next to it. Only surface it
-// when it actually carries something the badge doesn't (e.g. Codex's
-// model-supplied `reason` string).
+// "Approve use of {tool_name}?", which just repeats the tool-name badge shown
+// right next to it. Only surface it when it carries something else.
 function permissionReason(p: { tool_name: string; message: string }) {
   return p.message && p.message !== `Approve use of ${p.tool_name}?` ? p.message : ''
 }
@@ -2490,7 +2478,7 @@ const activeBucket = computed<BucketKey>(() => {
 const chatModelSections = computed(() => {
   const baseSections = sectionsFromModelsResponse(modelsResponse.value)
   // Name the Anthropic section for its vendor so it reads as a peer of the
-  // Codex and opencode sections rather than as "the default".
+  // opencode section rather than as "the default".
   return baseSections.map(section => {
     if (section.key === 'anthropic') {
       return { ...section, label: 'Claude (Anthropic)' }
@@ -2521,9 +2509,6 @@ const activeModelHighlights = computed(() => {
   if (!c) return []
   const model = activeModelId.value
   if (!model) return []
-  if (isFableSelection(model, c.thinking_level)) {
-    return [CODEX_FABLE_PSEUDO_MODEL]
-  }
   return [model]
 })
 
@@ -2537,23 +2522,20 @@ const bucketLocked = computed(() => {
   return Boolean(c.session_id) || store.activeMessages.length > 0
 })
 
-// Thinking levels are provider-native (claude → SDK effort, codex → reasoning
-// effort from the model catalog), so they key off the provider — narrowed per
-// model when the catalog reports levels — not the bucket.
+// Thinking levels are provider-native and may be narrowed per model when the
+// catalog reports levels.
 const filteredThinkingLevels = computed(() => {
   const model = chat.value?.model || ''
   const modelLevels = modelsResponse.value?.model_reasoning_levels?.[model]
   const levels = modelLevels?.length
     ? modelLevels
     : thinkingLevels.value[activeProvider.value] || []
-  return selectableThinkingLevels(model, levels)
+  return levels
 })
 
-// Fable is a model choice, not a thinking level, so the chips have nothing to
-// offer while it is selected.
 const showThinkingLevels = computed(() => {
   if (!filteredThinkingLevels.value.length) return false
-  return !isFableSelection(chat.value?.model, chat.value?.thinking_level)
+  return true
 })
 
 // Thinking level for the header chip. An empty thinking_level means the user
@@ -3967,7 +3949,6 @@ function tierAlias(model: string): TierAlias | null {
 function canonicalTier(model: string): string {
   const alias = tierAlias(model)
   if (alias) return alias
-  if (model === CODEX_FABLE_PSEUDO_MODEL) return model
   return model
 }
 
@@ -3985,7 +3966,6 @@ function routingProviderLabel(bucket: string | undefined, provider: string): str
   const lower = routingBucketLabel(bucket, provider)
   if (!lower) return ''
   if (lower === 'anthropic') return 'Anthropic'
-  if (lower === 'codex') return 'Codex'
   // Lower-case on purpose: that is how opencode brands itself.
   if (lower === 'opencode') return 'opencode'
   if (lower === 'claude') return 'Claude'
@@ -4001,8 +3981,6 @@ function bucketLabel(bucket: BucketKey): string {
 // the catalog has not reported yet.
 function bucketForSelectedModel(model: string): BucketKey {
   const response = modelsResponse.value
-  if ((response?.codex_models || []).includes(model)) return 'codex'
-  if (model === CODEX_FABLE_PSEUDO_MODEL) return 'codex'
   if ((response?.opencode_models || []).includes(model)) return 'opencode'
   if (model.includes('/')) return 'opencode'
   return 'claude'
@@ -4017,29 +3995,18 @@ async function selectModel(value: string | string[], sectionKey = '') {
   }
   const sectionBucket: Partial<Record<string, BucketKey>> = {
     anthropic: 'claude',
-    codex: 'codex',
     opencode: 'opencode',
   }
   // Picking from the Anthropic section is an explicit handover to Claude Code,
   // never a tier change on whichever provider is active. To change tier while
   // staying on a provider, pick that provider's own model instead.
   const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
-  // A fable chat stores the real model, so comparing raw ids would make
-  // "fable -> the plain model" look like re-picking what is already selected
-  // and return without doing anything.
-  const wasFablePseudo = isFableSelection(chat.value.model, chat.value.thinking_level)
-  const currentEntry = selectedModelEntry(
-    chat.value.model,
-    chat.value.thinking_level,
-    canonicalTier(chat.value.model),
-  )
+  const currentEntry = canonicalTier(chat.value.model)
   const sameModelAndRoute = canonicalTier(model) === currentEntry && targetBucket === activeBucket.value
   if (sameModelAndRoute) {
     showModelPicker.value = false
     return
   }
-  const isFablePseudo = model === CODEX_FABLE_PSEUDO_MODEL
-  const realModel = isFablePseudo ? CODEX_FABLE_REAL_MODEL : model
   // A handover is needed exactly when the provider changes: each runs its own
   // CLI with its own session, so the new one has never seen this chat.
   const targetRoute = targetBucket
@@ -4050,24 +4017,15 @@ async function selectModel(value: string | string[], sectionKey = '') {
     thinking_level?: string
   } = {
     provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
-    model: realModel,
+    model,
   }
-  if (isFablePseudo) {
-    updates.thinking_level = CODEX_FABLE_LEVEL
-  } else if (wasFablePseudo) {
-    // Leaving fable for a real entry: `ultra` was the pseudo-model's encoding,
-    // not a level the user chose, and the real model does support it, so the
-    // check below would keep it and land straight back on fable. Back to auto.
+  const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
+  if (
+    chat.value.thinking_level
+    && targetLevels
+    && !targetLevels.includes(chat.value.thinking_level)
+  ) {
     updates.thinking_level = ''
-  } else {
-    const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
-    if (
-      chat.value.thinking_level
-      && targetLevels
-      && !targetLevels.includes(chat.value.thinking_level)
-    ) {
-      updates.thinking_level = ''
-    }
   }
   if (bucketLocked.value && targetRoute !== currentRoute) {
     const ok = await askConfirm(

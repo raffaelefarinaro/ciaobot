@@ -1053,7 +1053,7 @@ class CiaoMcpService:
             Args:
                 name: Letters, numbers, dashes, or underscores. The vault
                     folder is the standard one under the vault root.
-                default_provider: claude, codex, or opencode.
+                default_provider: claude or opencode.
                 default_model: Empty inherits the app-wide default.
                 gws_profile: Linked Google Workspace profile, or empty.
                 disallowed_tools: Extra tools to deny in this workspace;
@@ -1282,7 +1282,7 @@ class CiaoMcpService:
                 title: Short sidebar label, e.g. "Fix #238 NSIRD drop".
                 model: Model for the delegate, e.g. a cheaper or specialized
                     one. Must be in the configured model set for the resolved
-                    provider (Anthropic, OpenAI via Codex, or opencode
+                    provider (Anthropic or opencode
                     tier alias). Unknown ids are rejected with `invalid_model`
                     and a list of valid alternatives. Omit to inherit the
                     workspace default.

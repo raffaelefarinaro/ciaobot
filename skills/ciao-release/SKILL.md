@@ -5,7 +5,7 @@ description: How to cut a Ciaobot release — the patch/minor/major convention, 
 
 # Ciaobot Release
 
-> Contributor/project skill — lives in the repo's workspace `skills/` folder, **not** `ciao/stock/skills/`. It is for people working *on* Ciaobot and is deliberately not packaged or shipped to end-user installs. `ciao sync-skills` mirrors it into `.claude/skills/` (Claude Code) and `.agents/skills/` (Codex). Don't move it into `ciao/stock/`.
+> Contributor/project skill — lives in the repo's workspace `skills/` folder, **not** `ciao/stock/skills/`. It is for people working *on* Ciaobot and is deliberately not packaged or shipped to end-user installs. `ciao sync-skills` mirrors it into the runtime-discovered `.claude/` and `.agents/` catalogs. Don't move it into `ciao/stock/`.
 
 Authoritative procedure for cutting a Ciaobot release. `develop` is the source line; `main` is publish-only — **merging a release PR into `main` is the trigger** for everything downstream (tag → GitHub release → bundled app assets). You never build artifacts or tag by hand.
 

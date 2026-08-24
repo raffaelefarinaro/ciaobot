@@ -1692,7 +1692,6 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     from starlette.requests import Request
 
     from ciao.config import CiaoConfig
-    from ciao.providers.codex import CodexProvider
     from ciao.web.routes_api import list_models
 
     config = CiaoConfig(
@@ -1701,7 +1700,6 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
     )
-    monkeypatch.setattr(CodexProvider, "model_catalog", AsyncMock(return_value=[]))
     monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[
         {"model": "opencode/big-pickle", "label": "Big Pickle (opencode)"},
     ]))
@@ -1725,7 +1723,6 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     assert OpencodeProvider.model_catalog.await_args.kwargs["force"] is False
     asyncio.run(list_models(_request(b"refresh=1")))
     assert OpencodeProvider.model_catalog.await_args.kwargs["force"] is True
-    assert CodexProvider.model_catalog.await_args.kwargs["force"] is True
 
 
 # ── credential reporting ────────────────────────────────────────────────
@@ -1799,12 +1796,11 @@ def test_dynamic_catalog_providers_skip_the_configured_model_check():
     serves its own catalog, so `opencode/hy3-free` was rejected with
     "Unknown model ... (configured models: opus, sonnet, haiku, ...)". The
     exemption is keyed on the `dynamic_models` capability so it covers any
-    such provider, not just Codex by name.
+    any such provider, not just one hard-coded provider name.
     """
     from ciao.provider_service import capabilities_for
 
     assert capabilities_for("opencode").dynamic_models is True
-    assert capabilities_for("codex").dynamic_models is True
     # Claude's catalog is configured, so it must stay validated.
     assert capabilities_for("claude").dynamic_models is False
     # An unknown provider must not be waved through.
@@ -1945,10 +1941,9 @@ async def test_an_empty_catalog_is_cached_only_briefly(tmp_path, monkeypatch):
 async def test_the_control_plane_mcp_is_attached_with_a_literal_token(tmp_path):
     """Ciaobot's own MCP must reach the chat, or opencode has no memory/vault.
 
-    Two things are pinned. First that it is registered at all: Claude gets it
-    via `options.mcp_servers` and Codex via `-c mcp_servers.ciaobot.*`, and
-    opencode initially got neither, so those chats silently had no control
-    plane. Second that the token is literal: opencode's `{env:VAR}`
+    The registration is pinned because opencode initially got no control plane,
+    so those chats silently had no memory/vault tools. The token must also be
+    literal: opencode's `{env:VAR}`
     interpolation is a config-file feature and is NOT applied to configs
     registered through the API — the placeholder went out verbatim and the
     control plane would have rejected it.
@@ -2128,9 +2123,11 @@ def test_an_empty_argument_map_summarizes_to_nothing():
 
 
 def test_permission_events_match_the_house_convention(tmp_path):
-    """Claude and Codex both emit `system` with "Approve use of X?". A different
-    type plus a restated "opencode wants to use bash" rendered as an extra
-    transcript line beside the approval card."""
+    """opencode permission events use the shared approval-card convention.
+
+    A different type plus a restated "opencode wants to use bash" rendered as
+    an extra transcript line beside the approval card.
+    """
     provider = _provider(tmp_path)
     provider._current_mode = "normal"
     events = _convert(provider, "permission.asked", LIVE_PERMISSION)

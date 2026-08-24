@@ -177,7 +177,7 @@ def _classify_non_skill(name: str) -> tuple[str, Path | None]:
 
     - ``"command"`` — lives in ``<workspace>/commands/<name>.md``
     - ``"subagent"`` — lives in ``<workspace>/subagents/<name>.md``
-    - ``"external"`` — neither found (impeccable plugin, codex, etc.)
+    - ``"external"`` — neither found (for example, an external plugin)
 
     Uses ``CIAO_WORKSPACE`` so the labels match the user's actual repo
     layout. Returns ``("external", None)`` when the workspace is unset,

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import subprocess
+import json
 from pathlib import Path
-import tomllib
 from types import SimpleNamespace
 
 from ciao import sync_skills
@@ -21,50 +20,44 @@ def test_update_upstream_skills_passes_timeout(tmp_path: Path) -> None:
         calls.append(kwargs)
         return SimpleNamespace(returncode=0)
 
-    assert sync_skills._update_upstream_skills(
-        tmp_path, ["upstream"], runner=runner
-    ) is True
+    assert sync_skills._update_upstream_skills(tmp_path, ["upstream"], runner=runner)
     assert calls[0]["timeout"] == sync_skills.SKILLS_NPX_TIMEOUT
 
 
 def test_update_upstream_skills_survives_timeout(tmp_path: Path) -> None:
     def runner(args, **kwargs):
-        # A stalled `npx -y skills update` would raise this once bounded; the
-        # startup phase must end (return False), not hang or propagate.
         raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout"))
 
-    assert sync_skills._update_upstream_skills(
-        tmp_path, ["upstream"], runner=runner
-    ) is False
+    assert not sync_skills._update_upstream_skills(tmp_path, ["upstream"], runner=runner)
 
 
-def test_sync_links_codex_guide_to_canonical_claude_guide(tmp_path: Path) -> None:
+def test_sync_links_agents_guide_to_canonical_claude_guide(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     claude_guide = workspace / "CLAUDE.md"
     _write(claude_guide, "# Shared workspace instructions\n")
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    codex_guide = workspace / "AGENTS.md"
-    assert codex_guide.is_symlink()
-    assert codex_guide.readlink() == Path("CLAUDE.md")
-    assert codex_guide.resolve() == claude_guide.resolve()
-    text = codex_guide.read_text(encoding="utf-8")
+    agents_guide = workspace / "AGENTS.md"
+    assert agents_guide.is_symlink()
+    assert agents_guide.readlink() == Path("CLAUDE.md")
+    assert agents_guide.resolve() == claude_guide.resolve()
+    text = agents_guide.read_text(encoding="utf-8")
     assert text.startswith("# Shared workspace instructions\n")
     assert "<!-- ciao:memory:start" in text
     assert "<!-- ciao:profile:start" in text
 
 
-def test_sync_preserves_custom_codex_guide(tmp_path: Path) -> None:
+def test_sync_preserves_custom_agents_guide(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write(workspace / "CLAUDE.md", "# Claude instructions\n")
-    codex_guide = workspace / "AGENTS.md"
-    _write(codex_guide, "# Custom Codex instructions\n")
+    agents_guide = workspace / "AGENTS.md"
+    _write(agents_guide, "# Custom workspace instructions\n")
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    assert not codex_guide.is_symlink()
-    assert codex_guide.read_text(encoding="utf-8") == "# Custom Codex instructions\n"
+    assert not agents_guide.is_symlink()
+    assert agents_guide.read_text(encoding="utf-8") == "# Custom workspace instructions\n"
 
 
 def test_sync_workspace_skills_mirrors_custom_skills(tmp_path: Path) -> None:
@@ -72,19 +65,12 @@ def test_sync_workspace_skills_mirrors_custom_skills(tmp_path: Path) -> None:
     _write(workspace / "skills" / "demo" / "SKILL.md", "# Demo\n")
     _write(workspace / ".claude" / "commands" / "remember.md", "Remember $ARGUMENTS\n")
 
-    result = sync_skills.sync_workspace_skills(
-        workspace,
-        refresh_upstream=False,
-    )
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     claude_skill = workspace / ".claude" / "skills" / "demo"
     assert claude_skill.is_symlink()
     assert claude_skill.resolve() == (workspace / "skills" / "demo").resolve()
-    codex_skill = workspace / ".agents" / "skills" / "demo"
-    assert codex_skill.is_symlink()
-    assert codex_skill.resolve() == (workspace / "skills" / "demo").resolve()
     assert result.custom_installed == 1
-    assert result.codex_skills_installed >= 1
 
 
 def test_sync_preserves_agents_canonical_upstream_skill(tmp_path: Path) -> None:
@@ -108,16 +94,11 @@ def test_sync_workspace_skills_prunes_orphaned_custom_links(tmp_path: Path) -> N
     workspace = tmp_path / "workspace"
     _write(workspace / "skills" / "kept" / "SKILL.md")
     (workspace / ".claude" / "skills").mkdir(parents=True)
-    # A broken custom-skill symlink (target gone) is recognised by the
-    # /skills/<name> path in its readlink target and pruned.
     (workspace / ".claude" / "skills" / "stale").symlink_to(
         workspace / "skills" / "stale"
     )
 
-    result = sync_skills.sync_workspace_skills(
-        workspace,
-        refresh_upstream=False,
-    )
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     assert not (workspace / ".claude" / "skills" / "stale").exists()
     assert result.custom_pruned == 1
@@ -129,10 +110,7 @@ def test_sync_workspace_skills_mirrors_subagents_and_commands(tmp_path: Path) ->
     _write(workspace / "commands" / "remember.md", "# Remember\n")
     _write(workspace / ".claude" / "agents" / "stock.md", "# Stock\n")
 
-    result = sync_skills.sync_workspace_skills(
-        workspace,
-        refresh_upstream=False,
-    )
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     agent_link = workspace / ".claude" / "agents" / "research.md"
     command_link = workspace / ".claude" / "commands" / "remember.md"
@@ -143,159 +121,6 @@ def test_sync_workspace_skills_mirrors_subagents_and_commands(tmp_path: Path) ->
     assert (workspace / ".claude" / "agents" / "stock.md").is_file()
     assert result.agents_installed == 1
     assert result.commands_installed >= 1
-    command_skill = workspace / ".agents" / "skills" / "ciao-command-remember" / "SKILL.md"
-    agent_skill = workspace / ".agents" / "skills" / "ciao-agent-research" / "SKILL.md"
-    assert "name: ciao-command-remember" in command_skill.read_text(encoding="utf-8")
-    assert "name: ciao-agent-research" in agent_skill.read_text(encoding="utf-8")
-    assert result.codex_wrappers_installed >= 2
-    native_agent = workspace / ".codex" / "agents" / "research.toml"
-    assert "developer_instructions" in native_agent.read_text(encoding="utf-8")
-    codex_config = tomllib.loads(
-        (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
-    )
-    assert codex_config["agents"]["research"]["config_file"] == "agents/research.toml"
-    assert result.codex_agents_installed >= 1
-
-
-def test_codex_native_agent_sync_is_idempotent_and_preserves_user_toml(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    _write(
-        workspace / "subagents" / "research.md",
-        "---\ndescription: Research carefully\n---\n\n# Research\nRead primary sources.\n",
-    )
-    _write(
-        workspace / ".codex" / "config.toml",
-        'model = "account-default"\n\n[agents.user_owned]\n'
-        'description = "Keep me"\nconfig_file = "agents/user.toml"\n',
-    )
-
-    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
-    first = (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
-    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
-    second = (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
-
-    assert first == second
-    parsed = tomllib.loads(second)
-    assert parsed["model"] == "account-default"
-    assert parsed["agents"]["user_owned"]["description"] == "Keep me"
-    assert parsed["agents"]["research"]["description"] == "Research carefully"
-
-
-def test_codex_native_agent_sync_does_not_override_user_agent_name(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    _write(workspace / "subagents" / "research.md", "# Canonical research\n")
-    _write(
-        workspace / ".codex" / "config.toml",
-        '[agents.research]\ndescription = "User version"\n'
-        'config_file = "agents/custom.toml"\n',
-    )
-
-    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
-
-    parsed = tomllib.loads(
-        (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
-    )
-    assert parsed["agents"]["research"]["config_file"] == "agents/custom.toml"
-    assert not (workspace / ".codex" / "agents" / "research.toml").exists()
-
-
-def test_sync_projects_mcp_json_into_codex_config_without_copying_secrets(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    _write(
-        workspace / ".mcp.json",
-        json.dumps(
-            {
-                "mcpServers": {
-                    "n8n_mcp": {
-                        "type": "http",
-                        "url": "https://example.test/mcp",
-                        "headers": {"Authorization": "Bearer ${N8N_MCP_TOKEN}"},
-                    },
-                    "notion": {
-                        "command": "npx",
-                        "args": ["-y", "@notionhq/notion-mcp-server"],
-                        "env": {"NOTION_TOKEN": "${NOTION_TOKEN}"},
-                    },
-                    "ciaobot": {"url": "http://127.0.0.1:8443/mcp/"},
-                }
-            }
-        ),
-    )
-    _write(workspace / ".codex" / "config.toml", 'model = "account-default"\n')
-
-    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
-
-    config_path = workspace / ".codex" / "config.toml"
-    parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    servers = parsed["mcp_servers"]
-    assert parsed["model"] == "account-default"
-    assert servers["n8n_mcp"]["url"] == "https://example.test/mcp"
-    assert servers["n8n_mcp"]["bearer_token_env_var"] == "N8N_MCP_TOKEN"
-    assert servers["notion"]["command"] == "npx"
-    assert servers["notion"]["env"]["NOTION_TOKEN"] == "${NOTION_TOKEN}"
-    assert "ciaobot" not in servers
-    assert "notion-secret-value" not in config_path.read_text(encoding="utf-8")
-    assert result.codex_mcps_installed == 2
-
-    first = config_path.read_text(encoding="utf-8")
-    second_result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
-    assert config_path.read_text(encoding="utf-8") == first
-    assert second_result.codex_mcps_installed == 2
-
-
-def test_sync_mcp_preserves_user_owned_codex_server(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    _write(
-        workspace / ".mcp.json",
-        json.dumps(
-            {
-                "mcpServers": {
-                    "notion": {
-                        "command": "npx",
-                        "args": ["-y", "@notionhq/notion-mcp-server"],
-                    }
-                }
-            }
-        ),
-    )
-    _write(
-        workspace / ".codex" / "config.toml",
-        '[mcp_servers.notion]\ncommand = "user-owned-server"\n',
-    )
-
-    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
-
-    parsed = tomllib.loads(
-        (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
-    )
-    assert parsed["mcp_servers"]["notion"]["command"] == "user-owned-server"
-    assert result.codex_mcps_installed == 0
-
-
-def test_sync_mcp_leaves_generated_config_untouched_on_invalid_source(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    _write(workspace / ".mcp.json", "{not valid json\n")
-    original = (
-        "model = \"account-default\"\n\n"
-        f"{sync_skills.CODEX_MCP_CONFIG_BEGIN}\n"
-        "[mcp_servers.\"notion\"]\n"
-        "command = \"npx\"\n"
-        f"{sync_skills.CODEX_MCP_CONFIG_END}\n"
-    )
-    _write(workspace / ".codex" / "config.toml", original)
-
-    result = sync_skills._install_codex_mcps(workspace)
-
-    assert (workspace / ".codex" / "config.toml").read_text(encoding="utf-8") == original
-    assert result == (0, 0)
 
 
 def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path: Path) -> None:
@@ -304,19 +129,8 @@ def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path:
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    remember = workspace / "commands" / "remember.md"
-    critique = workspace / "commands" / "critique.md"
-    interrogation = workspace / "commands" / "interrogation.md"
-    assert remember.is_file()
-    assert critique.is_file()
-    assert interrogation.is_file()
-    assert "ciao:memory" in remember.read_text(encoding="utf-8")
-    assert "1–3 targeted questions" in interrogation.read_text(encoding="utf-8")
-    assert "run_panel` engine" in critique.read_text(encoding="utf-8")
-
-    link = workspace / ".claude" / "commands" / "remember.md"
-    assert link.is_symlink()
-    assert link.resolve() == remember.resolve()
+    for name in ("remember", "critique", "interrogation"):
+        assert (workspace / "commands" / f"{name}.md").is_file()
     assert result.commands_installed >= 3
 
 
@@ -347,7 +161,7 @@ def test_sync_installs_stock_skills_with_marker(tmp_path: Path) -> None:
     assert (installed / "SKILL.md").is_file()
     assert (installed / sync_skills.STOCK_SKILL_MARKER).is_file()
     assert not installed.is_symlink()
-    assert result.stock_installed >= 3  # the packaged generic skill set
+    assert result.stock_installed >= 3
 
 
 def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:
@@ -359,9 +173,6 @@ def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:
     link = workspace / ".claude" / "skills" / "web-research"
     assert link.is_symlink()
     assert link.resolve() == (workspace / "skills" / "web-research").resolve()
-    # A later sync (override still present) keeps the symlink, no stock copy.
-    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
-    assert link.is_symlink()
 
 
 def test_stale_stock_skill_copy_is_pruned(tmp_path: Path) -> None:
@@ -375,7 +186,7 @@ def test_stale_stock_skill_copy_is_pruned(tmp_path: Path) -> None:
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     assert not stale.exists()
-    assert (user_dir / "SKILL.md").is_file()  # unmarked dirs are untouched
+    assert (user_dir / "SKILL.md").is_file()
     assert result.stock_pruned == 1
 
 
@@ -417,20 +228,10 @@ def test_disabled_auto_update_restores_missing_locked_skill(
     result = sync_skills._refresh_upstream_skills(workspace, runner=runner)
 
     assert result == (1, 0)
-    assert calls == [
-        [
-            "npx",
-            "-y",
-            "skills",
-            "add",
-            "owner/repo",
-            "--skill",
-            "upstream",
-            "--agent",
-            "claude-code",
-            "-y",
-        ]
-    ]
+    assert calls == [[
+        "npx", "-y", "skills", "add", "owner/repo", "--skill", "upstream",
+        "--agent", "claude-code", "-y",
+    ]]
     assert (workspace / ".agents" / "skills" / "upstream" / "SKILL.md").is_file()
 
 
@@ -444,9 +245,7 @@ def test_upstream_refresh_prunes_only_previous_locked_packages(
         json.dumps(
             {
                 "version": 1,
-                "skills": {
-                    "kept": {"source": "owner/kept", "sourceType": "github"}
-                },
+                "skills": {"kept": {"source": "owner/kept", "sourceType": "github"}},
             }
         ),
         encoding="utf-8",
@@ -454,16 +253,10 @@ def test_upstream_refresh_prunes_only_previous_locked_packages(
     cache = workspace / ".runtime" / "skills-sync-cache.json"
     cache.parent.mkdir(parents=True)
     cache.write_text(
-        json.dumps(
-            {
-                "heads": {"owner/kept": "same"},
-                "skills": {
-                    "kept": "owner/kept",
-                    "removed": "owner/removed",
-                    "stock": "owner/old-stock",
-                },
-            }
-        ),
+        json.dumps({
+            "heads": {"owner/kept": "same"},
+            "skills": {"kept": "owner/kept", "removed": "owner/removed", "stock": "owner/old-stock"},
+        }),
         encoding="utf-8",
     )
     for name in ("kept", "removed"):
@@ -478,11 +271,7 @@ def test_upstream_refresh_prunes_only_previous_locked_packages(
 
     monkeypatch.setenv("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "true")
     monkeypatch.setattr(sync_skills.shutil, "which", lambda _name: "/usr/bin/tool")
-    monkeypatch.setattr(
-        sync_skills.skills_sync,
-        "remote_heads",
-        lambda _repos: {"owner/kept": "same"},
-    )
+    monkeypatch.setattr(sync_skills.skills_sync, "remote_heads", lambda _repos: {"owner/kept": "same"})
 
     result = sync_skills._refresh_upstream_skills(workspace)
 

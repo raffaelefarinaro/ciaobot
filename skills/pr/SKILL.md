@@ -5,7 +5,7 @@ description: Pre-PR quality gate — run /code-review --fix on the branch diff b
 
 # PR quality gate
 
-> Contributor/project skill — lives in the repo's workspace `skills/` folder, **not** `ciao/stock/skills/`. It is for people working *on* Ciaobot and is deliberately not packaged or shipped to end-user installs. `ciao sync-skills` mirrors it into `.claude/skills/` (Claude Code) and `.agents/skills/` (Codex). Don't move it into `ciao/stock/`.
+> Contributor/project skill — lives in the repo's workspace `skills/` folder, **not** `ciao/stock/skills/`. It is for people working *on* Ciaobot and is deliberately not packaged or shipped to end-user installs. `ciao sync-skills` mirrors it into the runtime-discovered `.claude/skills/` and `.agents/skills/` catalogs. Don't move it into `ciao/stock/`.
 
 Before opening or updating a pull request, run this gate. Do not open the PR until findings are applied or explicitly deferred with the user.
 

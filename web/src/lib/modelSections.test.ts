@@ -12,13 +12,11 @@ describe('modelSections', () => {
       default: 'opus',
       provider_models: {
         claude: ['opus', 'sonnet', 'haiku'],
-        codex: ['gpt-test'],
         opencode: ['anthropic/claude-sonnet-4-6'],
       },
       provider_defaults: {},
-      codex_models: ['gpt-test'],
       opencode_models: ['anthropic/claude-sonnet-4-6'],
-      backends: { anthropic: true, codex: true, opencode: true },
+      backends: { anthropic: true, opencode: true },
       thinking_levels: {},
     }
 
@@ -26,7 +24,6 @@ describe('modelSections', () => {
 
     expect(sections.map((section) => section.label)).toEqual([
       'Anthropic',
-      'OpenAI Codex',
       'opencode',
     ])
     expect(sections.find((section) => section.key === 'anthropic')?.models).toEqual([
@@ -34,19 +31,17 @@ describe('modelSections', () => {
       'sonnet',
       'haiku',
     ])
-    expect(sections.find((section) => section.key === 'codex')?.models).toEqual(['gpt-test'])
     expect(sections.find((section) => section.key === 'opencode')?.models).toEqual([
       'anthropic/claude-sonnet-4-6',
     ])
     // No tier badges are produced now that tier routing is gone.
-    expect(sections.find((section) => section.key === 'codex')?.modelBadges).toBeUndefined()
+    expect(sections.find((section) => section.key === 'opencode')?.modelBadges).toBeUndefined()
   })
 })
 
 describe('providerForModelSection', () => {
   it('maps the Anthropic UI section and preserves provider sections', () => {
     expect(providerForModelSection('anthropic')).toBe('claude')
-    expect(providerForModelSection('codex')).toBe('codex')
     expect(providerForModelSection('opencode')).toBe('opencode')
   })
 })
