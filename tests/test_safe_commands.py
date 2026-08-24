@@ -255,6 +255,13 @@ def test_destructive_commands_are_destructive(command):
     "env -S 'rm -rf /tmp/valuable'",
     "env --split-string='rm -rf /tmp/valuable'",
     "env -S'shred ~/x'",
+    # `builtin` runs the named builtin, and builtins like `command` and `eval`
+    # run further commands — one more hop over the real verb.
+    "builtin command rm -f /tmp/valuable",
+    # Writing an alias through config persists the same execution the inline
+    # -c form arms, for a later invocation whose subcommand slot is innocent.
+    "git config alias.nuke '!rm -f /tmp/valuable'",
+    "git config --add alias.reset 'reset --hard'",
     "coproc rm -rf /tmp/valuable",
 ])
 def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
@@ -509,6 +516,9 @@ def test_deleting_copies_and_branches_are_destructive(command):
     "trap 'echo bye' EXIT",
     # coproc only wraps; a harmless command stays approved.
     "coproc LS ls -la",
+    # Reading or writing ordinary git config arms nothing.
+    "git config user.name 'Someone'",
+    "git config alias.nuke",
     "git tag v1",
     "git tag -a v1 -m 'release'",
 ])

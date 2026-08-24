@@ -225,9 +225,11 @@ _PRUNING_PUSH_FLAGS = frozenset({"--mirror", "--prune"})
 
 # Wrappers that merely elevate or prefix; the destructive verb follows them.
 # `xargs` belongs here too: `find . | xargs rm -f` never names rm as a segment
-# leader, which is exactly how it slipped past.
+# leader, which is exactly how it slipped past. `builtin` runs the named
+# builtin — and builtins like `command` and `eval` run further commands, so
+# `builtin command rm -f x` is the same removal one hop deeper.
 _DESTRUCTIVE_WRAPPERS = frozenset({
-    "sudo", "doas", "command", "env", "time", "timeout", "nohup", "nice",
+    "sudo", "doas", "command", "builtin", "env", "time", "timeout", "nohup", "nice",
     "ionice", "stdbuf", "setsid", "watch", "xargs", "exec",
 })
 
@@ -450,6 +452,22 @@ def _git_is_destructive(args: list[str]) -> bool:
     if not args:
         return False
     subcommand, *rest = args
+    if subcommand == "config":
+        # Writing an alias through config arms the same execution the inline
+        # `-c alias.*` form does, just persisted for later invocations whose
+        # subcommand slot will hold the innocent name. The value is vetted
+        # exactly the same way; reading or unsetting an alias writes nothing.
+        value_opts = {"--local", "--global", "--system", "--add", "--replace-all"}
+        for i, tok in enumerate(rest):
+            if tok.startswith("alias.") and i + 1 < len(rest) and rest[i + 1] not in value_opts:
+                cfg = rest[i + 1]
+                cmd = cfg[1:] if cfg.startswith("!") else cfg
+                try:
+                    words = shlex.split(cmd)
+                except ValueError:
+                    return True
+                if not words or is_destructive_command(cmd) or _git_is_destructive(words):
+                    return True
     if subcommand == "push":
         # Force rewrites what the remote keeps, the delete spellings remove
         # refs outright, and the pruning modes remove whatever the local side
