@@ -7,6 +7,7 @@ import {
   shouldReconnectActiveChatOnStreamingStarted,
   chatWsReconnectDelayMs,
   isHostConnectionUnavailableMessage,
+  setListIndex,
   useProjectStore,
 } from './projects'
 
@@ -105,6 +106,86 @@ beforeEach(() => {
     configurable: true,
   })
   vi.stubGlobal('WebSocket', FakeWebSocket)
+})
+
+describe('chat websocket URL containment', () => {
+  test('keeps a plain chat id verbatim', () => {
+    const store = useProjectStore()
+    store.activeChatId = 'c-plain'
+    store.connectWs('c-plain')
+    expect(fakeSockets[0].url).toBe('ws://localhost:3000/ws/chat/c-plain')
+  })
+
+  test('pins a hostile chat id into one encoded path segment', () => {
+    // The id flows from server state; encoding it keeps `../`, `?` or `#`
+    // inside it from rewriting the WebSocket path or authority.
+    const store = useProjectStore()
+    store.activeChatId = 'c-hostile'
+    store.connectWs('../../evil?x=1#y')
+    expect(fakeSockets[0].url).toBe('ws://localhost:3000/ws/chat/..%2F..%2Fevil%3Fx%3D1%23y')
+  })
+})
+
+describe('setListIndex guard', () => {
+  test('writes an in-range index', () => {
+    const list = [{ n: 1 }, { n: 2 }]
+    setListIndex(list, 1, { n: 9 })
+    expect(list.map(x => x.n)).toEqual([1, 9])
+    setListIndex(list, '0', { n: 8 }) // string index from stored data still lands
+    expect(list.map(x => x.n)).toEqual([8, 9])
+  })
+
+  test('skips out-of-range and negative indices instead of extending the list', () => {
+    const list = [{ n: 1 }]
+    setListIndex(list, -1, { n: -1 })
+    setListIndex(list, 1.5, { n: 2 })
+    setListIndex(list, 5, { n: 3 })
+    expect(list).toEqual([{ n: 1 }])
+    expect(Object.keys(list)).toEqual(['0'])
+  })
+
+  test('never assigns prototype-hazardous keys onto the array', () => {
+    const list: Array<{ n?: number; polluted?: boolean }> = [{ n: 1 }]
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      setListIndex(list, key as unknown as number, { polluted: true })
+    }
+    expect(list).toEqual([{ n: 1 }])
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+    expect((list as unknown as Record<string, unknown>).polluted).toBeUndefined()
+  })
+})
+
+describe('pending comment updates through the guarded write', () => {
+  test('updates text and images on a chat comment', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-guarded-chat-comments'
+    store.activeChatId = chatId
+    const id = store.addPendingChatComment({ messageId: 'msg-123', selection: 'quote', comment: 'note' })
+
+    store.updatePendingChatComment(id, 'edited')
+    expect(store.pendingChatComments[0].comment).toBe('edited')
+
+    store.addPendingChatCommentImage(id, 'a.png')
+    expect(store.pendingChatComments[0].images).toEqual(['a.png'])
+
+    store.removePendingChatCommentImage(id, 'a.png')
+    expect(store.pendingChatComments[0].images).toBeUndefined()
+  })
+
+  test('syncs file comment image changes into pending comments', () => {
+    const store = useProjectStore()
+    store.activeChatId = 'chat-guarded-file-comments'
+    const id = store.addPendingComment({ path: 'notes/a.md', selection: 'sel', comment: 'note' })
+    expect(store.fileComments['notes/a.md']?.map(c => c.id)).toContain(id)
+
+    store.addFileCommentImage('notes/a.md', id, 'a.png')
+    expect(store.pendingComments.find(c => c.id === id)?.images).toEqual(['a.png'])
+    expect(store.fileComments['notes/a.md']?.find(c => c.id === id)?.images).toEqual(['a.png'])
+
+    store.removeFileCommentImage('notes/a.md', id, 'a.png')
+    expect(store.pendingComments.find(c => c.id === id)?.images).toBeUndefined()
+    expect(store.fileComments['notes/a.md']?.find(c => c.id === id)?.images).toBeUndefined()
+  })
 })
 
 describe('native window focus reporting', () => {

@@ -1244,6 +1244,7 @@ import {
   cleanCommentSelection,
   commentTextMatches,
   commentTextOccurrenceIndex,
+  escapeCssAttrValue,
   highlightCommentText,
 } from '../lib/commentHighlight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
@@ -2970,7 +2971,7 @@ function findBubbleForComment(root: HTMLElement, c: { id: string; selection: str
   }
 
   if (c.messageId) {
-    const escapedId = c.messageId.replace(/"/g, '\\"')
+    const escapedId = escapeCssAttrValue(c.messageId)
     const byId = root.querySelector(`.message[data-msg-id="${escapedId}"]`) as HTMLElement | null
     if (byId) return byId
   }

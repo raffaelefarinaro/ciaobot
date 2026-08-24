@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import {
   cleanCommentSelection,
   commentTextOccurrenceIndex,
+  escapeCssAttrValue,
   findCommentTextMatch,
   highlightCommentText,
 } from './commentHighlight'
@@ -43,5 +44,31 @@ describe('comment text matching', () => {
     expect(highlightCommentText(root, 'selected\u200b text\nis visible', 'comment-1')).toBe(true)
     expect(root.querySelector('.comment-highlight')?.textContent).toBe('selected text')
     expect(root.querySelectorAll('.comment-highlight')[1]?.textContent).toBe('is visible')
+  })
+})
+
+describe('escapeCssAttrValue', () => {
+  it('escapes quotes and backslashes in one pass', () => {
+    expect(escapeCssAttrValue('plain')).toBe('plain')
+    expect(escapeCssAttrValue('msg-123')).toBe('msg-123')
+    expect(escapeCssAttrValue('a"b')).toBe('a\\"b')
+    expect(escapeCssAttrValue('a\\b')).toBe('a\\\\b')
+  })
+
+  it('keeps a trailing backslash from eating the escaped quote', () => {
+    // The old quote-only escape produced `\\` + `\"`, which CSS reads as one
+    // literal backslash followed by a string-terminating quote.
+    expect(escapeCssAttrValue('msg-\\"')).toBe('msg-\\\\\\"')
+  })
+
+  it('round-trips hostile ids through a real attribute selector', () => {
+    const root = document.createElement('div')
+    const id = 'msg-1712345678901.5\\", x]'
+    const el = document.createElement('div')
+    el.className = 'message'
+    el.setAttribute('data-msg-id', id)
+    root.appendChild(el)
+
+    expect(root.querySelector(`.message[data-msg-id="${escapeCssAttrValue(id)}"]`)).toBe(el)
   })
 })

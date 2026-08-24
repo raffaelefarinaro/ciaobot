@@ -1,5 +1,3 @@
-const BASE = ''
-
 /** The JSON body an error response may carry. Every field is best-effort. */
 interface ApiErrorBody {
   error?: string
@@ -30,6 +28,18 @@ function onDevicePage(): boolean {
   return window.location.pathname === '/device' || window.location.pathname.startsWith('/device/')
 }
 
+// Paths handed to the api wrapper are built from server state (chat ids, file
+// names). Resolve every request against the page origin and refuse anything
+// that would land on another host or scheme, so a crafted value can never
+// turn a same-origin API call into a cross-origin one.
+function sameOriginUrl(path: string): string {
+  const url = new URL(path, window.location.origin)
+  if (!/^https?:$/.test(url.protocol) || url.origin !== window.location.origin) {
+    throw new ApiError(`Blocked non-same-origin API path: ${path}`)
+  }
+  return `${url.pathname}${url.search}${url.hash}`
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const opts: RequestInit = {
     method,
@@ -39,7 +49,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (body !== undefined) {
     opts.body = JSON.stringify(body)
   }
-  const res = await fetch(`${BASE}${path}`, opts)
+  const res = await fetch(sameOriginUrl(path), opts)
   if (res.status === 401) {
     // Never hard-reload while already on /login — that caused a refresh loop
     // when client mode's /api/auth/check returns 401 (host password needed).

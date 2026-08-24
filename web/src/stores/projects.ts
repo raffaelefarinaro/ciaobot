@@ -59,6 +59,20 @@ export function isHostConnectionUnavailableMessage(message: string): boolean {
   return message.trim().toLowerCase().startsWith('host ws unreachable')
 }
 
+const PROTOTYPE_HAZARD_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+/**
+ * Checked element write for comment lists whose index comes from stored data.
+ * Skips prototype-hazardous keys and out-of-range indices instead of letting
+ * them become property assignments on the array itself.
+ */
+export function setListIndex<T>(list: T[], key: number | string, value: T): void {
+  if (typeof key === 'string' && PROTOTYPE_HAZARD_KEYS.has(key)) return
+  const index = typeof key === 'number' ? key : Number(key)
+  if (!Number.isInteger(index) || index < 0 || index >= list.length) return
+  list[index] = value
+}
+
 // Must match `_DEFAULT_CHAT_TITLE` on the server: `_is_empty_chat` uses it to
 // tell an abandoned draft from a chat the user deliberately named.
 const DEFAULT_CHAT_TITLE = 'New Chat'
@@ -3139,7 +3153,9 @@ export const useProjectStore = defineStore('projects', () => {
   function connectWs(chatId: string) {
     if (sockets.value[chatId]) return
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${proto}//${location.host}/ws/chat/${chatId}`)
+    // chatId comes from server state; pinning it to one encoded path segment
+    // keeps a crafted id from rewriting the rest of the WebSocket URL.
+    const ws = new WebSocket(`${proto}//${location.host}/ws/chat/${encodeURIComponent(chatId)}`)
     sockets.value[chatId] = ws
     lastChatFrameAt[chatId] = nowMs()
     let opened = false
@@ -4534,7 +4550,7 @@ export const useProjectStore = defineStore('projects', () => {
   function updatePendingChatComment(id: string, comment: string): void {
     const idx = pendingChatComments.value.findIndex(c => c.id === id)
     if (idx === -1) return
-    pendingChatComments.value[idx] = { ...pendingChatComments.value[idx], comment }
+    setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], comment })
     persistPendingChatComments()
   }
   function addPendingChatCommentImage(id: string, imageRef: string): void {
@@ -4542,7 +4558,7 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx === -1) return
     const existing = pendingChatComments.value[idx].images || []
     if (!existing.includes(imageRef)) {
-      pendingChatComments.value[idx] = { ...pendingChatComments.value[idx], images: [...existing, imageRef] }
+      setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], images: [...existing, imageRef] })
       persistPendingChatComments()
     }
   }
@@ -4551,7 +4567,7 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx === -1) return
     const existing = pendingChatComments.value[idx].images || []
     const next = existing.filter(img => img !== imageRef)
-    pendingChatComments.value[idx] = { ...pendingChatComments.value[idx], images: next.length ? next : undefined }
+    setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], images: next.length ? next : undefined })
     persistPendingChatComments()
   }
   function addFileCommentImage(path: string, id: string, imageRef: string): void {
@@ -4567,7 +4583,7 @@ export const useProjectStore = defineStore('projects', () => {
       // Sync to pending if it exists there
       const pIdx = pendingComments.value.findIndex(c => c.id === id)
       if (pIdx !== -1) {
-        pendingComments.value[pIdx] = { ...pendingComments.value[pIdx], images: [...existing, imageRef] }
+        setListIndex(pendingComments.value, pIdx, { ...pendingComments.value[pIdx], images: [...existing, imageRef] })
         persistPendingComments()
       }
       persistFileComments()
@@ -4585,7 +4601,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileComments.value[path] = next
     const pIdx = pendingComments.value.findIndex(c => c.id === id)
     if (pIdx !== -1) {
-      pendingComments.value[pIdx] = { ...pendingComments.value[pIdx], images: nextImages.length ? nextImages : undefined }
+      setListIndex(pendingComments.value, pIdx, { ...pendingComments.value[pIdx], images: nextImages.length ? nextImages : undefined })
       persistPendingComments()
     }
     persistFileComments()

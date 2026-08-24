@@ -27,7 +27,13 @@ export function parseFrontmatter(source: string): FrontmatterResult {
   // non-empty line. Without an opening fence we leave the document alone.
   // The BOM is written as \uFEFF: as a literal it is invisible in a diff and
   // trips no-irregular-whitespace.
-  const m = source.match(/^\uFEFF?(?:\s*\r?\n)*---\r?\n/)
+  //
+  // Each loop iteration pairs a newline-free whitespace run with exactly one
+  // `\n`. The classes are disjoint, so the split between iterations is forced
+  // and the match stays linear — `\s*\r?\n` inside the star would let every
+  // newline be claimed two ways and backtrack exponentially on long
+  // newline-only inputs.
+  const m = source.match(/^\uFEFF?(?:[^\S\n]*\n)*---\r?\n/)
   if (!m) return { frontmatter: null, body: source }
 
   const after = source.slice(m[0].length)
