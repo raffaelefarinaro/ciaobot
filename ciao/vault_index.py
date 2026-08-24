@@ -25,6 +25,7 @@ import os
 import posixpath
 import re
 import sys
+import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -694,6 +695,51 @@ def _strip_all_references(
     return text, changed
 
 
+def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
+    """Swap staged note rewrites in as one operation, rolling back on failure.
+
+    Phase 2 of `strip_references`. Every new text first lands in a temp file
+    next to its target (same directory, so `os.replace` stays atomic and on
+    the same filesystem), and only then are the targets swapped in. If any
+    stage or swap fails, every already-swapped file is restored from its
+    recorded original in reverse order, leftover temps are removed, and the
+    original error propagates: a raised error means the vault is unchanged.
+    """
+    staged: list[tuple[Path, Path]] = []  # (target, temp) in stage order
+    replaced: list[tuple[Path, str]] = []  # (target, original) already swapped in
+    try:
+        for abs_path, _original, new_text in edits:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                delete=False,
+                dir=abs_path.parent,
+                prefix=f".{abs_path.name}.",
+                suffix=".tmp",
+            ) as tmp:
+                tmp.write(new_text)
+                staged.append((abs_path, Path(tmp.name)))
+            # A fresh temp file lands at 0600 and os.replace would silently
+            # tighten the rewritten note's permissions; carry the old mode over.
+            try:
+                os.chmod(tmp.name, abs_path.stat().st_mode & 0o7777)
+            except OSError:
+                pass
+        for (abs_path, tmp), (_, original, _new_text) in zip(staged, edits):
+            os.replace(tmp, abs_path)
+            replaced.append((abs_path, original))
+    except OSError:
+        for abs_path, original in reversed(replaced):
+            abs_path.write_text(original, encoding="utf-8")
+        for _, tmp in staged:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    return [str(abs_path) for abs_path, _, _ in edits]
+
+
 def strip_references(
     vault_root: Path, deleted_path: str, *, path_prefix: Path | None = None
 ) -> list[str]:
@@ -708,6 +754,11 @@ def strip_references(
     "memory-vault/work/People/Mo.md"). Returns the repo-relative paths of the
     files actually edited on disk.
 
+    The cleanup is all-or-nothing: rewrites are computed without touching any
+    file, staged to temp files, then swapped in; a failure at any point rolls
+    every already-swapped file back, so on success the caller may safely
+    delete the target, and on failure the vault is exactly as before.
+
     ``path_prefix`` must be the prefix the CALLER's id was rendered with. After
     the re-rooting an id reads `<root>/memory-vault/...`, while a bare scan of
     one vault renders `memory-vault/...`: the two never compared equal, so
@@ -719,6 +770,9 @@ def strip_references(
     prefix = path_prefix or Path("memory-vault")
     entries = scan_vault(vault_root, path_prefix=path_prefix)
     filename_idx = _build_filename_index(entries)
+    # Phase 1 (pure): compute every rewrite up front, so a bad or unreadable
+    # note aborts the whole cleanup before any other note has been touched.
+    edits: list[tuple[Path, str, str]] = []
     edited: list[str] = []
     for e in entries:
         if str(e.path) == deleted_path or deleted_path not in e.related:
@@ -733,8 +787,10 @@ def strip_references(
             text, filename_idx, deleted_path, rel_from_vault
         )
         if file_changed:
-            abs_path.write_text(new_text, encoding="utf-8")
+            edits.append((abs_path, text, new_text))
             edited.append(str(e.path))
+    # Phase 2: stage + swap everything in, or roll back to the original bytes.
+    _commit_staged_edits(edits)
     return edited
 
 

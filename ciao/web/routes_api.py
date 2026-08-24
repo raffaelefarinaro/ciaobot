@@ -16,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, UTC
@@ -4479,12 +4480,31 @@ async def vault_delete_note(request: Request) -> JSONResponse:
     if not resolved.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
 
+    # Probe the target directory before any backlink is rewritten: an
+    # unwritable folder used to fail only at the final unlink, by which time
+    # strip_references had already stripped live references out of other
+    # notes. With the probe plus the staged cleanup, the residual window on
+    # the unlink below is negligible; if it ever fires, the vault keeps both
+    # the target and its valid references.
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=resolved.parent, prefix=".ciao-delete-", suffix=".probe"
+        ):
+            pass
+    except OSError as exc:
+        return JSONResponse({"error": f"cannot delete: {exc}"}, status_code=500)
+
     # The prefix the id was rendered with, not the helper's default: without it
     # the cleanup scan compares `memory-vault/...` against a `<root>/...` id,
     # matches nothing, and leaves every backlink dangling.
-    edited = await asyncio.to_thread(
-        functools.partial(strip_references, vault_root, raw, path_prefix=vault_prefix)
-    )
+    try:
+        edited = await asyncio.to_thread(
+            functools.partial(strip_references, vault_root, raw, path_prefix=vault_prefix)
+        )
+    except OSError as exc:
+        # strip_references is all-or-nothing: a raise here means every staged
+        # rewrite was rolled back and the vault is exactly as before.
+        return JSONResponse({"error": f"backlink cleanup failed: {exc}"}, status_code=500)
     try:
         await asyncio.to_thread(resolved.unlink)
     except OSError as exc:

@@ -9,7 +9,10 @@ capability that only wikilinks had.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 from ciao import vault_index as vi
 
@@ -453,6 +456,105 @@ def test_strip_references_matches_a_re_rooted_id(tmp_path: Path):
     foo_text = (tmp_path / "Projects" / "Foo.md").read_text(encoding="utf-8")
     assert "People/Mo" not in foo_text
     assert "Worked with Mo on this." in foo_text
+    # staging must not leave temp litter behind on success either
+    assert list(tmp_path.rglob("*.tmp")) == []
+
+
+def test_strip_references_pure_phase_failure_touches_no_note(tmp_path: Path, monkeypatch):
+    """A rewrite error must abort before ANY note is written.
+
+    Cleanup rewrote notes one-by-one straight to disk, so an error on a later
+    note left earlier notes already stripped while the delete still went
+    ahead. Phase 1 computes every edit without touching disk, so a raise here
+    means no file has been modified at all.
+    """
+    mo = tmp_path / "People" / "Mo.md"
+    _write(mo, "---\nname: Mo\ntype: person\n---\n# Mo\n")
+    foo_original = (
+        "---\n"
+        "name: Foo\n"
+        "type: project\n"
+        "related:\n"
+        "  - People/Mo\n"
+        "---\n"
+        "# Foo\n\n"
+        "Worked with [Mo](../People/Mo.md) on this.\n"
+    )
+    bar_original = (
+        "---\nname: Bar\ntype: project\n---\n# Bar\n\nSee [Mo](../People/Mo.md).\n"
+    )
+    foo = tmp_path / "Projects" / "Foo.md"
+    bar = tmp_path / "Projects" / "Bar.md"
+    _write(foo, foo_original)
+    _write(bar, bar_original)
+
+    real_strip = vi._strip_all_references
+    calls = {"n": 0}
+
+    def flaky_strip(*args):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("simulated rewrite failure")
+        return real_strip(*args)
+
+    monkeypatch.setattr(vi, "_strip_all_references", flaky_strip)
+
+    with pytest.raises(OSError):
+        vi.strip_references(tmp_path, "memory-vault/People/Mo.md")
+
+    assert calls["n"] == 2
+    assert foo.read_text(encoding="utf-8") == foo_original
+    assert bar.read_text(encoding="utf-8") == bar_original
+    assert list(tmp_path.rglob("*.tmp")) == []
+
+
+def test_strip_references_commit_failure_rolls_back_every_swap(tmp_path: Path, monkeypatch):
+    """A commit failing mid-way must restore already-swapped notes byte-for-byte.
+
+    The second os.replace is made to fail after the first one succeeded:
+    rollback has to put the first note back exactly as it was and sweep up
+    every leftover temp, or the vault ends up half-stripped with the target
+    note still alive.
+    """
+    mo = tmp_path / "People" / "Mo.md"
+    _write(mo, "---\nname: Mo\ntype: person\n---\n# Mo\n")
+    foo_original = (
+        "---\n"
+        "name: Foo\n"
+        "type: project\n"
+        "related:\n"
+        "  - People/Mo\n"
+        "---\n"
+        "# Foo\n\n"
+        "Worked with [Mo](../People/Mo.md) on this.\n"
+    )
+    bar_original = (
+        "---\nname: Bar\ntype: project\n---\n# Bar\n\nSee [Mo](../People/Mo.md).\n"
+    )
+    foo = tmp_path / "Projects" / "Foo.md"
+    bar = tmp_path / "Projects" / "Bar.md"
+    _write(foo, foo_original)
+    _write(bar, bar_original)
+
+    real_replace = os.replace
+    commits = {"n": 0}
+
+    def flaky_replace(src, dst):
+        commits["n"] += 1
+        if commits["n"] >= 2:
+            raise OSError("simulated commit failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(vi.os, "replace", flaky_replace)
+
+    with pytest.raises(OSError):
+        vi.strip_references(tmp_path, "memory-vault/People/Mo.md")
+
+    assert commits["n"] == 2  # one swap landed, the second blew up
+    assert foo.read_text(encoding="utf-8") == foo_original
+    assert bar.read_text(encoding="utf-8") == bar_original
+    assert (tmp_path / "People" / "Mo.md").exists()
+    assert list(tmp_path.rglob("*.tmp")) == []
 
 
 # ---- INDEX.md rendering -----------------------------------------------------
