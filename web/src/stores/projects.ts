@@ -2653,9 +2653,25 @@ export const useProjectStore = defineStore('projects', () => {
 
         const local = messages.value[chatId] || []
         const firstIndex = local.length ? local[0].i : undefined
-        if (!local.length || typeof firstIndex !== 'number' || env.total <= firstIndex) {
+        // How far the cache claims to reach, from its last INDEXED row: rows
+        // added locally (a failed-send notice, say) carry no index and must not
+        // inflate it, or a shrink check built on length would discard them.
+        let cachedEnd = 0
+        for (const row of local) {
+          if (typeof row.i === 'number' && row.i + 1 > cachedEnd) cachedEnd = row.i + 1
+        }
+        if (
+          !local.length ||
+          typeof firstIndex !== 'number' ||
+          env.total <= firstIndex ||
+          // The server assembled FEWER rows than we hold - a pruned or
+          // unreadable session segment. Merging by index would refresh the
+          // prefix and leave the stale tail untouched, showing messages that
+          // are no longer part of the chat, so the window wins outright.
+          env.total < cachedEnd
+        ) {
           // Empty cache, cache from a pre-envelope server, or the session
-          // reset/shrank below our oldest row: adopt the window wholesale.
+          // reset/shrank: adopt the window wholesale.
           messages.value[chatId] = windowRows
         } else {
           // Index-addressed merge: refresh rows we already hold, append new

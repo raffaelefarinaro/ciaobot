@@ -4254,6 +4254,15 @@ class ProjectChatManager:
                         workspace_root=config.workspace_root,
                         vault_root=config.vault_root,
                         proposal_vault_root=proposal_vault_root,
+                        # Region auto-promotion writes the workspace the chat
+                        # ran in. Without this the live archive path left every
+                        # [memory]/[profile] fact queued instead of promoted,
+                        # because `apply_proposals` will not guess a guide.
+                        guide_path=(
+                            Path(config.agent_root(workspace)) / "CLAUDE.md"
+                            if workspace and config.workspace(workspace) is not None
+                            else None
+                        ),
                         provider=chat_meta.provider if chat_meta else "claude",
                         project_doc_path=project_doc_path,
                     ),

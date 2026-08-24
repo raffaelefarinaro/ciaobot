@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ArchiveOutcome, ProjectChatManager
@@ -249,6 +249,52 @@ async def test_archive_postprocess_runs_insights_for_multiturn_chats(
     await asyncio.sleep(0)
 
     assert bool(calls) is expected
+
+
+@pytest.mark.asyncio
+async def test_archive_postprocess_names_the_guide_promotion_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live archive path has to say which guide auto-promotion writes.
+
+    ``apply_proposals`` deliberately leaves ``[memory]`` and ``[profile]`` facts
+    queued when no guide is supplied, so omitting this argument silently turned
+    ``auto_promote_memory=True`` into a no-op for durable facts: the backfill
+    path passed the workspace's agent-root guide, the live one passed nothing.
+    """
+    pcm = _make_manager(tmp_path)
+    # A chat always runs in a registered workspace; the guard on the call mirrors
+    # the backfill path and resolves nothing for an unknown one.
+    pcm._config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root=str(tmp_path / "work" / "memory-vault")
+    )
+    project = pcm.create_project("guide-project", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="guide chat")
+    calls: list[dict] = []
+
+    async def fake_extract_and_append(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+
+    pcm.run_archive_postprocess(
+        chat.chat_id,
+        ArchiveOutcome(
+            path=tmp_path / "archive.md",
+            session_id="session-guide",
+            turn_count=2,
+            filtered_jsonl="filtered transcript",
+        ),
+        chat,
+        project,
+    )
+    await asyncio.sleep(0)
+
+    assert calls, "the insights pipeline never started"
+    guide = calls[0]["guide_path"]
+    assert guide is not None, "no guide means every durable fact stays queued"
+    assert guide == Path(pcm._config.agent_root("work")) / "CLAUDE.md"
 
 
 # ── Empty-chat cleanup ──────────────────────────────────────────────────

@@ -3524,3 +3524,84 @@ describe('attentionChatCount', () => {
     expect(store.attentionChatCount).toBe(2)
   })
 })
+
+describe('envelope history window', () => {
+  test('adopts the server window when the assembled history shrinks', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-history-shrank'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-24T10:00:00Z',
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: items.length,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(
+      envelope([row(0, 'one'), row(1, 'two'), row(2, 'three'), row(3, 'four')]),
+    )
+    await store.loadMessages(chatId)
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'one', 'two', 'three', 'four',
+    ])
+
+    // An older provider session segment is pruned or becomes unreadable, so the
+    // backend skips it and assembles a SHORTER history. firstIndex is still 0,
+    // so the old `total <= firstIndex` guard let this through to the
+    // index-addressed merge, which refreshed rows 0-1 and left 2-3 in place -
+    // showing two messages that are no longer part of the chat.
+    apiGet.mockImplementation(envelope([row(0, 'one'), row(1, 'two')]))
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual(['one', 'two'])
+  })
+
+  test('still merges by index when the history only grows', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-history-grew'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-24T10:00:00Z',
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: items.length,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([row(0, 'one'), row(1, 'two')]))
+    await store.loadMessages(chatId)
+
+    apiGet.mockImplementation(
+      envelope([row(0, 'one'), row(1, 'two'), row(2, 'three')]),
+    )
+    await store.loadMessages(chatId)
+
+    // The shrink check must not cost us the ordinary append path.
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'one', 'two', 'three',
+    ])
+  })
+})
