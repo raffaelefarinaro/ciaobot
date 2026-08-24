@@ -250,6 +250,11 @@ def test_destructive_commands_are_destructive(command):
     # fires, so it is classified as its own command.
     "trap 'rm -rf /tmp/valuable' EXIT",
     'trap "shred ~/x" INT TERM',
+    # env splits and runs a `-S` payload itself, and coproc runs its command
+    # asynchronously; both carry the real verb behind an opaque leader.
+    "env -S 'rm -rf /tmp/valuable'",
+    "env --split-string 'shred ~/x'",
+    "coproc rm -rf /tmp/valuable",
 ])
 def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
     """Every one of these was auto-approved before.
@@ -501,6 +506,8 @@ def test_deleting_copies_and_branches_are_destructive(command):
     "trap -p",
     "trap '' EXIT",
     "trap 'echo bye' EXIT",
+    # coproc only wraps; a harmless command stays approved.
+    "coproc LS ls -la",
     "git tag v1",
     "git tag -a v1 -m 'release'",
 ])
