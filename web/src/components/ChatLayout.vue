@@ -1,6 +1,7 @@
 <template>
   <div class="chat-layout" :class="{ 'sidebar-open': !sidebarCollapsed }">
     <ProjectSidebar
+      ref="projectSidebarRef"
       :collapsed="sidebarCollapsed"
       :mode="viewMode"
       :style="sidebarStyle"
@@ -289,6 +290,8 @@ const fileViewer = useFileViewerStore()
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
 // Ref into HomeRecentChats for arrow-key navigation on the home screen.
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
+const projectSidebarRef = ref<InstanceType<typeof ProjectSidebar> | null>(null)
+const schedulePanelRef = ref<any>(null)
 
 // Reactive handle on the global font scale. Used by the Cmd/Ctrl+Shift+= and
 // Cmd/Ctrl+Shift+- shortcuts (below); the same composable is consumed by
@@ -853,6 +856,23 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     if (projectIdParam.value) {
       e.preventDefault()
       void router.push('/')
+      return
+    }
+    return
+  }
+
+  // Automations: same arrow contract as home, but over the sidebar's
+  // schedule lists and the overview pane. This lives outside the chat-only
+  // gate because shortcutsActive deliberately excludes schedules — the
+  // lists still want keyboard roaming.
+  if (viewMode.value === 'schedules' && e.key.startsWith('Arrow')) {
+    if (isTypingTarget(e.target) || e.defaultPrevented) return
+    if (projectSidebarRef.value?.onArrow?.(e.key)) {
+      e.preventDefault()
+      return
+    }
+    if (schedulePanelRef.value?.onArrow?.(e.key)) {
+      e.preventDefault()
       return
     }
     return

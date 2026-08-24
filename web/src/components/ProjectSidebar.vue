@@ -162,7 +162,7 @@
           >{{ missedCountFor(workspace.name) }}</span>
         </button>
       </div>
-      <div class="schedules-list">
+      <div ref="schedulesListEl" class="schedules-list">
         <template v-if="taskStore.loading">
           <div class="mm-loading-heading" role="status" aria-live="polite">
             <span class="history-loading-spinner" aria-hidden="true"></span>
@@ -676,12 +676,17 @@
 
         <!-- Aging notes: facts nobody has verified within their type's
              horizon. The actionable counterpart of "Recently written" — the
-             daily curation routine reviews this same list, so an entry here
-             is either worth re-confirming or worth deleting. -->
+             daily curation routine reviews this same list and may resolve an
+             entry, but a failed or disabled run leaves it for the user. -->
         <template v-if="mm.staleNotes.length">
           <div class="mm-row-between">
             <h3>Needs review ({{ mm.staleNotes.length }})</h3>
           </div>
+          <p class="mm-hint">
+            Daily Memory curation checks these notes too: it re-verifies, updates,
+            corrects, or removes them. They stay here until you or that run
+            resolves them.
+          </p>
           <div class="mm-link-list">
             <div
               v-for="n in mm.staleNotes.slice(0, staleLimit)"
@@ -1222,6 +1227,60 @@ const userLoops = computed(() =>
 const systemLoops = computed(() =>
   workspaceLoops.value.filter(l => l.scope === 'system'),
 )
+
+// ── Keyboard navigation for the schedules list (mirrors HomeRecentChats) ──────
+const schedulesListEl = ref<HTMLElement | null>(null)
+
+function focusableSchedules(): HTMLElement[] {
+  const root = schedulesListEl.value
+  if (!root) return []
+  return Array.from(root.querySelectorAll<HTMLElement>('.schedule-item:not([aria-disabled="true"])'))
+}
+
+function focusScheduleElement(element: HTMLElement) {
+  element.focus()
+  element.scrollIntoView({ block: 'nearest' })
+}
+
+function clamp(value: number, lower: number, upper: number): number {
+  return Math.min(upper, Math.max(lower, value))
+}
+
+function onArrow(key: string): boolean {
+  if (props.collapsed) return false
+  const items = focusableSchedules()
+  if (!items.length) return false
+  const active = document.activeElement as HTMLElement | null
+  let index = items.indexOf(active as HTMLElement)
+  if (index < 0) {
+    // Start from the active route, or the first item. This mirrors the
+    // homepage's anchorLane logic but for a flat list.
+    const activeLink = rootActiveScheduleElement(items)
+    if (activeLink) {
+      index = items.indexOf(activeLink)
+    } else {
+      items[0]?.focus()
+      items[0]?.scrollIntoView({ block: 'nearest' })
+      return true
+    }
+  }
+  const delta = key === 'ArrowDown' || key === 'ArrowRight' ? 1 : key === 'ArrowUp' || key === 'ArrowLeft' ? -1 : 0
+  if (!delta) return false
+  const nextIndex = clamp(index + delta, 0, items.length - 1)
+  if (nextIndex === index) return true
+  focusScheduleElement(items[nextIndex])
+  return true
+}
+
+function rootActiveScheduleElement(items: HTMLElement[]): HTMLElement | null {
+  // The router-link for the current /schedules/:id carries .active (or
+  // .router-link-active). Prefer it so arrows start where the user is.
+  const active = schedulesListEl.value?.querySelector<HTMLElement>('.schedule-item.active')
+  if (active && items.includes(active)) return active
+  return null
+}
+
+defineExpose({ onArrow })
 
 async function selectAutomationWorkspace(workspace: string) {
   if (store.activeWorkspace !== workspace) {
@@ -2806,60 +2865,67 @@ async function confirmDeleteChat(chatId: string) {
   flex-direction: column;
   overflow-y: auto;
   padding: 8px 8px 12px;
+  gap: 12px;
 }
 
-/* Grouped schedule sections */
+/* Grouped schedule sections — aligned to HomeRecentChats .home-tier language:
+   tier header is a low, mono, lowercase label with a bottom rule; rows are
+   home-chat-item rows with a left hue rail. The card box was adding a second
+   border and a background the homepage never has, which made the two sidebars
+   read as different systems. */
 .schedule-group {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+  margin-bottom: 0;
   flex-shrink: 0;
 }
-.schedule-group--once {
-  border-left: 2px solid var(--accent);
-}
+.schedule-group--once,
 .schedule-group--system {
-  border-left: 2px solid var(--accent2);
+  border-left: none;
 }
 .schedule-group-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
-  background: var(--bg2);
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
   border-bottom: 1px solid var(--border);
+  color: var(--fg3);
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--fg2);
-  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  background: transparent;
 }
 .schedule-group-hint {
   font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
-  color: var(--fg2);
+  color: var(--fg3);
   opacity: 0.7;
-  font-size: calc(10px * var(--font-scale));
+  font-size: var(--text-xs);
   margin-left: 4px;
 }
 .schedule-group-count {
-  font-size: calc(10px * var(--font-scale));
-  background: var(--bg3);
-  padding: 1px 5px;
-  border-radius: 999px;
-  color: var(--fg2);
-  min-width: 16px;
-  text-align: center;
+  margin-left: auto;
+  font-size: var(--text-xs);
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  color: var(--fg3);
+  min-width: auto;
+  text-align: right;
 }
 .schedule-group-items {
   display: flex;
   flex-direction: column;
-}
-.schedule-group-items .schedule-item {
-  border-radius: 0;
+  gap: 6px;
 }
 .schedule-item--once .schedule-time {
   color: var(--accent, #ff5566);
@@ -2867,39 +2933,72 @@ async function confirmDeleteChat(chatId: string) {
 }
 .schedule-item {
   display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--touch, 44px);
   align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  text-decoration: none;
-  color: var(--fg2);
-  font-size: var(--text-base);
-  cursor: pointer;
-  min-height: var(--touch);
-}
-.schedule-item:hover { background: var(--bg3); color: var(--fg); }
-.schedule-item.active {
-  background: var(--bg3);
+  gap: 8px;
+  padding: 7px 10px;
+  border: 0;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: transparent;
   color: var(--fg);
-  font-weight: 500;
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+.schedule-item:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); color: var(--fg); }
+.schedule-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.schedule-item.active {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+  color: var(--fg);
+  font-weight: 600;
   border-left: 2px solid var(--accent);
-  padding-left: 8px;
+  padding-left: 10px;
 }
 .schedule-item .schedule-time {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  color: var(--fg2);
+  color: var(--fg3);
   flex-shrink: 0;
-  font-size: var(--text-base);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
 }
+.schedule-item.active .schedule-time { color: var(--fg); }
 .schedule-item .schedule-label {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
 }
+.schedule-item.active .schedule-label { color: var(--fg); }
+.schedule-group--system .schedule-item {
+  border-left-color: color-mix(in srgb, var(--accent2) 45%, transparent);
+}
+.schedule-group--system .schedule-item:hover {
+  background: color-mix(in srgb, var(--accent2) 7%, transparent);
+}
+.schedule-group--system .schedule-item.active {
+  background: color-mix(in srgb, var(--accent2) 8%, var(--bg2));
+  border-left-color: var(--accent2);
+}
+.schedule-group--system .schedule-item:focus-visible {
+  outline-color: var(--accent2);
+}
+.schedule-item--missed { border-left-color: var(--warning) !important; }
 .schedule-item--missed .schedule-time { color: var(--warning); }
-.schedule-item--disabled { opacity: 0.5; }
+.schedule-item--disabled { opacity: 0.55; }
 .schedule-item .missed-dot {
   width: 6px;
   height: 6px;
