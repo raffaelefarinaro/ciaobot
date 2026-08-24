@@ -299,6 +299,14 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   .pane-header {
     height: auto;
     grid-template-columns: auto minmax(0, 1fr) auto;
+    /* Top padding matches the desktop/home 61px header's centring (12px here
+       vs the 30px icon half-height) rather than --space-2: with 8px the
+       touch-hit icons' -7px margin pulled their visual box to ~1px below the
+       safe-area line, which on a standalone iOS PWA put the row inside the
+       status bar's frosted-glass edge — the icons rendered as if something
+       translucent was covering them, while the title row below stayed crisp.
+       The extra 4px drops the icons below the glass like every other view. */
+    padding-top: calc(var(--space-3) + var(--safe-top));
     padding-left: calc(var(--space-3) + var(--safe-left));
     padding-right: calc(var(--space-3) + var(--safe-right));
     row-gap: var(--space-1);
