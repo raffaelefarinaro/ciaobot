@@ -536,7 +536,10 @@ describe('deferred message sends', () => {
     expect(sent.images).toBeUndefined()
   })
 
-  test('returns false and does not push a user bubble when the WS is down', () => {
+  // Previously this asserted the opposite (false, no bubble). That contract was
+  // the bug: for the whole retry window the user had no evidence the message
+  // was accepted, so they pressed send again and again.
+  test('accepts the send and renders it immediately when the WS is down', () => {
     const store = useProjectStore()
     const chatId = 'chat-no-socket'
     store.activeChatId = chatId
@@ -544,8 +547,13 @@ describe('deferred message sends', () => {
 
     const result = store.sendMessage(chatId, 'lost prompt')
 
-    expect(result).toBe(false)
-    expect(store.messages[chatId]).toBeUndefined()
+    expect(result).toBe(true)
+    const msgs = store.messages[chatId] || []
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0]).toMatchObject({ role: 'user', content: 'lost prompt' })
+    // No turn_index: the user_echo handler treats a user bubble without one as
+    // an un-reconciled optimistic bubble and upgrades it in place.
+    expect(msgs[0].turn_index).toBeUndefined()
   })
 
   test('fires onSent only when the message actually goes out', async () => {
@@ -561,7 +569,10 @@ describe('deferred message sends', () => {
     expect(onSentFired).toBe(true)
   })
 
-  test('does not fire onSent when the send is deferred', () => {
+  // Also inverted deliberately. A deferred send now renders a bubble, so the
+  // composer must clear: leaving the text sitting there next to its own bubble
+  // is what made users press send again.
+  test('fires onSent when the send is deferred so the composer clears', () => {
     const store = useProjectStore()
     const chatId = 'chat-onsent-deferred'
     store.activeChatId = chatId
@@ -570,7 +581,7 @@ describe('deferred message sends', () => {
     let onSentFired = false
     store.sendMessage(chatId, 'deferred prompt', undefined, () => { onSentFired = true })
 
-    expect(onSentFired).toBe(false)
+    expect(onSentFired).toBe(true)
   })
 
   test('surfaces a system error bubble after exhausting deferred retries', async () => {
@@ -597,14 +608,223 @@ describe('deferred message sends', () => {
 
     vi.useFakeTimers()
     try {
+      // Accepted immediately (the bubble is on screen), then abandoned.
       const result = store.sendMessage(chatId, 'doomed prompt')
-      expect(result).toBe(false)
+      expect(result).toBe(true)
       // Advance past all 20 retry attempts (20 * 500ms = 10s).
       await vi.advanceTimersByTimeAsync(11000)
 
       const msgs = store.messages[chatId] || []
       expect(msgs.some(m => m.role === 'system' && m.content.includes('Could not send'))).toBe(true)
       expect(store.streaming[chatId]).toBe(false)
+      // The user's own message survives next to the error so ChatPanel's retry
+      // has a user turn to resend, and it is no longer marked pending — the
+      // pending state must not outlive the retry chain.
+      const bubble = msgs.find(m => m.role === 'user' && m.content === 'doomed prompt')
+      expect(bubble).toBeDefined()
+      expect((bubble as { pendingSend?: true }).pendingSend).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+})
+
+// ── The reported bug ──────────────────────────────────────────────────
+// "I sent the message, nothing happens so I try to send again, and after a
+// while I see many times the same message queued."
+//
+// A send made while the chat socket is down waits on a 500ms retry chain.
+// It used to render nothing at all for that whole window, so the user had no
+// evidence the message was accepted, pressed send again, and each press
+// started an independent chain. When the socket opened they all fired; a turn
+// was running by then, so every one took the queue branch.
+describe('deferred send visibility and re-send de-duplication', () => {
+  // A socket that stays CONNECTING until the test opens it, so the deferred
+  // window can be driven deterministically.
+  let lateSockets: LateWebSocket[] = []
+  class LateWebSocket {
+    static CONNECTING = 0
+    static OPEN = 1
+    static CLOSING = 2
+    static CLOSED = 3
+    readyState = LateWebSocket.CONNECTING
+    onopen: (() => void) | null = null
+    onmessage: ((e: { data: string }) => void) | null = null
+    onclose: (() => void) | null = null
+    onerror: (() => void) | null = null
+    send = vi.fn()
+    close() { this.readyState = LateWebSocket.CLOSED; this.onclose?.() }
+    constructor(public url: string) { lateSockets.push(this) }
+    open() { this.readyState = LateWebSocket.OPEN; this.onopen?.() }
+  }
+
+  beforeEach(() => {
+    lateSockets = []
+    vi.stubGlobal('WebSocket', LateWebSocket)
+    vi.useFakeTimers()
+  })
+
+  function messageFrames(socket: LateWebSocket) {
+    return (socket.send as Mock).mock.calls
+      .map(([raw]) => JSON.parse(String(raw)) as Record<string, unknown>)
+      .filter(p => p.type === 'message')
+  }
+
+  function userBubbles(store: ReturnType<typeof useProjectStore>, chatId: string, text: string) {
+    return (store.messages[chatId] || []).filter(m => m.role === 'user' && m.content === text)
+  }
+
+  test('three presses while the socket is down send the message exactly once', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-resend-storm'
+      store.activeChatId = chatId
+
+      // Press 1: socket is absent, so the send defers — but it is accepted and
+      // visible immediately, which is the whole point.
+      expect(store.sendMessage(chatId, 'ship it')).toBe(true)
+      expect(userBubbles(store, chatId, 'ship it')).toHaveLength(1)
+
+      // "nothing happens so I try to send again" — twice more.
+      expect(store.sendMessage(chatId, 'ship it')).toBe(true)
+      expect(store.sendMessage(chatId, 'ship it')).toBe(true)
+      // Collapsed into the send already waiting: still one copy on screen and
+      // one retry chain, not three.
+      expect(userBubbles(store, chatId, 'ship it')).toHaveLength(1)
+
+      // The socket finally opens and every pending chain gets its chance.
+      expect(lateSockets).toHaveLength(1)
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(1)
+      expect(frames[0]).toMatchObject({ type: 'message', text: 'ship it' })
+      // Nothing stacked up in the queue, and the optimistic bubble was promoted
+      // in place rather than duplicated.
+      expect(store.queuedMessages[chatId] || []).toHaveLength(0)
+      expect(userBubbles(store, chatId, 'ship it')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a genuinely different message deferred alongside one is not dropped', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-two-deferred'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'first thought')
+      store.sendMessage(chatId, 'second thought')
+      expect(userBubbles(store, chatId, 'first thought')).toHaveLength(1)
+      expect(userBubbles(store, chatId, 'second thought')).toHaveLength(1)
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      // De-duplication keys on the payload, so both distinct messages go out:
+      // the first starts the turn, the second queues behind it.
+      const texts = messageFrames(socket).map(p => p.text)
+      expect(texts).toContain('first thought')
+      expect(texts).toContain('second thought')
+      expect(texts).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('the server echo reconciles the pending bubble instead of duplicating it', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-echo'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'echo me')
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(messageFrames(socket)).toHaveLength(1)
+
+      // The broker echoes the turn back with its server-assigned index.
+      socket.onmessage?.({
+        data: JSON.stringify({ type: 'user_echo', text: 'echo me', turn_index: 0 }),
+      })
+
+      const bubbles = userBubbles(store, chatId, 'echo me')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].turn_index).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a deferred send that lands mid-turn becomes one queue entry, not a bubble plus a chip', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-queues'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'follow up')
+      expect(userBubbles(store, chatId, 'follow up')).toHaveLength(1)
+
+      // A turn is running by the time the socket comes back.
+      store.streaming[chatId] = true
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(1)
+      expect(frames[0]).toMatchObject({ mode: 'queue', text: 'follow up' })
+      // Exactly one representation of the message: the queue entry. The
+      // optimistic bubble is handed over, not left behind alongside it.
+      expect(store.queuedMessages[chatId] || []).toHaveLength(1)
+      expect(store.queuedMessages[chatId][0].text).toBe('follow up')
+      expect(userBubbles(store, chatId, 'follow up')).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a re-send carrying a new image is not collapsed into the pending one', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-images'
+      store.activeChatId = chatId
+
+      store.pendingImages = ['shot-a.png']
+      store.sendMessage(chatId, 'look at this')
+      store.pendingImages = ['shot-b.png']
+      store.sendMessage(chatId, 'look at this')
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      // Same text but a different attachment is a different message; collapsing
+      // it would silently lose the second image.
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(2)
+      expect(frames.map(p => p.images)).toEqual(
+        expect.arrayContaining([['shot-a.png'], ['shot-b.png']]),
+      )
+      // The first send starts the turn and keeps its own bubble; the second
+      // queues behind it. Pending bubbles are matched on the whole payload, so
+      // two same-text sends cannot promote each other's bubble and leave the
+      // surviving one showing the wrong attachment.
+      const bubbles = userBubbles(store, chatId, 'look at this')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].images).toEqual(['shot-a.png'])
+      expect(store.queuedMessages[chatId] || []).toHaveLength(1)
+      expect(store.queuedMessages[chatId][0].images).toEqual(['shot-b.png'])
     } finally {
       vi.useRealTimers()
       vi.stubGlobal('WebSocket', FakeWebSocket)

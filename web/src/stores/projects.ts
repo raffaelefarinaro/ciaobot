@@ -3858,6 +3858,101 @@ export const useProjectStore = defineStore('projects', () => {
   // abandoned and a system error bubble tells the user the message didn't go.
   const DEFERRED_SEND_MAX_RETRIES = 20
 
+  // ── Deferred sends ──────────────────────────────────────────────────
+  // A send made while the chat socket is down waits on that 500ms retry
+  // chain. It used to render *nothing at all* in the meantime: no bubble, no
+  // pending marker, and the composer kept the text because sendMessage
+  // returned false. For up to 10s the user had no evidence their message was
+  // accepted, so they pressed send again — and each press started its own
+  // independent chain with no de-duplication. When the socket finally opened
+  // every chain fired; a turn was running by then, so they all took the
+  // `alreadyStreaming` queue branch and N identical entries appeared in the
+  // queue at once ("many times the same message queued").
+  //
+  // Two things fix that: render the message immediately as an optimistic
+  // bubble, and keep a per-chat registry of the sends still waiting so a
+  // re-send can collapse into the one already in flight.
+  //
+  // `pendingSend` marks a bubble that is rendered but not yet on the wire, so
+  // the send-out path can promote that exact bubble in place instead of
+  // pushing a second copy. It deliberately carries no `turn_index`, which is
+  // the invariant the `user_echo` handler relies on to reconcile an
+  // optimistic bubble rather than duplicate the turn.
+  type PendingUserMessage = ChatMessage & { pendingSend?: true }
+  interface DeferredSend { composed: string; images?: string[] }
+  const deferredSends: Record<string, DeferredSend[]> = {}
+
+  function sameDeferredPayload(a: DeferredSend, b: DeferredSend): boolean {
+    if (a.composed.trim() !== b.composed.trim()) return false
+    const ai = a.images || []
+    const bi = b.images || []
+    return ai.length === bi.length && ai.every((v, i) => v === bi[i])
+  }
+
+  function findDeferredSend(chatId: string, entry: DeferredSend): DeferredSend | undefined {
+    return deferredSends[chatId]?.find(d => sameDeferredPayload(d, entry))
+  }
+
+  function registerDeferredSend(chatId: string, entry: DeferredSend) {
+    if (!deferredSends[chatId]) deferredSends[chatId] = []
+    deferredSends[chatId].push(entry)
+  }
+
+  function dropDeferredSend(chatId: string, entry: DeferredSend) {
+    const list = deferredSends[chatId]
+    if (!list) return
+    const idx = list.findIndex(d => sameDeferredPayload(d, entry))
+    if (idx === -1) return
+    list.splice(idx, 1)
+    if (!list.length) delete deferredSends[chatId]
+  }
+
+  function pushPendingSendBubble(chatId: string, entry: DeferredSend) {
+    const msgs = messages.value[chatId] || []
+    const bubble: PendingUserMessage = {
+      role: 'user',
+      content: entry.composed,
+      timestamp: new Date().toISOString(),
+      images: entry.images,
+      pendingSend: true,
+    }
+    msgs.push(bubble)
+    messages.value[chatId] = msgs
+    persistMessages()
+  }
+
+  // A history reload (mergeMetadata keeps only turns the server knows about)
+  // can wipe the optimistic bubble while the retry chain is still waiting, so
+  // every caller must tolerate "not found". Matching on the whole payload, not
+  // just the text, keeps two same-text sends carrying different attachments
+  // from promoting or deleting each other's bubble.
+  function findPendingSendBubble(chatId: string, entry: DeferredSend): number {
+    const msgs = messages.value[chatId] || []
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i] as PendingUserMessage
+      if (m.role !== 'user' || !m.pendingSend) continue
+      if (sameDeferredPayload({ composed: m.content || '', images: m.images }, entry)) return i
+    }
+    return -1
+  }
+
+  // The frame is on the wire (or the send was abandoned): this is an ordinary
+  // optimistic bubble now. Clearing the marker keeps a later deferred send
+  // from promoting or deleting a bubble that is not its own, and guarantees
+  // no bubble can stay "pending" forever.
+  function settlePendingSendBubble(chatId: string, entry: DeferredSend): boolean {
+    const idx = findPendingSendBubble(chatId, entry)
+    if (idx === -1) return false
+    delete (messages.value[chatId][idx] as PendingUserMessage).pendingSend
+    return true
+  }
+
+  function dropPendingSendBubble(chatId: string, entry: DeferredSend) {
+    const idx = findPendingSendBubble(chatId, entry)
+    if (idx === -1) return
+    messages.value[chatId].splice(idx, 1)
+  }
+
   function sendMessage(
     chatId: string,
     text: string,
@@ -3891,13 +3986,41 @@ export const useProjectStore = defineStore('projects', () => {
     // message's staged attachments from the shared composer bucket.
     if (!prepared) consumePreparedAttachments(chatId, message)
     const { composed, imageRefs } = message
+    // Only a retry can own an optimistic pending bubble / registry entry: the
+    // first call either sends straight away or creates them below.
+    const wasDeferred = _deferredAttempt > 0
+    const deferredEntry: DeferredSend = { composed, images: imageRefs }
     const ws = sockets.value[chatId]
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (!wasDeferred) {
+        // Re-send de-duplication. An identical payload already waiting on the
+        // socket collapses into that send instead of starting a second retry
+        // chain — that stacking is what produced N copies of the same message
+        // in the queue. Only an *identical* payload collapses; a genuinely
+        // different message still gets its own chain, so nothing is dropped.
+        if (findDeferredSend(chatId, deferredEntry)) {
+          // The message is already visible as a pending bubble, so treat the
+          // press as accepted: clearing the composer stops it from holding
+          // text that invites yet another re-send.
+          onSent?.()
+          return true
+        }
+        registerDeferredSend(chatId, deferredEntry)
+        // Render it now. Nothing appeared here until the socket opened, which
+        // is exactly what "I sent the message, nothing happens" meant.
+        pushPendingSendBubble(chatId, deferredEntry)
+        onSent?.()
+      }
       // Retry limit: if the socket stays down, abandon the deferred send and
       // surface a system error bubble so the user knows the message didn't
-      // go through. Only fire on the original call (attempt 0) — the retry
-      // branches just stop re-scheduling.
+      // go through.
       if (_deferredAttempt >= DEFERRED_SEND_MAX_RETRIES) {
+        dropDeferredSend(chatId, deferredEntry)
+        // Keep the user's message in the transcript — the composer was cleared
+        // when we accepted it, so this bubble is their only copy, and
+        // ChatPanel's error retry resends the user turn above the error — but
+        // stop calling it pending now that no further attempt is coming.
+        settlePendingSendBubble(chatId, deferredEntry)
         const errorMsgs = messages.value[chatId] || []
         errorMsgs.push({
           role: 'system',
@@ -3915,13 +4038,23 @@ export const useProjectStore = defineStore('projects', () => {
         () => sendMessage(chatId, text, message, onSent, _deferredAttempt + 1),
         500,
       )
-      return false
+      // Accepted, not sent: the bubble is on screen and the composer is
+      // clear. Returning false here left the text in the composer with no
+      // bubble anywhere, which read as "nothing happened".
+      return true
     }
     const alreadyStreaming = isChatStreaming(chatId)
 
     if (alreadyStreaming) {
       // Queue: don't push to the main messages list yet. Queued messages live
       // in queuedMessages until the server echoes them.
+      if (wasDeferred) {
+        // This deferred send is becoming a real queue entry. Drop its
+        // optimistic bubble so the message isn't rendered twice (bubble in
+        // the transcript *and* a queued chip).
+        dropDeferredSend(chatId, deferredEntry)
+        dropPendingSendBubble(chatId, deferredEntry)
+      }
       if (!queuedMessages.value[chatId]) queuedMessages.value[chatId] = []
       const queueId = makeQueuedId()
       queuedMessages.value[chatId].push({ id: queueId, text: composed, images: imageRefs })
@@ -3933,14 +4066,20 @@ export const useProjectStore = defineStore('projects', () => {
       return true
     }
 
-    const msgs = messages.value[chatId] || []
-    msgs.push({
-      role: 'user',
-      content: composed,
-      timestamp: new Date().toISOString(),
-      images: imageRefs,
-    })
-    messages.value[chatId] = msgs
+    // A deferred send already rendered its message; promote that same bubble
+    // in place rather than pushing a second copy. `settlePending…` returns
+    // false when a history reload wiped it, in which case we push fresh.
+    if (wasDeferred) dropDeferredSend(chatId, deferredEntry)
+    if (!wasDeferred || !settlePendingSendBubble(chatId, deferredEntry)) {
+      const msgs = messages.value[chatId] || []
+      msgs.push({
+        role: 'user',
+        content: composed,
+        timestamp: new Date().toISOString(),
+        images: imageRefs,
+      })
+      messages.value[chatId] = msgs
+    }
     // Persist immediately so the user's own message survives app close even
     // if the assistant response never arrives (dropped WS, closed window).
     persistMessages()
