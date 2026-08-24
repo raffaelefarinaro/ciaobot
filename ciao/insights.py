@@ -811,8 +811,28 @@ def _has_insights_section(path: Path) -> bool:
         return False
 
 
+def _indent_body_fences(text: str) -> str:
+    """Indent any line-start ``` in the body we are about to append.
+
+    `_is_appended_tail` treats a line-start fence after the stamp as proof the
+    stamp is quoted transcript content, and its docstring asserts that the
+    appended body's own fences are always indented. The prompt's "## Reusable
+    snippets" template does indent them - but the model does not reliably
+    preserve that, and one unindented fence made the whole section invisible:
+    `locate_insights_section` returned None, so memory proposals filed nothing
+    and every backfill run appended ANOTHER copy of the section.
+
+    Indenting here makes that invariant true by construction instead of by
+    convention. Two spaces is what the template already uses, and is still a
+    fence to any CommonMark renderer (up to three spaces of indent).
+    """
+    return "\n".join(
+        f"  {line}" if line.startswith("```") else line for line in text.split("\n")
+    )
+
+
 def _append_section(path: Path, body: str) -> None:
-    text = body.strip()
+    text = _indent_body_fences(body.strip())
     if not text:
         return
     with path.open("a", encoding="utf-8") as f:

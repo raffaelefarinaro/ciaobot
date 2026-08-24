@@ -1073,3 +1073,31 @@ def test_retry_insights_for_chat_runs_text_mode_and_reports(
     assert called["trajectories_enabled"] is False
     assert called["memory_proposals_enabled"] is False
     assert called["filtered_jsonl"] == ""
+
+
+def test_an_appended_snippet_fence_does_not_hide_the_section(tmp_path):
+    """A line-start fence in our own body must not make the section invisible.
+
+    `_is_appended_tail` reads a line-start ``` after the stamp as proof the
+    stamp is quoted transcript content, and its contract is that the appended
+    body's fences are always indented. The "## Reusable snippets" template does
+    indent them, but the model does not reliably preserve that — and one
+    unindented fence hid the entire section: `locate_insights_section` returned
+    None, memory proposals filed nothing, and each backfill run appended
+    another copy of the same section.
+    """
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Chat\n\n## Turn 1\n\nhello\n", encoding="utf-8")
+
+    insights._append_section(
+        archive,
+        "## Reusable snippets\n- rebuild the bundle:\n```sh\nnpm run build\n```\n",
+    )
+
+    text = archive.read_text(encoding="utf-8")
+    assert insights.locate_insights_section(text) is not None
+    assert insights._has_insights_section(archive)
+    # Appended once, and a second pipeline pass must still see it rather than
+    # appending a duplicate.
+    assert text.count(insights._INSIGHTS_HEADER) == 1
+    assert "npm run build" in text

@@ -1114,3 +1114,48 @@ def test_a_colliding_note_aborts_the_whole_deletion(tmp_path):
     assert not (
         Path(config.workspace_vault_root(primary)) / "People" / "Ada.md"
     ).exists()
+
+
+def test_creating_a_workspace_seeds_its_agent_root(tmp_path, monkeypatch):
+    """A new workspace's chats run from its own root immediately.
+
+    Persisting the registry and refreshing the manager only creates the General
+    vault document. Nothing seeded `CLAUDE.md`/`AGENTS.md`, commands, agents or
+    the skill mirrors, so a chat opened right after creation ran with no
+    workspace guide and none of the packaged capabilities — the startup task
+    repairs it, but only after a restart.
+    """
+    client, config, _pcm = _client(tmp_path)
+    seeded: list[tuple[Path, bool]] = []
+
+    def fake_sync(workspace, *, refresh_upstream=True, **_kw):
+        seeded.append((Path(workspace), refresh_upstream))
+        return None
+
+    monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", fake_sync)
+
+    created = client.post(
+        "/api/workspaces", json={"name": "client-b", "vault_root": "client-b"}
+    )
+
+    assert created.status_code == 201
+    assert created.json()["bootstrapped"] is True
+    assert seeded == [(Path(config.agent_root("client-b")), False)]
+
+
+def test_seeding_failure_does_not_undo_the_created_workspace(tmp_path, monkeypatch):
+    """Creation already succeeded, so a sync failure is reported, not unwound."""
+    client, config, _pcm = _client(tmp_path)
+
+    def boom(workspace, **_kw):
+        raise RuntimeError("no packaged skills here")
+
+    monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", boom)
+
+    created = client.post(
+        "/api/workspaces", json={"name": "client-c", "vault_root": "client-c"}
+    )
+
+    assert created.status_code == 201
+    assert created.json()["bootstrapped"] is False
+    assert config.workspace("client-c") is not None

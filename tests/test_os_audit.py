@@ -1073,3 +1073,45 @@ def test_unrehomed_people_notice_is_silent_on_a_single_workspace_install(
 
     kinds = [notice["type"] for notice in result["notices"]]
     assert "unrehomed_people" not in kinds
+
+
+def test_a_search_index_defect_is_rendered_not_just_counted(tmp_path: Path) -> None:
+    """A defect that changes `status` has to be legible in the report.
+
+    `search_index` findings were added to `defect_count` when they landed but
+    never rendered, so an install whose only defect was the search index printed
+    "Total Issues: 1" above a report with every section empty — and `--repair`,
+    which is the fix, went unmentioned. The inline comment beside the count
+    asserted the opposite.
+    """
+    report = run_os_audit(
+        workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault"
+    )
+    report["search_index"] = {
+        "missing": True,
+        "stale_rows": ["personal/memory-vault/People/Mo.md"],
+        "transcripts_unindexed": 3,
+        "errors": [],
+    }
+
+    text = format_audit_markdown(report)
+
+    assert "## 7. Search Index" in text
+    assert "--repair" in text
+    assert "personal/memory-vault/People/Mo.md" in text
+    assert "3 transcript archive(s) unindexed" in text
+
+
+def test_a_clean_search_index_renders_no_section(tmp_path: Path) -> None:
+    """Silence is the healthy answer; an empty section reads as a finding."""
+    report = run_os_audit(
+        workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault"
+    )
+    report["search_index"] = {
+        "missing": False,
+        "stale_rows": [],
+        "transcripts_unindexed": 0,
+        "errors": [],
+    }
+
+    assert "## 7. Search Index" not in format_audit_markdown(report)

@@ -1701,6 +1701,29 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                 f"{failure.get('error')}"
             )
 
+    if "search_index" in report:
+        # Counted in `defect_count` since it landed, but never rendered: an
+        # install whose only defect was the search index reported "Total Issues:
+        # 1" above a report with every section empty, and `--repair` - the fix -
+        # went unmentioned. A defect that changes `status` has to be legible.
+        search = report["search_index"]
+        stale = search.get("stale_rows") or []
+        unindexed = int(search.get("transcripts_unindexed") or 0)
+        if search.get("missing") or stale or unindexed:
+            lines.extend(["", "## 7. Search Index"])
+            if search.get("missing"):
+                lines.append("- ⚠️ No search index; `--repair` rebuilds it")
+            if stale:
+                lines.append(
+                    f"- ⚠️ {len(stale)} indexed row(s) point at notes that moved"
+                )
+                for row in stale[:10]:
+                    lines.append(f"  - {row}")
+                if len(stale) > 10:
+                    lines.append(f"  - … {len(stale) - 10} more")
+            if unindexed:
+                lines.append(f"- ⚠️ {unindexed} transcript archive(s) unindexed")
+
     notices = report.get("upgrade_notices", {}).get("notices", [])
     if notices:
         # Not a finding: these are optional actions a user may decline, so they

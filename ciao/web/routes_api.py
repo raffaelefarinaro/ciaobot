@@ -884,7 +884,41 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
     config.workspaces[workspace.name] = workspace
     _persist_workspaces(config)
     _refresh_project_manager_workspaces(request)
-    return JSONResponse(_workspaces_payload(config), status_code=201 if created else 200)
+    payload = _workspaces_payload(config)
+    if created:
+        payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
+    return JSONResponse(payload, status_code=201 if created else 200)
+
+
+async def _bootstrap_new_agent_root(config, name: str) -> bool:
+    """Seed a freshly created workspace's own agent root.
+
+    Once the re-rooting receipt has flipped, a new workspace's chats run from
+    `<install>/<name>` immediately - but persisting the registry and refreshing
+    the manager only creates the General vault document. Nothing seeded
+    `CLAUDE.md`/`AGENTS.md`, commands, agents or the skill mirrors, so a chat
+    started right after creation ran with NO workspace guide and none of the
+    packaged or custom capabilities. The startup task repairs it, but only after
+    a restart, which is far too late for the chat the operator just opened.
+
+    Best-effort on purpose: the workspace is already registered and usable by
+    the time this runs, so a sync failure is reported rather than unwound. The
+    startup task remains the backstop.
+    """
+    from ciao.sync_skills import sync_workspace_skills
+
+    try:
+        root = Path(config.agent_root(name))
+    except (AttributeError, ValueError):
+        return False
+    try:
+        # `refresh_upstream=False`: this is a local seeding on a user-facing
+        # request, not the periodic upstream regeneration.
+        await asyncio.to_thread(sync_workspace_skills, root, refresh_upstream=False)
+    except Exception:  # noqa: BLE001 - creation already succeeded
+        logger.exception("Could not seed agent root for new workspace %s", name)
+        return False
+    return True
 
 
 async def delete_workspace_setting(request: Request) -> JSONResponse:
