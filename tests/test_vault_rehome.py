@@ -1247,3 +1247,39 @@ def test_a_link_back_to_a_different_person_is_not_a_link_back(tmp_path: Path) ->
     paths = [c.path for c in detect_misfiled_people(vault)]
 
     assert "personal/People/Ada.md" in paths
+
+
+def test_the_cli_does_not_claim_a_clean_vault_when_every_move_failed(
+    tmp_path: Path, capsys
+) -> None:
+    """"No tag-obvious misfiled people" was a lie, and the receipt went unmentioned.
+
+    `mechanical` names what the run FOUND; `moves` names what it managed to
+    move. With the destination unwritable, `moves` is empty — and the CLI printed
+    the clean-vault line on stdout while stderr listed the failures for the very
+    notes it had just found. The receipt line was keyed on `moves` too, so a
+    receipt was written and never mentioned.
+    """
+    from ciao import cli
+
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    destination = vault / "work" / "People"
+    destination.mkdir(parents=True, exist_ok=True)
+    destination.chmod(0o555)
+    try:
+        code = cli.main([
+            "vault-rehome", "--apply",
+            "--vault-root", str(vault),
+            "--runtime-root", str(runtime),
+            "--workspace-name", "personal",
+            "--workspace-name", "work",
+        ])
+    finally:
+        destination.chmod(0o755)
+
+    out = capsys.readouterr()
+    assert code == 1
+    assert "No tag-obvious misfiled people" not in out.out
+    assert "Moved nothing" in out.out
+    assert "did NOT finish" in out.out

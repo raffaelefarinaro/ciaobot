@@ -1611,6 +1611,17 @@ def _vault_rehome_command(args: argparse.Namespace) -> int:
                 f"  {candidate['path']} -> {candidate['destination']}  "
                 f"({candidate['reason']})"
             )
+    elif summary["mechanical"]:
+        # `mechanical` names the notes the run FOUND; `moves` names the ones it
+        # managed to move. When every move failed, printing the clean-vault line
+        # told the operator there was nothing misfiled while stderr listed the
+        # failures — and it named the notes it had just found.
+        print(
+            f"Moved nothing: all {len(summary['mechanical'])} tag-obvious "
+            f"move(s) failed ({summary['notes_scanned']} note(s) scanned):"
+        )
+        for candidate in summary["mechanical"]:
+            print(f"  {candidate['path']} -> {candidate['destination']}")
     else:
         print(f"No tag-obvious misfiled people in {summary['notes_scanned']} note(s).")
 
@@ -1641,9 +1652,18 @@ def _vault_rehome_command(args: argparse.Namespace) -> int:
         for item in summary["failed"]:
             print(f"  {item['path']}: {item['error']}", file=sys.stderr)
 
-    if args.apply and summary["moves"]:
+    # Keyed on the receipt, not on `moves`: a run whose moves all failed still
+    # wrote one (its rewrites are real and reversible), and saying nothing left
+    # a receipt on disk that the operator had never been told about.
+    if args.apply and summary.get("receipt_path"):
         print(f"\nReceipt: {summary.get('receipt_path', '')}")
         print("Reverse it exactly with `ciao vault-unrehome --apply`.")
+        if not summary.get("complete", True):
+            print(
+                "This run did NOT finish: the notes listed under Failed are "
+                "still misfiled. Fix the cause and re-run — the reverse map "
+                "carries forward, so nothing already done is lost."
+            )
     elif not args.apply and (summary["moves"] or summary["needs_judgement"]):
         print("\nRe-run with --apply to write these changes.")
     return 1 if summary["failed"] or summary["conflicts"] else 0
