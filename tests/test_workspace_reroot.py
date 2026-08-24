@@ -13,13 +13,18 @@ vault root, and a .DS_Store beside them.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from ciao import workspace_reroot
 from ciao.workspace_reroot import (
     apply,
+    receipt_path,
     dirty_tracked_paths,
     format_skill_triage,
     index_workspace_prefixes,
@@ -323,6 +328,39 @@ def test_apply_refuses_on_modified_tracked_files(tmp_path: Path) -> None:
     assert applied["status"] == "refused"
     assert any("uncommitted" in r for r in applied["refusals"])
     assert (install / "memory-vault").is_dir(), "it moved something despite refusing"
+    assert read_receipt(runtime) is None
+
+
+def test_a_failure_after_the_moves_rolls_back_and_records_the_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A post-move failure must not leave the install half-rooted AND silent.
+
+    Stashing the regenerated notes happens after every ``git mv`` and writes into
+    the runtime root, which ``CIAO_RUNTIME_ROOT`` may put on another filesystem -
+    where the move raised ``EXDEV``. Nothing recorded that: ``payload["applied"]``
+    is only set once the whole stretch succeeds, so no receipt was written, undo
+    had nothing to reverse, and startup swallowed the exception and carried on
+    with a config still naming paths that had already moved.
+    """
+    install, vault, runtime = _git_install(tmp_path)
+
+    def cross_device(src: str, dst: str) -> str:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(workspace_reroot.shutil, "move", cross_device)
+
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert applied["status"] == "refused"
+    assert any("after moving files" in r for r in applied["refusals"])
+    # Every git mv is reversed, so the tree is exactly as it was.
+    assert (install / "memory-vault" / "personal").is_dir()
+    assert not (install / "personal" / "memory-vault").exists()
+    # And the refusal is on disk. read_receipt still says "not migrated", which
+    # is what lets the next run retry rather than being blocked by a failure.
+    record = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    assert record["status"] == "refused"
     assert read_receipt(runtime) is None
 
 

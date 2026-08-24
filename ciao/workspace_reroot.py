@@ -523,83 +523,113 @@ def apply(
             return payload
         applied.append({"source": move.source, "destination": move.destination})
 
-    # Both the generated notes and the ignorable cruft are STASHED, not deleted.
-    # Undo has to restore a byte-identical tree with no caveats, and recreating a
-    # sidecar file empty is not identical. Three notes and a Finder sidecar cost
-    # nothing to keep, and an exactly-undoable migration is the whole argument for
-    # rewriting a user's layout at all.
+    # Everything past this point mutates the tree OUTSIDE git's reach - stashing
+    # regenerated notes, pruning the vault directory, rewriting the registry - and
+    # `payload["applied"]` is only recorded once it all succeeds. An exception here
+    # used to leave the install half-rooted with no receipt at all: startup caught
+    # it and carried on with a config still naming paths that had already moved,
+    # and undo had nothing to work from. So the same rollback the git mv loop does
+    # covers this stretch too, and the refusal is always recorded.
     backup_dir = runtime_root / _REGENERATED_BACKUP
-    backup_dir.mkdir(parents=True, exist_ok=True)
     stashed: list[dict[str, Any]] = []
-    for relative in [*result.regenerated, *result.ignored]:
-        source = install_root / relative
-        if not source.is_file():
-            continue
-        # Two of these are TRACKED on the reference install (the vault root's
-        # MEMORY.md and VOCABULARY.md), so moving them out of the worktree
-        # without telling git leaves the index claiming files that are gone.
-        # Stage the removal so the migration's git state is self-consistent and
-        # whoever commits it does not carry two ghost entries.
-        tracked = (
-            _run_git(install_root, "ls-files", "--error-unmatch", "--", relative)[0] == 0
-        )
-        target = backup_dir / Path(relative).name
-        source.replace(target)
-        if tracked:
-            _run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
-        stashed.append(
-            {
-                "source": relative,
-                "backup": str(target.relative_to(runtime_root)),
-                "tracked": tracked,
-            }
-        )
-
-    # The vault directory is empty now. Remove it so the layout has exactly one
-    # home per workspace, and record that undo recreates it.
     removed_vault = False
-    if vault_root.is_dir() and not any(vault_root.iterdir()):
-        vault_root.rmdir()
-        removed_vault = True
+    try:
+        # Both the generated notes and the ignorable cruft are STASHED, not deleted.
+        # Undo has to restore a byte-identical tree with no caveats, and recreating a
+        # sidecar file empty is not identical. Three notes and a Finder sidecar cost
+        # nothing to keep, and an exactly-undoable migration is the whole argument for
+        # rewriting a user's layout at all.
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        for relative in [*result.regenerated, *result.ignored]:
+            source = install_root / relative
+            if not source.is_file():
+                continue
+            # Two of these are TRACKED on the reference install (the vault root's
+            # MEMORY.md and VOCABULARY.md), so moving them out of the worktree
+            # without telling git leaves the index claiming files that are gone.
+            # Stage the removal so the migration's git state is self-consistent and
+            # whoever commits it does not carry two ghost entries.
+            tracked = (
+                _run_git(install_root, "ls-files", "--error-unmatch", "--", relative)[0] == 0
+            )
+            target = backup_dir / Path(relative).name
+            # `Path.replace` is os.rename, which fails with EXDEV when the
+            # runtime root sits on another filesystem - and CIAO_RUNTIME_ROOT
+            # can put it anywhere. shutil.move falls back to copy+unlink.
+            shutil.move(str(source), str(target))
+            if tracked:
+                _run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
+            stashed.append(
+                {
+                    "source": relative,
+                    "backup": str(target.relative_to(runtime_root)),
+                    "tracked": tracked,
+                }
+            )
 
-    # Move the registry with the files. Without this the install is left broken:
-    # every entry still names memory-vault/<name> while the directory now lives
-    # at <name>/memory-vault, so the vault resolves to a path that is gone. The
-    # before-image goes in the receipt so undo restores it exactly.
-    registry_before, registry_after = _rewrite_registry(runtime_root, result)
-    payload["registry_before"] = registry_before
-    payload["registry_after"] = registry_after
+        # The vault directory is empty now. Remove it so the layout has exactly one
+        # home per workspace, and record that undo recreates it.
+        if vault_root.is_dir() and not any(vault_root.iterdir()):
+            vault_root.rmdir()
+            removed_vault = True
 
-    vault_destinations = {m.workspace: m.destination for m in result.moves if m.workspace}
-    primary_vault = vault_destinations.get(primary, "")
-    created = write_skills_triage(install_root, triage, result.workspaces, primary_vault)
+        # Move the registry with the files. Without this the install is left broken:
+        # every entry still names memory-vault/<name> while the directory now lives
+        # at <name>/memory-vault, so the vault resolves to a path that is gone. The
+        # before-image goes in the receipt so undo restores it exactly.
+        registry_before, registry_after = _rewrite_registry(runtime_root, result)
+        payload["registry_before"] = registry_before
+        payload["registry_after"] = registry_after
 
-    if split is not None:
-        guide_created, guide_stashed = write_guide_split(
-            install_root, split, vault_destinations, backup_dir, runtime_root
-        )
-        created.extend(guide_created)
-        stashed.extend(guide_stashed)
-        payload["guide_split"] = {
-            "primary": split.primary,
-            "queued": {name: len(items) for name, items in split.queued.items()},
-        }
+        vault_destinations = {m.workspace: m.destination for m in result.moves if m.workspace}
+        primary_vault = vault_destinations.get(primary, "")
+        created = write_skills_triage(install_root, triage, result.workspaces, primary_vault)
 
-    # Every root gets its agent assets, through the same code --repair uses, so
-    # "after a migration, --repair is a no-op" is an invariant and not a hope.
-    created_dirs: list[str] = []
-    shared_sources = install_root / _SKILLS_SRC
-    for name in result.workspaces:
-        files, dirs = bootstrap_root(install_root / name, shared_sources)
-        created.extend(f"{name}/{relative}" for relative in files)
-        created_dirs.extend(f"{name}/{relative}" for relative in dirs)
-    payload["created_files"] = created
-    payload["created_dirs"] = created_dirs
+        if split is not None:
+            guide_created, guide_stashed = write_guide_split(
+                install_root, split, vault_destinations, backup_dir, runtime_root
+            )
+            created.extend(guide_created)
+            stashed.extend(guide_stashed)
+            payload["guide_split"] = {
+                "primary": split.primary,
+                "queued": {name: len(items) for name, items in split.queued.items()},
+            }
 
-    # Sessions are keyed by cwd, and the cwd just changed. Flag rather than
-    # pretend, and report the count so a user whose long chat resets knows why.
-    sessions = flag_stranded_sessions(runtime_root)
-    payload["stranded_sessions"] = sessions
+        # Every root gets its agent assets, through the same code --repair uses, so
+        # "after a migration, --repair is a no-op" is an invariant and not a hope.
+        created_dirs: list[str] = []
+        shared_sources = install_root / _SKILLS_SRC
+        for name in result.workspaces:
+            files, dirs = bootstrap_root(install_root / name, shared_sources)
+            created.extend(f"{name}/{relative}" for relative in files)
+            created_dirs.extend(f"{name}/{relative}" for relative in dirs)
+        payload["created_files"] = created
+        payload["created_dirs"] = created_dirs
+
+        # Sessions are keyed by cwd, and the cwd just changed. Flag rather than
+        # pretend, and report the count so a user whose long chat resets knows why.
+        sessions = flag_stranded_sessions(runtime_root)
+        payload["stranded_sessions"] = sessions
+
+    except Exception as exc:  # noqa: BLE001 - any failure has to unwind
+        for entry in reversed(stashed):
+            restored = install_root / entry["source"]
+            restored.parent.mkdir(parents=True, exist_ok=True)
+            backup = runtime_root / entry["backup"]
+            if backup.is_file():
+                shutil.move(str(backup), str(restored))
+            if entry["tracked"]:
+                _run_git(install_root, "add", "--", entry["source"])
+        if removed_vault:
+            vault_root.mkdir(parents=True, exist_ok=True)
+        for done in reversed(applied):
+            _run_git(install_root, "mv", done["destination"], done["source"])
+        payload["status"] = "refused"
+        payload["refused"] = True
+        payload["refusals"] = [f"migration failed after moving files: {exc}"]
+        payload["receipt_path"] = str(write_receipt(runtime_root, payload))
+        return payload
 
     payload["status"] = "migrated"
     payload["applied"] = applied

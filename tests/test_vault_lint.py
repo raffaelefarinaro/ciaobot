@@ -810,6 +810,7 @@ def test_a_symlinked_cross_root_link_is_not_a_broken_link(tmp_path: Path) -> Non
         "---\ntype: person\n---\n"
         "# User\n"
         "- [Colleague](shared/Colleague.md)\n"
+        "- [Ghost](shared/Ghost.md)\n"
         "- [Escapee](elsewhere/Secret.md)\n",
         encoding="utf-8",
     )
@@ -825,3 +826,6 @@ def test_a_symlinked_cross_root_link_is_not_a_broken_link(tmp_path: Path) -> Non
     # even though the file is real.
     assert "shared/Colleague.md" not in flagged
     assert "elsewhere/Secret.md" in flagged
+    # Landing inside the install does not make a dead link live: the lexical
+    # branch probes before clearing, and this branch has to agree with it.
+    assert "shared/Ghost.md" in flagged

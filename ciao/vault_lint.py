@@ -525,7 +525,10 @@ def _markdown_link_error(
     try:
         relative = resolved.relative_to(root)
     except ValueError:
-        if _resolves_inside_install(resolved, install_root):
+        # Inside the install is not enough on its own: the lexical branch above
+        # probes the target before clearing it, and a cross-root link to a file
+        # that does not exist is still a broken link.
+        if _resolves_inside_install(resolved, install_root) and resolved.is_file():
             return None
         return {
             "source": file.relative.as_posix(),
