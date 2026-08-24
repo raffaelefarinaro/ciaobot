@@ -848,11 +848,19 @@ def test_schedule_create_targets_another_workspace_without_inheriting(
     )
 
     assert result["data"]["workspace"] == "work"
-    # The caller's active project must not leak across the workspace boundary.
-    assert result["data"]["web_project_id"] is None
+    # The caller's active project must not leak across the workspace boundary -
+    # but leaving BOTH bindings unset was silently fatal: dispatch skips a user
+    # schedule with no web target, so it was created, listed, and never ran.
+    # An unqualified cross-workspace target means the destination's General.
+    general = next(
+        item for item in _work_project_pcm().list_projects("work")
+        if item.name == "General"
+    )
+    assert result["data"]["web_project_id"] == general.project_id
     stored = schedules.list_entries()[0]
     assert stored.workspace == "work"
-    assert stored.web_project_id is None
+    assert stored.web_project_id == general.project_id
+    assert stored.web_chat_id is None
 
 
 def test_schedule_create_cross_workspace_resolves_project_by_name(

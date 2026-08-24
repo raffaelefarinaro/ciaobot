@@ -1210,7 +1210,28 @@ class CiaoControlPlane:
                 )
             else:
                 project = self._resolve_project(principal, str(project_ref))
-        elif not web_chat_id and not cross_workspace:
+        elif cross_workspace:
+            # An unqualified cross-workspace target means the destination's
+            # General project. Leaving both bindings unset was silently fatal:
+            # `prepare_schedule_chat` skips a user schedule with no web target,
+            # so the schedule was created, listed, and never ran once - while
+            # this method's own docstring promised the General fallback. That
+            # fallback only ever applied to `scope == "system"` entries.
+            general = next(
+                (
+                    item for item in self.pcm.list_projects(workspace)
+                    if item.name == "General"
+                ),
+                None,
+            )
+            if general is None:
+                raise ControlPlaneError(
+                    "project_required",
+                    f"Workspace '{workspace}' has no General project, so name "
+                    "one with project_id.",
+                )
+            project = general
+        elif not web_chat_id:
             # Inherit the active project when omitted — preferred for vault-aware
             # automation and keeps the schedule in the same workspace as this chat.
             project = self._resolve_project(principal, None)
