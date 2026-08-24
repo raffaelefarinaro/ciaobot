@@ -405,10 +405,19 @@ def _git_is_destructive(args: list[str]) -> bool:
         # `-D` deletes even an unmerged branch, which can drop the only
         # reference to commits that exist nowhere else. `-d` refuses unmerged
         # work, so it is recoverable by definition and stays approved along
-        # with listing.
-        return any(a in {"-D", "--delete --force"} for a in rest) or (
-            "-d" in rest and "--force" in rest
-        )
+        # with listing - unless force rides along, because `-d --force`
+        # removes unmerged work exactly like `-D`. Shell parsing delivers the
+        # long flags as two tokens, so the pair is tested separately, and a
+        # short bundle (`-df`) carries both letters inside one token.
+        shorts = {
+            ch
+            for arg in rest
+            if arg.startswith("-") and not arg.startswith("--")
+            for ch in arg[1:]
+        }
+        forced = "--force" in rest or "f" in shorts
+        deleted = "-d" in rest or "--delete" in rest or "d" in shorts
+        return "-D" in rest or (deleted and forced)
     if subcommand in _DESTRUCTIVE_GIT_SUBCOMMANDS:
         return True
     return False

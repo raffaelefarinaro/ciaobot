@@ -430,6 +430,12 @@ def test_non_destructive_commands_are_not_destructive(command):
     # to those commits.
     "git branch -D only-copy",
     "git branch -d --force x",
+    # The long flags arrive as two separate tokens, and a short bundle
+    # carries both letters in one; every spelling is `-D` in disguise.
+    "git branch --delete --force only-copy",
+    "git branch --force --delete only-copy",
+    "git branch --delete -f x",
+    "git branch -df x",
 ])
 def test_deleting_copies_and_branches_are_destructive(command):
     assert is_destructive_command(command) is True
@@ -442,6 +448,9 @@ def test_deleting_copies_and_branches_are_destructive(command):
     "rsync -a --dry-run --delete a/ b/",
     # `-d` refuses unmerged work, so it is recoverable by definition.
     "git branch -d merged",
+    # Force alone rewrites the local ref but deletes nothing recoverable
+    # only through it; the card is for deletion.
+    "git branch -f main",
     "git branch",
     "git branch -a",
     "git branch --list",
