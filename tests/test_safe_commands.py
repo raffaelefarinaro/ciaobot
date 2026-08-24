@@ -21,6 +21,8 @@ from ciao.providers.safe_commands import is_destructive_command, is_read_only_co
     "wc -l *.py",
     "which python3",
     "echo hello world",
+    # Brace expansion is an argument, not the control operator.
+    "echo {a,b}",
     "rg TODO ciao/",
     "grep -rn 'pattern' tests",
     "find . -name '*.py'",
@@ -224,6 +226,12 @@ def test_destructive_commands_are_destructive(command):
     # subcommand slot holds an innocent-looking name.
     "git -c alias.nuke='!rm -rf /tmp/valuable' nuke",
     "git -c alias.reset='reset --hard' reset-all",
+    # Brace groups and compound-command keywords introduce commands of their
+    # own; left in the leader slot they hid the verb among the arguments.
+    "{ rm -rf /tmp/valuable; }",
+    "! rm -rf ~/x",
+    "if rm -rf ~/x; then :; fi",
+    'for f in *; do rm -rf "$f"; done',
 ])
 def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
     """Every one of these was auto-approved before.

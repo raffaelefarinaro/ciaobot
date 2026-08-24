@@ -297,6 +297,15 @@ _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # from the text: whatever it names is only decided at runtime, so it cannot be
 # classified and gets the card instead of the permissive default.
 _EXPANDED_VERB_RE = re.compile(r"\$")
+# Exact tokens that open, close, or introduce a compound command. Matched
+# WHOLE so brace expansion (`echo {a,b}`) is untouched; only a bare `{` is
+# the control operator.
+_COMPOUND_OPENERS = frozenset({
+    "{", "}", "!",
+    "if", "then", "elif", "else", "fi",
+    "for", "while", "until", "do", "done",
+    "case", "esac", "in", "select",
+})
 
 
 def _verb(name: str) -> str:
@@ -559,10 +568,14 @@ def is_destructive_command(command: str) -> bool:
     for token in tokens:
         if token in _CONNECTORS:
             segments.append([])
-        elif set(token) & {"(", ")"}:
-            # A subshell is its own command, so parens START a segment rather
-            # than being skipped - otherwise the verb inside lands in the outer
-            # segment's arguments, where only segment[0] is ever classified.
+        elif set(token) & {"(", ")"} or token in _COMPOUND_OPENERS:
+            # A subshell, brace group, or compound-command keyword (`{ …; }`,
+            # `if …; then`, `for …; do`) introduces commands of its own, so
+            # like parens it must START a segment. Left in place, `{` led the
+            # segment, the real verb sat among its arguments, and only
+            # segment[0] was ever classified - `{ rm -rf x; }` ran approved.
+            # A closer just ends the group; the fresh empty segment it opens
+            # is skipped below.
             segments.append([])
         elif all(char in _PUNCTUATION for char in token):
             if "<" in token:
