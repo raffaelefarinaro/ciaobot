@@ -1072,7 +1072,7 @@ class CiaoConfig:
         """
         return self.claude_mode
 
-    def _declared_mcp_server_names(self) -> list[str] | None:
+    def _declared_mcp_server_names(self, workspace: str | None = None) -> list[str] | None:
         """Names of servers declared in the project ``.mcp.json``.
 
         Returns the union of server names across the same candidate files the
@@ -1080,6 +1080,24 @@ class CiaoConfig:
         is declared, so nothing to deny), and ``None`` when a file exists but
         cannot be parsed. A parse failure cannot be mapped to names, so the
         caller fails closed against the known allowlist universe instead.
+
+        ``workspace`` adds that workspace's AGENT ROOT to the candidates, and
+        passing it is not cosmetic. A chat runs with its agent root as cwd and a
+        project-scoped ``.mcp.json`` is read from that cwd, so after the
+        re-rooting the file that actually grants servers to a chat is
+        ``<install>/<name>/.mcp.json`` — which is exactly what
+        ``operator_actions._detect_mcp_uncomposed`` tells the operator to write,
+        while deleting the shared one. Looking only under the install root and
+        its parent therefore returned ``[]`` on every composed install, so
+        :meth:`disallowed_tools_for_workspace` emitted no deny entry at all and
+        the per-workspace allowlist was silently inert: a workspace restricted
+        to two servers could reach every server its root declares.
+
+        Omitted (the seeding path), it keeps the pre-re-rooting view — the
+        shared files only. That is deliberate there: seeding writes an allowlist
+        from what a workspace can reach TODAY, and reading a per-root file into
+        it would seed a brand-new workspace with everything its root declares,
+        turning the fail-closed ``None`` default into allow-all.
         """
         workspace_root = self.workspace_root
         candidates = [
@@ -1087,6 +1105,16 @@ class CiaoConfig:
             workspace_root.parent / ".mcp.json",
             workspace_root.parent / "ciao" / ".mcp.json",
         ]
+        if workspace:
+            try:
+                agent_root = self.agent_root(workspace)
+            except ValueError:
+                # An unusable workspace name names no root. The shared
+                # candidates still apply, and an unregistered workspace still
+                # gets the fail-closed allowlist default from the caller.
+                agent_root = workspace_root
+            if agent_root != workspace_root:
+                candidates.insert(0, agent_root / ".mcp.json")
         names: list[str] = []
         seen: set[str] = set()
         for path in candidates:
@@ -1163,7 +1191,11 @@ class CiaoConfig:
             else None
         )
         allow_set = set(allowlist or ())
-        declared = self._declared_mcp_server_names()
+        # Resolved from this workspace's agent root, not just the install root:
+        # after the re-rooting the declaration a chat actually reads lives in
+        # its own root, and reading only the install root made every allowlist
+        # a no-op (see _declared_mcp_server_names).
+        declared = self._declared_mcp_server_names(workspace)
         if declared is None:
             denied = [f"mcp__{name}" for name in self._known_mcp_server_names()]
         else:

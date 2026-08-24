@@ -28,6 +28,7 @@ clobbered.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -39,18 +40,43 @@ from ciao.vault_index import TYPE_ALIASES, scan_vault, vocabulary_report
 
 logger = logging.getLogger(__name__)
 
+# The pre-keying receipt name. Still read, because every install upgrading into
+# per-vault keying has one, and still written by a caller that names no vault —
+# but it accounts for at most one vault. See `_install_receipt`.
 RECEIPT_NAME = "vault-vocabulary.json"
-RECEIPT_VERSION = 1
+RECEIPT_VERSION = 2
 
 _FRONTMATTER_RE = re.compile(r"\A(---[ \t]*\r?\n)(.*?)(\r?\n---[ \t]*(?:\r?\n|\Z))", re.DOTALL)
 
 
-def receipt_path(runtime_root: Path) -> Path:
-    return Path(runtime_root) / "migration" / RECEIPT_NAME
+def _vault_key(vault_root: Path) -> str:
+    """A stable, readable filename fragment for one vault's absolute path.
+
+    The parent directory's name is what a human reads (``personal``, ``work``),
+    and the digest is what makes it unambiguous: two roots can hold vaults with
+    the same leaf name, and the leaf alone is configurable (`CIAO_VAULT_ROOT`).
+    """
+    resolved = Path(vault_root).expanduser().resolve()
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:12]
+    label = re.sub(r"[^A-Za-z0-9._-]+", "-", resolved.parent.name).strip("-")[:24]
+    return f"{label}-{digest}" if label else digest
 
 
-def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
-    path = receipt_path(runtime_root)
+def receipt_path(runtime_root: Path, vault_root: Path | None = None) -> Path:
+    """Where the receipt for ``vault_root`` lives under this runtime root.
+
+    Keyed on the VAULT, not the runtime root, because those are not the same
+    unit: launchd bakes one absolute ``CIAO_RUNTIME_ROOT`` into the plist, so
+    every workspace's vault shares a single runtime directory while the thing
+    being migrated is one vault at a time.
+    """
+    base = Path(runtime_root) / "migration"
+    if vault_root is None:
+        return base / RECEIPT_NAME
+    return base / f"vault-vocabulary.{_vault_key(vault_root)}.json"
+
+
+def _read_receipt_file(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
@@ -60,12 +86,109 @@ def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def write_receipt(runtime_root: Path, summary: dict[str, Any]) -> Path:
-    path = receipt_path(runtime_root)
+def _vault_count(runtime_root: Path) -> int:
+    """How many vaults this install has: one per agent root.
+
+    Asked of ``config.agent_roots_for``, which holds the single definition of
+    "has this install re-rooted" — before the re-rooting there is one shared
+    vault, after it there is one per registered workspace. Only the COUNT is
+    used, so the workspace root handed over does not matter: that function reads
+    the registry and the re-root receipt and never touches the path.
+    """
+    try:
+        from ciao.config import agent_roots_for  # noqa: PLC0415
+
+        runtime = Path(runtime_root)
+        return max(1, len(agent_roots_for(runtime.parent, runtime)))
+    except Exception:  # noqa: BLE001 — an unreadable registry means "one vault"
+        logger.exception("vault vocabulary: could not count the agent roots")
+        return 1
+
+
+def _install_receipt(runtime_root: Path) -> dict[str, Any] | None:
+    """One view over every vault's receipt, or None while any vault is left.
+
+    "Is this install's vocabulary migration complete, and what did it leave for
+    the user?" — which is a different question from the per-vault gate, and the
+    only one an unkeyed caller can be asking. It must answer None while a vault
+    is still unmigrated, or the coarse gate in ``sync_skills`` closes on the
+    first root and the rest are never offered.
+
+    A pre-keying receipt does not record which vault it covers, so it accounts
+    for a single-vault install — where there is nothing else it could be about —
+    and for nothing else. On a multi-vault install it counts for no vault, which
+    is what makes an upgraded install migrate each of them once.
+    """
+    base = Path(runtime_root) / "migration"
+    keyed = [
+        data
+        for data in (
+            _read_receipt_file(path) for path in sorted(base.glob("vault-vocabulary.*.json"))
+        )
+        if data is not None
+    ]
+    covered = {str(data.get("vault_root") or "") for data in keyed} - {""}
+    expected = _vault_count(runtime_root)
+    if not covered:
+        legacy = _read_receipt_file(base / RECEIPT_NAME)
+        return legacy if legacy is not None and expected == 1 else None
+    if len(covered) < expected:
+        return None
+
+    unresolved: dict[str, list[Any]] = {}
+    renamed: list[Any] = []
+    for data in keyed:
+        renamed.extend(data.get("renamed") or [])
+        for raw_type, paths in (data.get("unresolved") or {}).items():
+            unresolved.setdefault(str(raw_type), []).extend(paths or [])
+    stamps = [str(data.get("completed_at") or "") for data in keyed]
+    return {
+        "schema_version": RECEIPT_VERSION,
+        "completed_at": max(stamps) if stamps else "",
+        "vaults": sorted(covered),
+        "renamed": renamed,
+        "unresolved": unresolved,
+    }
+
+
+def read_receipt(runtime_root: Path, vault_root: Path | None = None) -> dict[str, Any] | None:
+    """The receipt for ONE vault, or the install-wide view when none is named.
+
+    Name the vault. One runtime root serves every workspace's vault — launchd
+    bakes a single ``CIAO_RUNTIME_ROOT`` into the plist — so a receipt found
+    without naming a vault belongs to SOME vault, not necessarily to the one the
+    caller is about to skip. Answering with it is the bug this keying fixes:
+    `main.py`'s per-root ``update_skills`` loop wrote the receipt on the first
+    root and every later root short-circuited as "already migrated", so the
+    second workspace's vault kept its legacy ``type:`` values forever and
+    ``vault-lint``/``os-audit`` failed for it permanently, with no path to a fix.
+
+    A keyed read never trusts a pre-keying receipt: it does not say which vault
+    it covered, so it cannot claim one. The cost is one idempotent rescan per
+    vault after the upgrade. Unkeyed reads get :func:`_install_receipt`.
+    """
+    if vault_root is None:
+        return _install_receipt(runtime_root)
+    return _read_receipt_file(receipt_path(runtime_root, vault_root))
+
+
+def write_receipt(
+    runtime_root: Path, summary: dict[str, Any], *, vault_root: Path | None = None
+) -> Path:
+    """Record one vault's migration. The vault comes from ``summary`` if unnamed.
+
+    ``migrate_vault_vocabulary`` always reports ``vault_root``, so the keyed path
+    is reached without every caller having to thread it through by hand.
+    """
+    vault = vault_root if vault_root is not None else summary.get("vault_root") or None
+    path = receipt_path(runtime_root, Path(vault) if vault is not None else None)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": RECEIPT_VERSION,
         "completed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        # Recorded, not just hashed into the filename: a reader must be able to
+        # tell which vault a receipt covers without recomputing the key.
+        "vault_root": str(vault) if vault is not None else "",
         "renamed": summary.get("renamed", []),
         "unresolved": summary.get("unresolved", {}),
     }
@@ -164,13 +287,19 @@ def migrate_if_needed(
     *,
     apply: bool = True,
 ) -> dict[str, Any]:
-    """Run the migration once per install and record a receipt.
+    """Run the migration once per VAULT and record a receipt.
 
-    Called from the install/upgrade path. Returns a summary with ``skipped`` set
-    when the receipt is already present, so the caller can report a no-op
-    instead of rescanning the vault on every boot.
+    Called from the install/upgrade path, once per agent root. Returns a summary
+    with ``skipped`` set when this vault's receipt is already present, so the
+    caller can report a no-op instead of rescanning the vault on every boot.
+
+    Gated per vault rather than per runtime root: the unit that gets migrated is
+    a vault, and a multi-workspace install has several of them behind one
+    ``CIAO_RUNTIME_ROOT``. Keyed on the runtime root, the first root's receipt
+    short-circuited every later root, which left the other workspaces' notes on
+    the legacy vocabulary with no way to ever reach them again.
     """
-    existing = read_receipt(runtime_root)
+    existing = read_receipt(runtime_root, vault_root)
     if existing is not None:
         return {"skipped": "already migrated", "receipt": existing}
     summary = migrate_vault_vocabulary(vault_root, apply=apply)
@@ -178,5 +307,5 @@ def migrate_if_needed(
         # No vault yet (bootstrap). Leave no receipt so the real vault still
         # gets migrated once it exists.
         return summary
-    write_receipt(runtime_root, summary)
+    write_receipt(runtime_root, summary, vault_root=vault_root)
     return summary

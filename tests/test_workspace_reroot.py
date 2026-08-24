@@ -248,12 +248,52 @@ def test_write_receipt_keeps_the_earlier_one(tmp_path: Path) -> None:
     runtime.mkdir()
 
     write_receipt(runtime, {"status": "migrated", "marker": "first"})
-    write_receipt(runtime, {"status": "surveyed", "marker": "second"})
+    write_receipt(runtime, {"status": "migrated", "marker": "second"})
 
     archived = list((runtime / "migration").glob("workspace-rooting.*.json"))
     assert archived, "the earlier receipt was lost"
     kept = json.loads(archived[0].read_text(encoding="utf-8"))
     assert kept["marker"] == "first"
+
+
+def test_a_survey_never_downgrades_a_migrated_receipt(tmp_path: Path) -> None:
+    """The receipt is the only layout discriminator, so a survey cannot replace it.
+
+    `write_receipt` rotated any earlier receipt aside and wrote unconditionally,
+    so one `ciao workspace-reroot --rehearse` on a migrated install replaced
+    `status: "migrated"` with `surveyed` — and `config._rerooted` reads exactly
+    that, so every `agent_root()` fell back to the install root (no guide, no
+    skills) and `undo` answered `nothing_to_undo`.
+    """
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    write_receipt(runtime, {"status": "migrated", "marker": "real", "applied": []})
+
+    write_receipt(runtime, {"status": "surveyed", "marker": "survey"})
+    write_receipt(runtime, {"status": "refused", "marker": "refusal"})
+
+    receipt = read_receipt(runtime)
+    assert receipt is not None, "a survey un-migrated the install"
+    assert receipt["marker"] == "real"
+    # And nothing was rotated aside either: there was nothing to preserve.
+    assert not list((runtime / "migration").glob("workspace-rooting.*.json"))
+
+
+def test_rehearse_on_a_migrated_install_leaves_the_receipt_alone(tmp_path: Path) -> None:
+    """The whole path, as the CLI runs it: `workspace-reroot --rehearse`."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    write_receipt(
+        runtime,
+        {"status": "migrated", "install_root": str(tmp_path), "applied": [], "marker": "real"},
+    )
+
+    payload = rehearse(tmp_path, vault, ["personal", "work"], runtime)
+
+    assert payload["status"] == "surveyed"
+    receipt = read_receipt(runtime)
+    assert receipt is not None and receipt["marker"] == "real"
 
 
 # -- apply / undo round trip -------------------------------------------------

@@ -486,6 +486,7 @@ class ScheduleStore:
             for offset, workspace in enumerate(targets or [None]):
                 entry = self._entry_from_item(item)
                 allowed = SYSTEM_STATE_FIELDS
+                legacy_id = entry.schedule_id
                 if workspace is not None:
                     entry.schedule_id = system_schedule_id(entry.schedule_id, workspace)
                     entry.workspace = workspace
@@ -497,7 +498,7 @@ class ScheduleStore:
                     # The workspace is part of this row's identity, so a stored
                     # overlay must never move it.
                     allowed = SYSTEM_STATE_FIELDS - {"workspace"}
-                overlay = state.get(entry.schedule_id, {})
+                overlay = self._system_overlay(state, entry.schedule_id, legacy_id)
                 for key, value in overlay.items():
                     if key in allowed and hasattr(entry, key):
                         setattr(entry, key, value)
@@ -506,6 +507,31 @@ class ScheduleStore:
                 entry.removable = False
                 entries.append(entry)
         return entries
+
+    def _system_overlay(
+        self, state: dict[str, dict], schedule_id: str, legacy_id: str
+    ) -> dict:
+        """Overlay for one system row, migrating the pre-fan-out key forward.
+
+        Before the per-workspace fan-out, a routine's overlay was keyed by the
+        bare definition id (``system-memory-curation``); it is now keyed
+        ``<base>@<workspace>``. The key changed with no migration, so on upgrade
+        the new key had no stored state and a routine the user had DISABLED came
+        back enabled — the one direction of this bug a user cannot notice until
+        the run they switched off happens again.
+
+        Falling back only when the new key is absent keeps every already-migrated
+        row authoritative: once anything writes ``<base>@<workspace>``, that row
+        owns its state and the legacy key stops influencing it. The read stays
+        read-only on purpose — leaving the legacy key in place means a workspace
+        registered after the upgrade inherits it too, and no ``list_entries``
+        call has to write to disk.
+        """
+        if schedule_id in state:
+            return state[schedule_id]
+        if legacy_id == schedule_id:
+            return {}
+        return state.get(legacy_id, {})
 
     def _load_system_definitions(self) -> list[dict]:
         try:

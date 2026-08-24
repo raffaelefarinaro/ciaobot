@@ -11,7 +11,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ciao.config import CiaoConfig, _DEFAULT_HARNESS_DISALLOWED_TOOLS
+from ciao.config import (
+    CiaoConfig,
+    _DEFAULT_HARNESS_DISALLOWED_TOOLS,
+    reset_reroot_cache,
+)
 
 _MCP_JSON = {
     "mcpServers": {
@@ -240,3 +244,99 @@ def test_allowlist_round_trips_through_registry(tmp_path: Path) -> None:
         }
     )
     assert reloaded.workspace("personal").allowed_mcp_servers == ["alpha"]
+
+
+# -- per-root .mcp.json (re-rooting defect) ----------------------------------
+#
+# After the re-rooting a chat runs with its own agent root as cwd, and that is
+# where a project-scoped `.mcp.json` is read from. The operator is explicitly
+# told to write one file per root and delete the shared one
+# (`operator_actions._detect_mcp_uncomposed`), so on a composed install the only
+# declaration that exists is `<install>/<name>/.mcp.json`. Resolving names from
+# the install root and its parent alone found nothing there, so `declared` came
+# back `[]`, no `mcp__<server>` deny was emitted, and every workspace allowlist
+# was silently inert: a workspace restricted to one server could reach both.
+
+
+def _mark_rerooted(tmp_path: Path) -> None:
+    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
+    reset_reroot_cache()
+
+
+def _write_root_mcp_json(
+    tmp_path: Path, workspace: str, content: object = _MCP_JSON
+) -> None:
+    root = tmp_path / workspace
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".mcp.json").write_text(json.dumps(content, indent=2), encoding="utf-8")
+
+
+def test_allowlist_denies_a_server_declared_only_in_the_agent_root(
+    tmp_path: Path,
+) -> None:
+    """The composed layout: no shared file, one declaration per agent root."""
+    _write_root_mcp_json(tmp_path, "personal")
+    _write_registry(
+        tmp_path,
+        [{"name": "personal", "allowed_mcp_servers": ["alpha"]}],
+    )
+    _mark_rerooted(tmp_path)
+    config = _config(tmp_path)
+
+    assert config.agent_root("personal") == config.workspace_root / "personal"
+    denials = _mcp_denials(config.disallowed_tools_for_workspace("personal"))
+    assert denials == ["mcp__beta"]
+
+
+def test_a_workspace_resolves_its_own_roots_declaration(tmp_path: Path) -> None:
+    """Each root declares its own servers, and the deny follows that root.
+
+    `.mcp.json` grants credentialed access, which is why the migration composes
+    per root rather than copying one file everywhere. The allowlist has to be
+    read against the same file the chat reads, or the two disagree about which
+    servers even exist.
+    """
+    _write_root_mcp_json(tmp_path, "personal")
+    _write_root_mcp_json(
+        tmp_path,
+        "work",
+        {"mcpServers": {"gamma": {"command": "npx", "args": ["gamma"]}}},
+    )
+    _write_registry(
+        tmp_path,
+        [
+            {"name": "personal", "allowed_mcp_servers": ["alpha"]},
+            {"name": "work", "allowed_mcp_servers": []},
+        ],
+    )
+    _mark_rerooted(tmp_path)
+    config = _config(tmp_path)
+
+    assert _mcp_denials(config.disallowed_tools_for_workspace("personal")) == [
+        "mcp__beta"
+    ]
+    assert _mcp_denials(config.disallowed_tools_for_workspace("work")) == ["mcp__gamma"]
+
+
+def test_a_root_without_its_own_file_still_sees_the_shared_one(
+    tmp_path: Path,
+) -> None:
+    """The half-composed state the migration reports rather than fixing.
+
+    A root that has no `.mcp.json` yet while the shared one still exists must
+    keep resolving the shared declaration, so re-rooting an install never widens
+    an allowlist on the way through.
+    """
+    _write_mcp_json(tmp_path)
+    _write_registry(
+        tmp_path,
+        [{"name": "personal", "allowed_mcp_servers": ["alpha"]}],
+    )
+    _mark_rerooted(tmp_path)
+    config = _config(tmp_path)
+
+    assert _mcp_denials(config.disallowed_tools_for_workspace("personal")) == [
+        "mcp__beta"
+    ]

@@ -158,6 +158,75 @@ def test_per_workspace_enable_is_independent(tmp_path: Path) -> None:
     assert rows["system-memory-curation@personal"].enabled is True
 
 
+def test_a_disabled_routine_stays_disabled_after_the_fan_out(tmp_path: Path) -> None:
+    """The upgrade path.
+
+    The overlay used to be keyed by the bare definition id; the fan-out changed
+    the key to `<base>@<workspace>` with no migration, so on the first read after
+    an upgrade the new key held nothing and the packaged `enabled: true` won — a
+    routine the user had deliberately switched off started running again, in
+    every workspace.
+    """
+    _write_state(tmp_path, {"system-memory-curation": {"enabled": False}})
+
+    rows = {
+        entry.schedule_id: entry
+        for entry in _store(tmp_path, "personal", "work").list_entries()
+    }
+
+    assert rows["system-memory-curation@personal"].enabled is False
+    assert rows["system-memory-curation@work"].enabled is False
+
+
+def test_a_migrated_row_outranks_the_pre_fan_out_key(tmp_path: Path) -> None:
+    """The legacy key is only a fallback: a row that already has its own state
+    keeps it, so re-enabling one workspace's row is not undone by the old value.
+    """
+    _write_state(
+        tmp_path,
+        {
+            "system-memory-curation": {"enabled": False},
+            "system-memory-curation@work": {"enabled": True},
+        },
+    )
+
+    rows = {
+        entry.schedule_id: entry
+        for entry in _store(tmp_path, "personal", "work").list_entries()
+    }
+
+    assert rows["system-memory-curation@work"].enabled is True
+    assert rows["system-memory-curation@personal"].enabled is False
+
+
+def test_the_legacy_overlay_carries_the_last_run_forward(tmp_path: Path) -> None:
+    """The rest of the overlay migrates too, so the upgrade does not also replay
+    a missed occurrence in every workspace at once."""
+    _write_state(
+        tmp_path,
+        {"system-memory-curation": {"enabled": True, "last_triggered_on": "2026-08-19"}},
+    )
+
+    rows = {
+        entry.schedule_id: entry
+        for entry in _store(tmp_path, "personal", "work").list_entries()
+    }
+
+    assert rows["system-memory-curation@work"].last_triggered_on == "2026-08-19"
+
+
+def test_a_single_routine_still_reads_its_own_key(tmp_path: Path) -> None:
+    """The fallback must not make an un-fanned routine read some other key."""
+    _write_state(tmp_path, {"system-install-health": {"enabled": False}})
+
+    rows = {
+        entry.schedule_id: entry
+        for entry in _store(tmp_path, "personal", "work").list_entries()
+    }
+
+    assert rows["system-install-health"].enabled is False
+
+
 def test_a_stale_workspace_in_the_overlay_no_longer_shadows_the_definition(
     tmp_path: Path,
 ) -> None:

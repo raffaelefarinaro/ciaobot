@@ -18,6 +18,12 @@ EXCLUDED_VAULT_DIRS = {"Logs", "Templates", ".obsidian"}
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 
+# Every stored key is a path relative to the key base, so no key can begin with
+# a separator: this prefix matches no row. It is the fail-closed answer for a
+# vault whose rows have no identifying prefix, where the alternative ("" — match
+# everything) leaked one workspace's notes into another's search.
+_NO_MATCH_KEY_PREFIX = os.sep
+
 
 def get_db_path() -> Path:
     """Resolve the path to the SQLite search database.
@@ -150,6 +156,27 @@ def _key_base(root_dir: Path, path_base: Path | None) -> Path:
     return Path(path_base) if path_base is not None else root_dir.parent
 
 
+def _scope_prefix(root_dir: Path, base: Path) -> str | None:
+    """Stored-key prefix identifying the rows one indexing pass owns.
+
+    ``""`` means the pass owns every row, because the indexed directory IS the
+    key base. ``None`` means the answer is unknown: the indexed directory is not
+    under the base, so no prefix describes its rows and callers must fail closed
+    rather than read the empty prefix as "everything".
+
+    That case is a supported layout, not a corrupt one: ``CIAO_VAULT_MODE=existing``
+    with an absolute vault root points a workspace at a vault outside the
+    install, while ``path_base`` stays the install root. Compared against
+    ``base`` exactly as the key-writing loop does — unresolved — so the scope can
+    never claim a prefix the stored keys do not have.
+    """
+    try:
+        relative = str(Path(root_dir).relative_to(Path(base)))
+    except ValueError:
+        return None
+    return "" if relative in {"", "."} else relative + os.sep
+
+
 def _index_directory(
     conn: sqlite3.Connection,
     root_dir: Path,
@@ -175,14 +202,7 @@ def _index_directory(
     # Unscoped, indexing one agent root DELETED every row belonging to the
     # others, so a two-workspace install kept exactly one workspace's notes
     # searchable at a time and every switch paid a full re-index.
-    try:
-        scope_prefix = str(root_dir.relative_to(base))
-    except ValueError:
-        scope_prefix = ""
-    if scope_prefix in {"", "."}:
-        scope_prefix = ""
-    else:
-        scope_prefix += os.sep
+    scope_prefix = _scope_prefix(root_dir, base)
 
     found_paths: set[str] = set()
     indexed_count = 0
@@ -239,10 +259,21 @@ def _index_directory(
 
     # Remove deleted files from the index, within this subtree only.
     removed_count = 0
-    in_scope = {
-        key for key in existing if not scope_prefix or key.startswith(scope_prefix)
-    }
-    deleted_paths = in_scope - found_paths
+    if scope_prefix is None:
+        # Nothing identifies this pass's rows (the indexed directory is outside
+        # the key base), so pruning would have to guess. The old code guessed
+        # "everything": the empty prefix put every row in scope, and one pass
+        # over a vault outside the install — CIAO_VAULT_MODE=existing with an
+        # absolute root — deleted every OTHER agent root's rows. Keeping rows
+        # for notes deleted from this vault is the strictly smaller error: they
+        # are stale search hits until a pass that can be scoped runs, whereas
+        # the guess destroyed every other workspace's index.
+        deleted_paths: set[str] = set()
+    else:
+        in_scope = {
+            key for key in existing if not scope_prefix or key.startswith(scope_prefix)
+        }
+        deleted_paths = in_scope - found_paths
     for rel_str in deleted_paths:
         conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
         conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
@@ -307,13 +338,17 @@ def vault_key_prefix(vault_root: Path, path_base: Path | None) -> str:
     prune deleting every other root's rows on each index pass; with the prune
     scoped, the filter has to be explicit or the rows of every root become
     visible to every search.
+
+    A vault outside the key base has no prefix, and the two possible answers are
+    not symmetric: ``""`` means "match every row", so it handed that chat every
+    other workspace's notes — and now that the prune no longer wipes those rows,
+    they are all there to hand over. It fails closed instead: a prefix no stored
+    key can carry, so the search returns nothing until that vault is keyed under
+    the same base as the rest.
     """
     base = _key_base(vault_root, path_base)
-    try:
-        relative = str(Path(vault_root).resolve().relative_to(Path(base).resolve()))
-    except ValueError:
-        return ""
-    return "" if relative in {"", "."} else relative + os.sep
+    prefix = _scope_prefix(Path(vault_root).resolve(), Path(base).resolve())
+    return _NO_MATCH_KEY_PREFIX if prefix is None else prefix
 
 
 def index_file(
@@ -442,5 +477,37 @@ def search_vault(
     return search(conn, "vault_fts", query, limit, path_prefix=path_prefix)
 
 
-def search_logs(conn: sqlite3.Connection, query: str, limit: int = 10) -> list[dict[str, str]]:
-    return search(conn, "transcript_fts", query, limit)
+def search_logs(
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int = 10,
+    *,
+    path_prefix: str = "",
+) -> list[dict[str, str]]:
+    """Search transcripts, optionally scoped to one archive's stored keys.
+
+    ``path_prefix`` has the same meaning it has in :func:`search_vault`, and
+    exists for the same reason: one database holds every re-rooted workspace's
+    rows, and the prune now preserves sibling roots. ``search_vault`` gained the
+    filter and this did not, so a transcript search still answered with another
+    workspace's chat titles and snippets — the same disclosure, reached through
+    ``--logs`` instead of the notes path.
+
+    Left ``""`` for a single-archive install, and correct there: after the
+    re-rooting ``Logs/`` is PROMOTED to the install root UNSPLIT (D5), so its
+    rows have one prefix that every workspace shares. The filter matters for the
+    layouts where each root keeps its own archive under its own vault, which is
+    what a not-yet-migrated root and every per-root ``index_file`` write produce.
+    """
+    return search(conn, "transcript_fts", query, limit, path_prefix=path_prefix)
+
+
+def logs_key_prefix(logs_root: Path, path_base: Path | None) -> str:
+    """The stored-key prefix that identifies one transcript archive's rows.
+
+    The companion to :func:`vault_key_prefix`, for callers holding a ``logs_root``
+    rather than a vault root. Same computation and the same fail-closed answer
+    for an archive outside the key base — named separately so a call site cannot
+    read as if a vault path were being passed.
+    """
+    return vault_key_prefix(logs_root, path_base)

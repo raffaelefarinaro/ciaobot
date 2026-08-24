@@ -275,9 +275,27 @@ def peek_receipt(runtime_root: Path) -> dict[str, Any] | None:
 
 
 def write_receipt(runtime_root: Path, payload: dict[str, Any]) -> Path:
-    """Persist a receipt atomically, keeping any earlier one beside it."""
+    """Persist a receipt atomically, keeping any earlier one beside it.
+
+    A COMPLETED receipt is never downgraded. This file is the SOLE layout
+    discriminator — ``config._rerooted``, ``agent_roots_for`` and ``logs_root``
+    all ask ``read_receipt``, which answers only on ``status == "migrated"`` — so
+    replacing a migrated receipt with a survey or a refusal does not merely lose
+    the reverse map, it moves every agent root back to the install root: no
+    guide, no skills, and ``undo`` answering ``nothing_to_undo`` because there is
+    no migrated receipt left to reverse. A single
+    ``ciao workspace-reroot --rehearse`` on a migrated install did exactly that.
+    ``rehearse`` is documented as writing nothing that can make the real
+    migration look done; the inverse holds too. So a non-migrated payload is
+    dropped when the migration is already recorded — the same guard
+    ``vault_rehome.write_receipt`` makes, for the same reason.
+    """
     path = receipt_path(runtime_root)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if payload.get("status") != "migrated":
+        existing = peek_receipt(runtime_root)
+        if existing is not None and existing.get("status") == "migrated":
+            return path  # a survey or refusal must not un-migrate the install
     if path.is_file():
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path.replace(path.with_name(f"{path.stem}.{stamp}{path.suffix}"))
