@@ -232,6 +232,10 @@ def test_destructive_commands_are_destructive(command):
     "! rm -rf ~/x",
     "if rm -rf ~/x; then :; fi",
     'for f in *; do rm -rf "$f"; done',
+    # The pruning push modes remove remote refs the local side lost; --mirror
+    # force-updates the rest on the way past.
+    "git push --mirror origin",
+    "git push --prune origin",
 ])
 def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
     """Every one of these was auto-approved before.

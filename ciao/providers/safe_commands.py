@@ -219,6 +219,9 @@ _DESTRUCTIVE_GIT_SUBCOMMANDS = frozenset({"clean", "reset", "restore", "rm", "pr
 _DESTRUCTIVE_GIT_PUSH_FLAGS = frozenset({
     "-f", "--force", "--force-with-lease",
 })
+# Push modes that remove remote refs the local side no longer has; `--mirror`
+# also force-updates everything the remote keeps.
+_PRUNING_PUSH_FLAGS = frozenset({"--mirror", "--prune"})
 
 # Wrappers that merely elevate or prefix; the destructive verb follows them.
 # `xargs` belongs here too: `find . | xargs rm -f` never names rm as a segment
@@ -432,10 +435,13 @@ def _git_is_destructive(args: list[str]) -> bool:
     subcommand, *rest = args
     if subcommand == "push":
         # Force rewrites what the remote keeps, the delete spellings remove
-        # refs outright — either way the operator gets the card.
+        # refs outright, and the pruning modes remove whatever the local side
+        # no longer has — `--mirror` does all three at once. Either way the
+        # operator gets the card.
         return (
             any(a.startswith(f) for a in rest for f in _DESTRUCTIVE_GIT_PUSH_FLAGS)
             or any(_push_arg_deletes_a_ref(a) for a in rest)
+            or any(a in _PRUNING_PUSH_FLAGS for a in rest)
         )
     if subcommand in {"checkout", "switch"}:
         # `checkout` is two commands wearing one name. Moving between refs
