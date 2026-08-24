@@ -670,7 +670,15 @@
 
       <!-- PROVIDERS TAB -->
       <template v-if="currentTab === 'providers'">
-        <div v-if="!providerKeysLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <div v-if="!providerKeysLoaded" class="card" role="status" aria-live="polite" aria-label="Loading providers">
+          <div class="mm-loading-heading"><span class="history-loading-spinner" aria-hidden="true"></span><span>Loading providers…</span></div>
+          <div class="mm-skeleton-block" aria-hidden="true">
+            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
+            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
+            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 56px;"></span>
+          </div>
+        </div>
         <template v-else-if="providerKeysError">
           <div class="card"><p class="hint hint--warn">{{ providerKeysError }}</p></div>
         </template>
@@ -4624,6 +4632,45 @@ async function doPackageUpdate() {
 .loading {
   color: var(--fg2);
   font-size: var(--text-base);
+}
+
+.mm-loading-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-3);
+}
+.mm-shimmer-line {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+}
+.mm-skeleton-block { margin-top: var(--space-3); }
+.history-loading-spinner {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: history-loading-spin 0.8s linear infinite;
+}
+@keyframes history-loading-spin { to { transform: rotate(360deg); } }
+@keyframes title-shimmer-sweep {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mm-shimmer-line { animation: title-shimmer-pulse 1.8s ease-in-out infinite; }
+  @keyframes title-shimmer-pulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
+  }
 }
 
 .update-list {
