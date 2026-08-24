@@ -320,14 +320,75 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     return (adjacency.value.get(id) || []).map(nid => nodesById.value.get(nid)).filter(Boolean) as MemoryGraphNode[]
   }
 
-  async function loadGraph(workspace: string) {
-    loading.value = true
+  /**
+   * One snapshot per workspace, kept for the life of the session.
+   *
+   * The map used to be rebuilt from scratch on every visit: a full re-fetch
+   * (the server reads and parses every note in every vault), a full skeleton,
+   * and a full force-layout warmup — for a graph that had not changed since
+   * the user left the page thirty seconds earlier. Snapshots hold the same
+   * node objects the canvas mutates, so a workspace you have already looked
+   * at comes back instantly, with its settled layout intact.
+   */
+  interface GraphSnapshot {
+    nodes: MemoryGraphNode[]
+    edges: MemoryGraphEdge[]
+    signature: string
+    /** The canvas has already run a layout warmup on these positions. */
+    warm: boolean
+  }
+  const graphCache = new Map<string, GraphSnapshot>()
+  const loadedWorkspace = ref('')
+  /** Whether the current positions are settled, i.e. the canvas can skip the
+   * warmup and go straight to the short settle. */
+  const graphIsWarm = ref(false)
+  function markGraphWarm() {
+    graphIsWarm.value = true
+    const snap = graphCache.get(loadedWorkspace.value)
+    if (snap) snap.warm = true
+  }
+
+  /** Cheap identity of a graph's content, to tell a no-op refresh from a real
+   * change without diffing every field. */
+  function signatureOf(ns: { id: string; updated: string; degree: number; stale: boolean }[], es: MemoryGraphEdge[]): string {
+    const nodePart = ns.map(n => `${n.id}|${n.updated}|${n.degree}|${n.stale ? 1 : 0}`).join('\n')
+    return `${ns.length}:${es.length}\n${nodePart}`
+  }
+
+  function adopt(workspace: string, snap: GraphSnapshot) {
+    nodes.value = snap.nodes
+    edges.value = snap.edges
+    loadedWorkspace.value = workspace
+    graphIsWarm.value = snap.warm
+    loading.value = false
+    loadError.value = ''
+  }
+
+  /**
+   * Show the graph for `workspace`, fetching only when we have nothing to
+   * show. A workspace already in the cache is adopted immediately and then
+   * revalidated in the background, so the common case (leaving the page and
+   * coming back) costs no skeleton and no re-layout.
+   */
+  async function ensureGraph(workspace: string) {
+    const cached = graphCache.get(workspace)
+    if (cached && cached.nodes.length) {
+      if (loadedWorkspace.value !== workspace) adopt(workspace, cached)
+      void loadGraph(workspace, { background: true })
+      return
+    }
+    await loadGraph(workspace)
+  }
+
+  async function loadGraph(workspace: string, opts?: { background?: boolean }) {
+    const background = opts?.background === true
+    if (!background) loading.value = true
     loadError.value = ''
     try {
       const data = await api.get<{ nodes: any[]; edges: MemoryGraphEdge[] }>(
         `/api/vault/graph?workspace=${encodeURIComponent(workspace)}`,
       )
-      nodes.value = (data.nodes || []).map(n => ({
+      const incoming: MemoryGraphNode[] = (data.nodes || []).map(n => ({
         ...n,
         tags: n.tags || [],
         aliases: n.aliases || [],
@@ -341,16 +402,54 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
         vx: 0,
         vy: 0,
       }))
-      edges.value = (data.edges || []).filter(e => e.source !== e.target)
+      const incomingEdges = (data.edges || []).filter(e => e.source !== e.target)
+      const signature = signatureOf(incoming, incomingEdges)
+      const previous = graphCache.get(workspace)
+      // Nothing changed on disk: keep the layout the user is looking at rather
+      // than swapping in identical data and re-settling it for no reason.
+      if (previous && previous.signature === signature) {
+        if (loadedWorkspace.value !== workspace) adopt(workspace, previous)
+        return
+      }
+      // Carry positions across for notes we already had, so a refresh that adds
+      // one note does not re-scatter the other five hundred.
+      let carried = 0
+      if (previous) {
+        const prevById = new Map(previous.nodes.map(n => [n.id, n]))
+        for (const n of incoming) {
+          const old = prevById.get(n.id)
+          if (!old) continue
+          n.x = old.x
+          n.y = old.y
+          carried += 1
+        }
+      }
+      const snap: GraphSnapshot = {
+        nodes: incoming,
+        edges: incomingEdges,
+        signature,
+        // Positions inherited wholesale are already settled; a graph that is
+        // mostly new notes at random coordinates is not.
+        warm: Boolean(previous?.warm) && carried >= incoming.length * 0.5,
+      }
+      graphCache.set(workspace, snap)
+      nodes.value = snap.nodes
+      edges.value = snap.edges
+      loadedWorkspace.value = workspace
+      graphIsWarm.value = snap.warm
       activeCats.clear()
       categoryList.value.forEach(c => activeCats.add(c.key))
       selectedId.value = null
       pathStart.value = null
       pathEnd.value = null
     } catch (err) {
-      loadError.value = err instanceof Error ? err.message : 'Failed to load the vault graph.'
+      // A silent background refresh must not replace the graph on screen with
+      // an error card; the data we are showing is still the data we had.
+      if (!background) {
+        loadError.value = err instanceof Error ? err.message : 'Failed to load the vault graph.'
+      }
     } finally {
-      loading.value = false
+      if (!background) loading.value = false
     }
   }
 
@@ -360,7 +459,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   // requiring every consumer to remember to watch it, is what keeps the
   // graph from going stale/blank on a workspace switch.
   const projectStore = useProjectStore()
-  watch(() => projectStore.activeWorkspace, (ws) => { void loadGraph(ws) })
+  watch(() => projectStore.activeWorkspace, (ws) => { void ensureGraph(ws) })
 
   function setColorMode(mode: 'category' | 'cluster') {
     colorMode.value = mode
@@ -439,6 +538,14 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     if (selectedId.value === id) selectedId.value = null
     if (pathStart.value === id) pathStart.value = null
     if (pathEnd.value === id) pathEnd.value = null
+    // The cached snapshot holds the arrays we just replaced; leaving it stale
+    // would resurrect the deleted note on the next visit to this workspace.
+    const snap = graphCache.get(loadedWorkspace.value)
+    if (snap) {
+      snap.nodes = nodes.value
+      snap.edges = edges.value
+      snap.signature = signatureOf(nodes.value, edges.value)
+    }
   }
 
   function handleNodeClick(id: string, shiftKey: boolean) {
@@ -465,5 +572,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
     setColorMode, toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter, isolateCluster,
     selectNode, requestFocus, resetPath, handleNodeClick, deleteNote,
+    graphIsWarm, markGraphWarm, ensureGraph,
   }
 })

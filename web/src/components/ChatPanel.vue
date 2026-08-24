@@ -281,21 +281,38 @@
     <div class="messages" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
       <Transition name="history-loading">
+        <!-- Placeholder for the transcript, in the transcript's own shape: a
+             right-aligned user bubble, the left-aligned assistant bubbles with
+             their accent edge, and a collapsed Activity row between them, all
+             at the widths and radii the real rows use. The previous version
+             was a single bordered card in the middle of the pane, so the
+             reveal replaced one layout with a completely different one — the
+             skeleton predicted nothing about what was coming. -->
         <div
           v-if="blockingHistoryLoad"
-          class="history-loading-card"
+          class="history-skeleton-stack"
           role="status"
           aria-live="polite"
+          aria-label="Loading conversation"
         >
-          <div class="history-loading-heading">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
+          <div class="history-loading-inline" aria-hidden="true">
+            <span class="history-loading-spinner"></span>
             <span>Loading conversation</span>
           </div>
-          <div class="history-skeleton history-skeleton--user" aria-hidden="true">
+          <div class="skel-msg skel-msg--assistant" aria-hidden="true">
+            <span class="history-skeleton-line history-skeleton-line--long"></span>
+            <span class="history-skeleton-line history-skeleton-line--medium"></span>
+          </div>
+          <div class="skel-msg skel-msg--user" aria-hidden="true">
             <span class="history-skeleton-line history-skeleton-line--wide"></span>
             <span class="history-skeleton-line history-skeleton-line--short"></span>
           </div>
-          <div class="history-skeleton history-skeleton--assistant" aria-hidden="true">
+          <div class="skel-trace" aria-hidden="true">
+            <span class="skel-trace-chevron">&#9656;</span>
+            <span class="history-skeleton-line history-skeleton-line--trace"></span>
+          </div>
+          <div class="skel-msg skel-msg--assistant" aria-hidden="true">
+            <span class="history-skeleton-line history-skeleton-line--long"></span>
             <span class="history-skeleton-line history-skeleton-line--long"></span>
             <span class="history-skeleton-line history-skeleton-line--medium"></span>
             <span class="history-skeleton-line history-skeleton-line--short"></span>
@@ -4763,33 +4780,83 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   margin-top: auto;
 }
 
-.history-loading-card {
-  width: min(100%, 620px);
-  margin: auto 0 8px;
-  padding: 14px 16px 16px;
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--bg2) 82%, transparent);
+/* The stack sits where the transcript sits: bottom-pinned, full width, same
+   8px row gap as .messages-content, so the rows the skeleton draws are in the
+   place the real rows will occupy. */
+.history-skeleton-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: auto;
   animation: history-loading-enter 220ms ease-out both;
 }
 
-.history-loading-heading,
+/* Geometry copied from .message.user / .message.assistant deliberately: the
+   whole point is that the placeholder occupies the same box as the row that
+   replaces it. */
+.skel-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 14px;
+  min-width: 0;
+}
+
+.skel-msg--assistant {
+  align-self: flex-start;
+  width: 100%;
+  margin-right: 48px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 4px 14px 14px 14px;
+}
+
+.skel-msg--user {
+  align-self: flex-end;
+  width: 62%;
+  margin-left: 48px;
+  background: color-mix(in srgb, var(--accent2) 12%, var(--bg3));
+  border: 1px solid var(--border-strong);
+  border-radius: 14px 14px 2px 14px;
+}
+
+:root.theme-light .skel-msg--user {
+  background: color-mix(in srgb, var(--accent2) 8%, var(--bg3));
+  border-color: var(--border);
+}
+
+/* Matches a collapsed trace row: dashed, 98% wide, accent2 edge. */
+.skel-trace {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 98%;
+  padding: 9px 12px;
+  border: 1px dashed var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--accent2) 45%, transparent);
+  border-radius: var(--radius);
+  opacity: 0.85;
+}
+
+.skel-trace-chevron {
+  color: var(--fg3);
+  font-size: 9px;
+  line-height: 1;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .skel-msg--assistant { margin-right: 32px; }
+  .skel-msg--user { margin-left: 32px; }
+}
+
 .history-loading-inline {
   display: flex;
   align-items: center;
-  gap: 9px;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-}
-
-.history-loading-heading {
-  margin-bottom: 14px;
-  color: var(--fg);
-  font-weight: 600;
-}
-
-.history-loading-inline {
   align-self: center;
+  gap: 9px;
   padding: 4px 10px 2px;
   color: var(--fg3);
   font-size: var(--text-xs);
@@ -4805,26 +4872,6 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   animation: history-loading-spin 0.8s linear infinite;
 }
 
-.history-skeleton {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 78%;
-  padding: 12px 14px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--bg3) 70%, transparent);
-}
-
-.history-skeleton + .history-skeleton {
-  width: 88%;
-  margin-top: 10px;
-}
-
-.history-skeleton--user {
-  margin-left: auto;
-  border-radius: 14px 14px 2px 14px;
-}
-
 .history-skeleton-line {
   display: block;
   height: 10px;
@@ -4838,6 +4885,7 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
 .history-skeleton-line--long { width: 92%; }
 .history-skeleton-line--medium { width: 68%; }
 .history-skeleton-line--short { width: 42%; }
+.history-skeleton-line--trace { width: 96px; height: 9px; }
 
 .history-loading-enter-active,
 .history-loading-leave-active {
@@ -4865,12 +4913,12 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .history-loading-card,
+  .history-skeleton-stack,
   .history-loading-spinner,
   .history-skeleton-line {
     animation: none;
   }
-  .history-loading-card { opacity: 0.9; }
+  .history-skeleton-stack { opacity: 0.9; }
 }
 
 .message-wrap {

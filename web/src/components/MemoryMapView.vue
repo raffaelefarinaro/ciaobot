@@ -240,7 +240,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
 import ProposalReviewPanel from './ProposalReviewPanel.vue'
 import { useProposalsStore } from '../stores/proposals'
@@ -401,7 +401,9 @@ const FOCUS_ZOOM_RATIO = 2.6
 watch(() => mm.focusSignal.seq, () => {
   const id = mm.focusSignal.id
   if (!id) return
-  const n = mm.nodesById.get(id)
+  // Falls back to the full node map: the sidebar's unlinked list can focus a
+  // note that the current filter keeps out of the visible mirror.
+  const n = simById.get(id) || mm.nodesById.get(id)
   if (!n) return
   const magnify = mm.focusSignal.magnify && zoomRatio() < FOCUS_ZOOM_RATIO
   const scale = magnify
@@ -491,7 +493,7 @@ function zoomRatio(): number {
  * shows them how the current view relates to it. Layout-driven fits (first
  * paint, a filter change) still cut, since there is no continuity to preserve. */
 function fitCamera(animate = false) {
-  const vis = mm.visibleNodes
+  const vis = simNodes
   if (!vis.length || !W || !H) {
     cancelCameraTween()
     camera.x = 0
@@ -631,19 +633,24 @@ function attachCanvas() {
   ro.observe(canvasWrap.value)
   resizeCanvas()
   // Every (re)attachment is a fresh graph (initial load, or a workspace
-  // switch since the canvas is torn down and rebuilt for each) — warm up
-  // before the first paint, then run the brief settle animation.
-  warmupSimulation(warmupStepsFor(mm.visibleNodes.length))
+  // switch since the canvas is torn down and rebuilt for each).
+  refreshSimNodes()
   // Frame the graph only now: at onMounted the canvas had no size and the
   // nodes were still at their random start positions, so there was no extent
-  // worth measuring.
+  // worth measuring. The warmup re-frames as the layout expands.
   fitCamera()
-  wakeSimulation()
+  // A graph restored from the store already carries settled positions from the
+  // last visit, so it only needs the short settle, not the full warmup.
+  if (mm.graphIsWarm) wakeSimulation()
+  else beginWarmup(warmupStepsFor(simNodes.length))
 }
 // A category/search filter change can bring previously-hidden nodes back
 // into the simulation; wake it so they settle instead of sitting inert at
 // whatever position they last had.
-watch(() => mm.visibleIds, () => wakeSimulation())
+watch(() => mm.visibleIds, () => {
+  refreshSimNodes()
+  wakeSimulation()
+})
 // draw() only ever runs inside the RAF loop, which stops once the layout is
 // calm (see tick()) — so changing which node is selected/on-path while the
 // graph is at rest updated the reactive state but never repainted, and the
@@ -658,13 +665,34 @@ watch(() => mm.colorMode, () => requestRedraw())
 // filtering leaves the camera zoomed into empty space.
 watch(() => mm.orphanFilter, async () => {
   await nextTick()
-  warmupSimulation(warmupStepsFor(mm.visibleNodes.length))
+  refreshSimNodes()
   fitCamera()
-  wakeSimulation()
+  beginWarmup(warmupStepsFor(simNodes.length))
 })
 watch(canvasEl, (el) => {
   if (el) nextTick(() => attachCanvas())
 })
+
+// ---------- raw mirror for the physics loop ----------
+// The layout reads x/y/vx/vy of every node against every other node, so one
+// step is O(n^2) property reads — on a 552-note vault, ~600k of them. The
+// store hands out Vue's deep-reactive proxies, and every one of those reads
+// goes through a Proxy get trap: measured, one step costs 102ms against the
+// proxies and 6.8ms against the objects they wrap. That 15x is the whole
+// reason opening the memory page froze the tab — the 400-step warmup ran for
+// ~40 seconds instead of ~2.7, and even the settle animation was stuck at
+// ~10fps.
+//
+// toRaw() returns the very objects the proxies wrap, so a write here is still
+// visible to anything that reads a node through the store; it just no longer
+// notifies. That is what we want: nothing renders x/y except this canvas,
+// which repaints itself every frame anyway.
+let simNodes: MemoryGraphNode[] = []
+let simById = new Map<string, MemoryGraphNode>()
+function refreshSimNodes() {
+  simNodes = mm.visibleNodes.map(n => toRaw(n))
+  simById = new Map(simNodes.map(n => [n.id, n]))
+}
 
 /** Advances the layout by one step; returns the fastest node's speed this step. */
 /** @param cooling 1 = full force, ramping to 0 forces velocity to zero regardless of residual imbalance. */
@@ -686,7 +714,7 @@ watch(canvasEl, (el) => {
 // density uniform actually buys label room.
 const MIN_GAP = 40
 function stepSimulation(cooling = 1): number {
-  const vis = mm.visibleNodes
+  const vis = simNodes
   const REPEL = 2600
   const SPRING = 0.02
   const SPRING_LEN = 90
@@ -718,11 +746,9 @@ function stepSimulation(cooling = 1): number {
     fy += -a.y * CENTER
     forces.set(a.id, { fx, fy })
   }
-  const visSet = mm.visibleIds
   mm.edges.forEach(e => {
-    if (!visSet.has(e.source) || !visSet.has(e.target)) return
-    const a = mm.nodesById.get(e.source)
-    const b = mm.nodesById.get(e.target)
+    const a = simById.get(e.source)
+    const b = simById.get(e.target)
     if (!a || !b) return
     const dx = b.x - a.x
     const dy = b.y - a.y
@@ -757,14 +783,46 @@ function stepSimulation(cooling = 1): number {
   return maxSpeed
 }
 
-/** Run the layout forward without painting, so the graph starts near its
- * settled shape instead of visibly exploding outward from random starting
- * positions — noisy and hard to read with a large vault. Step count scales
- * with node count (see warmupStepsFor) so a dense, hub-heavy vault gets
- * proportionally more (still synchronous, pre-paint) time to work out a
- * stable configuration instead of ending warmup still mid-oscillation. */
-function warmupSimulation(steps: number) {
-  for (let i = 0; i < steps; i++) stepSimulation(Math.max(0, 1 - i / steps))
+/**
+ * Run the layout forward toward its settled shape before handing it to the
+ * cooling animation, so the graph does not visibly explode outward from random
+ * starting positions.
+ *
+ * Spread across frames rather than run in one blocking loop. It used to be
+ * synchronous "so it costs load time rather than animation time", but load
+ * time is the user's time: at 6.8ms a step, a 400-step warmup is 2.7 seconds
+ * with the tab wedged — no navigation, no clicks, nothing (and it was ~40s
+ * before the raw-mirror fix above). Each frame now spends a slice of its
+ * budget stepping and then paints, so the page stays interactive and the
+ * settling is something you watch instead of something you wait out.
+ */
+const WARMUP_FRAME_BUDGET_MS = 8
+let warmupStepsLeft = 0
+let warmupStepsTotal = 0
+
+function beginWarmup(steps: number) {
+  warmupStepsTotal = Math.max(1, steps)
+  warmupStepsLeft = warmupStepsTotal
+  calmFrames = 0
+  // Cooling starts when the warmup finishes; until then every step runs at
+  // full force, as the old synchronous ramp did.
+  coolingStartedAt = 0
+  if (!rafId) rafId = requestAnimationFrame(tick)
+}
+
+/** One frame's worth of warmup. Returns true while more remains. */
+function stepWarmupFrame(): boolean {
+  const deadline = performance.now() + WARMUP_FRAME_BUDGET_MS
+  do {
+    stepSimulation(Math.max(0, warmupStepsLeft / warmupStepsTotal))
+    warmupStepsLeft -= 1
+  } while (warmupStepsLeft > 0 && performance.now() < deadline)
+  if (warmupStepsLeft > 0) return true
+  coolingStartedAt = performance.now()
+  // These positions are worth keeping: the store remembers that this
+  // workspace's layout is settled, so coming back skips the warmup entirely.
+  mm.markGraphWarm()
+  return false
 }
 
 function wakeSimulation() {
@@ -794,7 +852,9 @@ function requestRedraw() {
 function draw() {
   if (!ctx) return
   ctx.clearRect(0, 0, W, H)
-  const vis = mm.visibleNodes
+  // Same raw mirror the physics uses: 552 nodes plus their edges every frame
+  // is another few hundred thousand property reads to keep off the proxies.
+  const vis = simNodes
   const visSet = mm.visibleIds
   const highlightSet = mm.pathIds.size
     ? mm.pathIds
@@ -810,8 +870,8 @@ function draw() {
   ctx.lineWidth = dpr
   mm.edges.forEach(e => {
     if (!visSet.has(e.source) || !visSet.has(e.target)) return
-    const a = mm.nodesById.get(e.source)
-    const b = mm.nodesById.get(e.target)
+    const a = simById.get(e.source)
+    const b = simById.get(e.target)
     if (!a || !b) return
     const onPath = mm.pathIds.has(e.source) && mm.pathIds.has(e.target)
     const onHover = !!hoverId && (e.source === hoverId || e.target === hoverId)
@@ -865,7 +925,7 @@ function draw() {
   // A ring under the cursor: with labels hidden at this zoom the tooltip is
   // the only name source, and the ring is what ties it to a specific dot.
   if (hoverId) {
-    const n = mm.nodesById.get(hoverId)!
+    const n = simById.get(hoverId)!
     const [sx, sy] = worldToScreen(n.x, n.y)
     const r = nodeRadius(n) * dpr * Math.max(0.7, Math.min(1.6, camera.scale))
     ctx!.beginPath()
@@ -888,7 +948,7 @@ function draw() {
  */
 function drawPulse() {
   if (!pulse) return
-  const n = mm.nodesById.get(pulse.id)
+  const n = simById.get(pulse.id)
   if (!n || !mm.visibleIds.has(pulse.id)) {
     pulse = null
     return
@@ -1031,6 +1091,16 @@ function drawLabels(vis: MemoryGraphNode[], highlightSet: Set<string> | null) {
 }
 
 function tick() {
+  // Warmup phase: step until this frame's slice is spent, keep the growing
+  // layout framed, paint, and come back next frame.
+  if (warmupStepsLeft > 0) {
+    const more = stepWarmupFrame()
+    fitCamera()
+    draw()
+    rafId = requestAnimationFrame(tick)
+    if (!more) calmFrames = 0
+    return
+  }
   // cooling ramps 1 -> 0 over COOLING_DURATION_MS of real elapsed time; once
   // past that budget it stays at 0, which forces velocity to exactly zero
   // every subsequent step (see stepSimulation) — a hard, wall-clock bound on
@@ -1056,7 +1126,7 @@ function tick() {
 }
 
 function hitTest(wx: number, wy: number): MemoryGraphNode | null {
-  const vis = mm.visibleNodes
+  const vis = simNodes
   for (let i = vis.length - 1; i >= 0; i--) {
     const n = vis[i]
     const r = nodeRadius(n) + 3
@@ -1228,7 +1298,10 @@ const sortedVisibleNodes = computed(() => {
 
 // ---------- lifecycle ----------
 onMounted(async () => {
-  await mm.loadGraph(store.activeWorkspace)
+  // ensureGraph, not loadGraph: a workspace already in the store's snapshot
+  // cache paints immediately and revalidates in the background, so returning
+  // to this page costs no skeleton and no re-layout.
+  await mm.ensureGraph(store.activeWorkspace)
   resetCamera()
   await nextTick()
   attachCanvas()

@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, test } from 'vitest'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { api } from '../lib/api'
+
+vi.mock('../lib/api', () => ({
+  api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
+}))
 import { clusterColorFor, COLORED_CLUSTERS, useMemoryMapStore, type MemoryGraphNode } from './memoryMap'
 
 beforeEach(() => {
@@ -149,5 +154,86 @@ describe('cluster palette', () => {
 
   test('light and dark themes use different steps', () => {
     expect(clusterColorFor(0, true)).not.toBe(clusterColorFor(0, false))
+  })
+})
+
+
+describe('graph snapshots', () => {
+  /** One fetched note per id, with the shape the server actually sends. */
+  function payload(ids: string[]) {
+    return {
+      nodes: ids.map(id => ({ id, title: id, type: 'note', tags: [], aliases: [], description: '', workspace: 'work', degree: 0, mtime: 1, updated: '2026-01-01' })),
+      edges: [],
+    }
+  }
+
+  beforeEach(() => {
+    vi.mocked(api.get).mockReset()
+  })
+
+  test('a second visit to the same workspace paints from cache and revalidates once', async () => {
+    vi.mocked(api.get).mockResolvedValue(payload(['a', 'b']))
+    const mm = useMemoryMapStore()
+    await mm.ensureGraph('work')
+    expect(api.get).toHaveBeenCalledTimes(1)
+    expect(mm.nodes).toHaveLength(2)
+
+    // Pretend the canvas has laid this out, and that the user moved a node.
+    mm.markGraphWarm()
+    mm.nodes[0].x = 123
+    await mm.ensureGraph('work')
+
+    // Adopted without a skeleton, and the settled position survived the
+    // background refresh because the content signature was unchanged.
+    expect(mm.loading).toBe(false)
+    expect(mm.graphIsWarm).toBe(true)
+    expect(mm.nodes[0].x).toBe(123)
+    expect(api.get).toHaveBeenCalledTimes(2)
+  })
+
+  test('a changed vault replaces the graph but keeps the positions it can', async () => {
+    vi.mocked(api.get).mockResolvedValue(payload(['a', 'b']))
+    const mm = useMemoryMapStore()
+    await mm.ensureGraph('work')
+    mm.markGraphWarm()
+    mm.nodes[0].x = 77
+
+    vi.mocked(api.get).mockResolvedValue(payload(['a', 'b', 'c']))
+    await mm.loadGraph('work')
+    expect(mm.nodes.map(n => n.id)).toEqual(['a', 'b', 'c'])
+    expect(mm.nodes[0].x).toBe(77)
+  })
+
+  test('a failed background refresh leaves the visible graph and shows no error', async () => {
+    vi.mocked(api.get).mockResolvedValue(payload(['a']))
+    const mm = useMemoryMapStore()
+    await mm.ensureGraph('work')
+
+    vi.mocked(api.get).mockRejectedValue(new Error('offline'))
+    await mm.loadGraph('work', { background: true })
+    expect(mm.loadError).toBe('')
+    expect(mm.nodes).toHaveLength(1)
+  })
+
+  test('a failed first load does surface the error', async () => {
+    vi.mocked(api.get).mockRejectedValue(new Error('offline'))
+    const mm = useMemoryMapStore()
+    await mm.ensureGraph('work')
+    expect(mm.loadError).toBe('offline')
+  })
+
+  test('a delete survives the next visit, cache included', async () => {
+    vi.mocked(api.get).mockResolvedValue(payload(['a', 'b']))
+    const mm = useMemoryMapStore()
+    await mm.ensureGraph('work')
+    vi.mocked(api.del).mockResolvedValue(undefined as never)
+    await mm.deleteNote('a')
+    expect(mm.nodes.map(n => n.id)).toEqual(['b'])
+
+    // The snapshot the next visit adopts is the post-delete one, so the note
+    // does not flash back on screen before the refresh lands.
+    vi.mocked(api.get).mockResolvedValue(payload(['b']))
+    await mm.ensureGraph('work')
+    expect(mm.nodes.map(n => n.id)).toEqual(['b'])
   })
 })
