@@ -58,7 +58,34 @@
     </PaneHeader>
     <div class="pfp-main" ref="mainEl">
       <div class="pfp-body" :class="{ 'pfp-body-csv': isCsv }" ref="bodyEl">
-        <div v-if="loading" class="pfp-loading">Loading…</div>
+        <div v-if="loading" class="pfp-skeleton" role="status" aria-live="polite" aria-label="Loading file" aria-busy="true">
+          <div class="pfp-skeleton-meta" aria-hidden="true">
+            <span class="pfp-skeleton-pill pfp-skeleton-pill--type"></span>
+            <span class="pfp-skeleton-pill pfp-skeleton-pill--status"></span>
+            <span class="pfp-skeleton-date"></span>
+          </div>
+          <div class="pfp-skeleton-tags" aria-hidden="true">
+            <span class="pfp-skeleton-tag"></span>
+            <span class="pfp-skeleton-tag pfp-skeleton-tag--wide"></span>
+            <span class="pfp-skeleton-tag"></span>
+          </div>
+          <div class="pfp-skeleton-block" aria-hidden="true">
+            <span class="pfp-skeleton-line pfp-skeleton-line--title"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--long"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--medium"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--short"></span>
+          </div>
+          <div class="pfp-skeleton-block" aria-hidden="true">
+            <span class="pfp-skeleton-line pfp-skeleton-line--long"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--long"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--medium"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--short"></span>
+          </div>
+          <div class="pfp-skeleton-block" aria-hidden="true">
+            <span class="pfp-skeleton-line pfp-skeleton-line--medium"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--short"></span>
+          </div>
+        </div>
         <div v-else-if="error" class="pfp-error">{{ error }}</div>
         <img
           v-else-if="kind === 'image'"
@@ -1154,14 +1181,70 @@ watch(() => props.filePath, () => {
 .pfp-body-csv {
   overflow: hidden !important;
 }
-.pfp-loading,
 .pfp-error {
   padding: 24px;
   text-align: center;
-  color: var(--fg2);
-}
-.pfp-error {
   color: var(--error, #f87171);
+}
+
+/* ── Skeleton loading (mirrors file + metadata card shape) ─────────────── */
+.pfp-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 8px 0 12px;
+}
+.pfp-skeleton-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2, rgba(255, 255, 255, 0.03));
+}
+.pfp-skeleton-pill,
+.pfp-skeleton-date,
+.pfp-skeleton-tag,
+.pfp-skeleton-line {
+  display: block;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: pfp-skeleton-sweep 1.4s ease-in-out infinite;
+}
+.pfp-skeleton-pill { height: 18px; }
+.pfp-skeleton-pill--type { width: 62px; }
+.pfp-skeleton-pill--status { width: 54px; }
+.pfp-skeleton-date { width: 72px; height: 11px; margin-left: auto; }
+.pfp-skeleton-tags {
+  display: flex;
+  gap: 6px;
+  margin-top: -6px;
+}
+.pfp-skeleton-tag { width: 44px; height: 18px; border-radius: 4px; }
+.pfp-skeleton-tag--wide { width: 68px; }
+.pfp-skeleton-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pfp-skeleton-line { height: 10px; }
+.pfp-skeleton-line--title { width: 46%; height: 14px; }
+.pfp-skeleton-line--long { width: 92%; }
+.pfp-skeleton-line--medium { width: 68%; }
+.pfp-skeleton-line--short { width: 42%; }
+@keyframes pfp-skeleton-sweep {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pfp-skeleton-pill,
+  .pfp-skeleton-date,
+  .pfp-skeleton-tag,
+  .pfp-skeleton-line {
+    animation: none;
+  }
 }
 .pfp-libreoffice-notice {
   margin: 24px;
