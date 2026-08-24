@@ -31,7 +31,7 @@
               'nav-item--working': isAnyChatWorking
             }"
             title="chats"
-            :aria-label="isAnyChatWorking ? 'chats (assistant is working)' : 'chats'"
+            :aria-label="store.attentionChatCount > 0 ? `chats — ${store.attentionChatCount} need attention` : (isAnyChatWorking ? 'chats (assistant is working)' : 'chats')"
           >
             <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -42,6 +42,11 @@
               <polyline points="8 18 8 21 11 18" />
             </svg>
                       <span class="nav-item-label" aria-hidden="true">chats</span>
+            <span
+              v-if="store.attentionChatCount > 0"
+              class="nav-item-badge nav-item-badge--count"
+              aria-hidden="true"
+            >{{ store.attentionChatCount }}</span>
           </router-link>
           <router-link
             to="/schedules"
@@ -70,7 +75,7 @@
             class="nav-item touch-hit"
             :class="{ 'nav-item--active': mode === 'memory' || mode === 'proposals' }"
             title="memory"
-            aria-label="memory"
+            :aria-label="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} to review` : 'memory'"
           >
             <!-- Book/tray: rectilinear like the rest of the rail, which the
                  organic-curve brain never was. It also now covers review, since
@@ -83,6 +88,11 @@
               <line x1="8" y1="8" x2="16" y2="8" />
             </svg>
                       <span class="nav-item-label" aria-hidden="true">memory</span>
+            <span
+              v-if="proposals.rows.length > 0"
+              class="nav-item-badge nav-item-badge--count"
+              aria-hidden="true"
+            >{{ proposals.rows.length }}</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/providers, /settings/models, ...) and none of them match
@@ -92,9 +102,9 @@
           <router-link
             to="/settings"
             class="nav-item touch-hit"
-            :class="{ 'nav-item--active': mode === 'settings' }"
-            :title="store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings'"
-            :aria-label="store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings'"
+            :class="{ 'nav-item--active': mode === 'settings', 'nav-item--warning': hasBlockingHousekeeping }"
+            :title="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
+            :aria-label="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
           >
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -107,9 +117,13 @@
               <rect x="15" y="15" width="4" height="4" fill="currentColor" />
             </svg>
                       <span class="nav-item-label" aria-hidden="true">settings</span>
-            <span v-if="store.packageStatus?.update_available" class="nav-item-badge" aria-hidden="true" />
+            <span
+              v-if="settingsNeedsAttention"
+              class="nav-item-badge"
+              :class="{ 'nav-item-badge--warning': hasBlockingHousekeeping }"
+              aria-hidden="true"
+            />
           </router-link>
-          <NotificationBell class="sidebar-bell" />
         </div>
       </template>
     </div>
@@ -375,9 +389,15 @@
           :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
           @click="store.switchWorkspace(workspace.name, { transition: false })"
         >
-          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
-        </button>
+           <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
+           <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
+           <span
+             v-if="proposals.scopedRows(workspace.name).length > 0"
+             class="badge"
+             :title="`${proposals.scopedRows(workspace.name).length} items to review`"
+             :aria-label="`${proposals.scopedRows(workspace.name).length} items to review`"
+           >{{ proposals.scopedRows(workspace.name).length }}</span>
+         </button>
       </div>
 
       <!-- The Graph/List/Review switcher lives here rather than in the pane
@@ -737,11 +757,7 @@
       <!-- Scrollable area for chats/projects -->
       <div class="chats-scroll-area">
         <template v-if="!store.bootstrapped && store.projects.length === 0">
-          <div class="mm-loading-heading" role="status" aria-live="polite" style="padding: 12px 16px 0;">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
-            <span>Loading chats…</span>
-          </div>
-          <div class="project-list" aria-hidden="true">
+          <div class="project-list" role="status" aria-live="polite" aria-label="Loading chats">
             <div v-for="i in 3" :key="i" class="project-group">
               <div class="project-header"><span class="mm-shimmer-line" style="width: 46%; height: 11px;"></span></div>
               <div class="chat-list">
@@ -1070,16 +1086,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
+import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, categoryColorFor, catKeyFor, clusterColorFor } from '../stores/memoryMap'
 import { useProposalsStore } from '../stores/proposals'
 import { isLightTheme } from '../lib/theme'
-import NotificationBell from './NotificationBell.vue'
 import ChatSignals from './ChatSignals.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
@@ -1094,6 +1110,7 @@ const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }
 
 const store = useProjectStore()
 const taskStore = useTaskStore()
+const housekeeping = useHousekeepingStore()
 const fileViewer = useFileViewerStore()
 const mm = useMemoryMapStore()
 const proposals = useProposalsStore()
@@ -1105,6 +1122,15 @@ const reviewScoped = computed(() => proposals.scopedRows(store.activeWorkspace).
 const reviewVisible = computed(() => proposals.visibleRows(store.activeWorkspace).length)
 const reviewElsewhere = computed(() => proposals.rows.length - reviewScoped.value)
 const reviewKinds = computed(() => proposals.kindCounts(store.activeWorkspace))
+const hasBlockingHousekeeping = computed(() => housekeeping.actions.some(action => action.blocking))
+const settingsNeedsAttention = computed(() => Boolean(store.packageStatus?.update_available || hasBlockingHousekeeping.value))
+
+onMounted(() => {
+  // These signals are needed by the rail even when the home or review pane has
+  // never been opened. Both store initializers are idempotent.
+  housekeeping.init()
+  void proposals.ensureLoaded()
+})
 
 const REVIEW_KIND_LABELS: Record<string, string> = {
   memory: 'memory',
@@ -1907,7 +1933,7 @@ async function confirmDeleteChat(chatId: string) {
      degrades in both directions: a sidebar dragged out to 500px does not fling the
      icons to the far edge (the strip stops at 200px), and one dragged down to its
      180px minimum packs them back to the --space-1 floor instead of overflowing
-     the rail. The strip is narrower on mobile, where the bell hides - see below. */
+      the rail. The strip is narrower on mobile, where labels hide - see below. */
   /* Sized to content now rather than a fixed strip: the active item carries an
      expanding label, so the row's width depends on which page you are on. */
   flex: 0 1 auto;
@@ -1939,8 +1965,8 @@ async function confirmDeleteChat(chatId: string) {
      pill by insetting that padding on every side: at 4px the highlight landed
      3px *inside* the glyph, clipping the icon instead of padding it, and the
      matching negative margin shrank each item's footprint to 24px. Uniform
-     padding restores the 30px control with a 44px touch target, and matches
-     the bell beside it, which never overrode this. */
+      padding restores the 30px control with a 44px touch target, matching the
+      other rail controls. */
   border-radius: var(--radius-sm);
   position: relative;
   isolation: isolate;
@@ -1955,8 +1981,8 @@ async function confirmDeleteChat(chatId: string) {
    max-width so it animates, and aria-hidden because .nav-item already carries a
    full aria-label - otherwise the accessible name would read "automations
    automations". */
-/* Mirrors NotificationBell's unread badge — a persistent signal, not a
-   count, so a pulsing dot reads better here than a numeral. */
+/* Persistent system-state signal, not a count: a pulsing dot reads better than
+   a numeral for update and blocking-housekeeping warnings. */
 .nav-item-badge {
   position: absolute;
   top: 2px;
@@ -1967,6 +1993,23 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--accent, #4c8bf5);
   box-shadow: 0 0 0 2px var(--bg-elev, #1b1e26);
   animation: nav-item-badge-pulse 2s ease-in-out infinite;
+}
+
+.nav-item-badge--warning {
+  background: var(--warning);
+}
+
+.nav-item-badge--count {
+  width: auto;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  background: var(--error);
+  color: #fff;
+  box-shadow: 0 0 0 2px var(--bg-elev, #1b1e26);
+  font: 600 10px/16px var(--font-mono, monospace);
+  text-align: center;
+  animation: none;
 }
 
 @keyframes nav-item-badge-pulse {
@@ -2004,7 +2047,7 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 /* The row's contents need roughly: toggle (44) + active item with label (~118)
-   + two bare items (88) + bell (44) + gaps (24) = 318. Under that the flex row
+   + three bare items (132) + gaps (24) = 318. Under that the flex row
    shrinks the only thing that can give - the label - and "automations" rendered
    as "automation" jammed against the pill edge. Drop the label instead of
    clipping a word in half; the icon and its tooltip still say what it is.
@@ -2078,38 +2121,6 @@ async function confirmDeleteChat(chatId: string) {
 
 .nav-item--active::before {
   background: var(--bg3);
-}
-
-.sidebar-bell :deep(.bell-btn) {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  position: relative;
-  isolation: isolate;
-  color: var(--fg2);
-  background: none;
-  border: none;
-  cursor: pointer;
-  transition: color 120ms var(--ease);
-}
-.sidebar-bell :deep(.bell-btn) svg {
-  width: 18px;
-  height: 18px;
-}
-.sidebar-bell :deep(.bell-btn:hover) {
-  color: var(--fg);
-}
-.sidebar-bell :deep(.bell-btn.has-unread) {
-  color: var(--accent);
-}
-.sidebar-bell :deep(.bell-badge) {
-  top: 4px;
-  right: 4px;
-  font-size: calc(10px * var(--font-scale));
-  min-width: 14px;
-  height: 14px;
 }
 
 .workspace-toggle {
@@ -2744,10 +2755,6 @@ async function confirmDeleteChat(chatId: string) {
     visibility: hidden;
   }
   .add-chat-btn { opacity: 1; }
-  .sidebar-bell { display: none; }
-  /* Three icons here instead of four (the pane header carries the bell on mobile),
-     so the strip narrows to match. Left at 200px it would space three glyphs
-     40px apart and read as scattered rather than spread. */
   .nav-links { flex-basis: 150px; }
 }
 

@@ -6860,15 +6860,15 @@ details[open] > .activity-summary::before {
 }
 
 .btn-approve, .btn-deny {
-  min-height: 32px;
-  padding: 0 14px;
+  min-height: 36px;
+  padding: 8px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   cursor: pointer;
   font-family: var(--font);
-  font-size: 13px;
+  font-size: var(--text-sm);
   font-weight: 600;
-  transition: background 120ms var(--ease), transform 120ms var(--ease);
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), transform 120ms var(--ease);
 }
 /* Keyboard chip on the permission buttons, mirroring the question-option key
    hint. Low-emphasis so it reads as a shortcut, not as part of the label. */
@@ -7220,19 +7220,22 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 4px;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: 8px 16px;
+  border-radius: var(--radius);
   border: 1px solid var(--border);
   background: transparent;
   color: var(--fg);
   cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease);
 }
-.btn-sm:hover { background: var(--bg2, rgba(255, 255, 255, 0.04)); }
+.btn-sm:hover { background: var(--bg3); border-color: var(--fg2); }
 .btn-sm.primary {
-  background: var(--accent, #60a5fa);
-  border-color: var(--accent, #60a5fa);
-  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
 }
 .btn-sm.primary:disabled {
   opacity: 0.5;

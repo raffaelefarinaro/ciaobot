@@ -1304,13 +1304,13 @@ watch(() => props.projectId, async () => {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--fg2);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px 6px;
   font-size: 10px;
   cursor: pointer;
   font-family: var(--font);
 }
-.btn-tiny:hover { color: var(--fg); border-color: var(--fg2); }
+.btn-tiny:hover { color: var(--fg); border-color: var(--fg2); background: var(--bg3); }
 
 .upload-errors {
   display: flex;

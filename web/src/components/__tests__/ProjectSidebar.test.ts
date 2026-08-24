@@ -7,6 +7,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
+import { useHousekeepingStore } from '../../stores/housekeeping'
 
 const chatId = 'chat-1234-abcd'
 
@@ -66,13 +67,36 @@ describe('ProjectSidebar chat actions', () => {
       props: { collapsed: false, mode: 'chat' },
       global: {
         plugins: [router],
-        stubs: { NotificationBell: true },
       },
     })
 
     const unread = wrapper.get('.chat-item .chat-signal--unread')
     expect(unread.attributes('aria-label')).toBe('Unread chat')
     expect(unread.attributes('title')).toBe('Unread chat')
+
+    wrapper.unmount()
+  })
+
+  it('shows the global attention count on the chats rail item', async () => {
+    const store = useProjectStore()
+    store.chats[0].last_activity_at = '2026-08-12T10:00:00Z'
+    store.chats[0].last_read_at = '2026-08-12T09:00:00Z'
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+
+    const chatsLink = wrapper.get('a[href="/"]')
+    expect(chatsLink.get('.nav-item-badge--count').text()).toBe('1')
+    expect(chatsLink.attributes('aria-label')).toBe('chats — 1 need attention')
 
     wrapper.unmount()
   })
@@ -95,7 +119,6 @@ describe('ProjectSidebar chat actions', () => {
       props: { collapsed: false, mode: 'chat' },
       global: {
         plugins: [router],
-        stubs: { NotificationBell: true },
       },
     })
 
@@ -145,7 +168,6 @@ describe('ProjectSidebar chat actions', () => {
       props: { collapsed: false, mode: 'chat' },
       global: {
         plugins: [router],
-        stubs: { NotificationBell: true },
       },
     })
 
@@ -191,7 +213,6 @@ describe('ProjectSidebar chat actions', () => {
       props: { collapsed: false, mode: 'chat' },
       global: {
         plugins: [router],
-        stubs: { NotificationBell: true },
       },
     })
 
@@ -242,7 +263,6 @@ describe('ProjectSidebar update badge', () => {
       props: { collapsed: false, mode: 'chat' },
       global: {
         plugins: [router],
-        stubs: { NotificationBell: true },
       },
     }))
   }
@@ -277,6 +297,35 @@ describe('ProjectSidebar update badge', () => {
 
     const settingsLink = wrapper.get('a[href="/settings"]')
     expect(settingsLink.find('.nav-item-badge').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('shows one warning dot for a blocking housekeeping action', async () => {
+    const housekeeping = useHousekeepingStore()
+    housekeeping.actions = [{
+      id: 'gws-login',
+      kind: 'gws_health',
+      severity: 1,
+      title: 'Sign in to gws',
+      detail: 'The token needs attention.',
+      glyph: '!',
+      workspace: '',
+      run_label: 'Open settings',
+      chat_label: '',
+      chat_prompt: '',
+      view_label: 'Settings',
+      view_route: '/settings',
+      blocking: true,
+    }]
+    vi.spyOn(housekeeping, 'init').mockImplementation(() => {})
+
+    const wrapper = await mountSidebar()
+    const settingsLink = wrapper.get('a[href="/settings"]')
+
+    expect(settingsLink.classes()).toContain('nav-item--warning')
+    expect(settingsLink.find('.nav-item-badge--warning').exists()).toBe(true)
+    expect(settingsLink.attributes('aria-label')).toBe('settings — action required')
 
     wrapper.unmount()
   })

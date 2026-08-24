@@ -531,7 +531,7 @@ a:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 6px 12px;
+  padding: 8px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg3);
@@ -539,11 +539,12 @@ a:hover {
   cursor: pointer;
   font-family: var(--font);
   font-size: var(--text-sm);
+  font-weight: 600;
   text-decoration: none;
-  transition: background 120ms var(--ease), transform 120ms var(--ease);
+  transition: background 120ms var(--ease), transform 120ms var(--ease), border-color 120ms var(--ease);
 }
 
-.btn-small:hover { background: var(--border-strong); }
+.btn-small:hover { background: var(--border-strong); border-color: var(--border-strong); }
 .btn-small:active { transform: scale(0.97); background: var(--bg2); }
 
 .btn-primary {
@@ -741,7 +742,7 @@ input:focus, textarea:focus, select:focus {
   flex-wrap: wrap;
 }
 
-/* ── Small bordered icon/text button (chat header, schedule actions) ── */
+/* ── Ghost / tertiary button — transparent, used for "talk about it" ── */
 .btn-chip {
   display: inline-flex;
   align-items: center;
@@ -751,13 +752,14 @@ input:focus, textarea:focus, select:focus {
   color: var(--fg2);
   cursor: pointer;
   font-family: var(--font);
-  font-size: var(--text-base);
-  padding: 4px 8px;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: 8px 16px;
   border-radius: var(--radius);
-  line-height: 1;
-  transition: color 120ms var(--ease), border-color 120ms var(--ease);
+  line-height: 1.2;
+  transition: color 120ms var(--ease), border-color 120ms var(--ease), background 120ms var(--ease);
 }
-.btn-chip:hover { color: var(--fg); border-color: var(--fg2); }
+.btn-chip:hover { color: var(--fg); border-color: var(--fg2); background: var(--bg3); }
 .btn-chip.active { color: var(--accent); border-color: var(--accent); }
 
 /* ── Badge / pill (status, context, day-of-week) ─────────────── */

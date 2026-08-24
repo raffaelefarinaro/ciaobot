@@ -186,9 +186,14 @@ async function openChat(action: OperatorAction): Promise<void> {
 }
 
 .housekeeping-tile {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    'glyph body'
+    '. actions';
+  column-gap: var(--space-2);
+  row-gap: var(--space-2);
+  align-items: start;
   padding: var(--space-2) var(--space-3);
   background: var(--bg-elev);
   border-left: 3px solid var(--warning);
@@ -197,13 +202,14 @@ async function openChat(action: OperatorAction): Promise<void> {
 }
 
 .housekeeping-glyph {
+  grid-area: glyph;
   font-size: var(--text-base);
   color: var(--warning);
   line-height: 1.4;
 }
 
 .housekeeping-body {
-  flex: 1 1 auto;
+  grid-area: body;
   min-width: 0;
 }
 
@@ -221,35 +227,14 @@ async function openChat(action: OperatorAction): Promise<void> {
 }
 
 .housekeeping-actions {
+  grid-area: actions;
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--space-1);
-  flex-shrink: 0;
 }
 
-/* On a phone the side-by-side actions squeezed the prose to a word per line
-   and left the two buttons floating top-right. Stack instead: text gets the
-   full width, the buttons drop below it in a column aligned under the text
-   (not the glyph), each stretched to the same width. */
-@media (max-width: 600px) {
-  .housekeeping-tile {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    grid-template-areas:
-      'glyph body'
-      '. actions';
-    column-gap: var(--space-2);
-    row-gap: var(--space-2);
-    align-items: start;
-  }
-  .housekeeping-glyph { grid-area: glyph; }
-  .housekeeping-body { grid-area: body; }
-  .housekeeping-actions {
-    grid-area: actions;
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .housekeeping-actions .btn-small {
-    width: 100%;
-  }
+.housekeeping-actions .btn-small {
+  width: 100%;
 }
 </style>

@@ -1104,18 +1104,6 @@ onMounted(() => { void store.fetch() })
   opacity: 0.75;
 }
 
-.pr-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.pr-actions--confirm {
-  flex-basis: 100%;
-}
-
 .pr-confirm-text {
   font-size: 0.8rem;
   color: var(--fg2);
@@ -1142,8 +1130,7 @@ onMounted(() => { void store.fetch() })
   width: 4.5rem;
 }
 
-/* One column on a narrow window: a three-column grid puts the buttons in a
-   sliver otherwise. */
+/* Stacked column keeps text full-width on both desktop and mobile. */
 @media (max-width: 640px) {
   .pr-row {
     grid-template-columns: auto 1fr;
@@ -1151,7 +1138,6 @@ onMounted(() => { void store.fetch() })
 
   .pr-actions {
     grid-column: 1 / -1;
-    justify-content: flex-start;
   }
 }
 </style>
