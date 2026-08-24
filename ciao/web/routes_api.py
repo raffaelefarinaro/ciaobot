@@ -5204,7 +5204,14 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if "enabled" in body:
         entry.enabled = bool(body["enabled"])
-    store.replace(entry)
+    try:
+        store.replace(entry)
+    except ValueError as exc:
+        # A fanned-out system routine's workspace is part of its id, so the
+        # store refuses to "move" it. That is a bad request, not a server
+        # fault: the PWA hides the control for those rows, but a direct API
+        # caller would otherwise get a 500 for asking something answerable.
+        return JSONResponse({"error": str(exc)}, status_code=400)
     pcm = request.app.state.project_chat_manager
     return JSONResponse(_enrich_schedule(entry, pcm))
 

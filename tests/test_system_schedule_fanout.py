@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ciao.job_runs import automation_summary
 from ciao.schedules import (
     ScheduleStore,
@@ -284,6 +286,85 @@ def test_replace_round_trips_a_fanned_out_row(tmp_path: Path) -> None:
     )
     assert sibling is not None
     assert sibling.last_triggered_on == ""
+
+
+def test_replace_refuses_to_move_a_fanned_out_row(tmp_path: Path) -> None:
+    """The update APIs reported a move the identity cannot represent.
+
+    `workspace` is an allowed system-schedule change and `replace` persisted it,
+    but `_system_entries` drops it again for a fanned-out row because the
+    workspace comes from the id suffix. So the caller got a payload naming
+    `personal` and the next read said `work`: a move confirmed to a caller that
+    never happened. The refusal has to name the reason, since "it moved, then it
+    didn't" is not something the caller can diagnose.
+    """
+    store = _store(tmp_path, "personal", "work")
+    entry = store.get("system-memory-curation@work")
+    assert entry is not None
+    entry.workspace = "personal"
+
+    with pytest.raises(ValueError) as excinfo:
+        store.replace(entry)
+
+    message = str(excinfo.value)
+    assert "system-memory-curation@work" in message
+    assert "once per workspace" in message
+    # Nothing was written, so the row is not left half-moved either.
+    assert not (tmp_path / "system_schedules_state.json").exists()
+    reloaded = _store(tmp_path, "personal", "work").get("system-memory-curation@work")
+    assert reloaded is not None
+    assert reloaded.workspace == "work"
+
+
+def test_replace_refuses_a_blank_workspace_on_a_fanned_out_row(
+    tmp_path: Path,
+) -> None:
+    """The PATCH route blanks an unrecognised workspace name rather than
+    rejecting it, so "" arrives here as a move too — and it would be ignored the
+    same way."""
+    store = _store(tmp_path, "personal", "work")
+    entry = store.get("system-memory-curation@work")
+    assert entry is not None
+    entry.workspace = ""
+
+    with pytest.raises(ValueError):
+        store.replace(entry)
+
+
+def test_a_case_only_workspace_difference_is_not_a_move(tmp_path: Path) -> None:
+    """The control plane lower-cases its target workspace before saving, so a
+    registry name with capitals would otherwise make every enable toggle on that
+    row fail."""
+    store = _store(tmp_path, "personal", "Work")
+    entry = store.get("system-memory-curation@Work")
+    assert entry is not None
+    entry.workspace = "work"
+    entry.enabled = False
+
+    store.replace(entry)
+
+    reloaded = _store(tmp_path, "personal", "Work").get("system-memory-curation@Work")
+    assert reloaded is not None
+    assert reloaded.enabled is False
+    assert reloaded.workspace == "Work"
+
+
+def test_a_single_routine_can_still_be_moved_between_workspaces(
+    tmp_path: Path,
+) -> None:
+    """The workspace is identity only for a fanned-out row. `system-install-health`
+    has one row for a shared subject, so pointing it at a workspace is a real
+    setting and must keep working."""
+    store = _store(tmp_path, "personal", "work")
+    entry = store.get("system-install-health")
+    assert entry is not None
+    entry.workspace = "work"
+
+    store.replace(entry)
+
+    reloaded = _store(tmp_path, "personal", "work").get("system-install-health")
+    assert reloaded is not None
+    assert reloaded.workspace == "work"
 
 
 # ---- consumers of the literal ids -----------------------------------------

@@ -595,7 +595,46 @@ class ScheduleStore:
         )
         tmp.replace(self._system_state_path)
 
+    def _reject_cross_workspace_move(self, entry: ScheduleEntry) -> None:
+        """Refuse a ``workspace`` change on a fanned-out system row.
+
+        ``workspace`` is in :data:`SYSTEM_STATE_FIELDS`, so it lands in the
+        overlay on any save — but ``_system_entries`` deliberately drops it again
+        for a fanned-out row, whose workspace comes from the
+        ``<base>@<workspace>`` id suffix. A stored value could therefore only be
+        written and then ignored: the update APIs accepted ``workspace`` here and
+        returned a payload naming the requested one, while the very next
+        ``list_entries`` read showed the old one — a move reported as done that
+        never happened, with no way for the caller to tell. Say the row cannot
+        move instead. An un-fanned-out routine is untouched: there the field is a
+        real setting (one shared subject, one row the user may point at any
+        workspace) rather than identity.
+        """
+        base_id, separator, row_workspace = entry.schedule_id.partition(
+            SYSTEM_ID_SEPARATOR
+        )
+        if not separator:
+            return
+        requested = (entry.workspace or "").strip()
+        # Casing alone is not a move: the workspace registry and the callers
+        # disagree about it (the control plane lower-cases its target), and
+        # refusing a save that changes nothing would break the enable toggle.
+        if requested.casefold() == row_workspace.strip().casefold():
+            return
+        hint = (
+            f" Change '{system_schedule_id(base_id, requested)}' instead."
+            if requested
+            else ""
+        )
+        raise ValueError(
+            f"System routine '{base_id}' runs once per workspace, so the "
+            f"workspace is part of its id: '{entry.schedule_id}' is the "
+            f"'{row_workspace}' run and cannot be moved to "
+            f"'{requested or '(none)'}'.{hint}"
+        )
+
     def _replace_system_state(self, entry: ScheduleEntry) -> None:
+        self._reject_cross_workspace_move(entry)
         state = self._load_system_state()
         current = state.setdefault(entry.schedule_id, {})
         for field in SYSTEM_STATE_FIELDS:
