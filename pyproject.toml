@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-  "claude-agent-sdk==0.2.139",
+  "claude-agent-sdk==0.2.144",
   # Agent-facing control plane shared by Claude Code and Codex.
   "mcp>=1.29.0,<2.0",
   "starlette==0.52.1",

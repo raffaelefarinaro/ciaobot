@@ -160,7 +160,15 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   // Bumped whenever something outside the canvas (the sidebar's "most
   // connected" list, a neighbor link) asks the canvas to pan/zoom onto a
   // node. The canvas owns camera state and only needs to watch this signal.
-  const focusSignal = reactive<{ id: string | null; seq: number }>({ id: null, seq: 0 })
+  //
+  // `magnify` separates the two reasons to focus. A name in a sidebar list is
+  // a note the user cannot see on the canvas, so the camera zooms in far
+  // enough for its title to be painted; a click on a dot is a note they are
+  // already looking at, and zooming there would throw away the overview on
+  // every click.
+  const focusSignal = reactive<{ id: string | null; seq: number; magnify: boolean }>(
+    { id: null, seq: 0, magnify: true },
+  )
 
   const nodesById = computed(() => {
     const map = new Map<string, MemoryGraphNode>()
@@ -395,10 +403,16 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   function selectNode(id: string | null) {
     selectedId.value = id
   }
-  /** Select a node and ask the canvas to pan/zoom onto it. */
-  function requestFocus(id: string) {
+  /**
+   * Select a node and ask the canvas to pan onto it.
+   *
+   * @param magnify Also zoom in far enough to read the note's title. Callers
+   * that name the note on screen already (a canvas click) pass false.
+   */
+  function requestFocus(id: string, magnify = true) {
     selectedId.value = id
     focusSignal.id = id
+    focusSignal.magnify = magnify
     focusSignal.seq += 1
   }
   function resetPath() {
@@ -437,7 +451,8 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     // Clicking a node directly on the canvas should feel the same as
     // clicking it from the sidebar or a linked-note link: it becomes
     // selected AND the camera centers on it, not just a highlight in place.
-    requestFocus(id)
+    // No magnification, though — the dot was already under the cursor.
+    requestFocus(id, false)
   }
 
   return {

@@ -2502,8 +2502,10 @@ describe('deep-link chat navigation', () => {
     await store.archiveChat('parent')
 
     expect(store.chatPostprocess('parent')?.state).toBe('running')
-    const toast = store.toasts.find(t => t.title === 'Chat archived')
-    expect(toast?.body).toContain('Processing insights in the background')
+    // The "Chat archived — processing insights in the background" toast was
+    // removed: archiving is immediate and the pipeline is visible via
+    // postprocess state, so no toast is needed.
+    expect(store.toasts.find(t => t.title === 'Chat archived')).toBeUndefined()
   })
 
   test('a subchat the server did not archive stays active and keeps its socket', async () => {

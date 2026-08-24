@@ -73,6 +73,20 @@ describe('visibility', () => {
     expect(mm.focusSignal.seq).toBe(1)
   })
 
+  test('a canvas click pans without magnifying — the dot was already visible', () => {
+    const mm = seedChain()
+    mm.handleNodeClick('c', false)
+    expect(mm.focusSignal.magnify).toBe(false)
+  })
+
+  test('focusing from a sidebar list magnifies, since the note is off-view', () => {
+    const mm = seedChain()
+    mm.requestFocus('d')
+    expect(mm.focusSignal.id).toBe('d')
+    expect(mm.focusSignal.magnify).toBe(true)
+    expect(mm.selectedId).toBe('d')
+  })
+
   test('shift-click builds a path instead of changing the selection', () => {
     const mm = seedChain()
     mm.handleNodeClick('a', false)

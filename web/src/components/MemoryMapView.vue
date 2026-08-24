@@ -51,9 +51,9 @@
           @wheel.prevent="onWheel"
         />
         <div class="mm-zoom-controls">
-          <button type="button" class="btn-icon touch-hit" @click="zoom(1.25)">+</button>
-          <button type="button" class="btn-icon touch-hit" @click="zoom(0.8)">−</button>
-          <button type="button" class="btn-icon touch-hit" @click="resetCamera">⤢</button>
+          <button type="button" class="btn-icon touch-hit" title="Zoom in" aria-label="Zoom in" @click="zoom(1.25)">+</button>
+          <button type="button" class="btn-icon touch-hit" title="Zoom out" aria-label="Zoom out" @click="zoom(0.8)">−</button>
+          <button type="button" class="btn-icon touch-hit" title="Fit the whole graph" aria-label="Fit the whole graph" @click="resetCamera(true)">⤢</button>
         </div>
         <div class="mm-toolbar">
           <div class="mm-seg mm-seg--sm" role="group" aria-label="Colour by">
@@ -94,8 +94,8 @@
         <div class="mm-hint-overlay">
           <span>
             {{ mm.visibleNodes.length }} notes ·
-            <template v-if="zoomedOut">hover a note for its name · zoom in for titles</template>
-            <template v-else>click a note to light up its links · shift-click two to trace a path</template>
+            <template v-if="zoomedOut">hover a note to name it and trace its links · zoom in for titles</template>
+            <template v-else>hover to trace links · click to pin the neighbourhood · shift-click two to find a path</template>
           </span>
         </div>
         <div
@@ -107,22 +107,54 @@
       <div v-else class="mm-list-wrap">
         <table>
           <thead>
+            <!-- Sortable headers state which way they are sorted, in both the
+                 caret and aria-sort. They were clickable with no indicator at
+                 all, so a second click on the same column looked like nothing
+                 had happened. -->
             <tr>
-              <th @click="setSort('title')">Name</th>
-              <th @click="setSort('type')">Type</th>
-              <th>Tags</th>
-              <th @click="setSort('degree')">Links</th>
-              <th @click="setSort('age')" title="Days since the note's facts were last verified">Checked</th>
+              <th :aria-sort="ariaSort('title')">
+                <button type="button" class="mm-sort" @click="setSort('title')">
+                  Name<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('title') }}</span>
+                </button>
+              </th>
+              <th :aria-sort="ariaSort('type')">
+                <button type="button" class="mm-sort" @click="setSort('type')">
+                  Type<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('type') }}</span>
+                </button>
+              </th>
+              <th class="th-plain">Tags</th>
+              <th :aria-sort="ariaSort('degree')">
+                <button type="button" class="mm-sort" @click="setSort('degree')">
+                  Links<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('degree') }}</span>
+                </button>
+              </th>
+              <th :aria-sort="ariaSort('age')">
+                <button type="button" class="mm-sort" title="Days since the note's facts were last verified" @click="setSort('age')">
+                  Checked<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('age') }}</span>
+                </button>
+              </th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="n in sortedVisibleNodes" :key="n.id" @click="mm.selectNode(n.id)">
+            <tr
+              v-for="n in sortedVisibleNodes"
+              :key="n.id"
+              :class="{ current: mm.selectedId === n.id }"
+              @click="mm.selectNode(n.id)"
+            >
               <td><span class="dot" :style="{ background: colorForNode(n) }" />{{ n.title }}</td>
               <td class="muted">{{ categoryLabelFor(n) }}</td>
               <td>
                 <span v-for="t in n.tags.slice(0, 4)" :key="t" class="tag-mini">{{ t }}</span>
               </td>
-              <td>{{ n.degree }}</td>
+              <!-- Link count as a bar as well as a number: sorted by links,
+                   the shape of the distribution (a few hubs, a long tail of
+                   twos) is the useful reading, and a column of digits hides
+                   it. -->
+              <td class="deg-cell">
+                <span class="deg-bar" aria-hidden="true"><span :style="{ width: degreeBarPct(n) + '%' }"></span></span>
+                <span class="deg-n">{{ n.degree }}</span>
+              </td>
               <td :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past its type's horizon">needs review</span></td>
             </tr>
           </tbody>
@@ -221,6 +253,7 @@ import {
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
 import { isLightTheme } from '../lib/theme'
+import { easeOutCubic, prefersReducedMotion, tweenCamera, type CameraState } from '../lib/cameraTween'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -239,7 +272,9 @@ const themeColors = reactive({
   label: 'rgba(231,232,240,0.85)',
   edge: 'rgba(150,160,190,0.35)',
   edgeDim: 'rgba(120,126,150,0.14)',
+  edgeHot: 'rgba(215,222,245,0.85)',
   selectRing: '#fff',
+  staleRing: 'rgba(255,152,0,0.85)',
 })
 function refreshThemeColors() {
   const light = isLightTheme.value
@@ -247,7 +282,13 @@ function refreshThemeColors() {
   themeColors.label = light ? 'rgba(32,33,48,0.88)' : 'rgba(231,232,240,0.85)'
   themeColors.edge = light ? 'rgba(80,86,120,0.35)' : 'rgba(150,160,190,0.35)'
   themeColors.edgeDim = light ? 'rgba(120,126,150,0.18)' : 'rgba(120,126,150,0.14)'
+  // The hover-preview edge has to read as brighter than a normal edge in dark
+  // and *darker* in light; on light theme a whiter line would disappear.
+  themeColors.edgeHot = light ? 'rgba(40,44,70,0.75)' : 'rgba(215,222,245,0.85)'
   themeColors.selectRing = light ? '#1a1a2e' : '#fff'
+  // Amber on white needs to go darker to stay visible, same as the CSS
+  // --warning token does between themes.
+  themeColors.staleRing = light ? 'rgba(196,110,0,0.9)' : 'rgba(255,152,0,0.85)'
 }
 function colorForNode(n: MemoryGraphNode): string {
   if (mm.colorMode === 'cluster') return clusterColorFor(mm.clusterSlotOf(n.id), themeColors.light)
@@ -353,15 +394,23 @@ const displayedPreview = computed(() => {
   return previewContent.value.slice(0, PREVIEW_LIMIT).trimEnd() + ' …'
 })
 
+// How far in a magnified focus zooms, as a multiple of the framed view. Past
+// LABEL_MIN_RATIO by a margin so the note that was just focused arrives with
+// its title painted rather than as an anonymous dot in the middle.
+const FOCUS_ZOOM_RATIO = 2.6
 watch(() => mm.focusSignal.seq, () => {
   const id = mm.focusSignal.id
   if (!id) return
   const n = mm.nodesById.get(id)
-  if (n) {
-    camera.x = -n.x * camera.scale
-    camera.y = -n.y * camera.scale
-    requestRedraw()
-  }
+  if (!n) return
+  const magnify = mm.focusSignal.magnify && zoomRatio() < FOCUS_ZOOM_RATIO
+  const scale = magnify
+    ? Math.max(0.15, Math.min(3, (fitScale.value || 0.55) * FOCUS_ZOOM_RATIO))
+    : camera.scale
+  flyTo({ x: -n.x * scale, y: -n.y * scale, scale })
+  // The pulse is what answers "which one is it?" on arrival. A centred dot in
+  // a field of dots does not read as the destination on its own.
+  pulseNode(id)
 })
 
 // ---------- canvas force layout ----------
@@ -437,9 +486,14 @@ const fitScale = ref(0.55)
 function zoomRatio(): number {
   return camera.scale / (fitScale.value || 0.55)
 }
-function fitCamera() {
+/** @param animate Ease there instead of cutting — for the reset control, where
+ * the user is asking to go back to a view they have seen and the tween is what
+ * shows them how the current view relates to it. Layout-driven fits (first
+ * paint, a filter change) still cut, since there is no continuity to preserve. */
+function fitCamera(animate = false) {
   const vis = mm.visibleNodes
   if (!vis.length || !W || !H) {
+    cancelCameraTween()
     camera.x = 0
     camera.y = 0
     camera.scale = 0.55
@@ -464,20 +518,85 @@ function fitCamera() {
   // from the framed view" instead of absolute scale values. Absolute thresholds
   // stopped being meaningful the moment the default zoom became data-dependent.
   fitScale.value = scale
-  camera.scale = scale
-  camera.x = -cx * scale
-  camera.y = -cy * scale
+  const target = { x: -cx * scale, y: -cy * scale, scale }
+  if (animate) {
+    flyTo(target)
+    return
+  }
+  cancelCameraTween()
+  applyCamera(target)
   requestRedraw()
 }
-function resetCamera() {
+function resetCamera(animate = false) {
   // draw() only runs inside the RAF loop; without this, resetting the
   // camera while the graph is at rest changed the reactive state but the
   // canvas kept showing the old view until something else woke it up.
-  fitCamera()
+  fitCamera(animate)
 }
 function zoom(factor: number) {
-  camera.scale = Math.max(0.15, Math.min(3, camera.scale * factor))
-  requestRedraw()
+  flyTo({ x: camera.x, y: camera.y, scale: Math.max(0.15, Math.min(3, camera.scale * factor)) }, ZOOM_TWEEN_MS)
+}
+
+// ---------- camera tween + arrival pulse ----------
+// Both are driven by one RAF loop, separate from the physics loop: a camera
+// move needs frames but must not nudge the layout, and the physics loop stops
+// itself the moment the graph is calm. `animRafId` runs only while something
+// is actually animating and then stops, so an idle graph still costs nothing.
+const FLY_TWEEN_MS = 420
+const ZOOM_TWEEN_MS = 160
+const PULSE_MS = 700
+let camTween: { from: CameraState; to: CameraState; startedAt: number; durMs: number } | null = null
+let pulse: { id: string; startedAt: number } | null = null
+let animRafId = 0
+
+function applyCamera(state: CameraState) {
+  camera.x = state.x
+  camera.y = state.y
+  camera.scale = state.scale
+}
+
+/** Ease the camera to `to`. Snaps instead when the OS asks for reduced motion. */
+function flyTo(to: CameraState, durMs = FLY_TWEEN_MS) {
+  if (prefersReducedMotion() || durMs <= 0) {
+    camTween = null
+    applyCamera(to)
+    requestRedraw()
+    return
+  }
+  camTween = { from: { x: camera.x, y: camera.y, scale: camera.scale }, to, startedAt: performance.now(), durMs }
+  startAnimLoop()
+}
+
+/** A ring that expands and fades once around a node, marking where we landed. */
+function pulseNode(id: string) {
+  if (prefersReducedMotion()) return
+  pulse = { id, startedAt: performance.now() }
+  startAnimLoop()
+}
+
+// Any hands-on camera control wins over an in-flight tween — otherwise a fly-to
+// kept dragging the view out from under a pan or a wheel gesture.
+function cancelCameraTween() {
+  camTween = null
+}
+
+function startAnimLoop() {
+  if (animRafId) return
+  animRafId = requestAnimationFrame(stepAnim)
+}
+
+function stepAnim() {
+  animRafId = 0
+  if (camTween) {
+    const t = (performance.now() - camTween.startedAt) / camTween.durMs
+    applyCamera(tweenCamera(camTween.from, camTween.to, easeOutCubic(t)))
+    if (t >= 1) camTween = null
+  }
+  // The physics loop already draws every frame while it runs; a second draw in
+  // the same frame would be pure waste.
+  if (!rafId) draw()
+  // draw() clears a finished pulse, so this check has to come after it.
+  if (camTween || pulse) startAnimLoop()
 }
 function worldToScreen(x: number, y: number): [number, number] {
   return [x * camera.scale + W / 2 + camera.x, y * camera.scale + H / 2 + camera.y]
@@ -683,6 +802,11 @@ function draw() {
       ? new Set([mm.selectedId, ...(mm.adjacency.get(mm.selectedId) || [])])
       : null
 
+  // Hovering a note previews its links. In a hairball the one question a dot
+  // cannot answer is "what is this connected to?", and answering it only on
+  // click meant losing the current selection to ask.
+  const hoverId = hoveredNode.value && visSet.has(hoveredNode.value.id) ? hoveredNode.value.id : null
+
   ctx.lineWidth = dpr
   mm.edges.forEach(e => {
     if (!visSet.has(e.source) || !visSet.has(e.target)) return
@@ -690,15 +814,18 @@ function draw() {
     const b = mm.nodesById.get(e.target)
     if (!a || !b) return
     const onPath = mm.pathIds.has(e.source) && mm.pathIds.has(e.target)
+    const onHover = !!hoverId && (e.source === hoverId || e.target === hoverId)
     const dim = highlightSet && !(highlightSet.has(e.source) && highlightSet.has(e.target))
     const [ax, ay] = worldToScreen(a.x, a.y)
     const [bx, by] = worldToScreen(b.x, b.y)
     ctx!.strokeStyle = onPath
       ? '#ffd166'
-      : dim
-        ? themeColors.edgeDim
-        : themeColors.edge
-    ctx!.lineWidth = onPath ? 2.5 * dpr : dpr
+      : onHover
+        ? themeColors.edgeHot
+        : dim
+          ? themeColors.edgeDim
+          : themeColors.edge
+    ctx!.lineWidth = onPath ? 2.5 * dpr : onHover ? 1.8 * dpr : dpr
     ctx!.beginPath()
     ctx!.moveTo(ax, ay)
     ctx!.lineTo(bx, by)
@@ -714,7 +841,21 @@ function draw() {
     ctx!.arc(sx, sy, r, 0, Math.PI * 2)
     ctx!.fillStyle = dim ? hexToRgba(colorForNode(n), 0.18) : colorForNode(n)
     ctx!.fill()
+    // Staleness was reported in the list, the detail panel and the sidebar —
+    // everywhere except the surface people actually look at. An amber ring
+    // (the same token the "Needs review" list uses for its dot) puts "these
+    // facts are unverified" on the map itself, without spending a hue that
+    // the category and cluster palettes need for identity.
+    if (n.stale && !dim) {
+      ctx!.beginPath()
+      ctx!.arc(sx, sy, r + 2.5 * dpr, 0, Math.PI * 2)
+      ctx!.lineWidth = 1.4 * dpr
+      ctx!.strokeStyle = themeColors.staleRing
+      ctx!.stroke()
+    }
     if (isSel) {
+      ctx!.beginPath()
+      ctx!.arc(sx, sy, r, 0, Math.PI * 2)
       ctx!.lineWidth = 2 * dpr
       ctx!.strokeStyle = themeColors.selectRing
       ctx!.stroke()
@@ -723,8 +864,8 @@ function draw() {
 
   // A ring under the cursor: with labels hidden at this zoom the tooltip is
   // the only name source, and the ring is what ties it to a specific dot.
-  if (hoveredNode.value && visSet.has(hoveredNode.value.id)) {
-    const n = hoveredNode.value
+  if (hoverId) {
+    const n = mm.nodesById.get(hoverId)!
     const [sx, sy] = worldToScreen(n.x, n.y)
     const r = nodeRadius(n) * dpr * Math.max(0.7, Math.min(1.6, camera.scale))
     ctx!.beginPath()
@@ -734,7 +875,37 @@ function draw() {
     ctx!.stroke()
   }
 
+  drawPulse()
   drawLabels(vis, highlightSet)
+}
+
+/**
+ * One expanding, fading ring on the node a focus request landed on.
+ *
+ * Drawn last so it sits over the neighbours it sweeps across, and it clears
+ * `pulse` itself once elapsed — the anim loop reads that to decide whether it
+ * still has work.
+ */
+function drawPulse() {
+  if (!pulse) return
+  const n = mm.nodesById.get(pulse.id)
+  if (!n || !mm.visibleIds.has(pulse.id)) {
+    pulse = null
+    return
+  }
+  const t = (performance.now() - pulse.startedAt) / PULSE_MS
+  if (t >= 1) {
+    pulse = null
+    return
+  }
+  const eased = easeOutCubic(t)
+  const [sx, sy] = worldToScreen(n.x, n.y)
+  const r = nodeRadius(n) * dpr * Math.max(0.7, Math.min(1.6, camera.scale))
+  ctx!.beginPath()
+  ctx!.arc(sx, sy, r + (3 + 26 * eased) * dpr, 0, Math.PI * 2)
+  ctx!.lineWidth = Math.max(1, 2.5 * (1 - eased)) * dpr
+  ctx!.strokeStyle = hexToRgba(colorForNode(n), 0.7 * (1 - eased))
+  ctx!.stroke()
 }
 
 // Labels get their own pass, run after every node is on screen, because
@@ -976,6 +1147,9 @@ function onMouseMove(e: MouseEvent) {
     dragging.vx = 0
     dragging.vy = 0
   } else if (panStart) {
+    // Dragging is the user taking the camera: whatever tween was in flight
+    // would otherwise keep pulling the view out from under the gesture.
+    cancelCameraTween()
     camera.x = panStart.cx + (e.clientX - panStart.x) * dpr
     camera.y = panStart.cy + (e.clientY - panStart.y) * dpr
     requestRedraw()
@@ -992,6 +1166,7 @@ function onMouseUp() {
   window.removeEventListener('mouseup', onMouseUp)
 }
 function onWheel(e: WheelEvent) {
+  cancelCameraTween()
   const delta = -e.deltaY * 0.0012
   camera.scale = Math.max(0.15, Math.min(3, camera.scale * (1 + delta)))
   requestRedraw()
@@ -1008,9 +1183,24 @@ const proposals = useProposalsStore()
 mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph'
 const sortKey = ref<'title' | 'type' | 'degree' | 'age'>('title')
 const sortDir = ref(1)
-function setSort(key: 'title' | 'type' | 'degree' | 'age') {
+type SortKey = 'title' | 'type' | 'degree' | 'age'
+function setSort(key: SortKey) {
   if (sortKey.value === key) sortDir.value *= -1
   else { sortKey.value = key; sortDir.value = 1 }
+}
+function sortCaret(key: SortKey): string {
+  if (sortKey.value !== key) return ''
+  return sortDir.value > 0 ? '\u25b4' : '\u25be'
+}
+function ariaSort(key: SortKey): 'ascending' | 'descending' | 'none' {
+  if (sortKey.value !== key) return 'none'
+  return sortDir.value > 0 ? 'ascending' : 'descending'
+}
+/** Link count as a share of the busiest visible note, for the list's bar. */
+const maxVisibleDegree = computed(() => mm.visibleNodes.reduce((m, n) => Math.max(m, n.degree), 0))
+function degreeBarPct(n: MemoryGraphNode): number {
+  if (!maxVisibleDegree.value) return 0
+  return Math.round((n.degree / maxVisibleDegree.value) * 100)
 }
 /** Age for the detail heading; empty when the note carries no date at all. */
 const ageLabelOfSelected = computed(() => {
@@ -1052,6 +1242,9 @@ watch(isLightTheme, () => {
 onBeforeUnmount(() => {
   if (rafId) cancelAnimationFrame(rafId)
   if (redrawRafId) cancelAnimationFrame(redrawRafId)
+  if (animRafId) cancelAnimationFrame(animRafId)
+  camTween = null
+  pulse = null
   ro?.disconnect()
   window.removeEventListener('mousemove', onMouseMove)
   window.removeEventListener('mouseup', onMouseUp)
@@ -1240,16 +1433,43 @@ onBeforeUnmount(() => {
 .mm-list-wrap { overflow: auto; padding: var(--space-4); }
 .mm-list-wrap table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
 .mm-list-wrap thead th {
-  text-align: left; padding: 6px 10px; color: var(--fg3); font-weight: 500; font-size: var(--text-xs);
-  text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; border-bottom: 1px solid var(--border);
+  text-align: left; padding: 0; color: var(--fg3); font-weight: 500; font-size: var(--text-xs);
+  text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--bg); z-index: 1;
 }
+/* Sortable headers put their padding on the button so the whole cell is the
+   hit target; the one non-sortable header keeps it on the cell. */
+.mm-list-wrap thead th.th-plain { padding: 6px 10px; }
+.mm-sort {
+  display: flex; align-items: center; gap: 4px; width: 100%;
+  background: none; border: none; padding: 6px 10px; cursor: pointer;
+  font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; text-align: left;
+}
+.mm-sort:hover { color: var(--fg2); }
+.mm-sort:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.mm-sort-caret { font-size: 9px; line-height: 1; color: var(--accent); }
 .mm-list-wrap tbody td { padding: 6px 10px; border-bottom: 1px solid var(--bg3); }
-.mm-list-wrap tbody tr:hover { background: var(--bg3); cursor: pointer; }
+.mm-list-wrap tbody tr { cursor: pointer; }
+.mm-list-wrap tbody tr:hover { background: var(--bg3); }
+/* The row whose note the detail panel is showing. Without it, clicking a row
+   opened the panel with no indication of which row it came from. */
+.mm-list-wrap tbody tr.current { background: var(--bg2); box-shadow: inset 2px 0 0 var(--accent); }
 .mm-list-wrap .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; }
 .mm-list-wrap .muted { color: var(--fg3); }
+.deg-cell { white-space: nowrap; }
+.deg-bar {
+  display: inline-block; width: 46px; height: 4px; border-radius: 2px;
+  background: var(--bg3); overflow: hidden; vertical-align: middle; margin-right: 7px;
+}
+.deg-bar > span {
+  display: block; height: 100%; border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.deg-n { color: var(--fg2); font-variant-numeric: tabular-nums; }
 .stale-age { color: var(--warning, #ff9800); white-space: nowrap; }
 .stale-flag {
-  display: inline-block; margin-left: 6px;
+  display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--warning, #ff9800) 15%, transparent);
   font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
 }
 .tag-mini { display: inline-block; background: var(--bg3); color: var(--fg2); border-radius: 4px; padding: 1px 6px; font-size: var(--text-xs); margin: 0 3px 2px 0; }

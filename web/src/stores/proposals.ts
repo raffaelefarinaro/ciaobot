@@ -92,6 +92,18 @@ export const useProposalsStore = defineStore('proposals', () => {
     search.value = ''
   }
 
+  function pruneSelected() {
+    if (!selected.value.size) return
+    const live = new Set(rows.value.map(r => r.id))
+    let changed = false
+    for (const id of selected.value) {
+      if (!live.has(id)) { changed = true; break }
+    }
+    if (changed) {
+      selected.value = new Set([...selected.value].filter(id => live.has(id)))
+    }
+  }
+
   async function fetch(): Promise<void> {
     if (fetchPromise) return fetchPromise
     const request = (async () => {
@@ -101,6 +113,7 @@ export const useProposalsStore = defineStore('proposals', () => {
         const data = await api.get<ProposalsResponse>('/api/proposals')
         rows.value = data.rows ?? []
         loaded.value = true
+        pruneSelected()
       } catch (e) {
         error.value = e instanceof Error ? e.message : 'Could not load proposals'
       } finally {
