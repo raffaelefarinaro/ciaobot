@@ -1,8 +1,8 @@
-const CACHE_NAME = 'ciaobot-v0.9.1'
+const CACHE_NAME = 'ciaobot-v0.10.0'
 const STATIC_ASSETS = ['/', '/index.html', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png', '/favicon.png']
 const ICON = '/icons/icon-192.png'
 const BADGE = '/icons/icon-192.png'
-const UNREAD_CACHE = 'ciaobot-unread-v0.9.1'
+const UNREAD_CACHE = 'ciaobot-unread-v0.10.0'
 const UNREAD_KEY = '/__unread__'
 
 self.addEventListener('install', (event) => {
