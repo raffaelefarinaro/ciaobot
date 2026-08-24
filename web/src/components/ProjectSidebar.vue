@@ -2840,6 +2840,16 @@ async function confirmDeleteChat(chatId: string) {
   }
   .add-chat-btn { opacity: 1; }
   .nav-links { flex-basis: 150px; }
+  /* No containment on the drawer's header. `container-type: inline-size` makes
+     the element its own rasterization root, and here that root sits inside a
+     `position: fixed` layer that the transform above keeps composited - the
+     combination WebKit rasterizes soft, which is why the nav glyphs came out
+     blurry on iPhone while the pills below them stayed sharp. Nothing is lost:
+     the query it feeds only decides whether the active item keeps its label,
+     and the `max-width: 900px` rule above already drops that label at every
+     width this media query covers. The container query stays for the wide
+     window where the sidebar is drag-resizable. */
+  .sidebar-header { container-type: normal; }
 }
 
 /* Schedules list in sidebar (schedules mode) */
