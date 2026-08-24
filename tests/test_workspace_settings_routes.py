@@ -21,6 +21,9 @@ from ciao.web.routes_api import (
     list_workspaces,
     provider_config_settings,
     upsert_workspace_setting,
+    relocate_workspace_vault,
+    browse_workspace_folder_endpoint,
+    create_workspace_folder_endpoint,
 )
 
 
@@ -59,6 +62,21 @@ def _client(tmp_path: Path, env_extra: dict[str, str] | None = None):
                 "/api/workspaces/{name}",
                 delete_workspace_setting,
                 methods=["DELETE"],
+            ),
+            Route(
+                "/api/workspaces/{name}/vault",
+                relocate_workspace_vault,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/workspaces/browse-folder",
+                browse_workspace_folder_endpoint,
+                methods=["GET"],
+            ),
+            Route(
+                "/api/workspaces/browse-folder",
+                create_workspace_folder_endpoint,
+                methods=["POST"],
             ),
             Route(
                 "/api/settings/providers",
@@ -1280,3 +1298,164 @@ def test_a_vault_outside_the_install_refuses_the_deletion(tmp_path):
     assert note.is_file()
     assert config.workspace("client-f") is not None
     assert pcm.reassigned == []
+
+
+# ── Workspace vault relocation ────────────────────────────────────────────
+
+
+def _make_vault_workspace(tmp_path, name="personal", leaf="memory-vault/personal"):
+    """Create a real vault directory for a workspace so relocation has content."""
+    vault = tmp_path / "memory-vault" / name
+    (vault / "People").mkdir(parents=True, exist_ok=True)
+    (vault / "People" / "Ada.md").write_text(
+        "---\ntype: person\ntitle: Ada\ntags: [person]\n---\n\n# Ada\n",
+        encoding="utf-8",
+    )
+    (vault / "INDEX.md").write_text("# Index\n", encoding="utf-8")
+    return vault
+
+
+def test_relocate_vault_hook_repoints_registry_and_pins(tmp_path):
+    client, config, pcm = _client(tmp_path)
+    source = _make_vault_workspace(tmp_path)
+    target = tmp_path / "external-vault"
+    target.mkdir()
+
+    resp = client.post("/api/workspaces/personal/vault", json={
+        "target": str(target),
+        "mode": "hook",
+    })
+
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["mode"] == "hook"
+    assert body["pinned"] is True
+    # Files were not moved — only the registry re-pointed.
+    assert (source / "People" / "Ada.md").is_file()
+    assert Path(config.workspace_vault_root("personal")) == target.resolve()
+    assert config.workspace("personal").vault_pinned is True
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    entry = next(item for item in stored if item["name"] == "personal")
+    assert entry["vault_pinned"] is True
+    assert Path(entry["vault_root"]).resolve() == target.resolve()
+    assert pcm.refresh_count == 1
+
+
+def test_relocate_vault_move_relocates_content(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    source = _make_vault_workspace(tmp_path)
+    target = tmp_path / "moved-vault"
+
+    resp = client.post("/api/workspaces/personal/vault", json={
+        "target": str(target),
+        "mode": "move",
+    })
+
+    assert resp.status_code == 200, resp.json()
+    # Content physically moved.
+    assert not (source / "People" / "Ada.md").exists()
+    assert (target / "People" / "Ada.md").is_file()
+    assert Path(config.workspace_vault_root("personal")).resolve() == target.resolve()
+    assert config.workspace("personal").vault_pinned is True
+
+
+def test_relocate_move_refuses_nonempty_target(tmp_path):
+    client, _config, _pcm = _client(tmp_path)
+    _make_vault_workspace(tmp_path)
+    target = tmp_path / "occupied"
+    target.mkdir()
+    (target / "keep.txt").write_text("x", encoding="utf-8")
+
+    resp = client.post("/api/workspaces/personal/vault", json={
+        "target": str(target),
+        "mode": "move",
+    })
+
+    assert resp.status_code == 400
+    assert "not empty" in resp.json()["error"]
+    assert (target / "keep.txt").is_file()
+
+
+def test_relocate_rejects_dangerous_targets(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    _make_vault_workspace(tmp_path)
+
+    # Filesystem root.
+    r = client.post("/api/workspaces/personal/vault", json={"target": "/", "mode": "hook"})
+    assert r.status_code == 400
+    assert "filesystem root" in r.json()["error"]
+
+    # A relative path is rejected (must be absolute).
+    r = client.post("/api/workspaces/personal/vault", json={"target": "relative", "mode": "hook"})
+    assert r.status_code == 400
+    assert "absolute" in r.json()["error"]
+
+    # Nesting inside the current vault is refused.
+    nested = tmp_path / "memory-vault" / "personal" / "nested"
+    nested.mkdir(parents=True, exist_ok=True)
+    r = client.post("/api/workspaces/personal/vault", json={"target": str(nested), "mode": "hook"})
+    assert r.status_code == 400
+    assert "inside the current vault" in r.json()["error"]
+
+    # Pointing at the current vault's parent is refused (overlap).
+    parent = tmp_path / "memory-vault"
+    r = client.post("/api/workspaces/personal/vault", json={"target": str(parent), "mode": "hook"})
+    assert r.status_code == 400
+
+
+def test_relocate_rejects_bad_mode_and_missing_workspace(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    _make_vault_workspace(tmp_path)
+    target = tmp_path / "v"
+    target.mkdir()
+
+    r = client.post("/api/workspaces/personal/vault", json={"target": str(target), "mode": "teleport"})
+    assert r.status_code == 400
+    assert "mode" in r.json()["error"]
+
+    r = client.post("/api/workspaces/nope/vault", json={"target": str(target), "mode": "hook"})
+    assert r.status_code == 400
+    assert "workspace not found" in r.json()["error"]
+
+
+def test_relocated_vault_is_pinned_for_detectors(tmp_path):
+    """A vault relocated through Settings no longer trips the
+    'not in its standard folder' operator action or audit notice."""
+    from ciao.operator_actions import DetectionContext, detect_actions
+
+    client, config, _pcm = _client(tmp_path)
+    source = _make_vault_workspace(tmp_path)
+    target = tmp_path / "external-vault"
+    target.mkdir()
+    client.post("/api/workspaces/personal/vault", json={"target": str(target), "mode": "hook"})
+    assert config.workspace("personal").vault_pinned is True
+    assert Path(config.workspace_vault_root("personal")).resolve() != source.resolve()
+
+    actions = detect_actions(DetectionContext(config))
+    vault_actions = [a for a in actions if a.kind == "vault-location"]
+    assert vault_actions == []
+
+
+def test_browse_and_create_workspace_folder(tmp_path):
+    client, _config, _pcm = _client(tmp_path)
+    listing = client.get(f"/api/workspaces/browse-folder?path={tmp_path}")
+    assert listing.status_code == 200
+    assert listing.json()["path"] == str(tmp_path.resolve())
+
+    created = client.post("/api/workspaces/browse-folder", json={
+        "path": str(tmp_path),
+        "name": "brand-new-vault",
+    })
+    assert created.status_code == 200, created.json()
+    assert (tmp_path / "brand-new-vault").is_dir()
+
+    bad = client.post("/api/workspaces/browse-folder", json={
+        "path": str(tmp_path),
+        "name": "../../escape",
+    })
+    assert bad.status_code == 400
+    assert not (tmp_path / ".." / "escape").exists()
+
+    not_a_dir = client.get("/api/workspaces/browse-folder?path=/nonexistent-xyz")
+    assert not_a_dir.status_code == 400

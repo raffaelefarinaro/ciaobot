@@ -1075,6 +1075,228 @@ def _read_env_lines(path: Path) -> list[str]:
         return []
 
 
+# ── Workspace vault relocation ──────────────────────────────────────────
+
+
+async def browse_workspace_folder_endpoint(request: Request) -> JSONResponse:
+    """List local subdirectories for the Settings → Workspaces vault picker.
+
+    The setup wizard's folder picker is bootstrap + localhost only; Settings
+    runs in a normal authenticated session, so it needs its own browse route.
+    It lists directory names and paths only and never reads file contents, the
+    same discipline as the setup picker, and it is protected by the normal
+    `/api` auth middleware.
+    """
+    raw = str(request.query_params.get("path") or "~").strip() or "~"
+    target = _resolve_setup_dir(raw)
+    if target is None:
+        return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
+    try:
+        return JSONResponse(_setup_dir_listing(target))
+    except PermissionError:
+        return JSONResponse({"error": f"permission denied: {target}"}, status_code=400)
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def create_workspace_folder_endpoint(request: Request) -> JSONResponse:
+    """Create a folder from the Settings → Workspaces vault picker.
+
+    Mirrors the setup wizard's ``/api/setup/mkdir`` for normal authenticated
+    sessions. Enumerates only a directory name under an already-listed parent;
+    never accepts a path string from the body beyond that parent, so it cannot
+    be used to write to arbitrary locations.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json object is required"}, status_code=400)
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    if "/" in name or "\\" in name or os.sep in name or name.startswith("."):
+        return JSONResponse(
+            {"error": "folder name must not contain path separators or start with a dot"},
+            status_code=400,
+        )
+    parent = _resolve_setup_dir(str(body.get("path", "")).strip())
+    if parent is None:
+        return JSONResponse({"error": "path must be an existing directory"}, status_code=400)
+    try:
+        (parent / name).mkdir()
+    except FileExistsError:
+        return JSONResponse({"error": f"already exists: {name}"}, status_code=400)
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    try:
+        return JSONResponse(_setup_dir_listing(parent))
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+def _vault_relocation_problems(
+    config, name: str, target_raw: str
+) -> tuple[list[str], Path | None]:
+    """Validate a proposed vault relocation. Returns (errors, resolved target)."""
+    errors: list[str] = []
+    if name not in config.workspaces:
+        return [f"workspace not found: {name}"], None
+    raw = Path(target_raw).expanduser()
+    if not raw.is_absolute():
+        return ["target must be an absolute path"], None
+    try:
+        target = raw.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return [f"could not resolve target path: {target_raw}"], None
+    if target == Path(target.anchor):
+        return ["vault must not be the filesystem root"], None
+    if target.exists() and not target.is_dir():
+        return [f"target is not a directory: {target}"], None
+
+    current = Path(config.workspace_vault_root(name)).resolve()
+    # Refuse to nest the vault inside itself or to point at a parent/ancestor
+    # of the current vault, which would make the two overlap.
+    try:
+        current.relative_to(target)
+    except ValueError:
+        pass
+    else:
+        errors.append("target is the current vault or one of its parents")
+    try:
+        target.relative_to(current)
+    except ValueError:
+        pass
+    else:
+        errors.append("target is inside the current vault")
+    if errors:
+        return errors, target
+
+    if target.is_symlink():
+        errors.append("target path must not be a symlink")
+    try:
+        if target.parent.is_symlink():
+            errors.append("target's parent must not be a symlink")
+    except OSError:
+        pass
+    return errors, target
+
+
+def _move_entry(source: Path, destination: Path) -> None:
+    """Move one top-level entry, refusing to overwrite an existing destination."""
+    if destination.exists():
+        raise OSError(f"destination exists: {destination}")
+    source.rename(destination)
+
+
+async def relocate_workspace_vault(request: Request) -> JSONResponse:
+    """Move a workspace's vault to a new folder, or re-point it to an existing one.
+
+    Body: ``{"target": "<abs-path>", "mode": "move" | "hook"}``.
+
+    - ``move``: relocate the existing vault's contents into *target* (created
+      if absent; must otherwise be empty) and re-point the registry. Internal
+      relative references stay valid because the whole vault moves together.
+    - ``hook``: re-point the registry to an existing folder, leaving the files
+      where they are (the operator moves them, or starts fresh).
+
+    The target is resolved and validated server-side (never the filesystem
+    root, never nested inside the current vault, never through a symlink), so a
+    settings call cannot be turned into filesystem-wide writes. On success the
+    workspace is marked ``vault_pinned`` so the "vault not in its standard
+    folder" chat action stops nagging about an intentional relocation.
+    """
+    config = request.app.state.config
+    name = str(request.path_params.get("name", "")).strip()
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json object is required"}, status_code=400)
+    target_raw = str(body.get("target", "")).strip()
+    mode = str(body.get("mode", "hook")).strip().lower()
+    if mode not in ("move", "hook"):
+        return JSONResponse({"error": "mode must be 'move' or 'hook'"}, status_code=400)
+
+    errors, target = _vault_relocation_problems(config, name, target_raw)
+    if errors:
+        return JSONResponse({"error": errors[0]}, status_code=400)
+    assert target is not None
+
+    current = Path(config.workspace_vault_root(name)).resolve()
+    if not current.is_dir():
+        return JSONResponse(
+            {"error": f"current vault is missing: {current}"}, status_code=400
+        )
+
+    if mode == "move":
+        if target.exists() and any(target.iterdir()):
+            return JSONResponse(
+                {"error": f"target folder is not empty: {target}"}, status_code=400
+            )
+        target.mkdir(parents=True, exist_ok=True)
+        try:
+            for entry in current.iterdir():
+                _move_entry(entry, target / entry.name)
+        except OSError as exc:
+            return JSONResponse(
+                {"error": f"failed to move vault: {exc}"}, status_code=500
+            )
+
+    # Always store an absolute path. A relative value is resolved against the
+    # configured vault root (single segment) or workspace root (several), and
+    # an external target can easily be neither — storing it relative would
+    # silently re-anchor the vault to a wrong location. Absolute registry roots
+    # are preserved verbatim by `workspace_vault_root`.
+    workspace = config.workspace(name)
+    workspace.vault_root = str(target)
+    workspace.vault_pinned = True
+    config.persist_workspace_registry()
+    _refresh_project_manager_workspaces(request)
+
+    _reindex_vault(config, target)
+
+    return JSONResponse({
+        "ok": True,
+        "workspace": name,
+        "mode": mode,
+        "new_vault_root": str(target),
+        "pinned": True,
+    })
+
+
+def _reindex_vault(config, vault: Path) -> None:
+    """Best-effort rebuild of a relocated vault's INDEX.md and FTS rows."""
+    try:
+        from ciao import vault_index
+
+        entries = vault_index.scan_vault(vault)
+        vault_index.write_index_file(entries, vault / "INDEX.md")
+    except Exception:  # noqa: BLE001 — non-fatal; the startup indexer recovers
+        logger.exception("vault index refresh failed for %s", vault)
+    try:
+        import sqlite3
+
+        from ciao import fts_search
+        from ciao.config import logs_root_for
+
+        base = Path(config.workspace_root).resolve()
+        logs_root = logs_root_for(base, vault, base / ".runtime")
+        db_path = fts_search.get_db_path()
+        conn = sqlite3.connect(db_path)
+        try:
+            fts_search.init_db(conn)
+            fts_search.index_vault(conn, vault, path_base=base)
+            fts_search.index_logs(conn, vault, logs_root=logs_root, path_base=base)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — non-fatal
+        logger.exception("fts index refresh failed for %s", vault)
+
+
+
 def _write_env_values(path: Path, updates: dict[str, str]) -> None:
     lines = _read_env_lines(path)
     remaining = dict(updates)
@@ -2401,10 +2623,16 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
 
 
 async def create_project_chat(request: Request) -> JSONResponse:
+    import time as _t
+    import logging as _lg
+    _entry = _t.perf_counter()
+    _lg.getLogger("ciao.web.routes").info("create_chat handler entered")
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
     body = await request.json()
     try:
+        _t0 = _t.perf_counter()
+        _lg.getLogger("ciao.web.routes").info("create_chat post-body %.0fms", (_t0 - _entry) * 1000)
         chat = pcm.create_chat(
             project_id,
             title=body.get("title", "New Chat"),
@@ -2412,6 +2640,9 @@ async def create_project_chat(request: Request) -> JSONResponse:
             mode=body.get("mode"),
             provider=body.get("provider"),
             control_surface=body.get("control_surface"),
+        )
+        _lg.getLogger("ciao.web.routes").info(
+            "create_chat %s total=%.0fms", chat.chat_id, (_t.perf_counter() - _entry) * 1000,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
@@ -2429,6 +2660,15 @@ async def chat_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     if request.method == "DELETE":
+        # Trace who deletes a chat: the empty-chat sweep, an explicit close, or
+        # a stray auto-close. The frontend tracer (__CIAO_TRACE) records its
+        # side; this server log line ties the client-side call to the moment
+        # the DELETE lands. # nav-trace
+        import logging
+        logging.getLogger("ciao.web.routes").info(
+            "chat DELETE %s only_if_empty=%r", chat_id,
+            request.query_params.get("only_if_empty"),
+        )
         # `only_if_empty` is how closing a chat discards a never-used draft.
         # The check has to happen here: "empty" means default title, no user
         # turns, no session and no live stream, and `user_turn_count` is not
@@ -2438,6 +2678,8 @@ async def chat_detail(request: Request) -> JSONResponse:
             if not pcm.is_empty_chat(chat_id):
                 return JSONResponse({"ok": False, "deleted": False, "reason": "not empty"})
         ok = pcm.delete_chat(chat_id)
+        import logging
+        logging.getLogger("ciao.web.routes").info("chat DELETE %s -> ok=%r", chat_id, ok)
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()

@@ -123,6 +123,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
+| POST | `/api/workspaces/{name}/vault` | Relocate a workspace's vault (re-point or move) |
+| GET | `/api/workspaces/browse-folder` | List local subdirectories for the vault picker |
+| POST | `/api/workspaces/browse-folder` | Create a folder from the vault picker |
 | GET, PATCH | `/api/settings/providers` | Read or update provider/service key status and the GitHub-skill refresh setting; credentials are redacted |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or opencode CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
@@ -422,6 +425,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 # metadata in place. `vault_root` in a request body is ignored: locations are
 # read-only here so a routine settings save cannot relocate a workspace.
 # Setup and migration may still persist an external/legacy root in the registry.
+# Use the dedicated vault-relocation endpoint (below) to change a vault location.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces" \
   -H 'content-type: application/json' \
   -d '{"name":"client-a","disallowed_tools":"mcp__n8n_mcp"}'
@@ -433,6 +437,43 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/works
 
 # Delete.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/workspaces/client-a"
+
+# Relocate a workspace's vault (Settings → Workspaces → Vault location).
+#   mode = "hook" — re-point the registry to an existing folder; files are not
+#           moved (use it to point at a fresh vault or one you moved yourself).
+#   mode = "move" — physically relocate the vault's contents into `target`
+#           (created if absent; must otherwise be empty) and re-point.
+# The target is validated server-side (never the filesystem root, never nested
+# inside the current vault, never through a symlink). On success the workspace
+# is marked `vault_pinned`, which suppresses the "not in its standard folder"
+# chat action for that workspace.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal/vault" \
+  -H 'content-type: application/json' \
+  -d '{"target":"/Users/you/vaults/personal","mode":"move"}'
+
+# List local subdirectories for the vault picker (authenticated browse).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces/browse-folder?path=/Users/alice"
+
+# Create a folder from the vault picker.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/browse-folder" \
+  -H 'content-type: application/json' \
+  -d '{"path":"/Users/alice","name":"vaults"}'
+
+# Relocate a workspace's vault (Settings → Workspaces → Vault location).
+#   mode = "hook" — re-point the registry to an existing folder; files are not
+#           moved (use it to point at a fresh vault or one you moved yourself).
+#   mode = "move" — physically relocate the vault's contents into `target`
+#           (created if absent; must otherwise be empty) and re-point.
+# The target is validated server-side (never the filesystem root, never nested
+# inside the current vault, never through a symlink). On success the workspace
+# is marked `vault_pinned`, which suppresses the "not in its standard folder"
+# chat action for that workspace.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal/vault" \
+  -H 'content-type: application/json' \
+  -d '{"target":"/Users/you/vaults/personal","mode":"move"}'
+
+# List local subdirectories for the vault picker (authenticated browse).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces/browse-folder?path=/Users/alice"
 ```
 
 **Schedules and ops**

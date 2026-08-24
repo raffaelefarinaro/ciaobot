@@ -1112,7 +1112,13 @@ def audit_upgrade_notices(
         # by config. Setup-created whole-vault roots, adopted external folders,
         # and pre-nesting siblings all remain usable until the user approves an
         # interactive migration, but all should receive the same guided path
-        # into the standard named folder.
+        # into the standard named folder. An operator-pinned vault (relocated
+        # deliberately through Settings) is exempt from this notice.
+        getter = getattr(config, "workspace", None)
+        if callable(getter):
+            ws = getter(name)
+            if ws is not None and getattr(ws, "vault_pinned", False):
+                continue
         try:
             actual = Path(resolver(name)).resolve()
             standard = Path(standardizer(name)).resolve()

@@ -1071,11 +1071,118 @@
                       </option>
                     </select>
                   </label>
+                  <div class="settings-field settings-field--wide">
+                    <div class="settings-label-row">
+                      <span class="ws-label">Vault location</span>
+                      <details class="field-info">
+                        <summary aria-label="About the vault location" title="About the vault location">i</summary>
+                        <div class="field-info-panel">
+                          <p>
+                            The folder holding this workspace's notes, projects, and memory.
+                            You can relocate it to another folder (for example to move it
+                            off a synced cloud drive that struggles with Ciaobot's frequent
+                            writes).
+                          </p>
+                          <p><strong>Move</strong> physically relocates the existing vault contents to
+                            an empty or new folder. <strong>Use folder</strong> re-points Ciaobot to an
+                            existing folder you move the files into yourself (or start fresh).
+                          </p>
+                        </div>
+                      </details>
+                    </div>
+                    <div class="vault-location-row">
+                      <code class="vault-location-path">{{ workspaceVaultDisplay(form.name) }}</code>
+                      <button
+                        class="btn-small"
+                        :disabled="workspacesSaving === form.name"
+                        @click="openVaultPicker(form.name)"
+                      >Move…</button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
 
             <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
+          </div>
+
+          <!-- VAULT LOCATION PICKER MODAL -->
+          <div v-if="vaultPickerOpen" class="picker-overlay" @click.self="closeVaultPicker">
+            <div class="picker-modal" role="dialog" aria-label="Move vault">
+              <div class="picker-head">
+                <span class="picker-title">Vault Location</span>
+                <span class="picker-help">
+                  Pick the folder that will hold the <code>{{ vaultPickerWorkspace }}</code>
+                  workspace's notes. Nothing changes until you confirm below.
+                </span>
+                <span class="picker-current-label">Currently viewing</span>
+                <code class="picker-path">{{ vaultPickerDisplayPath || '…' }}</code>
+              </div>
+              <div class="picker-toolbar">
+                <button
+                  type="button"
+                  class="btn-small"
+                  :disabled="!vaultPickerParent || vaultPickerLoading"
+                  @click="loadVaultPickerDirs(vaultPickerParent!)"
+                >↑ Up</button>
+                <button
+                  type="button"
+                  class="btn-small"
+                  :disabled="vaultPickerLoading"
+                  @click="loadVaultPickerDirs()"
+                >~ Home</button>
+              </div>
+              <ul class="picker-list">
+                <li v-for="dir in vaultPickerDirs" :key="dir.path">
+                  <button
+                    type="button"
+                    class="picker-dir"
+                    :disabled="vaultPickerLoading"
+                    @click="loadVaultPickerDirs(dir.path)"
+                  >{{ dir.name }}/</button>
+                </li>
+                <li v-if="!vaultPickerLoading && !vaultPickerDirs.length" class="picker-empty">
+                  No subfolders here — create one below, or use this folder as it is.
+                </li>
+              </ul>
+              <div class="picker-new-block">
+                <span class="picker-new-label">Or create a new folder here</span>
+                <div class="picker-new">
+                  <input
+                    v-model="vaultPickerNewName"
+                    type="text"
+                    class="form-input"
+                    placeholder="e.g. vaults"
+                    :disabled="vaultPickerLoading"
+                    @keydown.enter.prevent="createVaultPickerFolder"
+                  />
+                  <button
+                    type="button"
+                    class="btn-small"
+                    :disabled="!vaultPickerNewName.trim() || vaultPickerLoading"
+                    @click="createVaultPickerFolder"
+                  >Create folder</button>
+                </div>
+              </div>
+              <p v-if="vaultPickerError" class="line line--error">
+                <span class="prompt prompt--err">!</span>{{ vaultPickerError }}
+              </p>
+              <div class="picker-footer">
+                <button type="button" class="btn-small" @click="closeVaultPicker">Cancel</button>
+                <button
+                  type="button"
+                  class="btn-small"
+                  :disabled="!vaultPickerPath || vaultPickerLoading"
+                  @click="useVaultPickerFolder"
+                >Use this folder</button>
+                <button
+                  type="button"
+                  class="prompt-submit picker-select"
+                  :disabled="!vaultPickerPath || vaultPickerLoading"
+                  @click="moveVaultPickerFolder"
+                >Move vault here</button>
+              </div>
+            </div>
           </div>
 
           <!-- Google Workspace integration -->
@@ -4049,6 +4156,140 @@ async function removeWorkspace(name: string) {
   }
 }
 
+// -- Vault location (relocate / re-point) ---------------------------------
+interface DirListing {
+  path: string
+  display_path: string
+  parent: string | null
+  dirs: Array<{ name: string; path: string }>
+  home: string
+}
+const vaultPickerOpen = ref(false)
+const vaultPickerWorkspace = ref('')
+const vaultPickerPath = ref('')
+const vaultPickerDisplayPath = ref('')
+const vaultPickerParent = ref<string | null>(null)
+const vaultPickerDirs = ref<Array<{ name: string; path: string }>>([])
+const vaultPickerError = ref('')
+const vaultPickerLoading = ref(false)
+const vaultPickerNewName = ref('')
+
+function workspaceVaultDisplay(name: string): string {
+  const form = workspaceForms.value.find((f) => f.name === name)
+  return form?.vault_root?.trim() ? form.vault_root : name
+}
+
+function vaultPickerListing(path?: string): Promise<DirListing> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  return api.get<DirListing>(`/api/workspaces/browse-folder${query}`)
+}
+
+function applyVaultPickerListing(listing: DirListing) {
+  vaultPickerPath.value = listing.path
+  vaultPickerDisplayPath.value = listing.display_path
+  vaultPickerParent.value = listing.parent
+  vaultPickerDirs.value = listing.dirs || []
+}
+
+async function openVaultPicker(name: string) {
+  vaultPickerWorkspace.value = name
+  vaultPickerOpen.value = true
+  vaultPickerPath.value = ''
+  vaultPickerDisplayPath.value = ''
+  vaultPickerParent.value = null
+  vaultPickerDirs.value = []
+  vaultPickerError.value = ''
+  vaultPickerNewName.value = ''
+  vaultPickerLoading.value = true
+  try {
+    const current = workspaceVaultDisplay(name)
+    let listing: DirListing
+    if (current && /^\//.test(current)) {
+      try {
+        listing = await vaultPickerListing(current)
+      } catch {
+        listing = await vaultPickerListing()
+      }
+    } else {
+      listing = await vaultPickerListing()
+    }
+    applyVaultPickerListing(listing)
+  } catch (e) {
+    vaultPickerError.value = errorMessage(e, 'failed to list folder')
+  } finally {
+    vaultPickerLoading.value = false
+  }
+}
+
+async function loadVaultPickerDirs(path?: string) {
+  vaultPickerLoading.value = true
+  vaultPickerError.value = ''
+  try {
+    applyVaultPickerListing(await vaultPickerListing(path))
+  } catch (e) {
+    vaultPickerError.value = errorMessage(e, 'failed to list folder')
+  } finally {
+    vaultPickerLoading.value = false
+  }
+}
+
+async function createVaultPickerFolder() {
+  const name = vaultPickerNewName.value.trim()
+  if (!name || !vaultPickerPath.value) return
+  vaultPickerLoading.value = true
+  vaultPickerError.value = ''
+  try {
+    const listing = await api.post<DirListing>('/api/workspaces/browse-folder', { path: vaultPickerPath.value, name })
+    const created = (listing.dirs || []).find((dir) => dir.name === name)
+    applyVaultPickerListing(created ? await vaultPickerListing(created.path) : listing)
+    vaultPickerNewName.value = ''
+  } catch (e) {
+    vaultPickerError.value = errorMessage(e, 'failed to create folder')
+  } finally {
+    vaultPickerLoading.value = false
+  }
+}
+
+function closeVaultPicker() {
+  vaultPickerOpen.value = false
+}
+
+async function confirmVaultMove(target: string, mode: 'move' | 'hook') {
+  const name = vaultPickerWorkspace.value
+  const verb = mode === 'move'
+    ? `Move the "${name}" vault contents into ${target}?`
+    : `Re-point the "${name}" vault to ${target}?`
+  const detail = mode === 'move'
+    ? 'Ciaobot will relocate the notes and projects into the new folder and update its registry.'
+    : 'Ciaobot will point at the new folder. Move your files there yourself, or use it as a fresh vault.'
+  if (!await askConfirm(`${verb} ${detail}`, {
+    title: 'Move vault',
+    confirmLabel: mode === 'move' ? 'Move vault' : 'Use folder',
+  })) return
+  vaultPickerLoading.value = true
+  vaultPickerError.value = ''
+  try {
+    await api.post<{ ok: boolean }>(`/api/workspaces/${encodeURIComponent(name)}/vault`, { target, mode })
+    notifySaved(`Workspace "${name}" vault ${mode === 'move' ? 'moved' : 're-pointed'}.`, 'Workspaces')
+    vaultPickerOpen.value = false
+    await fetchWorkspacesList()
+  } catch (e) {
+    vaultPickerError.value = errorMessage(e, 'The vault could not be moved.')
+  } finally {
+    vaultPickerLoading.value = false
+  }
+}
+
+function useVaultPickerFolder() {
+  if (!vaultPickerPath.value) return
+  confirmVaultMove(vaultPickerPath.value, 'hook')
+}
+
+function moveVaultPickerFolder() {
+  if (!vaultPickerPath.value) return
+  confirmVaultMove(vaultPickerPath.value, 'move')
+}
+
 onMounted(async () => {
   loadAppearanceSettings()
   fetchSkills()
@@ -6515,5 +6756,148 @@ a.btn-secondary {
 
 .mcp-tag-grid--wide {
   gap: 8px;
+}
+
+/* Vault location picker (mirrors the setup wizard's picker) */
+.picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+}
+.picker-modal {
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  background: var(--bg2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+}
+.picker-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.picker-title {
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.picker-help {
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+.picker-help code {
+  color: var(--fg2);
+}
+.picker-current-label,
+.picker-new-label {
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.picker-new-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.picker-path {
+  font-family: inherit;
+  font-size: var(--text-xs);
+  color: var(--accent);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  word-break: break-all;
+}
+.picker-toolbar {
+  display: flex;
+  gap: 6px;
+}
+.picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.picker-dir {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 8px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.picker-dir:hover:not(:disabled) {
+  background: var(--bg3);
+}
+.picker-dir:disabled {
+  color: var(--fg3);
+  cursor: not-allowed;
+}
+.picker-empty {
+  padding: 5px 8px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+.picker-new {
+  display: flex;
+  gap: 6px;
+}
+.picker-new .form-input {
+  flex: 1;
+  min-width: 0;
+}
+.picker-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+.picker-select {
+  font-size: var(--text-sm);
+}
+
+/* Vault location row inside a workspace card */
+.vault-location-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.vault-location-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg2);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
 }
 </style>

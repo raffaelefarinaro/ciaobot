@@ -213,7 +213,14 @@ def _detect_vault_location(context: DetectionContext) -> list[OperatorAction]:
     if not callable(resolver) or not callable(standardizer) or not callable(lister):
         return []
     actions: list[OperatorAction] = []
+    getter = getattr(config, "workspace", None)
     for name in lister():
+        if callable(getter):
+            ws = getter(name)
+            if ws is not None and getattr(ws, "vault_pinned", False):
+                # The operator intentionally relocated this vault through
+                # Settings; it is not an accident in need of a chat migration.
+                continue
         try:
             actual = Path(resolver(name)).resolve()
             standard = Path(standardizer(name)).resolve()
