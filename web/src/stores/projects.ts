@@ -233,6 +233,16 @@ export const useProjectStore = defineStore('projects', () => {
   // and cleared on success (archived stays true, tidying takes over) or on
   // failure (archived is rolled back, row reappears).
   const archivingChats = ref<Record<string, boolean>>({})
+  // Chats this client has flipped to `archived: true` locally — optimistically
+  // in `archiveChat`, or from a `chat_archived` event — that no `/api/chats`
+  // payload has confirmed yet. Every list refresh replaces `chats.value`
+  // wholesale, so a GET issued before the archive landed on the server (the 15s
+  // poll, or the refresh the `chat_result_ready` / `chat_subagents_ready`
+  // handlers fire) resolves with `archived: false` and puts the row back in the
+  // sidebar until the next refresh — the archive flicker. `applyPendingArchived`
+  // re-applies the local truth to every payload; entries clear as soon as the
+  // server agrees (or the chat is gone), and on rollback when the POST fails.
+  const pendingArchived = ref<Record<string, boolean>>({})
   // Not reactive UI state, just an in-flight guard: `creatingChatProjectIds`
   // is a display flag consumers can ignore (a second click landing before
   // Vue re-renders, a duplicated keyboard handler), so a second createChat()
@@ -1655,8 +1665,30 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  /**
+   * Re-apply local archive intent to a server chat-list payload. A payload that
+   * still reports a pending-archive chat as active is stale (its GET raced the
+   * archive POST), so the row is kept archived rather than flickering back into
+   * the sidebar. Confirmed (or vanished) ids drop out of the pending map.
+   */
+  function applyPendingArchived(nextChats: ChatInfo[]): ChatInfo[] {
+    if (!Object.keys(pendingArchived.value).length) return nextChats
+    const present = new Set(nextChats.map(c => c.chat_id))
+    for (const id of Object.keys(pendingArchived.value)) {
+      if (!present.has(id)) delete pendingArchived.value[id]
+    }
+    return nextChats.map(c => {
+      if (!pendingArchived.value[c.chat_id]) return c
+      if (c.archived) {
+        delete pendingArchived.value[c.chat_id]
+        return c
+      }
+      return { ...c, archived: true }
+    })
+  }
+
   function reconcileChatList(nextChats: ChatInfo[]) {
-    chats.value = nextChats
+    chats.value = applyPendingArchived(nextChats)
 
     // Prune messages for deleted chats.
     const validIds = new Set(nextChats.map(ch => ch.chat_id))
@@ -2297,6 +2329,7 @@ export const useProjectStore = defineStore('projects', () => {
     // the server's disk work (transcript write + delegate cascade).
     for (const id of allIds) {
       archivingChats.value[id] = true
+      pendingArchived.value[id] = true
       const c = chats.value.find(ch => ch.chat_id === id)
       if (c) c.archived = true
     }
@@ -2322,8 +2355,12 @@ export const useProjectStore = defineStore('projects', () => {
         const c = chats.value.find(ch => ch.chat_id === id)
         if (c) c.archived = prev
         delete archivingChats.value[id]
+        delete pendingArchived.value[id]
       }
-      for (const id of allIds) delete archivingChats.value[id]
+      for (const id of allIds) {
+        delete archivingChats.value[id]
+        delete pendingArchived.value[id]
+      }
       for (const id of closedIds) connectWs(id)
       if (wasActive && activeChatId.value === null) {
         activeChatId.value = chatId
@@ -2348,6 +2385,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (!confirmed.has(id)) {
         const c = chats.value.find(ch => ch.chat_id === id)
         if (c) c.archived = prevArchived.get(id) ?? false
+        delete pendingArchived.value[id]
       } else if (id === chatId && res?.postprocess) {
         const c = chats.value.find(ch => ch.chat_id === id)
         if (c) {
@@ -2450,6 +2488,9 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function newSession(chatId: string) {
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/new`)
+    // A reset clears `archived` server-side on the same chat_id, so any stale
+    // local archive intent for it must go with it.
+    delete pendingArchived.value[chatId]
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     messages.value[chatId] = []
@@ -3484,7 +3525,7 @@ export const useProjectStore = defineStore('projects', () => {
           }
         }
         // Refresh the chats list so last_activity_at + recent ordering update.
-        api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = c }).catch(() => { /* ignore */ })
+        api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = applyPendingArchived(c) }).catch(() => { /* ignore */ })
         break
       }
       case 'chat_subagents_ready': {
@@ -3516,7 +3557,7 @@ export const useProjectStore = defineStore('projects', () => {
           void loadSubagents(msg.chat_id)
         }
         // Keep sidebar ordering and last-activity timestamps in sync.
-        api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = c }).catch(() => { /* ignore */ })
+        api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = applyPendingArchived(c) }).catch(() => { /* ignore */ })
         break
       }
       case 'chat_read': {
@@ -3578,6 +3619,9 @@ export const useProjectStore = defineStore('projects', () => {
           if (msg.archive_path) chat.archive_path = msg.archive_path
         }
         if (archivingChats.value[msg.chat_id]) delete archivingChats.value[msg.chat_id]
+        // Hold the local flag until a chat-list payload agrees: a GET that left
+        // before the archive committed can still resolve after this event.
+        pendingArchived.value[msg.chat_id] = true
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null
           persistState()

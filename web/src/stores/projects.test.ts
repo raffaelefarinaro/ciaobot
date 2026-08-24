@@ -2815,6 +2815,62 @@ describe('deep-link chat navigation', () => {
     expect(toast?.body).toContain('is not in the archive')
   })
 
+  test('a stale /api/chats payload does not resurrect a chat being archived', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = supervisorWithTwoSubchats()
+    apiPost.mockResolvedValue({ ok: true, archived_chat_ids: ['parent', 'child-a', 'child-b'] })
+
+    await store.archiveChat('parent')
+
+    // A GET that left before the archive committed (the 15s poll, or the
+    // refresh chat_result_ready fires) still reports the chat as active.
+    // Taking it at face value put the row back in the sidebar until the next
+    // poll corrected it — the archive flicker.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats') return Promise.resolve(supervisorWithTwoSubchats())
+      return Promise.resolve([])
+    })
+    await store.syncLatest()
+
+    expect(store.chats.every(chat => chat.archived)).toBe(true)
+    expect(store.projectChats('p1')).toHaveLength(0)
+
+    // Once the server agrees, its payload is authoritative again.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats') {
+        return Promise.resolve(supervisorWithTwoSubchats().map(c => ({ ...c, archived: true })))
+      }
+      return Promise.resolve([])
+    })
+    await store.syncLatest()
+    expect(store.chats.every(chat => chat.archived)).toBe(true)
+  })
+
+  test('a rolled-back archive lets the server payload show the chat as active', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = supervisorWithTwoSubchats()
+    apiPost.mockRejectedValue(new Error('archive exploded'))
+
+    await expect(store.archiveChat('parent')).rejects.toThrow('archive exploded')
+
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats') return Promise.resolve(supervisorWithTwoSubchats())
+      return Promise.resolve([])
+    })
+    await store.syncLatest()
+
+    expect(store.chats.some(chat => chat.archived)).toBe(false)
+    expect(store.projectChats('p1')).toHaveLength(3)
+  })
+
   test('a failed archive POST reconnects the sockets and raises an error toast', async () => {
     const store = useProjectStore()
     store.chats = supervisorWithTwoSubchats()
