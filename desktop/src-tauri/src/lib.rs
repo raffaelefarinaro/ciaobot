@@ -382,6 +382,18 @@ fn restart_engine_after_app_update(app: &AppHandle) -> Result<(), String> {
     }
 }
 
+// The download owns the 60..=88 band of the update window's progress bar.
+// `downloaded` is the running total of bytes received, not the last chunk.
+// Without a Content-Length there is nothing to divide by, so the bar parks
+// mid-band rather than pretending to advance.
+fn download_percent(downloaded: u64, total: Option<u64>) -> u8 {
+    match total {
+        None => 70,
+        Some(0) => 72,
+        Some(total) => 60 + (downloaded.saturating_mul(28) / total).min(28) as u8,
+    }
+}
+
 // Second half of the unified update. The dedicated update window stays visible
 // while the engine and app halves move together, then the process restarts.
 // Only restart when something actually changed — otherwise "Update…" would
@@ -414,18 +426,16 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
             );
             let download_app = app.clone();
             let download_version = version.clone();
+            // `on_chunk` reports the size of *this* chunk, not the running
+            // total, so feeding it straight into the percentage pinned the bar
+            // at whatever the first chunk happened to be (~60%) for the whole
+            // download. Keep the total here.
+            let mut downloaded: u64 = 0;
             update
                 .download_and_install(
                     move |chunk, total| {
-                        let percent = total
-                            .map(|total| {
-                                if total == 0 {
-                                    72
-                                } else {
-                                    (60 + ((chunk as u64).saturating_mul(28) / total).min(28)) as u8
-                                }
-                            })
-                            .unwrap_or(70);
+                        downloaded = downloaded.saturating_add(chunk as u64);
+                        let percent = download_percent(downloaded, total);
                         emit_update_progress(
                             &download_app,
                             percent,
@@ -1647,9 +1657,12 @@ fn check_permission(kind: permissions::PermissionKind) -> permissions::Permissio
     permissions::query(kind)
 }
 
+// Async on purpose: a synchronous command would run the permission prompt's
+// blocking wait on the main thread and freeze every window and the tray until
+// the user answered it.
 #[tauri::command]
-fn request_permission(kind: permissions::PermissionKind) -> permissions::PermissionState {
-    permissions::request(kind)
+async fn request_permission(kind: permissions::PermissionKind) -> permissions::PermissionState {
+    permissions::request_async(kind).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1740,9 +1753,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_log, browser_event_script, create_desktop_drop_grant, engine_already_current,
-        engine_launch_action, flags_are_dataless, is_external_link, is_trusted_main_navigation,
-        needs_drop_staging, requires_confirmation, should_show_main_window, should_stage,
+        append_log, browser_event_script, create_desktop_drop_grant, download_percent,
+        engine_already_current, engine_launch_action, flags_are_dataless, is_external_link,
+        is_trusted_main_navigation, needs_drop_staging, requires_confirmation,
+        should_show_main_window, should_stage,
     };
     use crate::service::ServiceResult;
 
@@ -1962,6 +1976,39 @@ mod tests {
             serde_json::json!({"requires_confirmation": true})
         )));
         assert!(!requires_confirmation(&result_with(serde_json::json!({}))));
+    }
+
+    // The updater hands the callback each chunk's length, not a running total.
+    // Summing the chunks has to walk the bar across the 60..=88 band; feeding
+    // it a single chunk length left it parked at ~60% for the whole download.
+    #[test]
+    fn download_progress_advances_with_the_accumulated_total() {
+        let total = Some(1_000u64);
+        assert_eq!(download_percent(0, total), 60);
+        assert_eq!(download_percent(250, total), 67);
+        assert_eq!(download_percent(500, total), 74);
+        assert_eq!(download_percent(1_000, total), 88);
+
+        // One 250 KB chunk out of a 1 MB download is 60%, however many chunks
+        // have already arrived; the accumulated total is what moves.
+        let chunk = 250u64;
+        let mut downloaded = 0u64;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            downloaded += chunk;
+            seen.push(download_percent(downloaded, total));
+        }
+        assert_eq!(seen, vec![67, 74, 81, 88]);
+        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn download_progress_stays_in_band_without_a_content_length() {
+        assert_eq!(download_percent(4_096, None), 70);
+        assert_eq!(download_percent(4_096, Some(0)), 72);
+        // A server that under-reports its own length must not push the bar
+        // past the band the install steps own.
+        assert_eq!(download_percent(9_999, Some(10)), 88);
     }
 
     #[test]
