@@ -779,3 +779,49 @@ def test_a_resolving_cross_root_link_is_not_a_broken_link(tmp_path: Path) -> Non
     assert "../../../work/memory-vault/People/Colleague.md" not in flagged
     assert "../../../work/memory-vault/People/Ghost.md" in flagged
     assert "../../../../outside-install/Secret.md" in flagged
+
+
+def test_a_symlinked_cross_root_link_is_not_a_broken_link(tmp_path: Path) -> None:
+    """A link that only leaves the vault once resolved is still the layout.
+
+    The sibling of ``test_a_resolving_cross_root_link_is_not_a_broken_link``, for
+    the other branch: this target does not escape the vault lexically, so
+    containment cannot be decided on paths alone, and the check happens after
+    ``resolve()`` instead. That branch called ``_resolves_inside_install``, which
+    was never written - so reaching it raised ``NameError`` rather than
+    reporting anything, and no test went down it.
+    """
+    for name in ("personal", "work"):
+        (tmp_path / name / "memory-vault" / "People").mkdir(parents=True)
+    (tmp_path / "work" / "memory-vault" / "People" / "Colleague.md").write_text(
+        "---\ntype: person\n---\n# Colleague\n", encoding="utf-8"
+    )
+    vault = tmp_path / "personal" / "memory-vault"
+    # Lexically `People/shared/Colleague.md` never leaves the vault; it lands in
+    # the sibling root only once the symlink is followed.
+    (vault / "People" / "shared").symlink_to(
+        tmp_path / "work" / "memory-vault" / "People", target_is_directory=True
+    )
+    outside = tmp_path.parent / "outside-install-symlinked"
+    outside.mkdir(exist_ok=True)
+    (outside / "Secret.md").write_text("private\n", encoding="utf-8")
+    (vault / "People" / "elsewhere").symlink_to(outside, target_is_directory=True)
+    (vault / "People" / "User.md").write_text(
+        "---\ntype: person\n---\n"
+        "# User\n"
+        "- [Colleague](shared/Colleague.md)\n"
+        "- [Escapee](elsewhere/Secret.md)\n",
+        encoding="utf-8",
+    )
+
+    flagged = {
+        item["target"]
+        for item in vault_lint.run_validation(vault, install_root=tmp_path)[
+            "broken_markdown_links"
+        ]
+    }
+
+    # Inside the install: the layout, not a defect. Outside it: still an error,
+    # even though the file is real.
+    assert "shared/Colleague.md" not in flagged
+    assert "elsewhere/Secret.md" in flagged

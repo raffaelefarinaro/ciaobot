@@ -20,7 +20,13 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
+
+# Imported lazily inside the handlers (see `_housekeeping_context`); only
+# the annotations need the name at module scope.
+if TYPE_CHECKING:
+    from ciao import operator_actions
+
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -6657,12 +6663,12 @@ _SKILL_PROPOSALS_REL = ("Workspace", "Skill-Proposals")
 
 def _proposals_file(config, workspace: str) -> Path:
     """The proposal queue for one workspace, rooted at its vault folder."""
-    return config.workspace_vault_root(workspace).joinpath(*_PROPOSALS_REL)
+    return Path(config.workspace_vault_root(workspace)).joinpath(*_PROPOSALS_REL)
 
 
 def _skill_proposals_dir(config, workspace: str) -> Path:
     """The skill-proposal queue folder for one workspace."""
-    return config.workspace_vault_root(workspace).joinpath(*_SKILL_PROPOSALS_REL)
+    return Path(config.workspace_vault_root(workspace)).joinpath(*_SKILL_PROPOSALS_REL)
 
 
 def _stable_proposal_id(workspace: str, path: str, kind: str, text: str, source: str, dup: int) -> str:
@@ -6763,7 +6769,7 @@ def _leak_warning(config, kind: str, workspace: str) -> bool:
         shared_guide = True
     if not shared_guide:
         return False
-    return workspace != config.primary_workspace()
+    return bool(workspace != config.primary_workspace())
 
 
 def _perform_rehome_move(config, row: dict[str, Any], target: str) -> dict[str, Any]:
@@ -6868,7 +6874,7 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
     for workspace in config.workspace_names():
         queue = _proposals_file(config, workspace)
         rel_path = Path(workspace).joinpath(*_PROPOSALS_REL).as_posix()
-        seen_dup: dict[tuple[str, str, str, str], int] = {}
+        seen_dup: dict[tuple[str, str, str], int] = {}
         if queue.is_file():
             for line_index, raw in enumerate(queue.read_text(encoding="utf-8").splitlines()):
                 bullet = proposal_kinds.parse_bullet(raw)
@@ -7097,7 +7103,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
     ids = [str(pid).strip() for pid in raw_ids]
     requested_workspace = str(body.get("workspace", "") or "").strip()
     resolved, error = _resolve_batch(config, ids)
-    if error:
+    if error or resolved is None:
         return JSONResponse({"error": error}, status_code=404)
 
     # Re-home rows are MOVES, so they are handled before the queue-file grouping

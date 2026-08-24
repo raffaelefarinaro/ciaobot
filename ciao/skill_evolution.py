@@ -743,7 +743,9 @@ async def _process_skill_dag(
         written_path["value"] = str(path)
         return True, str(path)
 
-    def write_stub_node(ctx: dict[str, Any]) -> tuple[bool, str]:
+    def write_stub_node(
+        ctx: dict[str, Any],
+    ) -> tuple[bool, str] | tuple[bool, str, bool]:
         # Only over-cap no-proposal persists a stub. Under-cap no-improvement
         # is a weak signal (loaded-but-not-causal) and would flood the
         # review queue with no actionable edit. The DAG already logs

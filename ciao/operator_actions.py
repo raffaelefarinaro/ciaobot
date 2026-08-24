@@ -293,6 +293,9 @@ def _detect_workspace_unmigrated(context: DetectionContext) -> list[OperatorActi
     if vault_root is None or not Path(vault_root).is_dir():
         # No shared vault to move: either already migrated or never set up.
         return []
+    if runtime is None:
+        # No runtime dir means no receipts to read, so nothing to report.
+        return []
     try:
         from ciao.workspace_reroot import peek_receipt, read_receipt
 

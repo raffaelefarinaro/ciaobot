@@ -428,6 +428,24 @@ def _lands_in_install(
     return combined != Path("..") and Path("..") not in combined.parents
 
 
+def _resolves_inside_install(resolved: Path, install_root: Path | None) -> bool:
+    """Whether an already-resolved path still sits inside the install.
+
+    The resolved-path companion to :func:`_lands_in_install`, for a link that
+    does not escape the vault lexically but still resolves outside it - a
+    symlinked vault, or a sibling root reached through one. ``resolved`` is
+    already absolute, so containment is a straight prefix check; a link that
+    leaves the install altogether stays an error.
+    """
+    if install_root is None:
+        return False
+    try:
+        resolved.relative_to(Path(install_root).resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def _markdown_link_error(
     *,
     vault_root: Path,

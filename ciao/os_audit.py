@@ -1523,11 +1523,11 @@ def run_os_audit(
     # A section outside this scope is REMOVED, not zeroed. An empty section
     # reads as "checked and clean", which is a claim this run never made.
     if not want_workspace:
-        for key in WORKSPACE_SECTIONS:
-            report.pop(key, None)
+        for section in WORKSPACE_SECTIONS:
+            report.pop(section, None)
     if not want_global:
-        for key in GLOBAL_SECTIONS:
-            report.pop(key, None)
+        for section in GLOBAL_SECTIONS:
+            report.pop(section, None)
     return report
 
 

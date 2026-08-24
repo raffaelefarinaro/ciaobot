@@ -2007,11 +2007,11 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         print(json.dumps(workspace_reroot.rehearse(workspace, vault, names, runtime), indent=2))
         return 0
 
-    result = workspace_reroot.plan(workspace, vault, names)
+    plan_result = workspace_reroot.plan(workspace, vault, names)
     primary = config.primary_workspace()
     triage = workspace_reroot.plan_skills_triage(workspace, primary)
     guides = workspace_reroot.guide_moves(workspace, primary)
-    payload = result.as_dict()
+    payload = plan_result.as_dict()
     # The dry run is what a person reads before approving, so it has to show
     # EVERY move the apply would make. Printing only the vault moves understated
     # it by four on the reference install, which is exactly the kind of gap that
@@ -2022,7 +2022,7 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         {"source": m.source, "destination": m.destination, "workspace": m.workspace}
         for m in guides
     ]
-    payload["total_moves"] = len(result.moves) + len(triage.moves) + len(guides)
+    payload["total_moves"] = len(plan_result.moves) + len(triage.moves) + len(guides)
     if triage.refusals:
         payload["refusals"] = [*payload["refusals"], *triage.refusals]
         payload["refused"] = True

@@ -693,7 +693,7 @@ def detect_misfiled_people(
         # Roles that name somewhere else, and that actually exist here. A tag
         # naming an unregistered role is no signal at all: there is no directory
         # to move to, so the note is not a candidate rather than a judgement call.
-        targets = sorted(
+        target_workspaces = sorted(
             {roles[role] for role in signalled_roles if role in roles and roles[role] != workspace}
         )
         own_role = role_of.get(workspace, "")
@@ -723,27 +723,27 @@ def detect_misfiled_people(
                 )
             )
             continue
-        if not targets:
+        if not target_workspaces:
             continue  # tags agree with where it already is, or name nowhere real
         if own_role and own_role in signalled_roles:
             out.append(
                 Candidate(
                     path=relative.as_posix(),
-                    destination=_moved_path(relative, workspace, targets[0])
-                    if len(targets) == 1
+                    destination=_moved_path(relative, workspace, target_workspaces[0])
+                    if len(target_workspaces) == 1
                     else "",
                     workspace=workspace,
-                    target_workspace=targets[0] if len(targets) == 1 else "",
+                    target_workspace=target_workspaces[0] if len(target_workspaces) == 1 else "",
                     bucket="needs_judgement",
                     reason=(
                         f"tags name both {workspace} and "
-                        f"{', '.join(targets)} ({', '.join(sorted(signals))})"
+                        f"{', '.join(target_workspaces)} ({', '.join(sorted(signals))})"
                     ),
                     tags=tags,
                 )
             )
             continue
-        if len(targets) > 1:
+        if len(target_workspaces) > 1:
             out.append(
                 Candidate(
                     path=relative.as_posix(),
@@ -751,7 +751,7 @@ def detect_misfiled_people(
                     workspace=workspace,
                     target_workspace="",
                     bucket="needs_judgement",
-                    reason=f"tags name more than one other workspace: {', '.join(targets)}",
+                    reason=f"tags name more than one other workspace: {', '.join(target_workspaces)}",
                     tags=tags,
                 )
             )
@@ -759,9 +759,9 @@ def detect_misfiled_people(
         out.append(
             Candidate(
                 path=relative.as_posix(),
-                destination=_moved_path(relative, workspace, targets[0]),
+                destination=_moved_path(relative, workspace, target_workspaces[0]),
                 workspace=workspace,
-                target_workspace=targets[0],
+                target_workspace=target_workspaces[0],
                 bucket="mechanical",
                 reason=f"tagged {', '.join(sorted(signals))}",
                 tags=tags,

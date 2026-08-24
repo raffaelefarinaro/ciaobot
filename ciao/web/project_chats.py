@@ -7062,7 +7062,7 @@ class ProjectChatManager:
                     steer = getattr(impl, "steer", None)
             if not callable(steer):
                 return False
-            return await steer(request)
+            return bool(await steer(request))
         except Exception:  # noqa: BLE001 — a failed nudge must not kill the watcher
             logger.exception(
                 "Subagent synthesis nudge failed for chat %s", chat_id
@@ -8018,7 +8018,7 @@ class ProjectChatManager:
             if classifier_provider not in supported_providers():
                 return True
             insights_model = resolve_insights_model(self._config, workspace)
-            env = {}
+            env: dict[str, str] = {}
             model, classifier_provider, note = _resolve_insights_call(
                 self._config,
                 insights_model,
