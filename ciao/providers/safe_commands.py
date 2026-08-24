@@ -296,10 +296,14 @@ _SUBSTITUTION_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 # command follows it. Only the segment's first word was ever classified, so
 # `KEEP=0 rm -rf /tmp/x` presented `KEEP=0` as the verb and ran approved.
 _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-# A verb the shell expands before exec (`$X`, `${X}`, `$(...)`) is unknowable
-# from the text: whatever it names is only decided at runtime, so it cannot be
-# classified and gets the card instead of the permissive default.
-_EXPANDED_VERB_RE = re.compile(r"\$")
+# A verb the shell rewrites before exec is unknowable from the text: `$X`,
+# `${X}`, and `$(...)` substitute at expansion time, while the glob, brace,
+# and pathname forms (`/bin/r[m]`, `r{m,mv}`, `~/tool`) are rewritten against
+# the filesystem. Whatever such a word names is decided only at runtime, so
+# none of it can be classified; each gets the card instead of the permissive
+# default. A bare `[` is exempt: that spelling is the test(1) builtin, not an
+# expansion.
+_EXPANDED_VERB_RE = re.compile(r"[$*?\[\]{}~]")
 # Exact tokens that open, close, or introduce a compound command. Matched
 # WHOLE so brace expansion (`echo {a,b}`) is untouched; only a bare `{` is
 # the control operator.
@@ -605,7 +609,8 @@ def is_destructive_command(command: str) -> bool:
             lead += 1
         # `X=rm; $X -rf /tmp/x` classifies `$X` as an unknown verb unless the
         # expansion itself is treated as the red flag it is.
-        if _EXPANDED_VERB_RE.search(segment[lead]):
+        verb = segment[lead]
+        if verb != "[" and _EXPANDED_VERB_RE.search(verb):
             return True
         if _segment_is_destructive(segment[lead], segment[lead + 1:]):
             return True

@@ -222,6 +222,11 @@ def test_destructive_commands_are_destructive(command):
     # so it fails closed.
     "X=rm; $X -rf /tmp/valuable",
     "${CMD} shred ~/x",
+    # Glob, brace, and tilde pathname forms are expanded against the
+    # filesystem just before exec; `/bin/r[m]` arrives at exec as /bin/rm.
+    "/bin/r[m] -rf /tmp/valuable",
+    "r{m,mv} -rf /tmp/valuable",
+    "~/bin/shred ~/x",
     # An inline `-c alias.*` makes git run the VALUE as a command while the
     # subcommand slot holds an innocent-looking name.
     "git -c alias.nuke='!rm -rf /tmp/valuable' nuke",
@@ -479,6 +484,8 @@ def test_deleting_copies_and_branches_are_destructive(command):
     "git branch",
     "git branch -a",
     "git branch --list",
+    # A bare bracket is the test(1) builtin, not a pathname expansion.
+    "[ -f /tmp/x ] && echo yes",
 ])
 def test_copies_and_safe_branch_work_stay_approved(command):
     assert is_destructive_command(command) is False
