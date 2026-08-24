@@ -290,7 +290,35 @@ def _unwrap(args: list[str]) -> tuple[str, list[str]] | None:
 _DESTRUCTIVE_QUERY_FLAGS = frozenset({"-h", "--help", "-V", "--version"})
 
 
+# Git's global options sit BEFORE the subcommand (`git -C <path> reset --hard`),
+# so `args[0]` is not the subcommand whenever one is present. These take a value;
+# the rest are flags. `--opt=value` is one token and needs no lookahead.
+_GIT_GLOBAL_VALUE_OPTS = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+    "--super-prefix", "--config-env",
+})
+
+
+def _git_subcommand(args: list[str]) -> list[str]:
+    """Drop Git's global options so the real subcommand leads the list.
+
+    Without this, every destructive-subcommand check was answered against
+    `-C`, and `git -C /tmp/repo reset --hard` classified clean.
+    """
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if not token.startswith("-"):
+            return args[index:]
+        if token in _GIT_GLOBAL_VALUE_OPTS:
+            index += 2  # the option and its separate value
+            continue
+        index += 1
+    return []
+
+
 def _git_is_destructive(args: list[str]) -> bool:
+    args = _git_subcommand(args)
     if not args:
         return False
     subcommand, *rest = args

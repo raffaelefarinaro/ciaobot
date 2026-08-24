@@ -236,6 +236,38 @@ def test_nested_wrappers_do_not_hide_the_verb(command):
     "git switch --discard-changes",
 ])
 def test_gits_discarding_checkouts_are_destructive(command):
+    """`checkout` is two commands wearing one name.
+
+    These forms throw away every uncommitted change they touch, as
+    unrecoverably as `restore`, and all of them were auto-approved.
+    """
+    assert is_destructive_command(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    "git -C /tmp status",
+    "git -p log",
+    "git --git-dir=/tmp/.git log --oneline",
+    "git -C /tmp checkout -b feat",
+])
+def test_global_options_on_a_read_only_git_stay_approved(command):
+    assert is_destructive_command(command) is False
+
+
+@pytest.mark.parametrize("command", [
+    "git -C /tmp/repo reset --hard",
+    "git --git-dir=/tmp/repo/.git clean -fd",
+    "git -c user.name=x reset --hard",
+    "git -C /tmp -c a=b checkout -- .",
+    "git --work-tree=/tmp rm -r x",
+])
+def test_gits_global_options_do_not_hide_the_subcommand(command):
+    """Git's global options come BEFORE the subcommand.
+
+    Every destructive-subcommand check read `args[0]`, so with `-C` or
+    `--git-dir` present it was answering about the option rather than the
+    command — and `git -C /tmp/repo reset --hard` was auto-approved.
+    """
     assert is_destructive_command(command) is True
 
 
