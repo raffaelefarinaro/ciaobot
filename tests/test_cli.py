@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import plistlib
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -1189,3 +1190,51 @@ def test_cli_skill_proposal_remove_refuses_ambiguous_match(
     # Nothing was deleted.
     queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
     assert len(list(queue.glob("*.md"))) == 2
+
+
+def _search_note(vault: Path, name: str) -> None:
+    (vault / "People").mkdir(parents=True, exist_ok=True)
+    (vault / "People" / f"{name}.md").write_text(
+        f"---\ntype: person\ntitle: {name}\n---\n# {name}\n\nLoves kiteboarding.\n",
+        encoding="utf-8",
+    )
+
+
+def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Cross-workspace leak: the FTS database is shared by every re-rooted agent
+    root — the migration rebuild fills it that way on purpose — and the prune is
+    now scoped, so it keeps the sibling roots' rows. An unscoped query therefore
+    printed another workspace's note titles and snippets."""
+    from ciao import fts_search
+
+    install = tmp_path / "install"
+    work_vault = install / "work" / "memory-vault"
+    personal_vault = install / "personal" / "memory-vault"
+    _search_note(work_vault, "Aymen")
+    _search_note(personal_vault, "Alba")
+
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+
+    # The other root's rows are already in the shared database, exactly as the
+    # migration rebuild leaves them.
+    conn = sqlite3.connect(fts_search.get_db_path())
+    try:
+        fts_search.init_db(conn)
+        fts_search.index_vault(conn, personal_vault, path_base=install)
+    finally:
+        conn.close()
+
+    assert cli.main(["vault-search", "kiteboarding", "--vault-root", str(work_vault)]) == 0
+
+    out = capsys.readouterr().out
+    assert "Aymen" in out  # this workspace's own note still resolves
+    assert "Alba" not in out
+    # And the link points at the note that actually exists on disk.
+    assert str(work_vault / "People" / "Aymen.md") in out

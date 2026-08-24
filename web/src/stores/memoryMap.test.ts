@@ -222,6 +222,28 @@ describe('graph snapshots', () => {
     expect(mm.loadError).toBe('offline')
   })
 
+  test('a superseded load cannot repaint the workspace the user has left', async () => {
+    // The graph fetch races the workspace switcher. The abandoned response
+    // used to publish anyway — `nodes`/`loadedWorkspace` were overwritten with
+    // the vault the user had just navigated away from, and the map showed the
+    // wrong workspace until something else forced a reload.
+    let releasePersonal!: (value: unknown) => void
+    const personal = new Promise(r => { releasePersonal = r })
+    vi.mocked(api.get).mockImplementation(((url: string) =>
+      url.includes('personal') ? personal : Promise.resolve(payload(['w1']))) as never)
+
+    const mm = useMemoryMapStore()
+    const abandoned = mm.ensureGraph('personal')
+    await mm.ensureGraph('work')
+    expect(mm.nodes.map(n => n.id)).toEqual(['w1'])
+
+    releasePersonal(payload(['p1', 'p2']))
+    await abandoned
+
+    expect(mm.nodes.map(n => n.id)).toEqual(['w1'])
+    expect(mm.loading).toBe(false)
+  })
+
   test('a delete survives the next visit, cache included', async () => {
     vi.mocked(api.get).mockResolvedValue(payload(['a', 'b']))
     const mm = useMemoryMapStore()

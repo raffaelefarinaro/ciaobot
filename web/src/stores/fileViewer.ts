@@ -201,6 +201,12 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
         fetch(url, { credentials: 'same-origin' }),
         pathsPromise,
       ])
+      // Every write below belongs to `filePath`, not to whatever is open when
+      // the response lands. A slow fetch used to repaint the viewer with the
+      // file the user had already navigated away from — and since saveEdits
+      // posts `content` to `path`, the next save then wrote one file's bytes
+      // to another file's path. Anything that no longer matches is discarded.
+      if (path.value !== filePath) return true
       if (!resp.ok) {
         if (resp.status === 404) error.value = 'File not found.'
         else if (resp.status === 403) error.value = 'Forbidden — path is outside the workspace.'
@@ -209,11 +215,15 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
         else error.value = `Failed to load file (HTTP ${resp.status}).`
         return true
       }
-      content.value = await resp.text()
+      const text = await resp.text()
+      if (path.value !== filePath) return true
+      content.value = text
     } catch (e) {
-      error.value = e instanceof Error ? e.message : String(e)
+      if (path.value === filePath) error.value = e instanceof Error ? e.message : String(e)
     } finally {
-      loading.value = false
+      // A superseding open() owns `loading` now; clearing it here would hide
+      // its spinner while its own request is still in flight.
+      if (path.value === filePath) loading.value = false
     }
     return true
   }
@@ -222,25 +232,34 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
 
   async function loadSource(force = false): Promise<void> {
     if (!path.value || (sourceLoaded.value && !force)) return
+    // The file this request is for. Same race as open(), and the damaging one:
+    // the source fetch of an artifact the user has left used to land in
+    // `content` under the newly-opened file's `path`, so startEditing seeded
+    // the textarea from the wrong file and saveEdits POSTed those bytes to the
+    // open file's path — one file overwritten with another's content.
+    const requestedPath = path.value
     sourceLoading.value = true
     sourceError.value = ''
     try {
       const resp = await fetch(
-        `/api/workspace-file?path=${encodeURIComponent(path.value)}`,
+        `/api/workspace-file?path=${encodeURIComponent(requestedPath)}`,
         { credentials: 'same-origin' },
       )
+      if (path.value !== requestedPath) return
       if (!resp.ok) {
         sourceError.value = resp.status === 413
           ? 'Source is too large to show (>2 MB).'
           : `Failed to load source (HTTP ${resp.status}).`
         return
       }
-      content.value = await resp.text()
+      const text = await resp.text()
+      if (path.value !== requestedPath) return
+      content.value = text
       sourceLoaded.value = true
     } catch (e) {
-      sourceError.value = e instanceof Error ? e.message : String(e)
+      if (path.value === requestedPath) sourceError.value = e instanceof Error ? e.message : String(e)
     } finally {
-      sourceLoading.value = false
+      if (path.value === requestedPath) sourceLoading.value = false
     }
   }
 

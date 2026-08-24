@@ -190,6 +190,17 @@ function toggleRow(id: string) {
   selected.value = next
 }
 
+/** Selected rows that are actually on screen.
+ *
+ * Every batch action is scoped through this, never through the raw `selected`
+ * set: the set lives in the store and survives a workspace or kind change,
+ * while `visibleRows` filters client-side and `pruneSelected` only drops ids the
+ * server stopped returning. So "select all" in `work`, switch to `personal`,
+ * press dismiss, and the batch discarded work rows the user could no longer
+ * see. A batch may only touch what the list is showing.
+ */
+const selectedVisible = computed(() => filtered.value.filter(r => selected.value.has(r.id)))
+
 /** Selected rows an accept can actually be performed on.
  *
  * The same predicate as a row's own accept button, and it has to be: the batch
@@ -199,10 +210,9 @@ function toggleRow(id: string) {
  * on. A skill row is excluded for the older reason: it is a file, not a bullet,
  * and `accept_for('skill')` raises on the server.
  */
-const selectedAcceptable = computed(() => [...selected.value].filter(id => {
-  const row = store.rows.find(r => r.id === id)
-  return !!row && canAccept(row)
-}))
+const selectedAcceptable = computed(
+  () => selectedVisible.value.filter(canAccept).map(r => r.id),
+)
 
 function isRegionKind(row: ProposalRow): boolean {
   return row.kind === 'memory' || row.kind === 'profile' || row.kind === 'user'
@@ -543,31 +553,30 @@ function discussPrompt(row: ProposalRow): string {
 }
 
 function batchAccept() {
+  if (!selectedAcceptable.value.length) return
   void store.batch(selectedAcceptable.value, 'accept')
 }
 
 /** Workspaces every selected re-home row could move to. */
 const batchMoveTargets = computed(() => {
-  const rows = filtered.value.filter(r => selected.value.has(r.id) && isRehome(r))
+  const rows = selectedVisible.value.filter(isRehome)
   if (!rows.length) return [] as string[]
   const own = new Set(rows.map(r => r.workspace))
   return projectStore.workspaceOptions.map(w => w.name).filter(n => !own.has(n))
 })
 
-const selectedRehomeCount = computed(
-  () => filtered.value.filter(r => selected.value.has(r.id) && isRehome(r)).length,
-)
+const selectedRehomeCount = computed(() => selectedVisible.value.filter(isRehome).length)
 
 function batchMove(workspace: string) {
-  const ids = filtered.value
-    .filter(r => selected.value.has(r.id) && isRehome(r))
-    .map(r => r.id)
+  const ids = selectedVisible.value.filter(isRehome).map(r => r.id)
   if (!ids.length) return
   void store.batch(ids, 'accept', workspace)
 }
 
 function batchDismiss() {
-  void store.batch([...selected.value], 'dismiss')
+  const ids = selectedVisible.value.map(r => r.id)
+  if (!ids.length) return
+  void store.batch(ids, 'dismiss')
 }
 
 async function batchDiscuss() {
@@ -575,9 +584,7 @@ async function batchDiscuss() {
   // queued. Opening a chat per row would be unusable at the counts this queue
   // reaches, and the rows are usually related — which is why they were selected
   // together.
-  const rows = [...selected.value]
-    .map(id => store.rows.find(r => r.id === id))
-    .filter((r): r is ProposalRow => !!r)
+  const rows = selectedVisible.value
   if (!rows.length || chatBusy.value) return
   chatBusy.value = true
   try {
@@ -634,8 +641,10 @@ onMounted(() => { void store.fetch() })
     </p>
 
 
-    <div v-if="selected.size" class="pr-batch">
-      <span class="pr-batch-count">{{ selected.size }} selected</span>
+    <!-- Counted and gated on the VISIBLE selection, so the bar can never
+         advertise (or act on) rows the current workspace/kind filter hides. -->
+    <div v-if="selectedVisible.length" class="pr-batch">
+      <span class="pr-batch-count">{{ selectedVisible.length }} selected</span>
       <!-- Absent rather than disabled when nothing in the selection can be
            accepted, matching a row's own actions. Rendering "accept 0" invited
            the click that dropped a re-home bullet while moving nothing. -->
@@ -661,13 +670,13 @@ onMounted(() => { void store.fetch() })
         class="btn-small btn-chip"
         :disabled="store.busy"
         @click="batchDismiss"
-      >dismiss {{ selected.size }}</button>
+      >dismiss {{ selectedVisible.length }}</button>
       <button
         type="button"
         class="btn-small btn-chip"
         :disabled="chatBusy"
         @click="batchDiscuss"
-      >talk about {{ selected.size }}</button>
+      >talk about {{ selectedVisible.length }}</button>
       <button type="button" class="btn-small btn-chip" @click="selected = new Set()">clear</button>
     </div>
 

@@ -1442,15 +1442,44 @@ def plan_rehome(
     ]
 
     moved_by_ref: dict[str, str] = {}
-    for candidate in candidates:
-        if candidate.bucket != "mechanical" or not candidate.destination:
-            continue
+    mechanical = [
+        candidate
+        for candidate in candidates
+        if candidate.bucket == "mechanical" and candidate.destination
+    ]
+    # Which candidates want each destination, counted BEFORE any of them is
+    # accepted. The `exists()` test below cannot answer this: two candidates in
+    # one run can name the same destination — `personal/People/Mo.md` and
+    # `home/People/Mo.md`, both tagged `colleague`, both bound for
+    # `work/People/Mo.md` — and at plan time neither has moved, so the
+    # destination is free for both. Both then entered `moves`, the apply pass ran
+    # `source.replace(destination)` twice, and the second note OVERWROTE the
+    # first: two reported successes, an empty `failed`, one note permanently
+    # gone, and a receipt whose reverse map now restores the survivor's content
+    # over the loser's path. Which of two people keeps the filename is the same
+    # content decision the on-disk collision declines to make, so it is refused
+    # the same way rather than resolved by iteration order.
+    claimants: dict[str, list[str]] = {}
+    for candidate in mechanical:
+        claimants.setdefault(candidate.destination, []).append(candidate.path)
+
+    for candidate in mechanical:
         if (root / candidate.destination).exists():
             # Two people with the same filename in both trees. Merging notes is a
             # content decision, so it is reported rather than resolved.
             plan["conflicts"].append(
                 {**candidate.as_dict(), "error": "a note already exists at the destination"}
             )
+            continue
+        rivals = [path for path in claimants[candidate.destination] if path != candidate.path]
+        if rivals:
+            plan["conflicts"].append({
+                **candidate.as_dict(),
+                "error": (
+                    "another note in this run moves to the same destination: "
+                    + ", ".join(rivals)
+                ),
+            })
             continue
         plan["mechanical"].append(candidate.as_dict())
         plan["moves"].append({"from": candidate.path, "to": candidate.destination})

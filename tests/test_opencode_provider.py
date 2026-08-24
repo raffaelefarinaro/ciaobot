@@ -38,6 +38,7 @@ from ciao.providers.opencode import (
     mode_settings,
     opencode_collab_tree_counts,
     opencode_default_model,
+    resolve_opencode_binary,
     _session_handover_text,
     split_model,
     unresolved_placeholders,
@@ -2286,3 +2287,27 @@ async def test_resolve_model_passes_through_unqualified_ids(
 
     provider = _provider(tmp_path)
     assert await provider._resolve_model(_Client(), requested) == expected
+
+
+def test_extra_env_overlay_does_not_hide_an_exported_override(tmp_path, monkeypatch):
+    """`extra_env` is an overlay, not a replacement environment.
+
+    `_ensure_server` passes `AgentRequest.extra_env`, which never carries
+    `CIAO_OPENCODE_BIN`; reading only that overlay made the documented
+    override dead on every chat turn while the error still named it.
+    """
+    binary = tmp_path / "opencode"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CIAO_OPENCODE_BIN", str(binary))
+
+    # An unrelated per-request overlay must not mask the exported override.
+    assert resolve_opencode_binary({"OPENCODE_CONFIG": "/x"}) == str(binary.resolve())
+    # No overlay at all still reads the process environment.
+    assert resolve_opencode_binary(None) == str(binary.resolve())
+
+    # A per-request override still wins over the exported one.
+    other = tmp_path / "opencode-req"
+    other.write_text("#!/bin/sh\n")
+    assert resolve_opencode_binary(
+        {"CIAO_OPENCODE_BIN": str(other)}
+    ) == str(other.resolve())

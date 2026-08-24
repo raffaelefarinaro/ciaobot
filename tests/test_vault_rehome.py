@@ -337,6 +337,37 @@ def test_a_destination_collision_is_reported_not_merged(tmp_path: Path) -> None:
     assert (vault / "work/People/Mo.md").read_text(encoding="utf-8") == keep
 
 
+def test_two_candidates_racing_for_one_destination_are_both_refused(tmp_path: Path) -> None:
+    """`personal/People/Mo.md` and `home/People/Mo.md`, both tagged `colleague`,
+    both resolve to `work/People/Mo.md`. Nothing is there yet, so the on-disk
+    guard passes for *both*: letting them through meant the apply pass ran
+    `replace()` twice and the second note ate the first, with two reported
+    successes, an empty `failed`, and a receipt that would then unrehome the
+    survivor's content onto the loser's path."""
+    vault = _vault(tmp_path)
+    _note(
+        vault,
+        "home/People/Mo.md",
+        "---\ntype: person\ntags: [person, colleague]\n---\n# Mo\n\nThe other Mo.\n",
+    )
+    before = {
+        path: (vault / path).read_text(encoding="utf-8")
+        for path in ("personal/People/Mo.md", "home/People/Mo.md")
+    }
+
+    summary = rehome_vault_people(vault, apply=True)
+
+    assert _paths(summary["conflicts"]) == ["home/People/Mo.md", "personal/People/Mo.md"]
+    for conflict in summary["conflicts"]:
+        assert "same destination" in conflict["error"]
+    # Refused at plan time, so it is a conflict and not an apply failure.
+    assert summary["moves"] == []
+    assert summary["failed"] == []
+    assert not (vault / "work/People/Mo.md").exists()
+    for path, text in before.items():
+        assert (vault / path).read_text(encoding="utf-8") == text
+
+
 # ---- the review queue ------------------------------------------------------
 
 

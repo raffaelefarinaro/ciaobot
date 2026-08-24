@@ -3842,7 +3842,11 @@ function handleKeydown(e: KeyboardEvent) {
       // Claim the key: Esc now closes the chat even while typing, so without
       // this the same press would dismiss the picker AND close the chat.
       e.stopPropagation()
-      inputText.value = ''
+      // Dismiss the picker only — never the draft. The trigger is caret-local
+      // now, so the picker opens mid-message ("…and then run /rev"): clearing
+      // inputText here wiped the whole message, and the draft-sync watcher
+      // persisted the empty string, so it could not be recovered.
+      dismissSlashCommandPicker()
       return
     }
     if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey)) {

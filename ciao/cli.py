@@ -1315,10 +1315,21 @@ def _vault_search_command(args: argparse.Namespace) -> int:
         except Exception as exc:  # noqa: BLE001 - search can still use existing index.
             print(f"Incremental indexing error: {exc}", file=sys.stderr)
 
+        # Scope the query to this vault's key prefix. The database is shared and
+        # the migration rebuild deliberately fills it with every re-rooted
+        # workspace's rows, while the prune now preserves sibling roots — so an
+        # unscoped query returned another workspace's note titles and snippets to
+        # whoever ran `ciao vault-search` here. Same filter the control plane's
+        # vault_search applies.
         results = (
             fts_search.search_logs(conn, args.query, limit=args.limit)
             if args.logs
-            else fts_search.search_vault(conn, args.query, limit=args.limit)
+            else fts_search.search_vault(
+                conn,
+                args.query,
+                limit=args.limit,
+                path_prefix=fts_search.vault_key_prefix(vault_root, key_base),
+            )
         )
     finally:
         conn.close()
@@ -1329,7 +1340,10 @@ def _vault_search_command(args: argparse.Namespace) -> int:
 
     print(f"### Search Results for: {args.query}\n")
     for result in results:
-        abs_path = vault_root.parent / result["path"]
+        # Keys are relative to `key_base`, not to the vault's parent: on a
+        # re-rooted install those differ by the workspace segment, so joining
+        # against the parent printed a `file://` link that does not exist.
+        abs_path = key_base / result["path"]
         link = f"file://{abs_path.as_posix()}"
         print(f"- **[{result['title']}]({link})** (rank: {result['rank']})")
         if result["snippet"]:

@@ -339,6 +339,16 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   }
   const graphCache = new Map<string, GraphSnapshot>()
   const loadedWorkspace = ref('')
+  /**
+   * Ticket for the newest in-flight graph request; older responses are dropped.
+   *
+   * Every load races the workspace switcher (and the background revalidation
+   * ensureGraph fires). A slow /api/vault/graph for the workspace the user has
+   * just left used to publish anyway, overwriting `nodes`/`loadedWorkspace`
+   * with the abandoned scope's graph — the map then showed the wrong vault
+   * until something else forced a reload.
+   */
+  let graphRequestSeq = 0
   /** Whether the current positions are settled, i.e. the canvas can skip the
    * warmup and go straight to the short settle. */
   const graphIsWarm = ref(false)
@@ -382,12 +392,17 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
 
   async function loadGraph(workspace: string, opts?: { background?: boolean }) {
     const background = opts?.background === true
+    const seq = ++graphRequestSeq
     if (!background) loading.value = true
     loadError.value = ''
     try {
       const data = await api.get<{ nodes: any[]; edges: MemoryGraphEdge[] }>(
         `/api/vault/graph?workspace=${encodeURIComponent(workspace)}`,
       )
+      // Superseded by a newer load (a workspace switch, or a later refresh):
+      // this response describes a scope nobody is looking at, so it must not
+      // touch the graph, the cache, or the spinner.
+      if (seq !== graphRequestSeq) return
       const incoming: MemoryGraphNode[] = (data.nodes || []).map(n => ({
         ...n,
         tags: n.tags || [],
@@ -444,12 +459,15 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       pathEnd.value = null
     } catch (err) {
       // A silent background refresh must not replace the graph on screen with
-      // an error card; the data we are showing is still the data we had.
-      if (!background) {
+      // an error card; the data we are showing is still the data we had. Nor
+      // may a superseded load report a failure for a scope nobody is on.
+      if (!background && seq === graphRequestSeq) {
         loadError.value = err instanceof Error ? err.message : 'Failed to load the vault graph.'
       }
     } finally {
-      if (!background) loading.value = false
+      // The newest load owns the spinner; clearing it from an older one would
+      // drop the skeleton while its request is still in flight.
+      if (!background && seq === graphRequestSeq) loading.value = false
     }
   }
 

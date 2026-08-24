@@ -259,8 +259,18 @@ def opencode_default_model(config: object) -> str:
 
 
 def resolve_opencode_binary(env: Mapping[str, str] | None = None) -> str | None:
-    """Absolute path to the opencode CLI, or None when it is not installed."""
-    source = env if env is not None else os.environ
+    """Absolute path to the opencode CLI, or None when it is not installed.
+
+    ``env`` is an *overlay* of per-request overrides, not a whole environment:
+    ``_ensure_server`` passes ``AgentRequest.extra_env``, which is built from
+    workspace settings and never carries ``CIAO_OPENCODE_BIN``. Reading the
+    overlay *instead of* the process environment therefore silently ignored an
+    exported ``CIAO_OPENCODE_BIN`` on every chat turn — even though the
+    not-installed error tells the operator to set exactly that variable. Layer
+    the overlay on top of ``os.environ`` so the override works from either
+    side, with the per-request value still winning.
+    """
+    source: Mapping[str, str] = {**os.environ, **env} if env else os.environ
     explicit = str(source.get("CIAO_OPENCODE_BIN", "")).strip()
     if explicit:
         path = Path(explicit).expanduser()
@@ -1452,16 +1462,56 @@ class OpencodeProvider(BaseSDKProvider):
         """Accumulate one emitted fragment of the visible reply."""
         self._answer_parts.setdefault(part_id, []).append(text)
 
+    def _turn_assistant_parts(
+        self, messages: list[Any]
+    ) -> list[Mapping[str, Any]]:
+        """Settled parts of *this* turn's assistant messages, in order.
+
+        ``GET /session/{id}/message`` returns the session's whole history, not
+        the current turn, and ``_reset_turn_state`` has just cleared
+        ``_emitted`` — so replaying every assistant message re-emitted turns
+        1..10 as turn 11's text when the SSE dropped on turn 11, and
+        ``record_turn`` then persisted that mash-up as the turn's response.
+
+        The turn begins at its own user message — the same anchor
+        ``_part_updated`` filters on — so everything after it is this turn's
+        output. When that id was never seen live (the stream died before the
+        user ``message.updated`` arrived) the *last* user message in the list
+        is ours, because our prompt is what created it.
+        """
+        anchor = -1
+        for index, message in enumerate(messages):
+            if not isinstance(message, Mapping):
+                continue
+            info = message.get("info")
+            if not isinstance(info, Mapping) or info.get("role") != "user":
+                continue
+            anchor = index
+            if self._user_message_id and str(info.get("id") or "") == self._user_message_id:
+                break
+
+        parts: list[Mapping[str, Any]] = []
+        for message in messages[anchor + 1:]:
+            if not isinstance(message, Mapping):
+                continue
+            info = message.get("info")
+            role = str(info.get("role") or "") if isinstance(info, Mapping) else ""
+            message_parts = message.get("parts")
+            if role != "assistant" or not isinstance(message_parts, list):
+                continue
+            parts.extend(part for part in message_parts if isinstance(part, Mapping))
+        return parts
+
     async def _reconcile_interrupted_turn(
         self, client: httpx.AsyncClient, session_id: str
     ) -> AsyncGenerator[StreamEvent, None]:
         """Recover a turn whose SSE died after the prompt was accepted.
 
         Polls ``GET /session/{id}/message`` until the message list stops
-        changing (or the recovery window expires), then replays every settled
-        assistant part through ``message.part.updated``. The accumulator's
-        per-part emitted counts make the replay emit only what the live
-        stream actually missed, so this backfills gaps and repairs a
+        changing (or the recovery window expires), then replays this turn's
+        settled assistant parts through ``message.part.updated``. The
+        accumulator's per-part emitted counts make the replay emit only what
+        the live stream actually missed, so this backfills gaps and repairs a
         truncated tail without duplicating anything already shown.
         """
         deadline = time.monotonic() + _OPENCODE_RECOVERY_WINDOW_S
@@ -1483,21 +1533,12 @@ class OpencodeProvider(BaseSDKProvider):
                 current = _opencode_messages_signature(messages)
                 quiesced = bool(current) and current == signature
                 signature = current or signature
-                if messages:
-                    for message in messages:
-                        info = message.get("info") if isinstance(message, Mapping) else None
-                        role = str(info.get("role") or "") if isinstance(info, Mapping) else ""
-                        parts = message.get("parts") if isinstance(message, Mapping) else None
-                        if role != "assistant" or not isinstance(parts, list):
-                            continue
-                        for part in parts:
-                            if not isinstance(part, Mapping):
-                                continue
-                            for converted in self._event_to_stream({
-                                "type": "message.part.updated",
-                                "properties": {"part": dict(part)},
-                            }):
-                                yield converted
+                for part in self._turn_assistant_parts(messages):
+                    for converted in self._event_to_stream({
+                        "type": "message.part.updated",
+                        "properties": {"part": dict(part)},
+                    }):
+                        yield converted
                 if quiesced:
                     self._turn_recovered_via_poll = True
                     return
@@ -1905,12 +1946,14 @@ class OpencodeProvider(BaseSDKProvider):
                     if response.status_code >= 400:
                         detail = _sanitize_error(response.text)
                         prompt_rejected = True
-                        yield ResultEvent(
-                            type="result",
-                            result=f"opencode rejected the prompt: {detail}",
-                            session_id=session_id,
-                            is_error=True,
-                        )
+                        # Record the failure and let the single closing
+                        # ResultEvent below carry it. Yielding a terminal
+                        # result here emitted *two*: this one, then the
+                        # unconditional one at the end of the turn with an
+                        # empty `result` and `is_error=False`, which the PWA
+                        # applied last — so a rejected prompt rendered as a
+                        # successful, blank turn instead of the error.
+                        error = error or f"opencode rejected the prompt: {detail}"
                         return
                     # Once accepted, the replacement session owns the handover
                     # context. Retain it only across a rejected prompt so a

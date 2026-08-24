@@ -55,16 +55,41 @@ OKF_VERSION = "0.2"
 BUNDLE_INDEX_NAME = "index.md"
 
 
-def _bundle_entries(vault_root: Path, workspace: str) -> list[Entry]:
+def _path_scope(vault_root: Path, workspace: str) -> str:
+    """The path segment to filter and strip, empty when there is nothing to strip.
+
+    A workspace used to be a subtree of one shared vault, so scoping was purely a
+    path filter on `Entry.path`. The per-workspace re-rooting broke that: a
+    workspace-scoped invocation is handed `<install>/<name>/memory-vault`, whose
+    scan yields `memory-vault/People/A.md` with no `<name>/` segment at all. The
+    filter then dropped every entry and `ciao vault-export --workspace-name work`
+    reported "no notes found for workspace 'work'" on every migrated install,
+    writing no bundle.
+
+    So: filter only when the workspace really is a subtree here. When instead the
+    vault's own parent directory is the workspace, the vault IS the workspace and
+    every note in it belongs in the bundle. An unknown workspace matches neither
+    and still exports nothing, which is the correct refusal.
+    """
+    if not workspace:
+        return ""
+    if (Path(vault_root) / workspace).is_dir():
+        return workspace  # legacy shared vault: the workspace is a subtree
+    if Path(vault_root).parent.name == workspace:
+        return ""  # re-rooted: this vault already holds only that workspace
+    return workspace
+
+
+def _bundle_entries(vault_root: Path, scope: str) -> list[Entry]:
     """Notes belonging in the bundle, in stable order.
 
-    Scoping to one workspace is a path filter rather than a re-scan: `Entry.path`
-    already carries the vault directory name followed by the workspace segment.
+    ``scope`` is the result of :func:`_path_scope`, not the raw workspace name:
+    on a re-rooted install there is no segment to filter on.
     """
     entries = scan_vault(vault_root)
-    if not workspace:
+    if not scope:
         return sorted(entries, key=lambda item: str(item.path))
-    prefix = f"{workspace}/"
+    prefix = f"{scope}/"
     kept = [
         entry
         for entry in entries
@@ -76,10 +101,15 @@ def _bundle_entries(vault_root: Path, workspace: str) -> list[Entry]:
 
 
 def _relative_within_bundle(entry: Entry, workspace: str) -> str:
-    """Path of a note inside the bundle, with the vault/workspace prefix removed."""
+    """Path of a note inside the bundle, with the vault/workspace prefix removed.
+
+    The workspace segment is stripped only when it is actually there: a re-rooted
+    vault's entries never carry one, and an unconditional `relative_to` raised
+    ValueError out of `format_bundle_index`.
+    """
     relative = Path(str(entry.path))
     relative = relative.relative_to(relative.parts[0])  # drop the vault dir name
-    if workspace:
+    if workspace and relative.parts[:1] == (workspace,):
         relative = relative.relative_to(workspace)
     return relative.as_posix()
 
@@ -163,7 +193,10 @@ def export_bundle(
         summary["example"] = unmigrated
         return summary
 
-    entries = _bundle_entries(root, workspace)
+    # `workspace` stays the bundle's label; `scope` is the path segment that
+    # exists in this layout, which on a re-rooted install is none.
+    scope = _path_scope(root, workspace)
+    entries = _bundle_entries(root, scope)
     summary["concepts"] = len(entries)
     if not entries:
         summary["skipped"] = (
@@ -171,10 +204,12 @@ def export_bundle(
         )
         return summary
 
-    if workspace:
+    if scope:
         # A note in this workspace whose edge leaves it cannot resolve inside a
-        # subtree bundle. Reported, not repaired.
-        prefix = f"{workspace}/"
+        # subtree bundle. Reported, not repaired. Only a subtree bundle can have
+        # them: a re-rooted vault is exported whole, so every edge it resolved
+        # stays inside the bundle root.
+        prefix = f"{scope}/"
         for entry in entries:
             for ref in entry.related:
                 inner = Path(str(ref))
@@ -182,7 +217,9 @@ def export_bundle(
                 if not inner.as_posix().startswith(prefix):
                     summary["cross_workspace_links"] += 1
 
-    bundle_root = root / workspace if workspace else root
+    bundle_root = root / scope if scope else root
+    # The label stays the workspace name even when there is no segment to strip:
+    # `_relative_within_bundle` strips it only where the entries carry it.
     index_text = format_bundle_index(entries, workspace)
 
     dest = Path(dest)

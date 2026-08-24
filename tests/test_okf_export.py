@@ -137,3 +137,31 @@ def test_index_groups_by_type_with_relative_links(tmp_path: Path) -> None:
     assert "## person (2)" in text
     assert "## product (1)" in text
     assert "- [Mo](./People/Mo.md)" in text
+
+
+def test_a_re_rooted_workspace_vault_exports_its_whole_tree(tmp_path: Path) -> None:
+    """Per-workspace re-rooting hands the exporter `<install>/work/memory-vault`,
+    so entries read `memory-vault/People/A.md` with no `work/` segment. Filtering
+    on one dropped every note and `--workspace-name work` reported "no notes
+    found" instead of writing the bundle it advertises."""
+    vault = tmp_path / "install" / "work" / "memory-vault"
+    _note(vault, "People/Aymen.md",
+          "---\ntype: person\ntitle: Aymen\n---\n# Aymen\n\nSee [Mo](./Mo.md).\n")
+    _note(vault, "People/Mo.md", "---\ntype: person\ntitle: Mo\n---\n# Mo\n")
+
+    summary = export_bundle(vault, tmp_path / "work.tar.gz", workspace="work")
+
+    assert "skipped" not in summary
+    assert summary["written"] is True
+    assert summary["concepts"] == 2
+    # Nothing leaves the bundle root: the whole vault IS the workspace.
+    assert summary["cross_workspace_links"] == 0
+    members = bundle_members(tmp_path / "work.tar.gz")
+    assert members == ["People/Aymen.md", "People/Mo.md", "index.md"]
+
+    with tarfile.open(tmp_path / "work.tar.gz", "r:gz") as archive:
+        index = archive.extractfile("index.md").read().decode("utf-8")
+    # The bundle is still labelled with the workspace even though no path
+    # segment named it.
+    assert "title: work" in index
+    assert "](./People/Aymen.md)" in index

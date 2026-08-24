@@ -2678,15 +2678,36 @@ export const useProjectStore = defineStore('projects', () => {
         } else {
           // Index-addressed merge: refresh rows we already hold, append new
           // tail rows, keep older pages loaded via loadOlderMessages.
+          //
+          // Rows are looked up by their ABSOLUTE index, never by `abs -
+          // firstIndex`: `local` is not a contiguous run of server-indexed
+          // rows. An optimistic user bubble, flushed streaming rows and the
+          // failed-send notice pushed by recoverUnackedSend all sit in it with
+          // `i === undefined`, and every one of them shifted the position
+          // arithmetic by one - so the window's rows landed on the wrong slots,
+          // rendering an assistant reply twice and silently overwriting the
+          // failed-send warning on the next refresh.
+          const posByIndex = new Map<number, number>()
+          local.forEach((row, pos) => {
+            if (typeof row.i === 'number') posByIndex.set(row.i, pos)
+          })
           const merged = local.slice()
           for (const item of windowRows) {
             const abs = item.i
             if (typeof abs !== 'number') continue
-            const pos = abs - firstIndex
-            if (pos >= 0 && pos < merged.length) merged[pos] = item
-            else if (pos === merged.length) merged.push(item)
-            // pos > merged.length would be a gap (cannot happen with a
-            // contiguous suffix window); skip defensively.
+            const pos = posByIndex.get(abs)
+            if (pos !== undefined) {
+              merged[pos] = item
+            } else if (abs >= cachedEnd) {
+              // Beyond the cached extent: genuinely new tail rows, appended in
+              // the window's own ascending order (after any un-indexed local
+              // rows, which are older than anything arriving now).
+              posByIndex.set(abs, merged.length)
+              merged.push(item)
+            }
+            // An index below cachedEnd that we don't hold is a hole in the
+            // cache (loadOlderMessages fills those); skip it rather than
+            // appending it out of order at the tail.
           }
           messages.value[chatId] = merged
         }
@@ -2835,28 +2856,63 @@ export const useProjectStore = defineStore('projects', () => {
     const meta = historyMeta.value[chatId]
     if (!meta?.hasMore || meta.nextOffset == null || loadingOlder.value[chatId]) return
     loadingOlder.value[chatId] = true
+    type OlderPage = { items: Parameters<typeof toChatMessage>[0][]; total: number; limit: number; hasMore: boolean; nextOffset: number | null }
     try {
-      const env = await api.get<{ items: Parameters<typeof toChatMessage>[0][]; total: number; limit: number; hasMore: boolean; nextOffset: number | null }>(
-        `/api/chats/${chatId}/messages?offset=${meta.nextOffset}&limit=${meta.limit}`
+      const local = messages.value[chatId] || []
+      const firstIndex = local.length ? local[0].i : undefined
+      const fetchPage = (offset: number) => api.get<OlderPage>(
+        `/api/chats/${chatId}/messages?offset=${offset}&limit=${meta.limit}`
       )
+      // `offset` counts BACKWARD from the server's CURRENT total, so
+      // `meta.nextOffset` — computed when the tail window was loaded — aims at
+      // the wrong boundary as soon as the session grows in between. A 75-row
+      // history loaded as indices 25-74 asks for offset 50; once two more rows
+      // exist that same offset answers with 0-26, the continuity check below
+      // rejects the overlap, and the rejected page's `hasMore: false` used to
+      // be persisted — freezing pagination so the oldest messages became
+      // permanently unreachable. Address the page by the index we actually
+      // need (`total - firstIndex`) and, when the response reveals a newer
+      // total, retry once against that index-stable boundary.
+      let requestedTotal = meta.total
+      let offset = typeof firstIndex === 'number'
+        ? Math.max(0, meta.total - firstIndex)
+        : meta.nextOffset
+      let env = await fetchPage(offset)
       if (Array.isArray(env)) return
+      if (typeof firstIndex === 'number' && env.total !== requestedTotal) {
+        const corrected = Math.max(0, env.total - firstIndex)
+        if (corrected !== offset) {
+          requestedTotal = env.total
+          offset = corrected
+          env = await fetchPage(offset)
+          if (Array.isArray(env)) return
+        }
+      }
       const older = normalizeMessages(env.items.map(toChatMessage))
-      historyMeta.value[chatId] = {
+      const pageMeta = {
         total: env.total,
         hasMore: Boolean(env.hasMore),
         nextOffset: env.nextOffset ?? null,
         limit: env.limit || meta.limit,
       }
-      const local = messages.value[chatId] || []
-      const firstIndex = local.length ? local[0].i : undefined
-      if (!older.length || typeof firstIndex !== 'number') return
+      if (!older.length || typeof firstIndex !== 'number') {
+        historyMeta.value[chatId] = pageMeta
+        return
+      }
       // The page must continue directly above the loaded window; anything
       // else means the session changed underneath us and the next full
       // refresh will resync — don't splice misaligned rows in.
       if (older[0].i === firstIndex - older.length) {
+        historyMeta.value[chatId] = pageMeta
         messages.value[chatId] = [...older, ...local]
         persistMessages()
+        return
       }
+      // Still misaligned after the retry: take the fresher total, but keep the
+      // previous `hasMore`/`nextOffset` so scrolling can try again. Adopting a
+      // rejected page's `hasMore: false` is what made the remaining history
+      // unreachable for the rest of the session.
+      historyMeta.value[chatId] = { ...meta, total: env.total }
     } catch {
       // Transient failure: leave state so the user can retry by scrolling.
     } finally {

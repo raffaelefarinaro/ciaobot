@@ -23,6 +23,8 @@ export const useProposalsStore = defineStore('proposals', () => {
   const error = ref('')
   const loaded = ref(false)
   let fetchPromise: Promise<void> | null = null
+  /** Ticket for the newest in-flight list request; older responses are dropped. */
+  let fetchSeq = 0
 
   function isBusy(id: string): boolean {
     return busyIds.value.has(id)
@@ -104,20 +106,33 @@ export const useProposalsStore = defineStore('proposals', () => {
     }
   }
 
-  async function fetch(): Promise<void> {
-    if (fetchPromise) return fetchPromise
+  /**
+   * Load the queue. `force` starts a fresh request even when one is in flight.
+   *
+   * Joining an in-flight request is right for concurrent *readers* (the panel
+   * and the sidebar mounting together), but wrong for the refresh that follows
+   * a mutation: an accept whose refresh joined a GET issued before its own POST
+   * was handed the pre-mutation snapshot, so the accepted row stayed in the
+   * queue as if nothing had happened. A forced request also takes a ticket, so
+   * the older, pre-mutation response cannot overwrite its result either.
+   */
+  async function fetch(opts?: { force?: boolean }): Promise<void> {
+    if (fetchPromise && !opts?.force) return fetchPromise
+    const seq = ++fetchSeq
     const request = (async () => {
       loading.value = true
       error.value = ''
       try {
         const data = await api.get<ProposalsResponse>('/api/proposals')
+        if (seq !== fetchSeq) return
         rows.value = data.rows ?? []
         loaded.value = true
         pruneSelected()
       } catch (e) {
+        if (seq !== fetchSeq) return
         error.value = e instanceof Error ? e.message : 'Could not load proposals'
       } finally {
-        loading.value = false
+        if (seq === fetchSeq) loading.value = false
       }
     })()
     fetchPromise = request
@@ -151,7 +166,7 @@ export const useProposalsStore = defineStore('proposals', () => {
     try {
       const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
       await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`)
-      await fetch()
+      await fetch({ force: true })
       return { ok: true }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Action failed'
@@ -171,7 +186,7 @@ export const useProposalsStore = defineStore('proposals', () => {
       await api.post<ProposalBatchResponse>('/api/proposals/batch', {
         action, ids, ...(workspace ? { workspace } : {}),
       })
-      await fetch()
+      await fetch({ force: true })
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Batch action failed'
     } finally {
@@ -187,7 +202,7 @@ export const useProposalsStore = defineStore('proposals', () => {
       await api.post<ProposalDismissOlderResponse>(
         `/api/proposals/dismiss-older-than?date=${encodeURIComponent(date)}`,
       )
-      await fetch()
+      await fetch({ force: true })
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Dismiss failed'
     } finally {

@@ -8,8 +8,9 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { api } from '../lib/api'
 import { useProposalsStore } from './proposals'
-import type { ProposalRow } from '../lib/types'
+import type { ProposalRow, ProposalsResponse } from '../lib/types'
 
 vi.mock('../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
@@ -96,5 +97,74 @@ describe('proposals store filters', () => {
     expect(store.kindFilter).toBe('all')
     expect(store.search).toBe('')
     expect(store.visibleRows('personal')).toHaveLength(3)
+  })
+})
+
+describe('post-mutation refresh', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset()
+  })
+
+  it('never reads the accepted row back out of a pre-mutation snapshot', async () => {
+    // A plain fetch() is still in flight when the accept lands. Its refresh
+    // used to be handed that same request back by the in-flight de-dup, so it
+    // observed the list as it was *before* the POST: the accepted row was
+    // written straight back into `rows` and sat in the queue as if nothing had
+    // happened, until something else reloaded the panel.
+    let releaseFirst!: (value: ProposalsResponse) => void
+    const preMutation = new Promise<ProposalsResponse>(r => { releaseFirst = r })
+    vi.mocked(api.get)
+      .mockReturnValueOnce(preMutation as never)
+      .mockResolvedValueOnce({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+
+    const store = useProposalsStore()
+    const reader = store.fetch()
+    const accepting = store.act('p1', 'accept')
+
+    releaseFirst({ rows: [row({ id: 'p1' })] })
+    await reader
+    await accepting
+
+    expect(store.rows).toEqual([])
+    expect(api.get).toHaveBeenCalledTimes(2)
+    expect(store.loading).toBe(false)
+  })
+
+  it('drops a pre-mutation response that lands after the refresh', async () => {
+    // The other half of the same race: bypassing the de-dup is not enough if
+    // the older, pre-mutation GET is still allowed to write `rows` when it
+    // finally arrives — the accepted row would reappear a beat later.
+    let releaseFirst!: (value: ProposalsResponse) => void
+    const preMutation = new Promise<ProposalsResponse>(r => { releaseFirst = r })
+    vi.mocked(api.get)
+      .mockReturnValueOnce(preMutation as never)
+      .mockResolvedValueOnce({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+
+    const store = useProposalsStore()
+    const reader = store.fetch()
+    await store.act('p1', 'accept')
+    expect(store.rows).toEqual([])
+
+    releaseFirst({ rows: [row({ id: 'p1' })] })
+    await reader
+
+    expect(store.rows).toEqual([])
+    expect(store.loading).toBe(false)
+  })
+
+  it('still de-dupes concurrent readers', async () => {
+    // The de-dup is right for two panels mounting at once; only the refresh
+    // that follows a mutation has to bypass it.
+    vi.mocked(api.get).mockResolvedValue({ rows: [row({ id: 'p1' })] } as never)
+
+    const store = useProposalsStore()
+    await Promise.all([store.fetch(), store.fetch()])
+
+    expect(api.get).toHaveBeenCalledTimes(1)
+    expect(store.rows.map(r => r.id)).toEqual(['p1'])
   })
 })

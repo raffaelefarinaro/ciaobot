@@ -210,3 +210,109 @@ async def test_failure_before_prompt_still_hard_fails(tmp_path, monkeypatch) -> 
     result = events[-1]
     assert result.is_error
     assert "opencode connection failed" in result.result
+
+
+@pytest.mark.asyncio
+async def test_poll_reconciliation_ignores_earlier_turns(tmp_path, monkeypatch) -> None:
+    """A mid-turn drop must not replay the whole session as this turn's text.
+
+    ``GET /session/{id}/message`` returns every message ever sent, and
+    ``_reset_turn_state`` clears the per-part emitted counts at the start of
+    each turn — so replaying all assistant messages re-emitted turns 1..N as
+    the current turn's answer, which ``record_turn`` then persisted.
+    """
+    provider = _provider(tmp_path)
+    messages = [
+        {"info": {"id": "u1", "role": "user"}, "parts": [
+            {"type": "text", "id": "up1", "text": "first question"},
+        ]},
+        {"info": {"id": "a1", "role": "assistant"}, "parts": [
+            {"type": "text", "id": "old1", "text": "ANSWER FROM TURN ONE"},
+        ]},
+        {"info": {"id": "u2", "role": "user"}, "parts": [
+            {"type": "text", "id": "up2", "text": "second question"},
+        ]},
+        {"info": {"id": "a2", "role": "assistant"}, "parts": [
+            {"type": "text", "id": "p1", "text": "Hello recovered world"},
+        ]},
+    ]
+    client = _RecoveryClient(
+        [
+            _FlakyStream([_DELTA], fail_after=1),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    texts = "".join(e.text for e in events if e.type == "text")
+    assert "ANSWER FROM TURN ONE" not in texts
+    assert texts == "Hello recovered world"
+    result = events[-1]
+    assert result.type == "result"
+    assert result.result == "Hello recovered world"
+
+
+@pytest.mark.asyncio
+async def test_poll_reconciliation_anchors_on_the_live_user_message(
+    tmp_path, monkeypatch
+) -> None:
+    """The anchor is the turn's own user message, not just the newest one.
+
+    If another client prompted the same session after us, the trailing user
+    message is not ours; the id learned from ``message.updated`` is.
+    """
+    provider = _provider(tmp_path)
+    messages = [
+        {"info": {"id": "u1", "role": "user"}, "parts": []},
+        {"info": {"id": "a1", "role": "assistant"}, "parts": [
+            {"type": "text", "id": "old1", "text": "ANSWER FROM TURN ONE"},
+        ]},
+        {"info": {"id": "u2", "role": "user"}, "parts": []},
+        {"info": {"id": "a2", "role": "assistant"}, "parts": [
+            {"type": "text", "id": "new1", "text": "ours"},
+        ]},
+        {"info": {"id": "u3", "role": "user"}, "parts": []},
+    ]
+    provider._user_message_id = "u2"
+
+    assert [part["id"] for part in provider._turn_assistant_parts(messages)] == ["new1"]
+
+
+@pytest.mark.asyncio
+async def test_rejected_prompt_yields_exactly_one_terminal_error(
+    tmp_path, monkeypatch
+) -> None:
+    """A rejected prompt must not be followed by an empty success result.
+
+    The rejection used to yield its own ResultEvent while ``run_streaming``
+    still yielded its unconditional closing one — an empty result with
+    ``is_error=False`` that landed last and overwrote the error in the PWA.
+    """
+    provider = _provider(tmp_path)
+
+    class _RejectingClient(_RecoveryClient):
+        async def post(self, _path: str, json=None):
+            class _Rejected:
+                status_code = 400
+                text = "model not configured"
+
+            return _Rejected()
+
+    client = _RejectingClient([_FakeEventStream([_IDLE])], messages=[])
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    results = [event for event in events if event.type == "result"]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert "opencode rejected the prompt" in results[0].result
+    assert "model not configured" in results[0].result

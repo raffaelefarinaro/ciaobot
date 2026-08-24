@@ -518,4 +518,105 @@ describe('workspace scoping', () => {
     expect(batch).not.toHaveBeenCalled()
     wrapper.unmount()
   })
+  it('a batch only acts on rows the current filters are showing', async () => {
+    // The bug: `selected` lives in the store and survives a filter change,
+    // while the list filters client-side, so selecting everything and then
+    // narrowing the kind chip left the batch bar acting on rows that were no
+    // longer on screen — dismiss discarded proposals the user could not see.
+    apiGet.mockResolvedValue({
+      rows: [
+        row({ id: 'm', kind: 'memory' }),
+        row({ id: 's', kind: 'skill', text: 'proposal-2026-08-20', path: 'personal/Workspace/Skill-Proposals/proposal-2026-08-20.md', line: -1 }),
+      ],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper.find('.pr-group-select input').setValue(true)
+    await nextTick()
+    expect(wrapper.find('.pr-batch').text()).toContain('2 selected')
+
+    // Narrow to one kind: the skill row is selected but no longer visible.
+    useProposalsStore().kindFilter = 'memory'
+    await nextTick()
+
+    const batch = wrapper.find('.pr-batch')
+    expect(batch.text()).toContain('1 selected')
+    await batch.findAll('button').find(b => b.text() === 'dismiss 1')!.trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/batch', {
+      action: 'dismiss',
+      ids: ['m'],
+    })
+    wrapper.unmount()
+  })
+
+  it('a workspace switch leaves the other workspace out of the batch', async () => {
+    // Select-all in `work`, switch the sidebar to `personal`, press dismiss —
+    // the work rows must not be discarded, and the bar must not count them.
+    apiGet.mockResolvedValue({
+      rows: [
+        row({ id: 'w1', workspace: 'work' }),
+        row({ id: 'w2', workspace: 'work' }),
+        row({ id: 'p1', workspace: 'personal' }),
+      ],
+    })
+    const projects = useProjectStore()
+    projects.activeWorkspace = 'work'
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper.find('.pr-group-select input').setValue(true)
+    await nextTick()
+    expect(wrapper.find('.pr-batch').text()).toContain('2 selected')
+
+    projects.activeWorkspace = 'personal'
+    await nextTick()
+    // Nothing visible is selected, so there is no batch to press at all.
+    expect(wrapper.find('.pr-batch').exists()).toBe(false)
+
+    // Selecting the row that IS on screen dismisses only that one.
+    await wrapper.find('.pr-row-check').setValue(true)
+    await nextTick()
+    await wrapper.find('.pr-batch').findAll('button')
+      .find(b => b.text() === 'dismiss 1')!.trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/batch', {
+      action: 'dismiss',
+      ids: ['p1'],
+    })
+    wrapper.unmount()
+  })
+
+  it('a batch accept skips selected rows the filters hide', async () => {
+    apiGet.mockResolvedValue({
+      rows: [
+        row({ id: 'w1', workspace: 'work' }),
+        row({ id: 'p1', workspace: 'personal' }),
+      ],
+    })
+    const projects = useProjectStore()
+    projects.activeWorkspace = 'work'
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper.find('.pr-group-select input').setValue(true)
+    await nextTick()
+    projects.activeWorkspace = 'personal'
+    await nextTick()
+    await wrapper.find('.pr-row-check').setValue(true)
+    await nextTick()
+
+    expect(wrapper.find('.pr-batch .btn-primary').text()).toBe('accept 1')
+    await wrapper.find('.pr-batch .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/batch', {
+      action: 'accept',
+      ids: ['p1'],
+    })
+    wrapper.unmount()
+  })
 })

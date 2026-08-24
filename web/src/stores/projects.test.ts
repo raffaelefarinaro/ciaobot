@@ -3604,4 +3604,202 @@ describe('envelope history window', () => {
       'one', 'two', 'three',
     ])
   })
+
+  test('merges by absolute index across un-indexed local rows', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unindexed-local-row'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-24T10:00:00Z',
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: items.length,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([row(0, 'one'), row(1, 'two')]))
+    await store.loadMessages(chatId)
+
+    // recoverUnackedSend pushes this notice straight into the cache, so it
+    // carries NO server index — same shape as an optimistic user bubble or a
+    // flushed streaming row.
+    const notice = "Error: a message didn't reach the engine and its automatic retry failed. Please send it again."
+    store.messages[chatId] = [
+      ...store.messages[chatId],
+      { role: 'system', content: notice, timestamp: '2026-08-24T10:01:00Z' },
+    ]
+
+    // The next turn lands two more server rows. Position arithmetic
+    // (`abs - firstIndex`) counted the un-indexed notice as index 2, so row 2
+    // overwrote the warning and every later row was off by one.
+    apiGet.mockImplementation(
+      envelope([row(0, 'one'), row(1, 'two'), row(2, 'three'), row(3, 'four')]),
+    )
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'one', 'two', notice, 'three', 'four',
+    ])
+  })
+
+  test('does not duplicate a row when an un-indexed row sits above indexed rows', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unindexed-row-above'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-24T10:00:00Z',
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: items.length,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([row(0, 'one'), row(1, 'two')]))
+    await store.loadMessages(chatId)
+
+    // Splice an un-indexed row BETWEEN two indexed rows (a flushed streaming
+    // row that the server never indexed). One shift is enough: the refresh
+    // wrote the assistant reply over that row while its own slot kept the
+    // stale copy, so the same reply rendered twice.
+    store.messages[chatId] = [
+      store.messages[chatId][0],
+      { role: 'system', content: 'local activity', timestamp: '2026-08-24T10:00:30Z' },
+      store.messages[chatId][1],
+    ]
+
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'one', 'local activity', 'two',
+    ])
+  })
+})
+
+describe('older history pages', () => {
+  // Emulates the server's backward-counting pagination: `offset` is measured
+  // from the CURRENT total, so a page covers
+  // [total - offset - limit, total - offset - 1].
+  function pagedHistory(total: () => number) {
+    const row = (i: number) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `m${i}`,
+      i,
+      sent_at: '2026-08-24T10:00:00Z',
+    })
+    return (path: string) => {
+      if (!path.includes('/messages')) return Promise.resolve([])
+      const params = new URLSearchParams(path.split('?')[1] || '')
+      const limit = Number(params.get('limit') || 50)
+      const offset = Number(params.get('offset') || 0)
+      const now = total()
+      const start = Math.max(0, now - offset - limit)
+      const end = now - offset - 1
+      const items = []
+      for (let i = start; i <= end; i++) items.push(row(i))
+      return Promise.resolve({
+        items,
+        total: now,
+        offset,
+        limit,
+        hasMore: start > 0,
+        nextOffset: start > 0 ? offset + limit : null,
+      })
+    }
+  }
+
+  test('prepends the previous page when the history is unchanged', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-older-stable'
+    store.activeChatId = chatId
+
+    // Tail window of an 8-row history, page size 5: indices 3-7.
+    apiGet.mockImplementation((path: string) =>
+      path.includes('offset=')
+        ? pagedHistory(() => 8)(path)
+        : Promise.resolve({
+            items: [3, 4, 5, 6, 7].map(i => ({
+              role: i % 2 === 0 ? 'user' : 'assistant',
+              content: `m${i}`,
+              i,
+              sent_at: '2026-08-24T10:00:00Z',
+            })),
+            total: 8,
+            offset: 3,
+            limit: 5,
+            hasMore: true,
+            nextOffset: 5,
+          }),
+    )
+    await store.loadMessages(chatId)
+    expect(store.canLoadOlder(chatId)).toBe(true)
+
+    await store.loadOlderMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'm0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7',
+    ])
+    expect(store.canLoadOlder(chatId)).toBe(false)
+  })
+
+  test('still reaches the oldest page after the history grows', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-older-grew'
+    store.activeChatId = chatId
+
+    let serverTotal = 8
+    apiGet.mockImplementation((path: string) =>
+      path.includes('offset=')
+        ? pagedHistory(() => serverTotal)(path)
+        : Promise.resolve({
+            items: [3, 4, 5, 6, 7].map(i => ({
+              role: i % 2 === 0 ? 'user' : 'assistant',
+              content: `m${i}`,
+              i,
+              sent_at: '2026-08-24T10:00:00Z',
+            })),
+            total: 8,
+            offset: 3,
+            limit: 5,
+            hasMore: true,
+            nextOffset: 5,
+          }),
+    )
+    await store.loadMessages(chatId)
+
+    // Two rows arrive after the tail was loaded. `meta.nextOffset` (5) still
+    // counts back from the OLD total of 8, so against 10 rows it answers with
+    // indices 0-4 instead of 0-2: the continuity check rejects the overlap and
+    // the rejected page's `hasMore: false` used to stop every further attempt,
+    // stranding m0-m2 forever.
+    serverTotal = 10
+
+    await store.loadOlderMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'm0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7',
+    ])
+    expect(store.canLoadOlder(chatId)).toBe(false)
+  })
 })
