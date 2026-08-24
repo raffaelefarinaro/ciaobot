@@ -17,7 +17,9 @@ permissive opencode default (allow every tool except destructive shell).
 
 from __future__ import annotations
 
+import re
 import shlex
+from pathlib import PurePosixPath
 
 # Commands that only ever read, regardless of arguments. Near-misses whose
 # ordinary flags write files are deliberately absent: `sort -o`/`uniq in out`
@@ -217,7 +219,61 @@ _DESTRUCTIVE_GIT_PUSH_FLAGS = frozenset({
 })
 
 # Wrappers that merely elevate or prefix; the destructive verb follows them.
-_DESTRUCTIVE_WRAPPERS = frozenset({"sudo", "command", "env", "time"})
+# `xargs` belongs here too: `find . | xargs rm -f` never names rm as a segment
+# leader, which is exactly how it slipped past.
+_DESTRUCTIVE_WRAPPERS = frozenset({
+    "sudo", "doas", "command", "env", "time", "timeout", "nohup", "nice",
+    "ionice", "stdbuf", "setsid", "watch", "xargs",
+})
+
+# A shell re-enters this classifier through its own `-c` payload; without a
+# payload it is reading a script or stdin that cannot be inspected at all,
+# which is what makes `curl … | sh` the shape it is.
+_SHELLS = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash",
+    "busybox", "pwsh", "powershell",
+})
+
+# Interpreters given code on the command line. The code is opaque, so an
+# inline-code invocation is treated as destructive; running a *script file* is
+# not, because `python manage.py` is ordinary use and flagging it would put a
+# card in front of nearly every project command.
+_INTERPRETERS = frozenset({
+    "python", "python2", "python3", "perl", "ruby", "node", "deno", "bun",
+    "php", "lua", "Rscript", "osascript", "tclsh", "gawk", "awk",
+})
+_INLINE_CODE_FLAGS = frozenset({"-c", "-e", "-E", "-r", "--eval", "--exec", "-p", "-n"})
+
+# `$(…)` and backticks carry a whole command inside another one. They are
+# pulled out and classified in their own right before the outer command is
+# tokenized, so `echo $(rm -rf ~/x)` cannot hide the removal mid-segment.
+_SUBSTITUTION_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+
+
+def _verb(name: str) -> str:
+    """The bare verb behind a possibly path-qualified name.
+
+    `/bin/rm` and `./rm` are the same command as `rm`; classifying on the
+    literal token let an absolute path through untouched.
+    """
+    cleaned = (name or "").strip()
+    if not cleaned or "/" not in cleaned:
+        return cleaned
+    return PurePosixPath(cleaned).name
+
+
+def _unwrap(args: list[str]) -> tuple[str, list[str]] | None:
+    """The real command inside a wrapper's arguments.
+
+    Skips the wrapper's own flags and operands - `timeout 5 rm -rf x`,
+    `env FOO=1 rm -rf x`, `xargs -0 rm -f` - and returns the first token that
+    can plausibly be a command, with the remainder as its arguments.
+    """
+    for index, arg in enumerate(args):
+        if arg.startswith("-") or arg.replace(".", "", 1).isdigit() or "=" in arg:
+            continue
+        return arg, args[index + 1 :]
+    return None
 
 # A destructive verb run with only query flags is a help/version request, not
 # a removal. Anything else (including a bare `rm file`) stays destructive.
@@ -237,11 +293,24 @@ def _git_is_destructive(args: list[str]) -> bool:
 
 def _segment_is_destructive(name: str, args: list[str]) -> bool:
     """Whether one command segment removes, truncates, or destroys data."""
+    name = _verb(name)
     if name in _DESTRUCTIVE_WRAPPERS:
         # `sudo <destructive>` still destroys; drop wrappers and re-look.
-        if args and args[0] not in _DESTRUCTIVE_WRAPPERS:
-            return _segment_is_destructive(args[0], args[1:])
+        inner = _unwrap(args)
+        if inner is not None and _verb(inner[0]) not in _DESTRUCTIVE_WRAPPERS:
+            return _segment_is_destructive(inner[0], inner[1])
         return False
+    if name in _SHELLS:
+        # `sh -c '<code>'` is judged on the code it carries. A shell with no
+        # inspectable payload - `curl … | sh`, `bash script.sh` - is opaque,
+        # and an opaque shell is the whole bypass, so it keeps the card.
+        for index, arg in enumerate(args):
+            if arg == "-c" and index + 1 < len(args):
+                return is_destructive_command(args[index + 1])
+        return not (args and all(a in _DESTRUCTIVE_QUERY_FLAGS for a in args))
+    if name in _INTERPRETERS and any(a in _INLINE_CODE_FLAGS for a in args):
+        # Arbitrary code as an argument; nothing here can read it.
+        return True
     if name == "git":
         return _git_is_destructive(args)
     if name == "find":
@@ -267,6 +336,16 @@ def is_destructive_command(command: str) -> bool:
     text = (command or "").strip()
     if not text:
         return False
+    # Classify anything embedded via `$(…)` or backticks on its own, then drop
+    # it so the outer tokenization cannot smuggle the verb into another
+    # segment's arguments.
+    for outer, inner in _SUBSTITUTION_RE.findall(text):
+        embedded = outer or inner
+        if embedded and is_destructive_command(embedded):
+            return True
+    text = _SUBSTITUTION_RE.sub(" ", text).strip()
+    if not text:
+        return False
     tokens = _tokens(text)
     if not tokens:
         return False
@@ -274,8 +353,13 @@ def is_destructive_command(command: str) -> bool:
     for token in tokens:
         if token in _CONNECTORS:
             segments.append([])
+        elif set(token) & {"(", ")"}:
+            # A subshell is its own command, so parens START a segment rather
+            # than being skipped - otherwise the verb inside lands in the outer
+            # segment's arguments, where only segment[0] is ever classified.
+            segments.append([])
         elif all(char in _PUNCTUATION for char in token):
-            # Redirection, background `&`, subshells: unknown but not removal.
+            # Redirection, background `&`: unknown but not removal.
             continue
         else:
             segments[-1].append(token)

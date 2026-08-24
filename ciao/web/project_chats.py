@@ -5458,36 +5458,46 @@ class ProjectChatManager:
                     journal.append(record)
                 yield event
 
-        async for event in _journalled_stream():
-            yield event
-        response_text = outcome.response_text
-        had_error = outcome.had_error
-        effective_model = outcome.effective_model
-        usage = outcome.usage
-        quota = outcome.quota
-        cost_usd = outcome.cost_usd
-        tool_events = outcome.tool_events
+        try:
+            async for event in _journalled_stream():
+                yield event
+            response_text = outcome.response_text
+            had_error = outcome.had_error
+            effective_model = outcome.effective_model
+            usage = outcome.usage
+            quota = outcome.quota
+            cost_usd = outcome.cost_usd
+            tool_events = outcome.tool_events
 
-        # Record transcript turn
-        if handover_context_sent and not had_error:
-            self.mark_handover_context_used(chat_id)
+            # Record transcript turn
+            if handover_context_sent and not had_error:
+                self.mark_handover_context_used(chat_id)
 
-        ctx = ChatContext.for_web(chat_id)
-        self._transcripts.record_turn(
-            request,
-            ctx=ctx,
-            response_text=response_text,
-            effective_model=effective_model,
-            session_id=chat.session_id or None,
-            usage=usage,
-            quota=quota,
-            input_kind="text",
-            context_label=chat.title,
-            provider=chat.provider,
-            tool_events=tool_events,
-            is_error=had_error,
-        )
-        journal.finish()
+            ctx = ChatContext.for_web(chat_id)
+            self._transcripts.record_turn(
+                request,
+                ctx=ctx,
+                response_text=response_text,
+                effective_model=effective_model,
+                session_id=chat.session_id or None,
+                usage=usage,
+                quota=quota,
+                input_kind="text",
+                context_label=chat.title,
+                provider=chat.provider,
+                tool_events=tool_events,
+                is_error=had_error,
+            )
+            # The transcript owns this turn now, so a death before the
+            # unlink below must not let recovery replay it as a second
+            # partial turn.
+            journal.mark_committed()
+        finally:
+            # A provider exception (or a Stop that raises) used to unwind
+            # straight past `finish()`, leaving a journal that the next
+            # startup folded back in even though the outer handler had
+            # already persisted the turn.
+            journal.finish()
 
         # Update global cost
         if cost_usd > 0:

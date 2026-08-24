@@ -242,7 +242,9 @@ export const useProjectStore = defineStore('projects', () => {
   // sidebar until the next refresh — the archive flicker. `applyPendingArchived`
   // re-applies the local truth to every payload; entries clear as soon as the
   // server agrees (or the chat is gone), and on rollback when the POST fails.
-  const pendingArchived = ref<Record<string, boolean>>({})
+  // A Set, not a Record: the keys are chat ids straight off the websocket, and
+  // `obj[id] = true` with `id === "__proto__"` walks up Object.prototype.
+  const pendingArchived = ref<Set<string>>(new Set())
   // Not reactive UI state, just an in-flight guard: `creatingChatProjectIds`
   // is a display flag consumers can ignore (a second click landing before
   // Vue re-renders, a duplicated keyboard handler), so a second createChat()
@@ -1672,15 +1674,15 @@ export const useProjectStore = defineStore('projects', () => {
    * the sidebar. Confirmed (or vanished) ids drop out of the pending map.
    */
   function applyPendingArchived(nextChats: ChatInfo[]): ChatInfo[] {
-    if (!Object.keys(pendingArchived.value).length) return nextChats
+    if (!pendingArchived.value.size) return nextChats
     const present = new Set(nextChats.map(c => c.chat_id))
-    for (const id of Object.keys(pendingArchived.value)) {
-      if (!present.has(id)) delete pendingArchived.value[id]
+    for (const id of [...pendingArchived.value]) {
+      if (!present.has(id)) pendingArchived.value.delete(id)
     }
     return nextChats.map(c => {
-      if (!pendingArchived.value[c.chat_id]) return c
+      if (!pendingArchived.value.has(c.chat_id)) return c
       if (c.archived) {
-        delete pendingArchived.value[c.chat_id]
+        pendingArchived.value.delete(c.chat_id)
         return c
       }
       return { ...c, archived: true }
@@ -2329,7 +2331,7 @@ export const useProjectStore = defineStore('projects', () => {
     // the server's disk work (transcript write + delegate cascade).
     for (const id of allIds) {
       archivingChats.value[id] = true
-      pendingArchived.value[id] = true
+      pendingArchived.value.add(id)
       const c = chats.value.find(ch => ch.chat_id === id)
       if (c) c.archived = true
     }
@@ -2355,11 +2357,11 @@ export const useProjectStore = defineStore('projects', () => {
         const c = chats.value.find(ch => ch.chat_id === id)
         if (c) c.archived = prev
         delete archivingChats.value[id]
-        delete pendingArchived.value[id]
+        pendingArchived.value.delete(id)
       }
       for (const id of allIds) {
         delete archivingChats.value[id]
-        delete pendingArchived.value[id]
+        pendingArchived.value.delete(id)
       }
       for (const id of closedIds) connectWs(id)
       if (wasActive && activeChatId.value === null) {
@@ -2385,7 +2387,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (!confirmed.has(id)) {
         const c = chats.value.find(ch => ch.chat_id === id)
         if (c) c.archived = prevArchived.get(id) ?? false
-        delete pendingArchived.value[id]
+        pendingArchived.value.delete(id)
       } else if (id === chatId && res?.postprocess) {
         const c = chats.value.find(ch => ch.chat_id === id)
         if (c) {
@@ -2484,7 +2486,7 @@ export const useProjectStore = defineStore('projects', () => {
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/new`)
     // A reset clears `archived` server-side on the same chat_id, so any stale
     // local archive intent for it must go with it.
-    delete pendingArchived.value[chatId]
+    pendingArchived.value.delete(chatId)
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     messages.value[chatId] = []
@@ -3631,7 +3633,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (archivingChats.value[msg.chat_id]) delete archivingChats.value[msg.chat_id]
         // Hold the local flag until a chat-list payload agrees: a GET that left
         // before the archive committed can still resolve after this event.
-        pendingArchived.value[msg.chat_id] = true
+        pendingArchived.value.add(msg.chat_id)
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null
           persistState()

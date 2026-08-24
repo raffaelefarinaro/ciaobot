@@ -666,6 +666,16 @@ def auto_approves_permission(mode: BridgeMode, permission: str, command: str) ->
     if permission == "bash":
         # A command we cannot see cannot be verified as non-destructive, so it
         # keeps the card rather than being waved through blind.
+        #
+        # This is a DENYLIST, and a denylist fails open: a destructive form the
+        # classifier has not been taught is auto-approved, with the operator's
+        # full filesystem and credential access and no card. `is_destructive_command`
+        # covers path-qualified verbs, prefix wrappers, `xargs`, shells carrying
+        # `-c` payloads, opaque shells (`curl … | sh`), command substitution,
+        # subshells and inline interpreter code - every bypass found so far -
+        # but "so far" is the operative phrase. An allowlist would fail closed
+        # instead; keeping auto frictionless was chosen over that, so any new
+        # destructive form belongs in the classifier and its tests.
         return bool(command) and not is_destructive_command(command)
     return permission in _READ_ONLY_TOOLS
 

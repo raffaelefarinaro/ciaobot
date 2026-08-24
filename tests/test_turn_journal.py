@@ -10,6 +10,7 @@ transcript as an ``is_partial`` turn on next startup, and rendered with a
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from ciao.models import ChatContext
@@ -150,3 +151,72 @@ def test_corrupt_journal_lines_are_skipped(tmp_path: Path) -> None:
     assert store.recover_journals() == 1
     rows = store.current_messages(_ctx("chat-12"), "claude")
     assert any(r.get("content") == "survived" for r in rows)
+
+
+def test_a_committed_journal_is_dropped_rather_than_replayed(tmp_path: Path) -> None:
+    """The window between `record_turn` and `finish` must not duplicate a turn.
+
+    `record_turn` writes the normalized turn and `finish` then deletes the
+    journal - two steps. A process death in between left a journal whose turn
+    was already durable, and recovery folded it in a second time, duplicating
+    the prompt and reply into history, the archive and the insights input,
+    after exactly the crash the journal exists to survive.
+    """
+    runtime = tmp_path / ".runtime"
+    store = _store(tmp_path)
+    journal = _write_journal(
+        runtime,
+        _ctx().key,
+        [
+            {"type": "begin", "provider": "claude", "prompt": "already durable"},
+            {"type": "text", "text": "the committed reply"},
+            {"type": "committed"},
+        ],
+    )
+
+    recovered = store.recover_journals()
+
+    assert recovered == 0, "a committed turn must not be recovered again"
+    assert not journal.exists(), "the stale journal should be cleaned up"
+    rows = store.current_messages(_ctx(), "claude")
+    assert not any(r.get("partial") for r in rows), "the turn was replayed"
+
+
+def test_an_uncommitted_journal_is_still_recovered(tmp_path: Path) -> None:
+    """The guard must not swallow the crash it exists to handle."""
+    runtime = tmp_path / ".runtime"
+    store = _store(tmp_path)
+    _write_journal(
+        runtime,
+        _ctx().key,
+        [
+            {"type": "begin", "provider": "claude", "prompt": "lost mid-turn"},
+            {"type": "text", "text": "half a reply"},
+        ],
+    )
+
+    assert store.recover_journals() == 1
+
+
+def test_the_buffered_tail_lands_without_another_append(tmp_path: Path) -> None:
+    """A quiet stretch after a small burst must not hold records indefinitely.
+
+    The elapsed deadline used to be evaluated only inside `append()`, so a turn
+    that emitted a few records and then went quiet kept them in memory until
+    the next one arrived - a crash there lost an arbitrarily old reply, not the
+    250ms tail the design documents.
+    """
+    store = _store(tmp_path)
+    journal = store.open_turn_journal(_ctx(), "claude")
+    journal.begin({"provider": "claude", "prompt": "p", "started_at": "now"})
+    journal.append({"type": "text", "text": "buffered"})
+
+    # Well under the 32-record batch, so only the deadline can flush it.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if "buffered" in journal._path.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.05)
+
+    assert "buffered" in journal._path.read_text(encoding="utf-8")
+    journal.finish()

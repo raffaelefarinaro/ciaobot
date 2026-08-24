@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import shutil
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,6 +52,14 @@ class TurnJournal:
         self._handle: Any = None
         self._buffer: list[str] = []
         self._last_flush = 0.0
+        # The elapsed deadline used to be checked only from `append()`, so a
+        # turn that emitted a short burst and then went quiet held those records
+        # until the next one arrived - a crash in the quiet stretch lost an
+        # arbitrarily old reply rather than the documented 250ms tail. A timer
+        # makes the deadline real; it fires on its own thread, so the buffer and
+        # the handle are guarded.
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
 
     @property
     def active(self) -> bool:
@@ -79,17 +88,45 @@ class TurnJournal:
             self._handle = None
 
     def append(self, record: dict[str, Any]) -> None:
-        if self._handle is None:
-            return
-        self._buffer.append(json.dumps(record, ensure_ascii=False))
-        now = time.monotonic()
-        if (
-            len(self._buffer) >= _JOURNAL_FLUSH_ENTRIES
-            or now - self._last_flush >= _JOURNAL_FLUSH_SECONDS
-        ):
-            self.flush()
+        with self._lock:
+            if self._handle is None:
+                return
+            self._buffer.append(json.dumps(record, ensure_ascii=False))
+            now = time.monotonic()
+            if (
+                len(self._buffer) >= _JOURNAL_FLUSH_ENTRIES
+                or now - self._last_flush >= _JOURNAL_FLUSH_SECONDS
+            ):
+                self._flush_locked()
+            else:
+                self._arm_locked()
 
     def flush(self) -> None:
+        with self._lock:
+            self._flush_locked()
+
+    def _arm_locked(self) -> None:
+        """Make sure the buffered tail lands even if nothing else arrives."""
+        if self._timer is not None:
+            return
+        delay = max(0.0, _JOURNAL_FLUSH_SECONDS - (time.monotonic() - self._last_flush))
+        timer = threading.Timer(delay, self._flush_from_timer)
+        timer.daemon = True
+        self._timer = timer
+        timer.start()
+
+    def _cancel_locked(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _flush_from_timer(self) -> None:
+        with self._lock:
+            self._timer = None
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        self._cancel_locked()
         if self._handle is None or not self._buffer:
             return
         try:
@@ -101,9 +138,29 @@ class TurnJournal:
             self._buffer.clear()
             self._last_flush = time.monotonic()
 
+    def mark_committed(self) -> None:
+        """Record that the normalized turn is durably written.
+
+        ``record_turn`` and ``finish`` are two steps, and a process death
+        between them left behind a journal whose turn was ALREADY in the
+        transcript - recovery then folded it in a second time, duplicating the
+        prompt and the reply into history, the archive and the insights input,
+        after exactly the crash the journal exists to survive. A journal
+        carrying this marker is dropped by recovery instead of replayed.
+        """
+        with self._lock:
+            if self._handle is None:
+                return
+            self._buffer.append(json.dumps({"type": "committed"}, ensure_ascii=False))
+            self._flush_locked()
+
     def finish(self) -> None:
         """Close and delete the journal — the turn completed normally."""
-        self.flush()
+        with self._lock:
+            self._flush_locked()
+            self._finish_locked()
+
+    def _finish_locked(self) -> None:
         if self._handle is not None:
             try:
                 self._handle.close()
@@ -285,6 +342,7 @@ class TranscriptStore:
                 provider = "claude"
                 prompt = ""
                 started_at = ""
+                committed = False
                 texts: list[str] = []
                 tool_events: list[dict[str, Any]] = []
                 with journal_file.open("r", encoding="utf-8") as handle:
@@ -309,6 +367,14 @@ class TranscriptStore:
                                 "name": str(record.get("name") or "tool"),
                                 "input": {"summary": ""},
                             })
+                        elif kind == "committed":
+                            committed = True
+                if committed:
+                    # The turn is already in the transcript; this journal only
+                    # outlived the unlink. Replaying it would duplicate the
+                    # exchange, so drop it and move on.
+                    journal_file.unlink(missing_ok=True)
+                    continue
                 ctx = ChatContext(chat_id=0, key_override=journal_file.parent.parent.name)
                 self.record_partial_turn(
                     ctx,
