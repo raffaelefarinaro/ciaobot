@@ -411,9 +411,10 @@ def _detect_unrehomed_people(context: DetectionContext) -> list[OperatorAction]:
     Detected from the re-home **receipt** alone, never a walk of the person
     notes. Same gate as the Settings audit: with one registered workspace every
     candidate has an empty destination, so there is nothing to move and firing
-    would offer an unactionable tile. Absent receipt, or a receipt that is not
-    ``migrated``, means the damage was never fixed. The fix is a judged
-    migration, so this is chat-only.
+    would offer an unactionable tile. A receipt means the migration ran — only
+    an applied run writes one — so the tile then speaks for whatever is still
+    queued for a decision; no receipt means nothing has moved yet. The fix is a
+    judged migration, so this is chat-only.
     """
     runtime = context.runtime
     config = context.config
@@ -444,35 +445,28 @@ def _detect_unrehomed_people(context: DetectionContext) -> list[OperatorAction]:
         # the queue the tile's own button opens, and 12 live candidates.
         queued = _queued_rehome_rows(context)
         undecided = queued if queued is not None else _count(receipt.get("needs_judgement"))
-        # An ABSENT status counts as applied. `vault_rehome` only started writing
-        # the field when its survey mode was added, so a receipt written before
-        # that records a COMPLETED re-home — and reading those as unfinished made
-        # this tile a permanent false positive on exactly the installs that had
-        # done the work. The reference install shows it: 87 moves and 165 link
-        # rewrites recorded, no status, tile still firing a day later.
-        applied = receipt.get("status", "migrated") == "migrated"
+        # The receipt is proof the migration RAN: only an applied run writes
+        # one, and a receipt written before the `status` field existed records a
+        # completed re-home with no status at all — reading those as unfinished
+        # made this tile a permanent false positive on exactly the installs that
+        # had done the work. The reference install shows it: 87 moves and 165
+        # link rewrites recorded, no status, tile still firing a day later.
+        #
         # Applied with nothing left to decide is genuinely finished. Applied with
-        # notes still needing a decision is NOT: the mechanical moves are done and
-        # a human still owes an answer on the rest, which a status-only check
-        # hides the moment the field starts being written.
-        if applied and undecided == 0:
+        # notes still needing a decision is NOT: the mechanical moves are done
+        # and a human still owes an answer on the rest.
+        if undecided == 0:
             return []
-        if applied:
-            detail = (
-                f"{moved} person note(s) were re-homed. {undecided} still need a "
-                "decision because no tag names a workspace, and are queued as "
-                "proposals for review."
-            )
-        else:
-            detail = (
-                "Person notes may be filed in the wrong workspace: a survey found "
-                f"{moved} to move and {undecided} needing a decision, and none of "
-                "it has been applied yet."
-            )
+        detail = (
+            f"{moved} person note(s) were re-homed. {undecided} still need a "
+            "decision because no tag names a workspace, and are queued as "
+            "proposals for review."
+        )
     else:
         detail = (
-            "Person notes may be filed in the wrong workspace, but no re-home "
-            "survey has been recorded yet."
+            "Person notes may be filed in the wrong workspace, and none have "
+            "been re-homed yet. A preview lists the candidates without moving "
+            "anything."
         )
     return [
         OperatorAction(

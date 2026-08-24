@@ -153,8 +153,13 @@ def test_unrehomed_people_gated_on_two_workspaces(tmp_path: Path) -> None:
     # Two workspaces, no receipt yet: the tile fires.
     config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
     context = DetectionContext(config=config, runtime_dir=runtime)
-    ids = [a.id for a in detect_actions(context)]
-    assert "vault-unrehomed-people" in ids
+    actions = [a for a in detect_actions(context) if a.id == "vault-unrehomed-people"]
+    assert len(actions) == 1
+    # Nothing ever ran a survey, so the fallback must not promise one: with
+    # `survey_vault_people` gone the only thing on offer is the dry-run preview.
+    detail = actions[0].detail
+    assert "survey" not in detail.lower()
+    assert "none have been re-homed yet" in detail
 
     # A migrated receipt clears it.
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
@@ -359,13 +364,21 @@ def test_every_action_offers_run_or_chat(tmp_path: Path) -> None:
         json.dumps({"renamed": [], "unresolved": {"log": ["x.md"]}}), encoding="utf-8"
     )
     (runtime / "migration" / "vault-rehome.json").write_text(
-        json.dumps({"status": "surveyed", "mechanical": 1, "needs_judgement": 1, "conflicts": 0}),
+        json.dumps({
+            "status": "migrated",
+            "moves": [{"from": "a"}],
+            "needs_judgement": [{"path": "b"}],
+            "proposals": [{"path": "c"}],
+        }),
         encoding="utf-8",
     )
     queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
     queue.parent.mkdir(parents=True, exist_ok=True)
     queue.write_text(
-        "\n".join(f"- [memory] Pending {i}." for i in range(REVIEW_QUEUE_DEPTH)),
+        "\n".join(f"- [memory] Pending {i}." for i in range(REVIEW_QUEUE_DEPTH))
+        # The re-home tile counts the QUEUE, not the receipt, so a queue with no
+        # `[rehome]` row would clear it however many the receipt recorded.
+        + "\n- [rehome] Re-home `personal/People/J.md` to `work/...`?",
         encoding="utf-8",
     )
     now = datetime(2026, 1, 20, 0, 0, tzinfo=UTC)
@@ -552,12 +565,12 @@ def test_an_applied_receipt_still_surfaces_what_needs_a_decision(tmp_path: Path)
 
 def test_the_tile_never_renders_a_container_into_its_prose(tmp_path: Path) -> None:
     """It read keys this receipt has never had, and one that is a LIST, so it
-    said "the survey recorded 0 to move" while 87 were recorded as moved and
-    then printed a list of dicts on screen."""
+    said "0 to move" while 87 were recorded as moved and then printed a list of
+    dicts on screen. Every count on the tile goes through `_count`."""
     _rehome_receipt(
         tmp_path,
         {
-            "status": "surveyed",
+            "status": "migrated",
             "moves": [{"path": "a"}] * 3,
             "needs_judgement": [{"bucket": "needs_judgement", "path": "b"}] * 15,
             "proposals": [],
@@ -566,8 +579,9 @@ def test_the_tile_never_renders_a_container_into_its_prose(tmp_path: Path) -> No
 
     detail = _rehome_actions(tmp_path)[0].detail
 
-    assert "bucket" not in detail and "{" not in detail
-    assert "3 to move" in detail and "15 needing a decision" in detail
+    assert "bucket" not in detail and "{" not in detail and "[" not in detail
+    assert "3 person note(s) were re-homed" in detail
+    assert "15 still need a decision" in detail
 
 
 def test_a_detail_string_never_renders_a_container() -> None:

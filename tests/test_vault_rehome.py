@@ -15,13 +15,13 @@ from pathlib import Path
 
 from ciao.vault_rehome import (
     detect_misfiled_people,
+    peek_receipt,
     plan_rehome,
     read_receipt,
     receipt_path,
     rehome_people,
     rehome_vault_people,
     resolve_role_workspaces,
-    survey_vault_people,
     unrehome_people,
     unrehome_vault_people,
     vault_workspaces,
@@ -750,56 +750,36 @@ def test_the_plan_names_only_the_files_it_would_write(tmp_path: Path) -> None:
     ]
 
 
-# ---- survey mode -----------------------------------------------------------
+# ---- only an applied run writes a receipt ----------------------------------
 
 
-def test_survey_writes_a_receipt_and_moves_nothing(tmp_path: Path) -> None:
-    """Survey is the D4 answer: run the plan once at boot, record the counts,
-    and never touch a file — detection stays cheap forever after."""
+def test_a_dry_run_writes_no_receipt(tmp_path: Path) -> None:
+    """The receipt is the record of an APPLIED migration, and the whole detection
+    side now reads its mere presence as "the re-home ran". A preview that left a
+    file behind would tell every surface the work was done."""
     vault = _vault(tmp_path)
     runtime = tmp_path / ".runtime"
     before = _snapshot(vault)
 
-    summary = survey_vault_people(vault, runtime)
+    rehome_people(vault, runtime, apply=False)
 
-    assert summary["applied"] is False
-    assert summary["mechanical"] == 1
-    assert summary["needs_judgement"] == 1
-    assert summary["conflicts"] == 0
-    assert _snapshot(vault) == before
-    receipt = read_receipt(runtime)
-    assert receipt is None, "a survey receipt is not a migrated one, so read_receipt must ignore it"
-    peek = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
-    assert peek["status"] == "surveyed"
-    assert peek["mechanical"] == 1
-    assert peek["needs_judgement"] == 1
-    assert peek["conflicts"] == 0
-
-
-def test_read_receipt_ignores_a_surveyed_receipt(tmp_path: Path) -> None:
-    """The regression for P3.1: a survey receipt gates on existence, the real
-    migration would look already-done and be permanently blocked. read_receipt
-    must return None for a surveyed receipt, so rehome_people stays runnable."""
-    vault = _vault(tmp_path)
-    runtime = tmp_path / ".runtime"
-    survey_vault_people(vault, runtime)
-
+    assert not receipt_path(runtime).exists()
     assert read_receipt(runtime) is None
-    assert rehome_people(vault, runtime, apply=True)["moves"]
-    assert json.loads(receipt_path(runtime).read_text(encoding="utf-8"))["status"] == "migrated"
+    assert _snapshot(vault) == before
 
 
-def test_survey_is_silent_when_the_migration_is_done(tmp_path: Path) -> None:
-    """A survey must not overwrite or mask the reverse map that undoes real
-    work: re-homed is done, and the survey has nothing new to say."""
+def test_an_applied_run_writes_a_migrated_receipt(tmp_path: Path) -> None:
+    """`migrated` is the only status the receipt can carry, so `read_receipt`
+    and `peek_receipt` agree on every receipt this code writes."""
     vault = _vault(tmp_path)
     runtime = tmp_path / ".runtime"
+
     rehome_people(vault, runtime, apply=True)
-    migrated = receipt_path(runtime).read_text(encoding="utf-8")
 
-    survey_vault_people(vault, runtime)
-
-    assert receipt_path(runtime).read_text(encoding="utf-8") == migrated
+    payload = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    assert payload["status"] == "migrated"
+    assert read_receipt(runtime) is not None
+    assert peek_receipt(runtime) == payload
 
 
 # -- an existing linked counterpart settles the question ----------------------

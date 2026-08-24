@@ -894,17 +894,17 @@ def _rehome_notice(report: dict) -> list[dict]:
     ]
 
 
-def _write_survey_receipt(runtime: Path, **counts: int) -> None:
-    """Write a surveyed re-home receipt with whatever counts the test wants."""
+def _write_legacy_receipt(runtime: Path) -> None:
+    """A receipt from before `vault_rehome` wrote a `status` field at all."""
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 1,
-        "status": "surveyed",
-        "surveyed_at": "2026-08-19T00:00:00Z",
+        "rehomed_at": "2026-08-19T00:00:00Z",
         "vault_root": str(runtime),
-        "mechanical": counts.get("mechanical", 3),
-        "needs_judgement": counts.get("needs_judgement", 2),
-        "conflicts": counts.get("conflicts", 1),
+        "moves": [{"from": "personal/People/A.md", "to": "work/People/A.md"}],
+        "rewrites": [],
+        "needs_judgement": [],
+        "proposals": [],
     }
     (runtime / "migration" / "vault-rehome.json").write_text(
         json.dumps(payload), encoding="utf-8"
@@ -930,7 +930,7 @@ def _write_migrated_receipt(runtime: Path) -> None:
 
 
 def test_rehome_notice_fires_when_receipt_is_absent(tmp_path: Path) -> None:
-    """Nothing ever surveyed the vault, so the damage may exist and is unseen."""
+    """No receipt means no re-home has ever been applied, so the offer stands."""
     workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
 
     report = run_os_audit(
@@ -941,7 +941,11 @@ def test_rehome_notice_fires_when_receipt_is_absent(tmp_path: Path) -> None:
     )
 
     assert _rehome_notice(report)
-    assert "no re-home survey" in _rehome_notice(report)[0]["detail"]
+    detail = _rehome_notice(report)[0]["detail"]
+    # Nothing writes a survey receipt any more, so the notice must not claim a
+    # survey either ran or is the next step.
+    assert "survey" not in detail.lower()
+    assert "none have been re-homed yet" in detail
 
 
 def test_rehome_notice_is_silent_once_migrated(tmp_path: Path) -> None:
@@ -958,10 +962,17 @@ def test_rehome_notice_is_silent_once_migrated(tmp_path: Path) -> None:
     assert _rehome_notice(report) == []
 
 
-def test_rehome_notice_still_fires_on_a_surveyed_receipt(tmp_path: Path) -> None:
-    """Surveyed is not migrated: the D4 point, a survey proves the work is pending."""
+def test_rehome_notice_is_silent_on_a_legacy_receipt_with_no_status(
+    tmp_path: Path,
+) -> None:
+    """A receipt written before the `status` field records a COMPLETED re-home.
+
+    Gating on `status == "migrated"` made this notice fire forever on exactly
+    the installs that had done the work — the same false positive the home-screen
+    tile was fixed for. Presence of the receipt is the signal.
+    """
     workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
-    _write_survey_receipt(runtime)
+    _write_legacy_receipt(runtime)
 
     report = run_os_audit(
         workspace_dir=workspace,
@@ -970,21 +981,18 @@ def test_rehome_notice_still_fires_on_a_surveyed_receipt(tmp_path: Path) -> None
         config=_rehome_config(workspace),
     )
 
-    assert _rehome_notice(report)
+    assert _rehome_notice(report) == []
 
 
-def test_rehome_notice_reads_counts_from_the_receipt_not_the_vault(
-    tmp_path: Path,
-) -> None:
-    """The notice reports the receipt's numbers even when the vault disagrees.
+def test_rehome_notice_never_walks_the_vault_for_counts(tmp_path: Path) -> None:
+    """The notice is a receipt check, not a vault scan.
 
-    The vault below holds far more person notes than the receipt claims. If a
-    future edit "helpfully" switched the notice to scan the vault, this test
-    fails — the whole point of the survey/apply split is that detection never
-    walks the vault.
+    The vault below holds nine re-homable person notes. This routine runs on
+    every app open, and `plan_rehome` walks every person note, so quoting a
+    number here would put that walk on the hot path. If a future edit
+    "helpfully" scanned the vault to fill in counts, this test fails.
     """
     workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
-    # A vault that would report different counts than the receipt.
     for i in range(9):
         note = vault / "personal" / "People" / f"Note{i}.md"
         note.parent.mkdir(parents=True, exist_ok=True)
@@ -992,7 +1000,6 @@ def test_rehome_notice_reads_counts_from_the_receipt_not_the_vault(
             "---\ntype: person\ntags: [person, colleague]\n---\n# X\n",
             encoding="utf-8",
         )
-    _write_survey_receipt(runtime, mechanical=1, needs_judgement=0, conflicts=0)
 
     report = run_os_audit(
         workspace_dir=workspace,
@@ -1002,9 +1009,7 @@ def test_rehome_notice_reads_counts_from_the_receipt_not_the_vault(
     )
 
     detail = _rehome_notice(report)[0]["detail"]
-    assert "1 to move" in detail
-    assert "0 needing a decision" in detail
-    assert "0 conflicting" in detail
+    assert not any(char.isdigit() for char in detail), detail
 
 
 def test_rehome_notice_remedy_names_the_inverse_command(tmp_path: Path) -> None:
