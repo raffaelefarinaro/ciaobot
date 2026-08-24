@@ -82,6 +82,14 @@ class McpPrincipal:
         )
 
 
+# Permission modes ordered weakest to strongest, so a child chat's requested
+# mode can be compared against its ceiling instead of being overwritten by it.
+# ``plan`` is read-only, ``normal`` asks before acting, ``auto`` acts with safer
+# defaults, ``bypass`` skips approvals. Mirrors ``BridgeMode`` in ciao.models
+# and the SDK mapping in ciao.providers.claude.
+_MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
+
+
 class ControlPlaneError(ValueError):
     """Stable application error returned by MCP adapters."""
 
@@ -279,24 +287,38 @@ class CiaoControlPlane:
         return str(getattr(chat, "mode", "auto") or "auto")
 
     def _child_mode(self, principal: McpPrincipal, requested: str | None) -> str:
-        """Keep an MCP-created child at its caller's permission ceiling.
+        """Hold an MCP-created child at or below its caller's permission ceiling.
 
-        The child starts its first turn immediately, so accepting a stronger
+        The child starts its first turn immediately, so accepting a *stronger*
         mode from model-authored tool arguments would let a normal/auto chat
-        manufacture a bypass session without an operator approval. The
-        provider enforces the returned mode as its session permission rules;
-        keeping the clamp here also covers provider child chats.
+        manufacture a bypass session without an operator approval. The provider
+        enforces the returned mode as its session permission rules; keeping the
+        clamp here also covers provider child chats.
+
+        A ceiling, not a pin. This used to return ``parent_mode`` outright and
+        ignore ``requested``, which blocked *de-escalation* as well as
+        escalation: from a ``bypass`` chat, ``chat_update(chat_id=<other>,
+        mode="normal")`` raised the target to ``bypass`` instead of clamping it,
+        and in an ``auto`` chat a ``mode="plan"`` downgrade was written back as
+        ``auto`` while the response still reported success — a requested
+        restriction silently discarded. A weaker request is always honoured;
+        only an upward one is clamped.
         """
         parent_mode = self.chat_mode(principal)
-        if parent_mode not in {"normal", "plan", "auto", "bypass"}:
+        if parent_mode not in _MODE_RANK:
             parent_mode = "normal"
-        if requested and requested != parent_mode:
-            logger.warning(
-                "Clamping child chat mode %r to parent %r for %s",
-                requested,
-                parent_mode,
-                principal.chat_id or "unscoped MCP session",
-            )
+        # An unrecognised request carries no rank to compare, so it cannot be
+        # honoured safely; fall back to the ceiling rather than guessing.
+        if not requested or requested not in _MODE_RANK:
+            return parent_mode
+        if _MODE_RANK[requested] <= _MODE_RANK[parent_mode]:
+            return requested
+        logger.warning(
+            "Clamping child chat mode %r to ceiling %r for %s",
+            requested,
+            parent_mode,
+            principal.chat_id or "unscoped MCP session",
+        )
         return parent_mode
 
     def _vault_root(self, principal: McpPrincipal) -> Path:

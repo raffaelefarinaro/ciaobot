@@ -88,12 +88,22 @@ def parse_bullet(line: str) -> ProposalBullet | None:
     kind (headings, blank lines, prose, an unregistered kind). It never
     reports a silent zero for a kind that exists; unknown kinds are covered by
     the lookup guard on the accept table.
+
+    The kind is lowercased to the registry spelling. ``BULLET_RE`` is
+    case-insensitive (so a producer's casing never hides a row from the
+    counters) but :data:`_ACCEPT` is keyed by the lowercase names in
+    :data:`KINDS`, so returning ``match.group(1)`` verbatim let the regex and
+    the lookup disagree: ``- [Profile] x`` matched, then ``accept_for("Profile")``
+    raised :class:`UnknownKindError`. The queue scan in
+    ``ciao.web.routes_api`` calls ``accept_for`` unguarded, so one capitalised
+    bullet 500'd ``/api/proposals`` and emptied the whole review queue in the
+    app. Normalising here keeps that impossible for every consumer at once.
     """
     match = BULLET_RE.match(line)
     if match is None:
         return None
     return ProposalBullet(
-        kind=match.group(1),
+        kind=match.group(1).lower(),
         text=match.group(3).strip(),
         source=(match.group(4) or "").strip(),
         target=(match.group(2) or "").strip(),

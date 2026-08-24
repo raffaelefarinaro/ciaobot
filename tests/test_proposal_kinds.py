@@ -249,3 +249,22 @@ def test_parse_bullet_returns_none_for_non_bullet_lines() -> None:
     assert pk.parse_bullet("") is None
     assert pk.parse_bullet("- [unknown] unregistered kind") is None
     assert pk.parse_bullet("- [memory]") is None  # empty content is not a bullet
+
+
+def test_parsed_kind_is_normalised_to_the_registry_spelling() -> None:
+    """A capitalised bullet must not desynchronise the regex from the lookup.
+
+    ``BULLET_RE`` is case-insensitive but ``_ACCEPT`` is keyed by the lowercase
+    names in ``KINDS``. Returning the matched kind verbatim meant
+    ``- [Profile] x`` parsed and then ``accept_for("Profile")`` raised
+    ``UnknownKindError`` — and the ``/api/proposals`` scan calls ``accept_for``
+    unguarded, so one capitalised bullet 500'd the endpoint and the whole
+    review queue vanished from the app.
+    """
+    for kind in pk.KINDS:
+        for spelling in (kind.upper(), kind.capitalize()):
+            bullet = pk.parse_bullet(f"- [{spelling}] some content")
+            assert bullet is not None, f"regex missed {spelling!r}"
+            assert bullet.kind == kind
+            # The end-to-end failure: this raised for every capitalised kind.
+            pk.accept_for(bullet.kind)

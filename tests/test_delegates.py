@@ -592,6 +592,76 @@ def test_chat_update_cannot_upgrade_mode_through_mcp(tmp_path: Path) -> None:
     assert result["data"]["requested_mode"] == "bypass"
 
 
+def test_chat_update_does_not_raise_another_chat_to_the_callers_mode(
+    tmp_path: Path,
+) -> None:
+    """The child-mode clamp is a ceiling, not a pin.
+
+    ``_child_mode`` returned the parent's mode unconditionally, so from a
+    ``bypass`` chat an explicit ``mode="normal"`` on *another* chat raised that
+    target to ``bypass`` — the clamp escalating a chat instead of restricting
+    it. A weaker request must always be honoured.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    caller = manager.create_chat(project.project_id, title="Supervisor", mode="bypass")
+    target = manager.create_chat(project.project_id, title="Worker", mode="bypass")
+    plane = _control_plane(manager)
+
+    result = plane.chat_update(
+        _principal(caller.chat_id, project.project_id),
+        target.chat_id,
+        mode="normal",
+    )
+
+    assert manager.get_chat(target.chat_id).mode == "normal"
+    assert "mode_clamped" not in result["data"]
+
+
+def test_chat_update_honours_a_downgrade_to_plan(tmp_path: Path) -> None:
+    """A requested restriction must not be silently discarded.
+
+    In an ``auto`` chat a ``mode="plan"`` downgrade was written back as
+    ``auto`` while the response still reported success, so the caller believed
+    it had dropped to read-only while the chat kept acting with auto approvals.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Worker", mode="auto")
+    plane = _control_plane(manager)
+
+    result = plane.chat_update(
+        _principal(chat.chat_id, project.project_id),
+        "",
+        mode="plan",
+    )
+
+    assert manager.get_chat(chat.chat_id).mode == "plan"
+    assert result["data"]["mode"] == "plan"
+    assert "mode_clamped" not in result["data"]
+
+
+def test_delegate_spawn_honours_a_weaker_mode_than_its_parent(tmp_path: Path) -> None:
+    """A ``bypass`` supervisor must be able to dispatch a read-only delegate."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor", mode="bypass")
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    manager.queue_message = lambda _chat_id, _text: True  # type: ignore[method-assign]
+    plane = _control_plane(manager)
+
+    result = plane.delegate_spawn(
+        _principal(parent.chat_id, project.project_id),
+        prompt="read the docs and report",
+        mode="plan",
+    )
+
+    child = manager.get_chat(result["data"]["chat_id"])
+    assert child is not None
+    assert child.mode == "plan"
+    assert "mode_clamped" not in result["data"]
+
+
 def test_finished_delegates_free_their_slot(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Delegates", workspace="work")
