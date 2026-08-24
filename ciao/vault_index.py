@@ -716,24 +716,25 @@ def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
                 dir=abs_path.parent,
                 prefix=f".{abs_path.name}.",
                 suffix=".tmp",
-            ) as tmp:
-                tmp.write(new_text)
-                staged.append((abs_path, Path(tmp.name)))
+            ) as handle:
+                handle.write(new_text)
+                temp = Path(handle.name)
             # A fresh temp file lands at 0600 and os.replace would silently
             # tighten the rewritten note's permissions; carry the old mode over.
             try:
-                os.chmod(tmp.name, abs_path.stat().st_mode & 0o7777)
+                os.chmod(temp, abs_path.stat().st_mode & 0o7777)
             except OSError:
                 pass
-        for (abs_path, tmp), (_, original, _new_text) in zip(staged, edits):
-            os.replace(tmp, abs_path)
-            replaced.append((abs_path, original))
+            staged.append((abs_path, temp))
+        for (target, temp), (_, original, _new_text) in zip(staged, edits):
+            os.replace(temp, target)
+            replaced.append((target, original))
     except OSError:
-        for abs_path, original in reversed(replaced):
-            abs_path.write_text(original, encoding="utf-8")
-        for _, tmp in staged:
+        for target, original in reversed(replaced):
+            target.write_text(original, encoding="utf-8")
+        for _, temp in staged:
             try:
-                tmp.unlink(missing_ok=True)
+                temp.unlink(missing_ok=True)
             except OSError:
                 pass
         raise
