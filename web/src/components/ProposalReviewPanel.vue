@@ -622,11 +622,15 @@ onMounted(() => { void store.fetch() })
     </header>
 
     <p class="pr-hint">
-      Accepting a memory row writes it into that workspace’s bounded guide region;
-      project rows fold into the named doc, people rows create a stub note,
-      learnings append to Workspace/Learnings.md. Re-home rows are not moved here.
-      Skill rows are files — dismiss removes them, and implement builds the skill
-      in a chat. Review rows have no destination yet: talk it through first.
+      This is a fallback queue, not a list of every new fact: confident facts are
+      applied when a chat is archived. Daily Memory curation retries addressable
+      queued items and re-checks aging notes, so rows can disappear when either
+      you or that run resolves them. Accepting a memory row writes it into that
+      workspace’s bounded guide region; project rows fold into the named doc,
+      people rows create a stub note, and learnings append to
+      Workspace/Learnings.md. Re-home rows are not moved here. Skill rows are
+      files — dismiss removes them, and implement builds the skill in a chat.
+      Review rows have no destination yet and still need your decision.
     </p>
 
 

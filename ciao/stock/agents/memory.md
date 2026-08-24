@@ -11,7 +11,7 @@ Read-only recall is handled inline by the system prompt (`vault_search`, answer 
 
 Curation targets:
 - Vault pages for projects, people, ideas, resources, and logs.
-- `<vault>/Workspace/Memory-Proposals.md` — the review queue for durable facts. You promote, reject, or merge these; the app never applies them itself. Growing proposals are a signal that memory needs consolidating.
+- `<vault>/Workspace/Memory-Proposals.md` — the fallback review queue for durable facts. Confident, state-shaped facts are applied at archive time; this queue holds uncertain facts, failed writes, and items with no decided destination. You promote, reject, or merge the remainder. Growing proposals are a signal that memory needs consolidating.
 - `<vault>/Workspace/Skill-Proposals/` — the review queue for skill-edit suggestions. Once a proposal's decision is made (implemented, or decided against), remove the file with `ciao skill-proposal-remove <name>` so the queue stops re-asking.
 - Bounded memory regions in the workspace `CLAUDE.md`: `ciao:memory` (cross-session preferences, environment, lessons) and `ciao:profile` (identity, communication style).
 

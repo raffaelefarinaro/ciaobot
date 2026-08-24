@@ -3,7 +3,7 @@
     {
       "schedule_id": "system-memory-curation",
       "title": "Memory curation",
-      "description": "Keeps your second brain tidy: files durable learnings from recent chats, applies accepted memory proposals, and updates project notes when something changed. Reports only what it processed; does nothing on a quiet day.",
+      "description": "Keeps your second brain tidy: processes uncertain or failed memory items left after archive-time auto-filing, re-checks aging notes, files durable learnings, and updates project notes when something changed. Reports only what it processed; does nothing on a quiet day.",
       "scope": "system",
       "editable": false,
       "removable": false,

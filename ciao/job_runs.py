@@ -191,8 +191,9 @@ REGISTRY: tuple[JobSpec, ...] = (
     JobSpec("memory_proposals", "Memory proposals", "content",
             "Proposes durable facts from a session's insights.", False, True,
             trigger=(
-                "After session insights. The daily system-memory-curation "
-                "schedule then promotes them."
+                "After session insights; confident facts are applied at "
+                "archive time. The daily system-memory-curation schedule "
+                "processes the uncertain or failed remainder."
             ),
             schedule_id="system-memory-curation",
             step_of="insights",
