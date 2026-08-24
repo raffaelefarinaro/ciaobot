@@ -444,9 +444,26 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/work
 #   mode = "move" — physically relocate the vault's contents into `target`
 #           (created if absent; must otherwise be empty) and re-point.
 # The target is validated server-side (never the filesystem root, never nested
-# inside the current vault, never through a symlink). On success the workspace
-# is marked `vault_pinned`, which suppresses the "not in its standard folder"
-# chat action for that workspace.
+# inside the current vault, never through a symlink, never a folder another
+# workspace already owns or contains). On success the workspace is marked
+# `vault_pinned`, which suppresses the "not in its standard folder" chat action
+# for that workspace.
+#
+# 400 when: the target is a file, does not exist (hook mode only — hook adopts
+# an existing folder), is not empty (move mode; Finder metadata alone is fine),
+# is unreadable, or the source vault is the install root itself — moving that
+# would carry `.env` and the runtime directory along, so it is refused rather
+# than filtered, and the error names the two ways forward.
+#
+# 200 may include `warnings`: a vault outside the install cannot be reached by
+# the search index (its rows are keyed relative to the install), so relocating
+# there disables vault search for that workspace and says so rather than
+# failing. A move also prunes the old path's search rows, and rolls the whole
+# operation back — files and registry — if any step fails.
+#
+# Both `browse-folder` routes need a password set, or a request from the
+# machine itself: they enumerate directories outside the workspace, which
+# nothing else on this API does.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal/vault" \
   -H 'content-type: application/json' \
   -d '{"target":"/Users/you/vaults/personal","mode":"move"}'
