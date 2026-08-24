@@ -201,6 +201,23 @@ async function openChat(action: OperatorAction): Promise<void> {
   min-width: 0;
 }
 
+@media (min-width: 640px) {
+  .housekeeping-tile {
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas: 'glyph body actions';
+    align-items: center;
+  }
+
+  .housekeeping-actions {
+    min-width: 160px;
+  }
+
+  .housekeeping-actions .btn-small {
+    width: auto;
+    min-width: 140px;
+  }
+}
+
 .housekeeping-glyph {
   grid-area: glyph;
   font-size: var(--text-base);
