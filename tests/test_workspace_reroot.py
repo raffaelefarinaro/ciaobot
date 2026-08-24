@@ -1768,6 +1768,164 @@ def test_undo_refuses_on_a_legacy_receipt_that_recorded_no_contents(
     assert result["status"] == "undone", result
 
 
+def test_undo_refuses_on_a_capture_that_records_names_without_digests(
+    tmp_path: Path,
+) -> None:
+    """An intermediate build captured names alone, so its receipts prove the
+    NAMES of what the bootstrap wrote but not the CONTENTS.
+
+    A live file under such a capture cannot be verified byte-for-byte, so it
+    counts as unattributed and refuses, exactly like a receipt with no capture
+    at all. Unknown state must not be deleted on a guess.
+    """
+    import shutil
+
+    install, runtime = _migrated(tmp_path)
+    record = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    record["created_dirs_contents"] = {
+        directory: sorted(entries)
+        for directory, entries in record["created_dirs_contents"].items()
+    }
+    receipt_path(runtime).write_text(json.dumps(record), encoding="utf-8")
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "refused"
+
+    for name in ("personal", "work"):
+        for relative in (".claude", "commands", "subagents"):
+            target = install / name / relative
+            if target.is_dir():
+                shutil.rmtree(target)
+
+    # Nothing verifiable left beneath the created directories, so this receipt
+    # completes exactly as the no-capture legacy one does.
+    result = undo(install, runtime)
+    assert result["status"] == "undone", result
+
+
+def _seeded_command(install: Path) -> tuple[Path, bytes]:
+    """A regular file the bootstrap seeded into a created commands/ directory."""
+    for candidate in sorted((install / "work" / "commands").rglob("*")):
+        if candidate.is_file() and not candidate.is_symlink():
+            return candidate, candidate.read_bytes()
+    raise AssertionError("fixture expected a seeded regular command")
+
+
+def test_undo_refuses_when_a_seeded_command_was_edited_in_place(
+    tmp_path: Path,
+) -> None:
+    """The names-only guard matched an edited seeded file perfectly, so undo
+    waved it through and the rmtree destroyed the edit.
+
+    `commands/` exists to hold commands the operator edits, so an in-place
+    change to a seeded, explicitly editable command is the ordinary case, not
+    an exotic one. The receipt now fingerprints every file it seeds.
+    """
+    install, runtime = _migrated(tmp_path)
+    seeded, original = _seeded_command(install)
+
+    seeded.write_text("# rewritten\n", encoding="utf-8")
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "refused"
+    assert str(seeded.relative_to(install)) in result["reason"]
+    assert seeded.read_text(encoding="utf-8") == "# rewritten\n"
+    assert read_receipt(runtime) is not None, "a refusal consumed the receipt"
+
+    # Restoring the original content lets the same undo complete.
+    seeded.write_bytes(original)
+    result = undo(install, runtime)
+    assert result["status"] == "undone", result
+
+
+def test_undo_refuses_when_a_seeded_command_was_deleted(tmp_path: Path) -> None:
+    """A recorded file that is gone is a deletion, not a state undo may assume."""
+    install, runtime = _migrated(tmp_path)
+    seeded, original = _seeded_command(install)
+    seeded.unlink()
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "refused"
+    assert str(seeded.relative_to(install)) in result["reason"]
+
+    # Putting the bytes back lets the same undo complete.
+    seeded.write_bytes(original)
+    result = undo(install, runtime)
+    assert result["status"] == "undone", result
+
+
+def _cross_device_replace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make Path.replace fail with EXDEV for the stash backups only.
+
+    Only the stash restores travel between the two filesystems; every other
+    rename an undo performs (the registry write) keeps its real implementation.
+    """
+    real_replace = Path.replace
+
+    def cross_device(self: Path, target: object) -> Path:
+        if "reroot-regenerated" in str(self):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", cross_device)
+
+
+def test_undo_restores_stashes_across_a_filesystem_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CIAO_RUNTIME_ROOT on another filesystem must not strand a half-restored undo.
+
+    The forward migration stashes with shutil.move because EXDEV is a supported
+    configuration; the reverse step used Path.replace — a rename — which fails
+    on exactly that configuration, after earlier entries had already been
+    restored. The fallback has to finish byte-for-byte and leave no temp behind.
+    """
+    install, vault, runtime = _with_guide(tmp_path)
+    before = _install_hashes(install)
+
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    assert applied["stashed_files"]
+
+    _cross_device_replace(monkeypatch)
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "undone", result
+    assert sorted(result["restored_stashed"]) == sorted(
+        e["source"] for e in applied["stashed_files"]
+    )
+    assert _install_hashes(install) == before
+    assert not list((install / "memory-vault").glob("*.tmp")), "a temp copy was left"
+
+
+def test_undo_restore_cleans_up_its_temp_file_when_the_copy_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed fallback leaves neither a rewritten destination nor its temp."""
+    import shutil
+
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+
+    _cross_device_replace(monkeypatch)
+
+    def full_disk(src: object, dst: object, **kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(shutil, "copy2", full_disk)
+
+    with pytest.raises(OSError, match="space"):
+        undo(install, runtime)
+
+    assert not (install / "memory-vault" / "INDEX.md").exists()
+    assert not list((install / "memory-vault").glob("*.tmp"))
+
+
 def test_an_empty_catalog_directory_is_not_moved(tmp_path: Path) -> None:
     """`git mv` refuses an empty directory, failing and rolling back the whole run.
 

@@ -27,6 +27,8 @@ file it did not recognise is how a vault loses notes.
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import logging
 import os
@@ -640,8 +642,11 @@ def apply(
         payload["created_dirs"] = created_dirs
         # What the bootstrap put inside each directory it created, recorded so
         # undo can tell the migration's own contents from anything an operator
-        # added underneath afterwards. The directory name alone made undo delete
-        # a user's later files along with the bootstrap's.
+        # did underneath afterwards. The directory name alone made undo delete
+        # a user's later files along with the bootstrap's, and names alone still
+        # could not see an edit made IN PLACE to a seeded command — which the
+        # migration invites — so each file is hashed, each symlink has its
+        # target recorded, and undo refuses unless everything matches.
         payload["created_dirs_contents"] = _snapshot_created_dirs(
             install_root, created_dirs
         )
@@ -725,6 +730,33 @@ def apply(
     return payload
 
 
+def _replace_across_filesystems(source: Path, destination: Path) -> None:
+    """Replace ``destination`` with ``source``, even across filesystems.
+
+    why: ``Path.replace`` is rename(2), which fails with EXDEV when the runtime
+    root (``CIAO_RUNTIME_ROOT``) sits on a different filesystem from the install
+    root. The forward migration stashes INTO the runtime root with
+    ``shutil.move`` precisely because that layout is supported, so this reverse
+    step needs the same reach. The fast path stays an atomic rename; on EXDEV
+    the fallback copies beside the DESTINATION and ``os.replace``s onto it, so
+    the overwrite stays atomic and a failed copy leaves the destination
+    untouched. Errors propagate: a failed restore still aborts the undo.
+    """
+    try:
+        source.replace(destination)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    tmp = destination.with_name(destination.name + ".ciao-restore.tmp")
+    try:
+        shutil.copy2(source, tmp)
+        os.replace(tmp, destination)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     """Reverse a completed re-rooting to a byte-identical tree.
 
@@ -741,9 +773,12 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     would mean the receipt carrying a copy of every index it replaced, which buys
     nothing: they are rebuilt from the notes on the next sync either way.
 
-    Refuses without touching anything when a bootstrap-created directory holds
-    files the migration did not put there: an architecture rollback must not be
-    the thing that deletes a custom command added after it.
+    Refuses without touching anything when a bootstrap-created directory does
+    not hold exactly what the migration left in it: a file an operator added
+    underneath, a seeded command edited in place, or a recorded file deleted.
+    An architecture rollback must not be the thing that destroys any of those,
+    and the directory is removed whole, so the guard compares names AND content
+    fingerprints before a single path is touched.
     """
     install_root = Path(install_root).resolve()
     runtime_root = Path(runtime_root)
@@ -752,8 +787,9 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         return {"status": "nothing_to_undo", "reason": "no migrated receipt"}
 
     # Before ANY mutation: a directory the migration created may have gained
-    # descendants since, and everything below assumes only recorded contents
-    # are inside them.
+    # descendants since, or had its seeded contents edited or removed, and
+    # everything below assumes the directories hold exactly what the receipt
+    # recorded.
     blocked = _unexpected_under_created_dirs(install_root, receipt)
     if blocked:
         shown = ", ".join(blocked[:5])
@@ -761,10 +797,11 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         return {
             "status": "refused",
             "reason": (
-                "these paths under directories the migration created were not "
-                f"put there by the migration: {shown}{more}. Move them out or "
-                "delete them, then run the undo again; undoing anyway would "
-                "delete them with their directory and git cannot bring them back"
+                "these paths under directories the migration created were "
+                f"added, edited or deleted after it ran: {shown}{more}. Restore "
+                "each one to what the migration left or move it out, then run "
+                "the undo again; undoing anyway would delete them with their "
+                "directory and git cannot bring them back"
             ),
             "unexpected_paths": blocked,
         }
@@ -779,7 +816,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         target = install_root / entry["source"]
         if backup.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
-            backup.replace(target)
+            _replace_across_filesystems(backup, target)
             # Re-stage only what WAS tracked. `git add` on a file that was
             # untracked before would newly track it, which is not a restoration.
             if entry.get("tracked"):
@@ -813,8 +850,9 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     # recorded as a directory and removed whole rather than listed file by file.
     # Only directories this migration CREATED are listed, so a root that already
     # had one keeps it. Removing whole is safe because the guard above verified
-    # every descendant against the contents the receipt recorded; anything
-    # unrecorded refused the undo before this line ran.
+    # every descendant against the name-and-fingerprint capture the receipt
+    # recorded; anything added, edited or deleted since refused the undo before
+    # this line ran.
     import shutil  # noqa: PLC0415
 
     for relative in receipt.get("created_dirs", []):
@@ -902,34 +940,90 @@ def _walk_entries(base: Path) -> set[str]:
     return entries
 
 
+def _entry_fingerprint(path: Path) -> dict[str, Any]:
+    """One descendant as the receipt remembers it.
+
+    A regular file is HASHED, not named: the migration seeds commands an
+    operator is meant to edit, so an in-place modification is exactly the case
+    a name-only capture misses — the names still match the receipt while undo
+    rmtree's the directory and destroys the edit with it. A symlink records its
+    target STRING instead of hashing through it, which would store the target's
+    content and miss a retarget. A directory stays name-based; its descendants
+    carry their own entries.
+    """
+    if path.is_symlink():
+        return {"target": os.readlink(path)}
+    if path.is_file():
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 16), b""):
+                digest.update(chunk)
+        return {"size": path.stat().st_size, "sha256": digest.hexdigest()}
+    return {}
+
+
+def _fingerprint_tree(base: Path) -> dict[str, dict[str, Any]]:
+    """Every descendant of ``base`` fingerprinted, keyed relative to it.
+
+    The same walk ``_walk_entries`` does — ``followlinks=False``, so a symlinked
+    directory is one entry and never descended into — carrying each entry's
+    fingerprint, so apply time and undo time diff like against like.
+    """
+    records: dict[str, dict[str, Any]] = {}
+    for current, dirs, files in os.walk(base, followlinks=False):
+        prefix = Path(current).relative_to(base)
+        for name in [*dirs, *files]:
+            records[str(prefix / name)] = _entry_fingerprint(Path(current) / name)
+    return records
+
+
 def _snapshot_created_dirs(
     install_root: Path, created_dirs: list[str]
-) -> dict[str, list[str]]:
-    """List what the bootstrap put inside each directory it created.
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Fingerprint what the bootstrap put inside each directory it created.
 
-    Recorded in the receipt beside the directory names, because a name alone
-    made undo rmtree the whole directory — and with it any command, subagent or
-    other file an operator added beneath it after the migration ran.
+    Recorded in the receipt beside the directory names: each file's sha256 and
+    size, each symlink's target string, each directory by name alone. Names
+    alone made undo rmtree the whole directory — and with it anything an
+    operator added or edited beneath it after the migration ran.
     """
-    contents: dict[str, list[str]] = {}
+    contents: dict[str, dict[str, dict[str, Any]]] = {}
     for relative in created_dirs:
         base = Path(install_root) / relative
         if base.is_dir():
-            contents[relative] = sorted(_walk_entries(base))
+            contents[relative] = _fingerprint_tree(base)
     return contents
+
+
+def _entry_matches_capture(path: Path, recorded: dict[str, Any]) -> bool:
+    """Whether one live descendant is still exactly what the receipt recorded.
+
+    Recorded-but-gone counts as changed: the receipt says the bootstrap wrote
+    it, so its absence is a deletion undo must not paper over. An unreadable
+    file counts as changed too — unknown state refuses rather than guessing.
+    """
+    if not (path.is_symlink() or path.exists()):
+        return False
+    try:
+        return _entry_fingerprint(path) == recorded
+    except OSError:
+        return False
 
 
 def _unexpected_under_created_dirs(
     install_root: Path, receipt: dict[str, Any]
 ) -> list[str]:
-    """Descendants of bootstrap-created directories the migration did not write.
+    """Descendants of bootstrap-created directories the migration did not leave.
 
-    Each recorded directory's live tree is compared against the contents its
-    receipt entry captured; anything not in that capture blocks the undo, named
-    by path, because removing the directory whole would remove it too and the
-    git moves that follow cannot bring it back. A receipt written before the
-    captures existed records nothing per directory, so every descendant counts
-    as unattributed and none of them may be deleted on a guess.
+    Each recorded directory's live tree is diffed against the fingerprint its
+    receipt entry captured: an entry that appeared, a file whose bytes no longer
+    hash to what the bootstrap wrote, a symlink retargeted, or a recorded file
+    that has vanished all block the undo, named by path, because removing the
+    directory whole would destroy them and the git moves that follow cannot
+    bring them back. A receipt written before the captures existed — or by the
+    build that recorded names alone — carries nothing verifiable per
+    descendant, so every live entry counts as unattributed and none of it may
+    be deleted on a guess.
     """
     unexpected: list[str] = []
     contents = receipt.get("created_dirs_contents")
@@ -937,9 +1031,18 @@ def _unexpected_under_created_dirs(
         base = Path(install_root) / str(relative)
         if not base.is_dir():
             continue
-        recorded = set((contents or {}).get(str(relative)) or [])
-        for entry in sorted(_walk_entries(base) - recorded):
-            unexpected.append(f"{relative}/{entry}")
+        recorded = (contents or {}).get(str(relative))
+        if not isinstance(recorded, dict):
+            # No capture at all, or the earlier names-only shape: no digest to
+            # hold a live file against, so nothing beneath this directory is
+            # attributable.
+            for entry in sorted(_walk_entries(base)):
+                unexpected.append(f"{relative}/{entry}")
+            continue
+        for entry in sorted({*recorded, *_walk_entries(base)}):
+            want = recorded.get(entry)
+            if want is None or not _entry_matches_capture(base / entry, want):
+                unexpected.append(f"{relative}/{entry}")
     return sorted(unexpected)
 
 
