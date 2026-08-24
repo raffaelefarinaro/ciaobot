@@ -241,7 +241,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -249,10 +249,19 @@ import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
-import MemoryMapView from './MemoryMapView.vue'
-import ProjectView from './ProjectView.vue'
-import SchedulePanel from './SchedulePanel.vue'
-import SettingsView from './SettingsView.vue'
+// The destinations behind the rail are loaded on first visit, not on boot.
+// Statically imported they landed in the same chunk as the chat itself — a
+// third of a megabyte of Settings, Automations, the memory canvas and the
+// project view that every cold start had to download and parse before the
+// first chat could paint, whether or not the user ever opened them. They are
+// each rendered behind a `viewMode` branch, so a component-level split needs
+// no other change; the chunk is fetched from the local server (and is
+// cache-first in the service worker after that), so the first switch is not
+// perceptibly slower.
+const MemoryMapView = defineAsyncComponent(() => import('./MemoryMapView.vue'))
+const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
+const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
+const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
 import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'

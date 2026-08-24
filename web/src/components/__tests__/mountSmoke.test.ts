@@ -324,15 +324,21 @@ vi.mock('../../lib/push', () => ({
 // the module path because Vue SFCs import siblings directly via ESM, which
 // bypasses `config.global.stubs`.
 const NoopStub = { name: 'NoopStub', render: () => h('div') }
+// `__esModule: true` on the destination stubs is load-bearing: ChatLayout
+// imports those four with defineAsyncComponent, and Vue only unwraps a
+// resolved module's `default` when it can recognise the object as an ES
+// module. Without the flag it hands the whole mock namespace to the renderer
+// as the component.
+const AsyncNoopStub = { default: NoopStub, __esModule: true }
 vi.mock('../VoiceRecorder.vue', () => ({ default: NoopStub }))
 vi.mock('../ChatPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../PinnedFilePanel.vue', () => ({ default: NoopStub }))
 vi.mock('../FileViewerModal.vue', () => ({ default: NoopStub }))
 vi.mock('../NewScheduleForm.vue', () => ({ default: NoopStub }))
-vi.mock('../SchedulePanel.vue', () => ({ default: NoopStub }))
+vi.mock('../SchedulePanel.vue', () => AsyncNoopStub)
 const MemoryMapStub = { name: 'MemoryMapStub', render: () => h('div', { 'data-testid': 'memory-map-stub' }) }
-vi.mock('../MemoryMapView.vue', () => ({ default: MemoryMapStub }))
+vi.mock('../MemoryMapView.vue', () => ({ default: MemoryMapStub, __esModule: true }))
 vi.mock('../ProjectSidebar.vue', () => ({ default: NoopStub }))
 vi.mock('../InAppToast.vue', () => ({ default: NoopStub }))
 

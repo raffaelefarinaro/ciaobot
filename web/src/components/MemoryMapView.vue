@@ -1280,6 +1280,17 @@ onBeforeUnmount(() => {
   padding: var(--space-3);
   background: var(--bg2);
   border-left: 1px solid var(--border);
+  /* The panel is created by v-if, so a mount animation is all it needs. It
+     used to appear instantly, which reads as the layout jumping rather than a
+     panel opening — the graph column resizes at the same moment. */
+  animation: mm-detail-in 180ms ease-out;
+}
+@keyframes mm-detail-in {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mm-detail { animation: none; }
 }
 .mm-detail-close {
   position: absolute;

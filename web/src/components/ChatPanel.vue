@@ -2146,6 +2146,53 @@ function scrollToBottom() {
   isNearBottom.value = true
 }
 
+// ---------- opening a chat lands at the bottom ----------
+// Setting scrollTop once when a chat opens is not enough, which is why a chat
+// used to appear scrolled to the top and then travel down on its own a moment
+// later. The height of the transcript keeps changing for a few hundred
+// milliseconds after its rows first paint — the history fetch resolves after
+// the skeleton has already been measured, images and avatars load, the
+// subagent fetch adds trace blocks, the composer resizes — and each of those
+// growths leaves the viewport where it was, i.e. at the top. The
+// stick-to-bottom watcher only catches up on the *next* change, so the
+// correction was always visible as a scroll.
+//
+// Pinning the scroll to the bottom on every frame for a short window after
+// the open makes the first frame the user sees the bottom, and keeps it there
+// while the height settles. It costs one rAF per frame for well under a
+// second, and only while a chat is being opened.
+const OPEN_PIN_MS = 700
+let pinUntil = 0
+let pinRafId = 0
+
+function pinToBottom(ms = OPEN_PIN_MS) {
+  pinUntil = performance.now() + ms
+  if (pinRafId) return
+  const step = () => {
+    pinRafId = 0
+    const el = messagesEl.value
+    if (!el) {
+      pinUntil = 0
+      return
+    }
+    el.scrollTop = el.scrollHeight
+    isNearBottom.value = true
+    if (performance.now() < pinUntil) pinRafId = requestAnimationFrame(step)
+    else checkScroll()
+  }
+  pinRafId = requestAnimationFrame(step)
+}
+
+/** The user scrolling during the settle window wins immediately — a pin that
+ * fought a deliberate scroll would be worse than the jump it removes. */
+function releasePin() {
+  pinUntil = 0
+  if (pinRafId) {
+    cancelAnimationFrame(pinRafId)
+    pinRafId = 0
+  }
+}
+
 // Scroll after layout when we're already following the tail. Call checkScroll
 // only after scrolling — running it first clears isNearBottom when new content
 // just grew the list (user bubble, streaming indicator, etc.).
@@ -3101,6 +3148,11 @@ onMounted(async () => {
   await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
+  // Any hands-on scroll gesture releases the open-time bottom pin.
+  messagesEl.value?.addEventListener('wheel', releasePin, { passive: true })
+  messagesEl.value?.addEventListener('touchmove', releasePin, { passive: true })
+  // Covers a scrollbar drag, which produces scroll events but no wheel.
+  messagesEl.value?.addEventListener('pointerdown', releasePin, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
     messagesResizeObserver = new ResizeObserver(() => {
       stickToBottomIfNeeded()
@@ -3112,7 +3164,7 @@ onMounted(async () => {
     autoResize()
     if (messagesEl.value) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-      checkScroll()
+      pinToBottom()
     }
   })
 })
@@ -3132,6 +3184,10 @@ onBeforeUnmount(() => {
     document.removeEventListener('selectionchange', onChatSelectionChange)
   }
   messagesEl.value?.removeEventListener('scroll', checkScroll)
+  messagesEl.value?.removeEventListener('wheel', releasePin)
+  messagesEl.value?.removeEventListener('touchmove', releasePin)
+  messagesEl.value?.removeEventListener('pointerdown', releasePin)
+  releasePin()
   messagesResizeObserver?.disconnect()
   messagesResizeObserver = null
   if (clockTimer) { clearInterval(clockTimer); clockTimer = null }
@@ -3688,11 +3744,19 @@ watch(() => store.activeChatId, () => {
   dockExpanded.value = false
   contextExpanded.value = false
   nextTick(() => {
-    if (messagesEl.value) {
-      messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-      checkScroll()
-    }
+    if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+    // Hold the bottom while the incoming transcript's height settles, rather
+    // than measuring it once against whatever was on screen at this instant
+    // (usually the loading skeleton).
+    pinToBottom()
   })
+})
+
+// The transcript replacing the loading skeleton is the moment the real height
+// arrives, and it happens after the switch above has already scrolled. Pin
+// again from there so the reveal itself lands at the bottom.
+watch(blockingHistoryLoad, (loading, wasLoading) => {
+  if (!loading && wasLoading) nextTick(() => pinToBottom())
 })
 
 // Auto-scroll only when the user is already near the bottom.
