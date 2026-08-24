@@ -4793,6 +4793,25 @@ class ProjectChatManager:
         )
         return provider, model, workspace
 
+    def reassign_workspace(self, old: str, new: str) -> int:
+        """Repoint every project on *old* at *new*; returns how many moved.
+
+        Deleting a workspace kept its projects and chats, still naming a
+        registry entry that no longer existed - and `_agent_root_for_chat`
+        then fell through to `primary_workspace()`, so continuing one of those
+        chats silently loaded the primary workspace's guide and could read and
+        write its vault. Migrating the projects makes that move explicit and
+        recorded rather than an accident of the fallback.
+        """
+        moved = 0
+        for project in self._projects.values():
+            if project.workspace == old:
+                project.workspace = new
+                moved += 1
+        if moved:
+            self._save(reason="workspace_deleted")
+        return moved
+
     def refresh_workspaces(self) -> None:
         self._ensure_defaults()
         self._discover_vault_projects()

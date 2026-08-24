@@ -894,10 +894,76 @@ async def delete_workspace_setting(request: Request) -> JSONResponse:
         return JSONResponse({"error": "workspace not found"}, status_code=404)
     if len(config.workspaces) <= 1:
         return JSONResponse({"error": "cannot delete the last workspace"}, status_code=400)
+    target = config.primary_workspace()
+    if target == name:
+        return JSONResponse(
+            {"error": "cannot delete the primary workspace"}, status_code=400
+        )
+    # The chats outlive the registry entry, so they are MOVED rather than left
+    # pointing at a workspace that no longer exists - which resolved them to
+    # the primary agent root by accident of the fallback. Notes move first: a
+    # collision refuses that note instead of overwriting it, and a refusal
+    # must not be discovered after the registry entry is already gone.
+    vault = _migrate_workspace_vault(config, name, target)
+    moved_projects = _reassign_project_manager_workspace(request, name, target)
     config.workspaces.pop(name, None)
     _persist_workspaces(config)
     _refresh_project_manager_workspaces(request)
-    return JSONResponse(_workspaces_payload(config))
+    payload = _workspaces_payload(config)
+    payload["migrated"] = {
+        "into": target,
+        "projects": moved_projects,
+        "notes": len(vault["moved"]),
+        "refused": vault["refused"],
+    }
+    return JSONResponse(payload)
+
+
+def _reassign_project_manager_workspace(request: Request, old: str, new: str) -> int:
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    reassign = getattr(pcm, "reassign_workspace", None)
+    return int(reassign(old, new)) if callable(reassign) else 0
+
+
+def _migrate_workspace_vault(config, name: str, target: str) -> dict[str, Any]:
+    """Move a workspace's notes into *target*, taking their links with them.
+
+    Per-note rather than a directory rename, because both directions of every
+    link have to be rewritten - a bulk move would leave every reference to
+    these notes pointing at a path that no longer exists. A note whose
+    destination is already taken is REFUSED and reported, never overwritten.
+    """
+    from ciao.vault_rehome import move_note_between_roots
+
+    moved: list[str] = []
+    refused: list[dict[str, Any]] = []
+    install_root = Path(config.workspace_root)
+    try:
+        source_root = Path(config.workspace_vault_root(name))
+    except (ValueError, TypeError):
+        return {"moved": moved, "refused": refused}
+    if not source_root.is_dir():
+        return {"moved": moved, "refused": refused}
+    targets = config.vault_scan_targets()
+    workspaces = config.workspace_names()
+    for note in sorted(source_root.rglob("*.md")):
+        try:
+            relative = note.relative_to(install_root).as_posix()
+        except ValueError:
+            continue
+        result = move_note_between_roots(
+            install_root,
+            relative,
+            target,
+            targets=targets,
+            workspaces=workspaces,
+            apply=True,
+        )
+        if result.get("applied"):
+            moved.append(relative)
+        else:
+            refused.append({"note": relative, "refusals": result.get("refusals", [])})
+    return {"moved": moved, "refused": refused}
 
 
 def _env_path(config) -> Path:

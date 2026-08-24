@@ -27,9 +27,14 @@ from ciao.web.routes_api import (
 class _PCM:
     def __init__(self) -> None:
         self.refresh_count = 0
+        self.reassigned: list[tuple[str, str]] = []
 
     def refresh_workspaces(self) -> None:
         self.refresh_count += 1
+
+    def reassign_workspace(self, old: str, new: str) -> int:
+        self.reassigned.append((old, new))
+        return 2
 
 
 def _client(tmp_path: Path, env_extra: dict[str, str] | None = None):
@@ -1035,3 +1040,56 @@ def test_gws_personal_purpose_keeps_the_separation_warning_once_connected(tmp_pa
     personal = next(p for p in resp.json()["profiles"] if p["name"] == "personal")
     assert "Keep this separate from company systems." in personal["purpose"]
     assert personal["purpose"].endswith("Connected to Gmail.")
+
+
+def test_deleting_a_workspace_migrates_its_chats_instead_of_rerouting_them(tmp_path):
+    """A deleted workspace's chats must not resolve to the primary by accident.
+
+    Deletion keeps the projects and chats, and they went on naming a registry
+    entry that no longer existed - so `_agent_root_for_chat` fell through to
+    `primary_workspace()` and continuing an old chat loaded the primary guide
+    and could read and write its vault. The move is now explicit and reported.
+    """
+    client, config, pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
+    primary = config.primary_workspace()
+
+    deleted = client.delete("/api/workspaces/client-a")
+
+    assert deleted.status_code == 200
+    assert pcm.reassigned == [("client-a", primary)]
+    migrated = deleted.json()["migrated"]
+    assert migrated["into"] == primary
+    assert migrated["projects"] == 2
+
+
+def test_the_primary_workspace_cannot_be_deleted(tmp_path):
+    """There is nowhere to migrate to, so the delete has to refuse."""
+    client, config, pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
+
+    refused = client.delete(f"/api/workspaces/{config.primary_workspace()}")
+
+    assert refused.status_code == 400
+    assert pcm.reassigned == []
+
+
+def test_a_colliding_note_is_refused_rather_than_overwritten(tmp_path):
+    """Migration must never destroy a note that is already at the destination."""
+    client, config, pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
+    primary = config.primary_workspace()
+    for workspace in ("client-a", primary):
+        people = Path(config.workspace_vault_root(workspace)) / "People"
+        people.mkdir(parents=True, exist_ok=True)
+        (people / "Mo.md").write_text(
+            f"---\ntype: person\n---\n# Mo in {workspace}\n", encoding="utf-8"
+        )
+    kept = Path(config.workspace_vault_root(primary)) / "People" / "Mo.md"
+    before = kept.read_text(encoding="utf-8")
+
+    deleted = client.delete("/api/workspaces/client-a")
+
+    assert deleted.status_code == 200
+    assert kept.read_text(encoding="utf-8") == before, "the note was overwritten"
+    assert deleted.json()["migrated"]["refused"], "the collision was not reported"
