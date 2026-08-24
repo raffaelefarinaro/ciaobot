@@ -513,20 +513,25 @@ def _segment_is_destructive(name: str, args: list[str]) -> bool:
     """Whether one command segment removes, truncates, or destroys data."""
     name = _verb(name)
     if name == "env":
-        # `-S`/`--split-string` carries a mini command line that env splits
-        # and runs itself; `_unwrap` skips it as an option value, which left
+        # `-S` carries a mini command line that env splits and runs itself;
+        # `_unwrap` skips it as an option value, which left
         # `env -S 'rm -rf /tmp/x'` with nothing left to classify. Judge the
-        # payload on its own text, then let the normal wrapper path look at
+        # payload on its own text — in its separated, joined-long, and
+        # attached-short spellings — then let the normal wrapper path look at
         # any command named alongside it (`env -S 'FOO=1' rm -rf x`).
         index = 0
         while index < len(args):
-            if args[index] in {"-S", "--split-string"}:
+            arg = args[index]
+            if arg in {"-S", "--split-string"}:
                 payload = args[index + 1] if index + 1 < len(args) else ""
-                if payload and is_destructive_command(payload):
-                    return True
                 index += 2
-                continue
-            break
+            elif arg.startswith("--split-string=") or (arg.startswith("-S") and len(arg) > 2):
+                payload = arg.split("=", 1)[-1] if arg.startswith("--") else arg[2:]
+                index += 1
+            else:
+                break
+            if payload and is_destructive_command(payload):
+                return True
     if name in _DESTRUCTIVE_WRAPPERS:
         # `sudo <destructive>` still destroys; drop wrappers and re-look.
         # RECURSE, rather than giving up when the next token is also a wrapper:

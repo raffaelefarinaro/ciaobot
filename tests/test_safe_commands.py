@@ -253,7 +253,8 @@ def test_destructive_commands_are_destructive(command):
     # env splits and runs a `-S` payload itself, and coproc runs its command
     # asynchronously; both carry the real verb behind an opaque leader.
     "env -S 'rm -rf /tmp/valuable'",
-    "env --split-string 'shred ~/x'",
+    "env --split-string='rm -rf /tmp/valuable'",
+    "env -S'shred ~/x'",
     "coproc rm -rf /tmp/valuable",
 ])
 def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
