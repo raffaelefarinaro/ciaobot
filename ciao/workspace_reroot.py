@@ -542,15 +542,28 @@ def apply(
         applied.append({"source": move.source, "destination": move.destination})
 
     # Everything past this point mutates the tree OUTSIDE git's reach - stashing
-    # regenerated notes, pruning the vault directory, rewriting the registry - and
-    # `payload["applied"]` is only recorded once it all succeeds. An exception here
-    # used to leave the install half-rooted with no receipt at all: startup caught
-    # it and carried on with a config still naming paths that had already moved,
-    # and undo had nothing to work from. So the same rollback the git mv loop does
-    # covers this stretch too, and the refusal is always recorded.
+    # regenerated notes, pruning the vault directory, rewriting the registry,
+    # writing the receipt - and nothing is committed until it all succeeds. An
+    # exception here used to leave the install half-rooted with no receipt at
+    # all: startup caught it and carried on with a config still naming paths
+    # that had already moved, and undo had nothing to work from. So the same
+    # rollback the git mv loop does covers this stretch too, and the refusal is
+    # always recorded. The receipt is inside the stretch on purpose: it is what
+    # flips agent_root onto the layout the moves just built, so a run whose
+    # write fails has to unwind like any other instead of leaving files migrated
+    # under a config still answering the shared layout.
     backup_dir = runtime_root / _REGENERATED_BACKUP
     stashed: list[dict[str, Any]] = []
     removed_vault = False
+    # The before-image the registry rewrite captures, hoisted above the try so
+    # the unwind can restore it; if the rewrite itself is what failed, the file
+    # was never touched (it writes atomically) and None is exactly right.
+    registry_before: list[dict[str, Any]] | None = None
+    # Hoisted beside it: what this run CREATED, which the unwind removes too -
+    # leftovers inside a destination root would leave it non-empty and make
+    # every retry refuse forever.
+    created: list[str] = []
+    created_dirs: list[str] = []
     try:
         # Both the generated notes and the ignorable cruft are STASHED, not deleted.
         # Undo has to restore a byte-identical tree with no caveats, and recreating a
@@ -601,7 +614,9 @@ def apply(
 
         vault_destinations = {m.workspace: m.destination for m in result.moves if m.workspace}
         primary_vault = vault_destinations.get(primary, "")
-        created = write_skills_triage(install_root, triage, result.workspaces, primary_vault)
+        created.extend(
+            write_skills_triage(install_root, triage, result.workspaces, primary_vault)
+        )
 
         if split is not None:
             guide_created, guide_stashed = write_guide_split(
@@ -616,7 +631,6 @@ def apply(
 
         # Every root gets its agent assets, through the same code --repair uses, so
         # "after a migration, --repair is a no-op" is an invariant and not a hope.
-        created_dirs: list[str] = []
         shared_sources = install_root / _SKILLS_SRC
         for name in result.workspaces:
             files, dirs = bootstrap_root(install_root / name, shared_sources)
@@ -624,11 +638,29 @@ def apply(
             created_dirs.extend(f"{name}/{relative}" for relative in dirs)
         payload["created_files"] = created
         payload["created_dirs"] = created_dirs
+        # What the bootstrap put inside each directory it created, recorded so
+        # undo can tell the migration's own contents from anything an operator
+        # added underneath afterwards. The directory name alone made undo delete
+        # a user's later files along with the bootstrap's.
+        payload["created_dirs_contents"] = _snapshot_created_dirs(
+            install_root, created_dirs
+        )
 
         # Sessions are keyed by cwd, and the cwd just changed. Flag rather than
         # pretend, and report the count so a user whose long chat resets knows why.
         sessions = flag_stranded_sessions(runtime_root)
         payload["stranded_sessions"] = sessions
+
+        # The receipt is the LAST step inside the transaction: committing the
+        # layout flip and holding every other mutation to the same rollback is
+        # one decision, not two. A failure here unwinds the run below rather
+        # than returning success with no receipt committed.
+        payload["status"] = "migrated"
+        payload["applied"] = applied
+        payload["pruned_empty"] = pruned_empty
+        payload["stashed_files"] = stashed
+        payload["removed_vault_dir"] = removed_vault
+        payload["receipt_path"] = str(write_receipt(runtime_root, payload))
 
     except Exception as exc:  # noqa: BLE001 - any failure has to unwind
         for entry in reversed(stashed):
@@ -637,24 +669,54 @@ def apply(
             backup = runtime_root / entry["backup"]
             if backup.is_file():
                 shutil.move(str(backup), str(restored))
-            if entry["tracked"]:
+            # `.get`, not `[`: the guide split stashes queue backups without a
+            # tracked key, and one of those ahead of the failure used to kill
+            # the unwind itself with a KeyError.
+            if entry.get("tracked"):
                 _run_git(install_root, "add", "--", entry["source"])
         if removed_vault:
             vault_root.mkdir(parents=True, exist_ok=True)
         for done in reversed(applied):
             _run_git(install_root, "mv", done["destination"], done["source"])
+        # What the run itself wrote comes back out, or the leftovers keep every
+        # destination root non-empty and the next attempt refuses forever. Only
+        # recorded paths, never a pattern.
+        for relative in reversed(created):
+            target = install_root / relative
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            _prune_empty_parents(install_root, target.parent)
+        for relative in reversed(created_dirs):
+            target = install_root / relative
+            if target.is_dir():
+                shutil.rmtree(target)
+            _prune_empty_parents(install_root, target.parent)
+        # The registry moved with the files, so it moves BACK with them.
+        # Leaving the rewritten entries pointing at per-root paths while the
+        # vaults sit back under the shared root is how a failed unattended run
+        # makes every workspace look empty.
+        refusals = [f"migration failed after moving files: {exc}"]
+        if registry_before is not None:
+            try:
+                _write_registry(runtime_root, registry_before)
+            except Exception as restore_exc:  # noqa: BLE001 - surfaced, never swallowed
+                refusals.append(
+                    "the workspace registry could not be restored either "
+                    f"({restore_exc}); its entries still name per-root paths "
+                    "while the vaults are back under the shared root, so repair "
+                    "it by hand before starting the app"
+                )
+        # A failed receipt write can leave half a file at the path; nothing
+        # short of a completed migration may sit there gating the next start.
+        stray = receipt_path(runtime_root)
+        stray.unlink(missing_ok=True)
+        stray.with_suffix(".json.tmp").unlink(missing_ok=True)
         payload["status"] = "refused"
         payload["refused"] = True
-        payload["refusals"] = [f"migration failed after moving files: {exc}"]
+        payload["refusals"] = refusals
         payload["receipt_path"] = str(write_receipt(runtime_root, payload))
         return payload
 
-    payload["status"] = "migrated"
-    payload["applied"] = applied
-    payload["pruned_empty"] = pruned_empty
-    payload["stashed_files"] = stashed
-    payload["removed_vault_dir"] = removed_vault
-    payload["receipt_path"] = str(write_receipt(runtime_root, payload))
     # The receipt is what flips CiaoConfig.agent_root, so the cached answer from
     # before the migration is now stale in this process.
     from ciao.config import reset_reroot_cache
@@ -678,12 +740,34 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     regenerated aggregates, and ``git status`` names them. Un-deriving them here
     would mean the receipt carrying a copy of every index it replaced, which buys
     nothing: they are rebuilt from the notes on the next sync either way.
+
+    Refuses without touching anything when a bootstrap-created directory holds
+    files the migration did not put there: an architecture rollback must not be
+    the thing that deletes a custom command added after it.
     """
     install_root = Path(install_root).resolve()
     runtime_root = Path(runtime_root)
     receipt = read_receipt(runtime_root)
     if receipt is None:
         return {"status": "nothing_to_undo", "reason": "no migrated receipt"}
+
+    # Before ANY mutation: a directory the migration created may have gained
+    # descendants since, and everything below assumes only recorded contents
+    # are inside them.
+    blocked = _unexpected_under_created_dirs(install_root, receipt)
+    if blocked:
+        shown = ", ".join(blocked[:5])
+        more = f" (and {len(blocked) - 5} more)" if len(blocked) > 5 else ""
+        return {
+            "status": "refused",
+            "reason": (
+                "these paths under directories the migration created were not "
+                f"put there by the migration: {shown}{more}. Move them out or "
+                "delete them, then run the undo again; undoing anyway would "
+                "delete them with their directory and git cannot bring them back"
+            ),
+            "unexpected_paths": blocked,
+        }
 
     vault_name = Path(receipt.get("vault_root", "")).name or VAULT_DIR_NAME
     if receipt.get("removed_vault_dir"):
@@ -728,7 +812,9 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     # The bootstrap's `.claude/` holds hundreds of packaged files, so it is
     # recorded as a directory and removed whole rather than listed file by file.
     # Only directories this migration CREATED are listed, so a root that already
-    # had one keeps it.
+    # had one keeps it. Removing whole is safe because the guard above verified
+    # every descendant against the contents the receipt recorded; anything
+    # unrecorded refused the undo before this line ran.
     import shutil  # noqa: PLC0415
 
     for relative in receipt.get("created_dirs", []):
@@ -797,6 +883,64 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         "cleared_handover_flags": cleared,
         "already_reversed": already,
     }
+
+
+def _walk_entries(base: Path) -> set[str]:
+    """Every file, directory and symlink under ``base``, relative to it.
+
+    ``os.walk`` with ``followlinks=False`` rather than ``rglob``: a symlinked
+    directory is recorded once as an entry and never descended into, so the
+    mirror farms inside `.claude/` are named without pulling in their targets'
+    trees. The same walk at apply time and at undo time is what makes the
+    comparison a diff of like against like.
+    """
+    entries: set[str] = set()
+    for current, dirs, files in os.walk(base, followlinks=False):
+        prefix = Path(current).relative_to(base)
+        for name in [*dirs, *files]:
+            entries.add(str(prefix / name))
+    return entries
+
+
+def _snapshot_created_dirs(
+    install_root: Path, created_dirs: list[str]
+) -> dict[str, list[str]]:
+    """List what the bootstrap put inside each directory it created.
+
+    Recorded in the receipt beside the directory names, because a name alone
+    made undo rmtree the whole directory — and with it any command, subagent or
+    other file an operator added beneath it after the migration ran.
+    """
+    contents: dict[str, list[str]] = {}
+    for relative in created_dirs:
+        base = Path(install_root) / relative
+        if base.is_dir():
+            contents[relative] = sorted(_walk_entries(base))
+    return contents
+
+
+def _unexpected_under_created_dirs(
+    install_root: Path, receipt: dict[str, Any]
+) -> list[str]:
+    """Descendants of bootstrap-created directories the migration did not write.
+
+    Each recorded directory's live tree is compared against the contents its
+    receipt entry captured; anything not in that capture blocks the undo, named
+    by path, because removing the directory whole would remove it too and the
+    git moves that follow cannot bring it back. A receipt written before the
+    captures existed records nothing per directory, so every descendant counts
+    as unattributed and none of them may be deleted on a guess.
+    """
+    unexpected: list[str] = []
+    contents = receipt.get("created_dirs_contents")
+    for relative in receipt.get("created_dirs", []):
+        base = Path(install_root) / str(relative)
+        if not base.is_dir():
+            continue
+        recorded = set((contents or {}).get(str(relative)) or [])
+        for entry in sorted(_walk_entries(base) - recorded):
+            unexpected.append(f"{relative}/{entry}")
+    return sorted(unexpected)
 
 
 def _prune_empty_parents(install_root: Path, directory: Path) -> None:

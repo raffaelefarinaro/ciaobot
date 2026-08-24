@@ -404,6 +404,88 @@ def test_a_failure_after_the_moves_rolls_back_and_records_the_refusal(
     assert read_receipt(runtime) is None
 
 
+def test_a_failed_receipt_write_unwinds_the_whole_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt is part of the transaction, not a trophy handed out after it.
+
+    Every vault, registry, guide and skill mutation completed BEFORE the receipt
+    write, and that write sat outside the guarded stretch: a full runtime disk
+    failed it, migrate_if_needed caught the exception and started up with no
+    receipt - so agent_root still answered the shared layout while every file
+    sat under its per-workspace root, and nothing recorded that the move had
+    happened at all.
+    """
+    from ciao.workspace_reroot import peek_receipt
+
+    install, vault, runtime = _with_guide(tmp_path)
+    original_registry = [
+        {"name": "personal", "vault_root": "memory-vault/personal"},
+        {"name": "work", "vault_root": "memory-vault/work"},
+    ]
+    _registry(runtime, original_registry)
+
+    real_write = workspace_reroot.write_receipt
+
+    def full_disk(runtime_root, payload):
+        if payload.get("status") == "migrated":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write(runtime_root, payload)
+
+    monkeypatch.setattr(workspace_reroot, "write_receipt", full_disk)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "refused"
+    assert any("after moving files" in r for r in result["refusals"])
+    # Everything moved is back: the vault, the stashed aggregates, the guide.
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+    assert (install / "memory-vault" / "INDEX.md").is_file()
+    assert (install / "CLAUDE.md").is_file()
+    assert not (install / "personal").exists()
+    # The registry holds the pre-migration entries, not the rewritten ones.
+    after = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    assert after == original_registry
+    # No migrated receipt anywhere, and no half-written one beside it either.
+    assert read_receipt(runtime) is None
+    assert peek_receipt(runtime)["status"] == "refused"
+    assert not list((runtime / "migration").glob("*.tmp"))
+    # So every receipt-gated reader still resolves the SHARED layout.
+    config = _trigger_config(install, runtime)
+    assert config.agent_root("work") == install
+
+
+def test_a_failure_after_the_registry_rewrite_restores_the_before_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registry moved with the files, so it has to move BACK with them.
+
+    A failure past _rewrite_registry - writing the triage sheet, splitting the
+    guide, bootstrapping a root against an unwritable destination - used to move
+    the vaults home but left the rewritten durable entries naming per-root paths
+    that were gone again, so every workspace looked empty after a failed
+    unattended run. The unwind now restores what the rewrite captured.
+    """
+    install, vault, runtime = _with_guide(tmp_path)
+    original = [
+        {"name": "personal", "vault_root": "memory-vault/personal"},
+        {"name": "work", "vault_root": "memory-vault/work"},
+    ]
+    _registry(runtime, original)
+
+    def unwritable(*args, **kwargs):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(workspace_reroot, "write_skills_triage", unwritable)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "refused"
+    after = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    assert after == original
+    assert (install / "memory-vault" / "personal").is_dir()
+
+
 def test_apply_does_not_refuse_on_untracked_files(tmp_path: Path) -> None:
     """Untracked files must NOT block.
 
@@ -1623,6 +1705,67 @@ def test_undo_stages_the_created_files_it_removes(tmp_path: Path) -> None:
     assert not (install / "personal").exists()
     status = _git(install, "-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=no")
     assert " D " not in status, status
+
+
+def test_undo_refuses_rather_than_deleting_files_added_after_the_migration(
+    tmp_path: Path,
+) -> None:
+    """An architecture rollback must never delete work the migration did not do.
+
+    The receipt recorded a bootstrap-created directory by its top-level name
+    alone, so undo rmtree'd the whole of it: a custom command added beneath
+    `commands/` after the migration vanished permanently, unrecoverable by the
+    git moves that follow. Undo now diffs the live tree against what the receipt
+    captured and refuses while anything unrecorded is present.
+    """
+    install, runtime = _migrated(tmp_path)
+    user_file = install / "work" / "commands" / "my-own-command.md"
+    user_file.write_text("# mine\n", encoding="utf-8")
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "a command the migration never wrote")
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "refused"
+    assert "my-own-command.md" in result["reason"]
+    assert user_file.is_file(), "the refusal must have touched nothing"
+    assert read_receipt(runtime) is not None, "a refusal consumed the receipt"
+
+    # Clearing the conflict lets the same undo finish exactly as before.
+    user_file.unlink()
+    result = undo(install, runtime)
+    assert result["status"] == "undone", result
+    assert not (install / "work").exists()
+
+
+def test_undo_refuses_on_a_legacy_receipt_that_recorded_no_contents(
+    tmp_path: Path,
+) -> None:
+    """Receipts written before the contents capture name directories alone, so
+    nothing under them is attributable and none of it may be deleted on a guess."""
+    import shutil
+
+    install, runtime = _migrated(tmp_path)
+    record = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    record.pop("created_dirs_contents")
+    receipt_path(runtime).write_text(json.dumps(record), encoding="utf-8")
+    seeded = install / "work" / "commands"
+    assert seeded.is_dir() and any(seeded.iterdir())
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "refused"
+    shutil.rmtree(install / "work" / ".claude")
+    shutil.rmtree(install / "personal" / ".claude")
+    for name in ("personal", "work"):
+        for relative in ("commands", "subagents"):
+            target = install / name / relative
+            if target.is_dir():
+                shutil.rmtree(target)
+
+    # With every bootstrap-created directory empty, a legacy undo can proceed.
+    result = undo(install, runtime)
+    assert result["status"] == "undone", result
 
 
 def test_an_empty_catalog_directory_is_not_moved(tmp_path: Path) -> None:
