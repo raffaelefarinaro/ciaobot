@@ -1079,15 +1079,52 @@ def _read_env_lines(path: Path) -> list[str]:
 # ── Workspace vault relocation ──────────────────────────────────────────
 
 
+def _workspace_fs_guard(request: Request) -> JSONResponse | None:
+    """Gate the Settings folder-picker routes on a password or localhost.
+
+    These two routes reach OUTSIDE the workspace - they enumerate arbitrary
+    directories and create folders anywhere the process can write - which is
+    broader than anything else on `/api`. They relied on the auth middleware
+    alone, and `pwa_auth_required` is `bool(pwa_auth_token)`: on an install with
+    no password set, every `/api` route is open, so these were too, and
+    `PWA_HOST` defaults to `0.0.0.0`. The rest of the API at least stays inside
+    the workspace; filesystem enumeration of the whole machine should not be
+    reachable from the network without a password.
+
+    Localhost is still allowed unauthenticated, because that is the owner at the
+    keyboard and it is how the tokenless first-run flow reaches the picker.
+    Deliberately NOT the setup guard: that one also demands `bootstrap_mode`,
+    which is false once the install is configured, so reusing it would make the
+    Settings picker permanently 404.
+    """
+    config = request.app.state.config
+    if getattr(config, "pwa_auth_required", False):
+        return None
+    if _localhost_request(request):
+        return None
+    return JSONResponse(
+        {
+            "error": (
+                "browsing the filesystem needs a password — set one in "
+                "Settings, or open Ciaobot on the machine itself"
+            )
+        },
+        status_code=403,
+    )
+
+
 async def browse_workspace_folder_endpoint(request: Request) -> JSONResponse:
     """List local subdirectories for the Settings → Workspaces vault picker.
 
     The setup wizard's folder picker is bootstrap + localhost only; Settings
     runs in a normal authenticated session, so it needs its own browse route.
     It lists directory names and paths only and never reads file contents, the
-    same discipline as the setup picker, and it is protected by the normal
-    `/api` auth middleware.
+    same discipline as the setup picker. Gated by `_workspace_fs_guard`: a
+    password, or the owner at the machine itself.
     """
+    guard = _workspace_fs_guard(request)
+    if guard is not None:
+        return guard
     raw = str(request.query_params.get("path") or "~").strip() or "~"
     target = _resolve_setup_dir(raw)
     if target is None:
@@ -1104,10 +1141,17 @@ async def create_workspace_folder_endpoint(request: Request) -> JSONResponse:
     """Create a folder from the Settings → Workspaces vault picker.
 
     Mirrors the setup wizard's ``/api/setup/mkdir`` for normal authenticated
-    sessions. Enumerates only a directory name under an already-listed parent;
-    never accepts a path string from the body beyond that parent, so it cannot
-    be used to write to arbitrary locations.
+    sessions, gated by `_workspace_fs_guard`.
+
+    The parent comes from ``body["path"]`` and IS an arbitrary absolute path -
+    an earlier version of this docstring claimed otherwise, which was the
+    opposite of true. Only the leaf `name` is constrained (no separators, no
+    leading dot), so this can create a directory anywhere the process can
+    write; that is why the guard above matters.
     """
+    guard = _workspace_fs_guard(request)
+    if guard is not None:
+        return guard
     try:
         body = await request.json()
     except ValueError:

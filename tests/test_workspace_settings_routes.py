@@ -1615,3 +1615,46 @@ def test_browse_and_create_workspace_folder(tmp_path):
 
     not_a_dir = client.get("/api/workspaces/browse-folder?path=/nonexistent-xyz")
     assert not_a_dir.status_code == 400
+
+
+# ---- folder-picker guard ----------------------------------------------------
+
+
+def test_folder_browsing_needs_a_password_from_the_network(tmp_path):
+    """These routes reach outside the workspace, so they need more than nothing.
+
+    `pwa_auth_required` is `bool(pwa_auth_token)`, so an install with no
+    password set leaves every `/api` route open — and `PWA_HOST` defaults to
+    `0.0.0.0`. The rest of the API at least stays inside the workspace; these
+    two enumerate arbitrary directories and create folders anywhere the process
+    can write, which should not be reachable from the network unauthenticated.
+    """
+    client, _config, _pcm = _client(tmp_path, {"PWA_AUTH_TOKEN": ""})
+
+    listed = client.get("/api/workspaces/browse-folder?path=~")
+    made = client.post("/api/workspaces/browse-folder", json={"path": "/", "name": "x"})
+
+    assert listed.status_code == 403
+    assert "password" in listed.json()["error"]
+    assert made.status_code == 403
+
+
+def test_folder_browsing_is_allowed_from_the_machine_itself(tmp_path):
+    """Localhost is the owner at the keyboard, and the tokenless first-run path."""
+    client, _config, _pcm = _client(tmp_path, {"PWA_AUTH_TOKEN": ""})
+
+    listed = client.get(
+        "/api/workspaces/browse-folder?path=~", headers={"host": "localhost"}
+    )
+
+    assert listed.status_code == 200
+    assert "entries" in listed.json() or "dirs" in listed.json()
+
+
+def test_folder_browsing_is_allowed_once_a_password_is_set(tmp_path):
+    """The picker must keep working for a normal remote Settings session."""
+    client, _config, _pcm = _client(tmp_path)  # fixture sets PWA_AUTH_TOKEN
+
+    listed = client.get("/api/workspaces/browse-folder?path=~")
+
+    assert listed.status_code == 200
