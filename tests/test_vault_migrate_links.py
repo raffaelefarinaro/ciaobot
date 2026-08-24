@@ -725,3 +725,37 @@ def test_a_custom_frontmatter_key_keeps_the_full_ref(tmp_path: Path) -> None:
     # ...while prose keeps the label a reader was meant to see.
     assert "description: asked Mo Salah to help" in text
     assert "[[" not in text
+
+
+def test_the_cli_does_not_claim_a_clean_vault_after_a_failed_write(
+    tmp_path: Path, capsys
+) -> None:
+    """"No wikilinks found" was a flat lie on a retry.
+
+    When every note carrying wikilinks fails to write, `rewrites` is empty — and
+    the CLI printed the same line it uses for a genuinely clean vault, on stdout,
+    while the failures went to stderr. An operator reading stdout was told the
+    vault had nothing to migrate.
+    """
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "People" / "Mo.md").write_text(
+        "---\ntype: person\n---\n# Mo\n", encoding="utf-8"
+    )
+    note = vault / "Root.md"
+    note.write_text("---\ntype: doc\n---\nSee [[People/Mo]].\n", encoding="utf-8")
+    note.chmod(0o444)
+    try:
+        code = cli.main(
+            ["vault-migrate-links", "--apply", "--vault-root", str(vault)]
+        )
+    finally:
+        note.chmod(0o644)
+
+    out = capsys.readouterr()
+    assert code == 1
+    assert "No wikilinks found" not in out.out
+    assert "failed to write" in out.out
+    assert "Permission denied" in out.err

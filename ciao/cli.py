@@ -1469,6 +1469,15 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
                 f"  {change['path']}:{change['line']}  "
                 f"{change['from']} -> {change['to']}"
             )
+    elif summary["failed"]:
+        # "No wikilinks found" would be a flat lie here: wikilinks WERE found,
+        # every note carrying them failed to write, and the failures are printed
+        # to stderr just below. A retry hit exactly this and told the operator
+        # the vault was clean.
+        print(
+            f"Rewrote nothing: every note with wikilinks failed to write "
+            f"({summary['files_scanned']} scanned)."
+        )
     else:
         print(f"No wikilinks found in {summary['files_scanned']} note(s).")
 
@@ -1493,6 +1502,14 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     if args.apply and rewrites:
         print(f"\nReceipt: {summary.get('receipt_path', '')}")
         print("Reverse it exactly with `ciao vault-unmigrate-links --apply`.")
+        if not summary.get("complete", True):
+            # The receipt is real and the undo works, but the migration is not
+            # done. Printing only the success trailer read as "finished".
+            print(
+                "This run did NOT finish: the notes listed under Failed still "
+                "use wikilinks. Fix the cause and re-run — the reverse map "
+                "carries forward, so nothing already converted is lost."
+            )
     elif not args.apply and rewrites:
         print("\nRe-run with --apply to write these changes.")
     return 1 if summary["failed"] else 0
