@@ -375,9 +375,30 @@ def _git_is_destructive(args: list[str]) -> bool:
         # `--` introduces a pathspec: `git checkout -- .` throws the worktree
         # away. A bare `.` does the same without the separator.
         return "--" in rest or "." in rest
+    if subcommand == "branch":
+        # `-D` deletes even an unmerged branch, which can drop the only
+        # reference to commits that exist nowhere else. `-d` refuses unmerged
+        # work, so it is recoverable by definition and stays approved along
+        # with listing.
+        return any(a in {"-D", "--delete --force"} for a in rest) or (
+            "-d" in rest and "--force" in rest
+        )
     if subcommand in _DESTRUCTIVE_GIT_SUBCOMMANDS:
         return True
     return False
+
+
+# `rsync --delete` removes files from the DESTINATION that are absent from the
+# source, so an empty source empties the target. rsync is otherwise a copy, and
+# copies are not listed as destructive here, so only the deleting forms count.
+_RSYNC_DELETE_PREFIXES = ("--delete", "--del", "--remove-source-files")
+
+
+def _rsync_is_destructive(args: list[str]) -> bool:
+    if any(a in {"-n", "--dry-run"} for a in args):
+        # A dry run reports what it would delete and removes nothing.
+        return False
+    return any(a.startswith(_RSYNC_DELETE_PREFIXES) for a in args)
 
 
 def _segment_is_destructive(name: str, args: list[str]) -> bool:
@@ -425,6 +446,8 @@ def _segment_is_destructive(name: str, args: list[str]) -> bool:
         return _git_is_destructive(args)
     if name == "find":
         return any(arg.startswith(_UNSAFE_FIND_PREFIXES) for arg in args)
+    if name == "rsync":
+        return _rsync_is_destructive(args)
     if name not in _DESTRUCTIVE_COMMANDS:
         return False
     # A help/version-only invocation of a destructive verb is a query.

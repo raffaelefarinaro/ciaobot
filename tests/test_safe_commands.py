@@ -397,3 +397,51 @@ def test_an_interpreter_running_a_script_file_is_still_approved(command):
 ])
 def test_non_destructive_commands_are_not_destructive(command):
     assert is_destructive_command(command) is False
+
+
+# ---- rsync deletion and forced branch deletion ------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    # `--delete` removes files from the DESTINATION that the source lacks, so
+    # an empty source empties the target. rsync reached the unknown-command
+    # fallback and was approved.
+    "rsync -a --delete empty/ valuable/",
+    "rsync -a --del a/ b/",
+    "rsync --delete-after a/ b/",
+    "rsync --delete-excluded a/ b/",
+    "rsync --remove-source-files a/ b/",
+    "sudo rsync --delete a/ b/",
+    # `-D` drops a branch even when unmerged, which can be the only reference
+    # to those commits.
+    "git branch -D only-copy",
+    "git branch -d --force x",
+])
+def test_deleting_copies_and_branches_are_destructive(command):
+    assert is_destructive_command(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    # rsync without a delete flag is a copy, and copies are not listed here.
+    "rsync -av a/ b/",
+    # A dry run reports what it would delete and removes nothing.
+    "rsync -a --dry-run --delete a/ b/",
+    # `-d` refuses unmerged work, so it is recoverable by definition.
+    "git branch -d merged",
+    "git branch",
+    "git branch -a",
+    "git branch --list",
+])
+def test_copies_and_safe_branch_work_stay_approved(command):
+    assert is_destructive_command(command) is False
+
+
+def test_the_read_only_classifier_still_rejects_a_deleting_rsync():
+    """The rsync rule belongs to the DESTRUCTIVE classifier, not the safe one.
+
+    Placed in `_segment_is_safe` by mistake it returned "destructive" as the
+    answer to "is this safe?", which would have marked a deleting rsync as
+    read-only — the exact inversion of the fix.
+    """
+    assert is_read_only_command("rsync --delete a/ b/") is False
+    assert is_read_only_command("ls -la") is True
