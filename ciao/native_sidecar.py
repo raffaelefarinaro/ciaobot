@@ -36,6 +36,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ciao.jsonio import write_private_text
+
 logger = logging.getLogger(__name__)
 
 SIDECAR_NAME = "ciaobot-native"
@@ -266,8 +268,9 @@ async def _respond_in_user_session(
     prompt_path = Path(tmp_dir) / "prompt"
     stderr_path = Path(tmp_dir) / "stderr"
     try:
-        prompt_path.write_text(prompt, encoding="utf-8")
-        prompt_path.chmod(0o600)
+        # owner-only from creation: this is a chat transcript, and write_text
+        # would briefly expose umask-default permissions before the chmod
+        write_private_text(prompt_path, prompt)
 
         command = f"{shlex.quote(str(binary))} respond"
         if instructions:

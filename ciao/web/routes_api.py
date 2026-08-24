@@ -40,6 +40,7 @@ from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
 from ciao import vault_rehome
+from ciao.jsonio import write_private_text
 from ciao.memory_tool import resolve_region
 from ciao.native_sessions import live_sessions_for_workspace
 from ciao.config import WorkspaceConfig
@@ -1097,7 +1098,9 @@ def _write_env_values(path: Path, updates: dict[str, str]) -> None:
         if value:
             out.append(f"{key}={value}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+    # .env carries provider keys and PWA_AUTH_TOKEN, so it must be owner-only
+    # from creation, not only after a follow-up chmod
+    write_private_text(path, "\n".join(out).rstrip() + "\n")
 
 
 def _read_env_value(path: Path, key: str) -> str:
@@ -1596,9 +1599,15 @@ async def gws_save_client_secret(request: Request) -> JSONResponse:
 
     try:
         config_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # the dir holds only this profile's Google OAuth material; tighten
+            # it for installs whose older setup left it group/world-readable
+            config_dir.chmod(0o700)
+        except OSError as exc:
+            logger.warning("Failed to tighten %s permissions: %s", config_dir, exc)
         path = config_dir / "client_secret.json"
-        path.write_text(json.dumps(secret_json, indent=2), encoding="utf-8")
-        path.chmod(0o600)
+        # owner-only from creation: the file carries the Google client secret
+        write_private_text(path, json.dumps(secret_json, indent=2))
     except Exception as e:
         return JSONResponse({"error": f"Failed to write client_secret.json: {str(e)}"}, status_code=500)
 

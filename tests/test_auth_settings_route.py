@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -49,6 +50,9 @@ def test_auth_settings_enable_password(tmp_path: Path) -> None:
     env = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "PWA_AUTH_REQUIRED=true" in env
     assert "PWA_AUTH_TOKEN=hunter2" in env
+    # .env holds the password in clear text by design, so it must at least be
+    # owner-only
+    assert stat.S_IMODE((tmp_path / ".env").stat().st_mode) == 0o600
     assert "ciao_session=" in res.headers.get("set-cookie", "")
 
 

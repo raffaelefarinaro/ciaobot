@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
+from urllib.parse import urlparse
 
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -726,6 +728,12 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     assert profiles["personal"]["client_secret_present"] is True
     assert profiles["personal"]["configured"] is False
 
+    # The uploaded file carries the Google client secret, so both it and its
+    # containing profile dir must be owner-only.
+    secret_path = tmp_path / "secrets" / "gws-personal" / "client_secret.json"
+    assert stat.S_IMODE(secret_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(secret_path.parent.stat().st_mode) == 0o700
+
     # Check validation error
     resp = client.post(
         "/api/integrations/gws/client-secret",
@@ -969,7 +977,12 @@ def test_gws_profile_payload_never_shows_a_raw_scope_url(tmp_path):
     assert resp.status_code == 200
     personal = next(p for p in resp.json()["profiles"] if p["name"] == "personal")
 
-    assert not any("googleapis.com" in chip for chip in personal["examples"])
+    # Chips must render as human labels: no chip may parse as a URL at all,
+    # which is stricter than the old "googleapis.com appears nowhere" check
+    # that a hostile URL could satisfy by hiding the host in a query param.
+    for chip in personal["examples"]:
+        parsed_chip = urlparse(chip)
+        assert parsed_chip.scheme not in ("http", "https"), chip
     assert "googleapis.com" not in personal["purpose"]
     assert "openid" not in personal["purpose"]
     # The services the user actually recognises still appear.

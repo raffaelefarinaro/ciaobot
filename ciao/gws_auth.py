@@ -42,6 +42,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from ciao.jsonio import write_private_text
+
 logger = logging.getLogger(__name__)
 
 # OAuth scopes granted per profile. Both profiles request the full set of core
@@ -440,9 +442,15 @@ def store_credentials(
                 logger.warning("Failed to move stale %s: %s", name, exc)
 
     config_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        # everything under here is OAuth material; tighten the profile dir for
+        # installs whose older setup left it group/world-readable
+        config_dir.chmod(0o700)
+    except OSError as exc:
+        logger.warning("Failed to tighten %s permissions: %s", config_dir, exc)
     creds_path = config_dir / "credentials.json"
-    creds_path.write_text(json.dumps(creds, indent=2), encoding="utf-8")
-    creds_path.chmod(0o600)
+    # owner-only from creation: this file carries the refresh token
+    write_private_text(creds_path, json.dumps(creds, indent=2))
 
     key_file = config_dir / ".encryption_key"
     if key_file.exists():
