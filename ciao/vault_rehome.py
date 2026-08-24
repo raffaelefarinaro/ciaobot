@@ -62,6 +62,14 @@ touching it, leaves a file completely alone on any mismatch, and only then moves
 the notes back. Proposals already written to a review queue are deliberately
 *not* withdrawn: they are the user's to resolve, and a note the user has since
 promoted must not be silently un-proposed.
+
+Which means the map may never *narrow*. A run that could not write some note or
+could not move it records `status: "partial"` — so nothing reads the vault as
+re-homed and the retry is not refused — and each later run adds its entries to
+the map rather than replacing it, keeping every note an earlier run touched
+restorable. Only entries a later run superseded are dropped: rewrites for a note
+this run rewrote itself, whose offsets it has just shifted, and a move whose
+destination this run moved away from again.
 """
 
 from __future__ import annotations
@@ -165,36 +173,15 @@ def receipt_path(runtime_root: Path) -> Path:
     return Path(runtime_root) / "migration" / RECEIPT_NAME
 
 
-def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
-    """The reverse map of a completed migration, or None.
-
-    Gates on ``status == "migrated"`` rather than on the file existing, because
-    only a migrated receipt carries a reverse map: this is the accessor for undo
-    and for the refusal check, both of which need the map itself, not the mere
-    fact that a file is there. The detection side wants the opposite question
-    ("has anything been recorded at all?") and asks :func:`peek_receipt`.
-    """
-    path = receipt_path(runtime_root)
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data if data.get("status") == "migrated" else None
-
-
 def peek_receipt(runtime_root: Path) -> dict[str, Any] | None:
-    """Read the receipt file whatever its status, for the detection side.
+    """Read the receipt file whatever its status.
 
-    The upgrade notice and the operator tile read this rather than
-    :func:`read_receipt`, because a receipt written before the ``status`` field
-    existed records a COMPLETED re-home with no status at all, and
-    `read_receipt` correctly returns None for it — reading that as "never
-    re-homed" made both surfaces permanent false positives on exactly the
-    installs that had done the work.
+    Two callers need the reverse map regardless of whether the run that wrote it
+    finished: :func:`unrehome_people`, because a partial run's map is still an
+    exact inverse for the notes it *did* move and rewrite, and
+    :func:`write_receipt`, because a retry has to carry those entries forward.
+    Everything that asks "has this vault been re-homed?" wants
+    :func:`read_receipt` instead.
     """
     path = receipt_path(runtime_root)
     if not path.is_file():
@@ -206,34 +193,149 @@ def peek_receipt(runtime_root: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
+    """The receipt of a *completed* re-homing, or None.
+
+    Gates on ``status`` rather than on the file existing, because a run that
+    could not write or could not move some note left the vault half re-homed:
+    reading that receipt as "already migrated" is what let the migration stop
+    short of done and report that it had finished — the normal re-run was
+    refused while the note it never moved stayed misfiled with every reference
+    to it already repointed at a path it is not at.
+
+    A receipt written before ``status`` existed records a completed run, so a
+    missing field reads as ``"migrated"``; anything else would turn every
+    install that already did the work into a permanent false positive. That
+    tolerance lives here rather than in the callers precisely so the detection
+    surfaces can ask this one question and get both halves right.
+    """
+    data = peek_receipt(runtime_root)
+    if data is None:
+        return None
+    return data if data.get("status", "migrated") == "migrated" else None
+
+
+def _carry_moves(
+    previous: Any, fresh: Sequence[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The earlier moves this run did not supersede.
+
+    A move is whole-file, so an earlier `from`/`to` pair stays exactly true for
+    as long as the note is still at `to` — which is every earlier move except
+    one this run moved that same path away from again. Merging is therefore the
+    safe default here, and the all-or-nothing rotation it replaces is what left
+    a retry's receipt naming only the notes the retry itself moved, with the
+    first batch's moves unrecoverable.
+
+    A note reaching `to` and then moving *again* needs its tags rewritten
+    between the two runs, since the destination is by construction the workspace
+    its tags name. Those are dropped rather than composed into a single
+    `from`→`to` hop: the case is unreachable without a hand edit, and dropping
+    can only ever match today's behaviour, which drops every earlier move.
+    """
+    claimed = {str(move.get("from", "")) for move in fresh}
+    claimed |= {str(move.get("to", "")) for move in fresh}
+    carried: list[dict[str, Any]] = []
+    for move in previous if isinstance(previous, list) else []:
+        if not isinstance(move, dict):
+            continue
+        origin, current = str(move.get("from", "")), str(move.get("to", ""))
+        if not origin or not current or current in claimed:
+            continue
+        carried.append(move)
+    return carried
+
+
+def _carry_rewrites(
+    previous: Any,
+    fresh: Sequence[dict[str, Any]],
+    moves: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The earlier spans this run's writes did not invalidate.
+
+    Merging two receipts is safe *per note*, which is the distinction the old
+    rotation missed. An offset only means anything against the exact bytes it was
+    recorded against, so an entry for a note this run rewrote is stale and is
+    dropped — but a note this run left alone is byte for byte as its own entries
+    describe it, and those carry over untouched.
+
+    Carried entries are first re-keyed through this run's moves. A move does not
+    touch a byte of the note's content, so a span recorded against the old path
+    is still exact at the new one; without the re-keying the undo would look for
+    it where the note no longer is, fail to read it, and report a mismatch it
+    invented. The re-keying is also what makes the drop test correct, since this
+    run records its own spans against the path the note *ends up* at.
+
+    The stale ones are dropped rather than shifted arithmetically. Recomputing
+    them is not merely fiddly: one mismatched span disqualifies the *whole* file
+    in :func:`unrehome_vault_people`, so a wrong entry would take this run's good
+    entries for that note down with it. The superseded receipt is archived beside
+    the active one either way.
+    """
+    moved = {
+        str(move.get("from", "")): str(move.get("to", ""))
+        for move in moves
+        if str(move.get("from", "")) and str(move.get("to", ""))
+    }
+    rewritten = {str(entry.get("path", "")) for entry in fresh}
+    carried: list[dict[str, Any]] = []
+    for entry in previous if isinstance(previous, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path", ""))
+        if not path:
+            continue
+        path = moved.get(path, path)
+        if path in rewritten:
+            continue
+        carried.append({**entry, "path": path})
+    return carried
+
+
 def write_receipt(runtime_root: Path, summary: dict[str, Any]) -> Path:
-    """Persist a receipt atomically, keeping any earlier reverse map.
+    """Persist a receipt atomically, absorbing any earlier reverse map.
 
     Written through a `.tmp` sibling and `replace()` so a crash mid-write cannot
     leave a truncated reverse map — a half-written receipt is worse than none,
     because unrehoming would restore part of a file and move nothing back.
 
-    A forced re-run would otherwise overwrite the receipt of the run that did the
-    real work, and the two cannot be merged: the second pass rewrites text the
-    first pass already shifted. So an existing receipt is moved aside under a
-    timestamped name instead of being lost.
+    The active receipt carries every run's entries for the notes that run still
+    describes, not just the last run's. Replacing it outright lost the earlier
+    batch: after a run that could not move one note, the retry that moved it left
+    an active map naming only that note, so the notes moved first could no longer
+    be put back — precisely the promise the reverse map exists to make, and a
+    promise `--force` could break on a vault that was never broken.
+    :func:`_carry_moves` and :func:`_carry_rewrites` decide per note which
+    earlier entries still hold. The superseded file is kept under a timestamped
+    name either way, as the raw record of what one run did.
 
-    Only an applied migration writes one, so the payload is always the
-    ``migrated`` reverse map.
+    ``status`` is ``"partial"`` whenever the run left failures behind. That is
+    what stops a half re-homed vault from presenting itself as finished.
+
+    ``needs_judgement`` and ``proposals`` are the current run's alone, not a
+    union: every run re-derives the plan, so the newest values already describe
+    the whole backlog, and merging frozen snapshots is how the operator tile
+    ended up quoting four different counts for one thing.
     """
     path = receipt_path(runtime_root)
     path.parent.mkdir(parents=True, exist_ok=True)
+    previous = peek_receipt(runtime_root) or {}
     if path.is_file():
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path.replace(path.with_name(f"{path.stem}.{stamp}{path.suffix}"))
+    moves = list(summary.get("moves", []))
+    rewrites = list(summary.get("rewrites", []))
     payload = {
         "schema_version": RECEIPT_VERSION,
-        "status": "migrated",
+        "status": "partial" if summary.get("failed") else "migrated",
         "rehomed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "vault_root": summary.get("vault_root", ""),
         "git_head_before": summary.get("git_head_before", ""),
-        "moves": summary.get("moves", []),
-        "rewrites": summary.get("rewrites", []),
+        "moves": [*_carry_moves(previous.get("moves"), moves), *moves],
+        "rewrites": [
+            *_carry_rewrites(previous.get("rewrites"), rewrites, moves),
+            *rewrites,
+        ],
         "needs_judgement": summary.get("needs_judgement", []),
         "proposals": summary.get("proposals", []),
     }
@@ -1467,6 +1569,50 @@ def plan_rehome(
     return plan
 
 
+def _unwrite_own_links(
+    root: Path,
+    move: dict[str, Any],
+    originals: dict[str, str],
+    summary: dict[str, Any],
+) -> None:
+    """Take back the own-link rewrite of a note whose move then failed.
+
+    The note's own relative links were recomputed against the directory it was
+    going to. Leaving them that way while the note sits where it started is not
+    merely untidy, it poisons the retry: the second pass reads those links from
+    the old directory, resolves them to somewhere that does not exist, and
+    faithfully "recomputes" that — turning a dangling link into a *different*
+    dangling link that was never in the vault and that no receipt can undo. So
+    the rewrite is reverted here, and the spans it recorded are dropped with it,
+    because there is nothing left to reverse.
+
+    If the revert itself cannot be written the spans are re-keyed to where the
+    note actually sits instead. The map then still describes the file exactly,
+    which is the one thing that must hold; the operator is told, because a note
+    whose own links disagree with its location needs a human.
+    """
+    original = originals.get(move["to"])
+    if original is not None:
+        try:
+            (root / move["from"]).write_text(original, encoding="utf-8")
+        except OSError as exc:
+            summary["failed"].append(
+                {
+                    "path": move["from"],
+                    "error": f"its own links were left rewritten for the move: {exc}",
+                }
+            )
+        else:
+            kept = [item for item in summary["rewrites"] if item["path"] != move["to"]]
+            if len(kept) != len(summary["rewrites"]):
+                summary["files_rewritten"] -= 1
+            summary["rewrites"][:] = kept
+            return
+    for entry in summary["rewrites"]:
+        if entry["path"] == move["to"]:
+            entry["path"] = move["from"]
+
+
 def rehome_vault_people(
     vault_root: Path,
     *,
@@ -1511,12 +1657,30 @@ def rehome_vault_people(
         summary["skipped"] = plan["skipped"]
         return summary
 
+    # The pre-rewrite text of the notes that are about to *move*, keyed by where
+    # they are going. A note's own links are recomputed against the directory it
+    # is moving to, so that text is only correct once it gets there: if the move
+    # then fails the rewrite has to be taken back (see the move loop below), and
+    # this is what it is taken back to. Only the movers are held, so this is the
+    # length of `moves`, not of the vault.
+    originals: dict[str, str] = {}
     for before, record in sorted(plan["files"].items()):
         if apply:
+            if record["after"] != before:
+                try:
+                    originals[record["after"]] = (root / before).read_text(
+                        encoding="utf-8"
+                    )
+                except (OSError, UnicodeDecodeError):
+                    pass
             try:
                 (root / before).write_text(record["text"], encoding="utf-8")
             except OSError as exc:
                 summary["failed"].append({"path": before, "error": str(exc)})
+                # Nothing landed, so there is nothing to take back if the move
+                # fails too — and attempting it would report a second failure
+                # for a file this run never changed.
+                originals.pop(record["after"], None)
                 continue
         summary["files_rewritten"] += 1
         for change in record["changes"]:
@@ -1540,6 +1704,7 @@ def rehome_vault_people(
                 source.replace(destination)
             except OSError as exc:
                 summary["failed"].append({"path": move["from"], "error": str(exc)})
+                _unwrite_own_links(root, move, originals, summary)
                 continue
         summary["moves"].append(move)
 
@@ -1726,8 +1891,15 @@ def rehome_people(
     Neither refusal applies to a dry run. Both exist to protect a *write*, and
     gating the preview meant the only way to see what would happen to a dirty
     vault was to pass the flag that skips the check — exactly backwards.
+
+    The "already migrated" refusal reads a *completed* receipt only. A run that
+    could not move some note has not re-homed the vault, and gating the retry on
+    its receipt left that note misfiled with every reference to it already
+    pointing at a path it never reached, while the CLI reported a finished
+    migration. ``summary["complete"]`` says which kind of run this was.
     """
     receipt = read_receipt(runtime_root)
+    recorded = peek_receipt(runtime_root)
     plan = plan_rehome(vault_root, workspaces=workspaces)
     git = vault_git_state(vault_root, touched=_touched_paths(plan))
     if apply and not force:
@@ -1743,13 +1915,26 @@ def rehome_people(
     summary = rehome_vault_people(vault_root, apply=apply, workspaces=workspaces, plan=plan)
     summary["git_head_before"] = git["head"]
     summary["forced"] = bool(force)
+    summary["complete"] = not summary["failed"]
     # A forced re-run over an already-rehomed vault moves nothing, and recording
-    # *that* would replace a usable reverse map with an empty one — leaving
-    # `vault-unrehome` with nothing to undo. A first run with nothing to do still
-    # writes one, so the vault is marked done.
-    if apply and "skipped" not in summary and (summary["moves"] or receipt is None):
+    # *that* would rewrite the receipt for no reason. A first run with nothing to
+    # do still writes one, so the vault is marked done. Beyond that the receipt
+    # is rewritten only when this run actually wrote something — a move, or the
+    # link rewrites of a run whose every move then failed — or when the vault's
+    # *status* moved: down to "partial" because something could not be written,
+    # or up to "migrated" once a retry finds nothing left to fix. A retry that
+    # changes neither is not recorded at all, so re-running a failing migration
+    # does not bury the reverse map under timestamped copies.
+    recorded_partial = (recorded or {}).get("status", "migrated") == "partial"
+    should_record = (
+        summary["moves"]
+        or summary["rewrites"]
+        or recorded is None
+        or bool(summary["failed"]) != recorded_partial
+    )
+    if apply and "skipped" not in summary and should_record:
         summary["receipt_path"] = str(write_receipt(runtime_root, summary))
-    elif receipt is not None:
+    elif recorded is not None:
         summary["receipt_path"] = str(receipt_path(runtime_root))
     return summary
 
@@ -1777,8 +1962,16 @@ def unrehome_people(
 
     Queued proposals are not withdrawn — the review queue is the user's, and a
     judgement case they have already resolved must not be silently un-proposed.
+
+    Reads the receipt with :func:`peek_receipt`, so a *partial* re-homing is
+    still undoable. Whether the run finished is the forward side's question; here
+    the only question is what it moved and rewrote, which a partial receipt
+    answers exactly for the notes it names. Refusing to reverse one would strand
+    those notes with no way back, which is the opposite of the guarantee — and
+    it is what happened to every receipt written before the ``status`` field
+    existed, since the completed-only accessor read those as no receipt at all.
     """
-    receipt = read_receipt(runtime_root)
+    receipt = peek_receipt(runtime_root)
     if receipt is None:
         return {
             "skipped": "no migration receipt to reverse",

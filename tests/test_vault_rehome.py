@@ -588,11 +588,14 @@ def test_the_receipt_gates_a_second_run(tmp_path: Path) -> None:
     assert summary["skipped"] == "already migrated"
 
 
-def test_force_moves_the_old_receipt_aside(tmp_path: Path) -> None:
-    """Two receipts cannot be merged — the second pass shifts text the first
-    recorded — so the earlier reverse map is kept under its own name."""
+def test_force_adds_to_the_reverse_map_instead_of_replacing_it(tmp_path: Path) -> None:
+    """A second pass must not narrow what can be undone. It shifts only the text
+    of the notes *it* rewrites and moves only the notes *it* moves, so every other
+    entry stays exactly true and is carried into the new receipt; the earlier file
+    is still archived under its own name."""
     vault = _vault(tmp_path)
     runtime = tmp_path / ".runtime"
+    before = _snapshot(vault)
     rehome_people(vault, runtime, apply=True)
     first = read_receipt(runtime)
     _note(vault, "personal/People/Late.md", _person("[person, customer]"))
@@ -606,9 +609,19 @@ def test_force_moves_the_old_receipt_aside(tmp_path: Path) -> None:
     ]
     assert len(kept) == 1
     assert json.loads(kept[0].read_text(encoding="utf-8"))["moves"] == first["moves"]
-    assert read_receipt(runtime)["moves"] == [
-        {"from": "personal/People/Late.md", "to": "work/People/Late.md"}
-    ]
+    merged = read_receipt(runtime)
+    assert merged["moves"] == [
+        {"from": "personal/People/Mo.md", "to": "work/People/Mo.md"},
+        {"from": "personal/People/Late.md", "to": "work/People/Late.md"},
+    ], "the first batch stays reversible"
+    for entry in first["rewrites"]:
+        assert entry in merged["rewrites"]
+
+    unrehome_people(vault, runtime, apply=True)
+    after = _snapshot(vault)
+    after.pop("personal/Workspace/Memory-Proposals.md", None)
+    after.pop("personal/People/Late.md", None)
+    assert after == before, "both batches restored, byte for byte"
 
 
 def test_a_forced_rerun_with_nothing_to_do_keeps_the_reverse_map(tmp_path: Path) -> None:
@@ -623,6 +636,208 @@ def test_a_forced_rerun_with_nothing_to_do_keeps_the_reverse_map(tmp_path: Path)
 
     assert read_receipt(runtime) == first
     assert unrehome_people(vault, runtime)["moves_reverted"]
+
+
+# ---- a run that could not finish -------------------------------------------
+
+
+def _block_moves(vault: Path) -> Path:
+    """Make the move fail the way a permission or quota problem does.
+
+    The destination workspace is left unwritable, so the link rewrites all land
+    and only `source.replace(destination)` fails — the shape that matters,
+    because it is the one that leaves work on disk with nothing recording it.
+    """
+    work = vault / "work"
+    work.chmod(0o555)
+    return work
+
+
+def test_a_partial_run_is_not_recorded_as_complete(tmp_path: Path) -> None:
+    """One note that could not be moved means the vault is not re-homed. A receipt
+    saying otherwise made the migration stop short of done and report that it had
+    finished: the next normal run was refused as "already migrated" while the note
+    it never moved stayed misfiled — with every reference to it already repointed
+    at a path it is not at, so the vault was left worse than before the run."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    blocked = _block_moves(vault)
+    try:
+        summary = rehome_people(vault, runtime, apply=True)
+
+        assert _paths(summary["failed"]) == ["personal/People/Mo.md"]
+        assert summary["moves"] == []
+        assert summary["complete"] is False
+        assert (vault / "personal/People/Mo.md").is_file(), "still misfiled"
+        # No *completed* receipt, so nothing reads the vault as re-homed.
+        assert read_receipt(runtime) is None
+        # But what did land is recorded, or it could never be taken back.
+        recorded = peek_receipt(runtime)
+        assert recorded is not None
+        assert recorded["status"] == "partial"
+        assert recorded["moves"] == []
+        assert "work/People/Mo.md" in (vault / "personal/Projects/Foo.md").read_text(
+            encoding="utf-8"
+        ), "the references were repointed even though the move failed"
+        assert {entry["path"] for entry in recorded["rewrites"]} == {
+            "personal/Projects/Foo.md",
+            "work/projects/alpha.md",
+        }
+        # The note's own links were recomputed for a directory it never reached,
+        # so that one write is taken back rather than recorded.
+        assert "](../../work/projects/alpha.md)" in (
+            vault / "personal/People/Mo.md"
+        ).read_text(encoding="utf-8")
+        # And the retry is a plain re-run, not something that needs --force.
+        assert "skipped" not in rehome_people(vault, runtime, apply=True)
+        # That retry failed the same way and wrote nothing new, so it is not
+        # recorded: re-running a failing migration must not bury the one usable
+        # reverse map under a pile of timestamped copies of itself.
+        assert [
+            path
+            for path in receipt_path(runtime).parent.glob("vault-rehome.*.json")
+            if path != receipt_path(runtime)
+        ] == []
+    finally:
+        blocked.chmod(0o755)
+
+
+def test_a_partial_run_is_undoable_on_its_own(tmp_path: Path) -> None:
+    """A run that could not finish still has to be an exact inverse of what it did
+    write, or the receipt it now leaves behind is no better than the missing one.
+    Two ways that failed: the spans of the note whose move failed were keyed to
+    the destination it never reached, so the undo reported a mismatch it invented,
+    and the completed-only reader refused the receipt outright."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    before = _snapshot(vault)
+    blocked = _block_moves(vault)
+    try:
+        rehome_people(vault, runtime, apply=True)
+    finally:
+        blocked.chmod(0o755)
+
+    summary = unrehome_people(vault, runtime, apply=True)
+
+    assert summary["failed"] == []
+    assert summary["restored"] == [
+        "personal/Projects/Foo.md",
+        "work/projects/alpha.md",
+    ]
+    after = _snapshot(vault)
+    after.pop("personal/Workspace/Memory-Proposals.md", None)
+    assert after == before
+
+
+def test_a_retry_after_a_partial_run_can_undo_both_batches(tmp_path: Path) -> None:
+    """The reverse map has to stay usable across retries. Rotating it away on the
+    second pass left the references the first pass rewrote with nothing to restore
+    them — the retry moves the note and records only that, so the undo put the note
+    back and left every link pointing at the workspace it no longer lives in."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    before = _snapshot(vault)
+    blocked = _block_moves(vault)
+    try:
+        first = rehome_people(vault, runtime, apply=True)
+    finally:
+        blocked.chmod(0o755)
+    assert first["failed"], "the fixture has to actually fail the first move"
+
+    retry = rehome_people(vault, runtime, apply=True)
+
+    assert "skipped" not in retry, "a partial run must not gate its own retry"
+    assert retry["complete"] is True
+    assert retry["moves"] == [{"from": "personal/People/Mo.md", "to": "work/People/Mo.md"}]
+    assert read_receipt(runtime)["status"] == "migrated", "the vault is done now"
+    # The first pass's rewrites survive, re-keyed to where the retry's move put
+    # the note: a move does not touch a byte, so the offsets are still exact.
+    assert {entry["path"] for entry in read_receipt(runtime)["rewrites"]} == {
+        "work/People/Mo.md",
+        "personal/Projects/Foo.md",
+        "work/projects/alpha.md",
+    }
+
+    unrehome_people(vault, runtime, apply=True)
+
+    after = _snapshot(vault)
+    after.pop("personal/Workspace/Memory-Proposals.md", None)
+    assert after == before, "both batches restored, byte for byte"
+
+
+def test_a_rewrite_that_cannot_be_taken_back_is_still_mapped_to_the_real_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Reverting the own-link rewrite of a failed move is the preferred outcome,
+    but it is a write and writes fail. When it does, the spans must be re-keyed to
+    where the note actually sits: pointing them at the destination it never reached
+    would leave the one file whose links disagree with its location unrestorable."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    before = _snapshot(vault)
+    real = Path.write_text
+
+    def refuse_the_rollback(self, data, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if self.name == "Mo.md" and "../../work/projects/alpha.md" in data:
+            raise OSError("Read-only file system")
+        return real(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse_the_rollback)
+    blocked = _block_moves(vault)
+    try:
+        summary = rehome_people(vault, runtime, apply=True)
+    finally:
+        blocked.chmod(0o755)
+        monkeypatch.undo()
+
+    assert any(
+        "its own links were left rewritten" in item["error"]
+        for item in summary["failed"]
+    ), "a note whose links disagree with its location needs a human, so it is reported"
+    assert "personal/People/Mo.md" in {
+        entry["path"] for entry in peek_receipt(runtime)["rewrites"]
+    }
+
+    unrehome_people(vault, runtime, apply=True)
+
+    after = _snapshot(vault)
+    after.pop("personal/Workspace/Memory-Proposals.md", None)
+    assert after == before, "the degraded branch is still an exact inverse"
+
+
+def test_a_partial_receipt_never_reads_as_a_re_homed_vault(tmp_path: Path) -> None:
+    """The accessor split, stated on its own: the completed-only reader is what
+    every "has this vault been re-homed?" surface must ask, and the raw one is for
+    the undo and the carry-forward, which need the map whatever its status."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    blocked = _block_moves(vault)
+    try:
+        rehome_people(vault, runtime, apply=True)
+    finally:
+        blocked.chmod(0o755)
+
+    assert read_receipt(runtime) is None
+    assert peek_receipt(runtime)["status"] == "partial"
+
+
+def test_a_receipt_written_before_status_existed_still_reads_as_complete(
+    tmp_path: Path,
+) -> None:
+    """Installs that did the work before the field existed must not have their
+    migration re-run, and must still be able to reverse it — the completed-only
+    reader used to answer None for those, which took the undo away from exactly
+    the installs holding the largest reverse maps."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    rehome_people(vault, runtime, apply=True)
+    legacy = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    del legacy["status"]
+    receipt_path(runtime).write_text(json.dumps(legacy), encoding="utf-8")
+
+    assert read_receipt(runtime) is not None
+    assert rehome_people(vault, runtime, apply=True)["skipped"] == "already migrated"
+    assert unrehome_people(vault, runtime, apply=True)["moves_reverted"]
 
 
 def test_a_dirty_vault_is_refused_without_force(tmp_path: Path, monkeypatch) -> None:
