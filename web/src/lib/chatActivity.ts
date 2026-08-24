@@ -25,9 +25,12 @@ export function collectTraceOutputs(
 
 export function formatTokenUsage(usage?: Record<string, unknown>): string {
   if (!usage) return ''
-  const hasInput = usage.input_tokens !== undefined && usage.input_tokens !== null && usage.input_tokens !== ''
-  const hasOutput = usage.output_tokens !== undefined && usage.output_tokens !== null && usage.output_tokens !== ''
-  const hasContext = usage.context_pct !== undefined && usage.context_pct !== null && usage.context_pct !== ''
+  const inputVal = (usage.input_tokens ?? usage.inputTokens) as unknown
+  const outputVal = (usage.output_tokens ?? usage.outputTokens) as unknown
+  const contextVal = (usage.context_pct ?? usage.contextPct) as unknown
+  const hasInput = inputVal !== undefined && inputVal !== null && inputVal !== ''
+  const hasOutput = outputVal !== undefined && outputVal !== null && outputVal !== ''
+  const hasContext = contextVal !== undefined && contextVal !== null && contextVal !== ''
 
   const formatNum = (val: unknown) => {
     const num = typeof val === 'number' ? val : parseInt(String(val), 10)
@@ -36,13 +39,13 @@ export function formatTokenUsage(usage?: Record<string, unknown>): string {
 
   const parts: string[] = []
   if (hasInput) {
-    parts.push(`<span class="token-number">${formatNum(usage.input_tokens)}</span> in`)
+    parts.push(`<span class="token-number">${formatNum(inputVal)}</span> in`)
   }
   if (hasOutput) {
-    parts.push(`<span class="token-number">${formatNum(usage.output_tokens)}</span> out`)
+    parts.push(`<span class="token-number">${formatNum(outputVal)}</span> out`)
   }
   if (hasContext) {
-    parts.push(`<span class="context-pct">${String(usage.context_pct)}</span> ctx`)
+    parts.push(`<span class="context-pct">${String(contextVal)}</span> ctx`)
   }
   if (!parts.length) return ''
   return `Tokens ${parts.join(' · ')}`

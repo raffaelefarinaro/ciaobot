@@ -874,7 +874,10 @@ class ClaudeProvider(BaseSDKProvider):
                     await asyncio.wait_for(client.query(payload), timeout=120)
 
                 pending_result: ResultEvent | None = None
+                last_result_msg: ResultMessage | None = None
                 async for msg in client.receive_response():
+                    if isinstance(msg, ResultMessage):
+                        last_result_msg = msg
                     for event in self._convert_message(msg):
                         if isinstance(event, ResultEvent):
                             pending_result = event
@@ -882,7 +885,9 @@ class ClaudeProvider(BaseSDKProvider):
                             merged.put_nowait(event)
 
                 if pending_result is not None:
-                    await self._augment_with_context_pct(client, pending_result)
+                    await self._augment_with_context_pct(
+                        client, pending_result, last_result_msg
+                    )
                     # A mid-response connection drop is emitted by the CLI as
                     # assistant text and may come back as a *non-error* terminal
                     # result. Re-flag it as an error (and make sure the banner
@@ -993,25 +998,80 @@ class ClaudeProvider(BaseSDKProvider):
 
     @staticmethod
     async def _augment_with_context_pct(
-        client: ClaudeSDKClient, event: ResultEvent
+        client: ClaudeSDKClient,
+        event: ResultEvent,
+        result_msg: ResultMessage | None = None,
     ) -> None:
         """Fetch accurate context-window % from the CLI and attach to usage.
 
-        Silent on failure: if the CLI cannot answer, the field is simply
-        absent from the event. We deliberately do not fall back to a
-        hand-rolled estimate — only the CLI has the authoritative number.
+        Prefers the CLI's authoritative ``get_context_usage()`` (it counts
+        system prompt + tool defs + memory + autocompact buffer). On failure,
+        falls back to a best-effort estimate from ``ResultMessage.usage +
+        model_usage.contextWindow`` so the footer still shows something — the
+        same total/context math opencode uses.
         """
         try:
             usage = await client.get_context_usage()
         except _CLAUDE_OP_ERRORS:
-            logger.debug("get_context_usage failed; dropping context_pct")
-            return
+            usage = None  # fall through to local estimate
+            logger.debug("get_context_usage failed; trying local estimate")
         except Exception:  # noqa: BLE001 — defensive against SDK surprises
+            usage = None
             logger.debug("get_context_usage raised unexpectedly", exc_info=True)
-            return
-        pct = usage.get("percentage") if isinstance(usage, dict) else None
-        if isinstance(pct, (int, float)):
-            event.usage = {**event.usage, "context_pct": f"{pct:.1f}%"}
+        if isinstance(usage, dict):
+            pct = usage.get("percentage")
+            if isinstance(pct, (int, float)):
+                event.usage = {**event.usage, "context_pct": f"{pct:.1f}%"}
+                return
+            # Also carry raw window sizes when the CLI exposes them
+            total = usage.get("totalTokens")
+            mx = usage.get("maxTokens") or usage.get("rawMaxTokens")
+            if isinstance(total, (int, float)) and isinstance(mx, (int, float)) and mx > 0:
+                event.usage = {
+                    **event.usage,
+                    "context_pct": f"{min(100.0, float(total) / float(mx) * 100):.1f}%",
+                }
+                return
+        # Fallback: total tokens from ResultMessage.usage over model_usage.contextWindow
+        if result_msg is not None and isinstance(result_msg.model_usage, dict):
+            context_window: int | None = None
+            for v in result_msg.model_usage.values():
+                if isinstance(v, dict):
+                    cw = v.get("contextWindow")
+                    if isinstance(cw, (int, float)) and cw > 0:
+                        context_window = int(cw)
+                        break
+            if context_window:
+                total = 0
+                raw_usage = result_msg.usage or {}
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                ):
+                    val = raw_usage.get(k)
+                    if isinstance(val, int):
+                        total += val
+                # Already computed string totals are in event.usage; use them if raw missing
+                if total == 0:
+                    for k in (
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_creation_input_tokens",
+                        "cache_read_input_tokens",
+                    ):
+                        sval = event.usage.get(k)
+                        if sval is not None:
+                            try:
+                                total += int(sval)
+                            except (TypeError, ValueError):
+                                pass
+                if total > 0:
+                    event.usage = {
+                        **event.usage,
+                        "context_pct": f"{min(100.0, total / context_window * 100):.1f}%",
+                    }
 
     def _convert_message(self, msg: Any) -> list[StreamEvent]:
         if isinstance(msg, SDKStreamEvent):
@@ -1242,11 +1302,17 @@ class ClaudeProvider(BaseSDKProvider):
     def _extract_effective_model(msg: ResultMessage) -> str:
         model_usage = msg.model_usage
         if isinstance(model_usage, dict):
-            for value in model_usage.values():
+            for key, value in model_usage.items():
                 if isinstance(value, dict):
-                    model = value.get("model")
-                    if isinstance(model, str) and model:
-                        return model
+                    for candidate in (
+                        value.get("canonicalModel"),
+                        value.get("model"),
+                        key,
+                    ):
+                        if isinstance(candidate, str) and candidate.strip():
+                            return candidate.strip()
+                if isinstance(key, str) and key.strip():
+                    return key.strip()
         return ""
 
     @staticmethod
