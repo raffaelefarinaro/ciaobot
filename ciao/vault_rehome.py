@@ -76,9 +76,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import posixpath
 import re
 import shutil
+import tempfile
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -1382,6 +1384,7 @@ def move_note_between_roots(
     # let a request time out and be cancelled between the move and the bullet
     # removal, leaving the note moved and its row still queued.
     stem = Path(source).stem
+    pending: list[tuple[str, Path, str, str]] = []
     for note, here in sweep:
         note_file = install_root / note
         if not note_file.is_file():
@@ -1435,23 +1438,86 @@ def move_note_between_roots(
                 "to": change["to"],
             })
         if apply:
-            try:
-                note_file.write_text(new_text, encoding="utf-8")
-            except OSError as exc:
-                out["refusals"].append(f"could not rewrite {note}: {exc}")
-                return out
+            pending.append((note, note_file, text, new_text))
 
     if apply:
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        code, output = _run_git(install_root, "mv", source, destination)
-        if code != 0:
-            # Untracked, or no repository: still a move, just without history
-            # following it. Recorded so the caller can say which happened.
-            try:
+        # One transaction, in the pattern of `_commit_staged_edits` in
+        # vault_index: every rewrite above was computed without writing, so
+        # nothing is on disk until this block. Each new text first lands in a
+        # temp file next to its target (same directory, so `os.replace` stays
+        # atomic and on the same filesystem), only then are the targets swapped
+        # in, and only then does the note itself move. Writing each rewritten
+        # note the moment it was computed meant a later backlink write — or the
+        # move — could fail after earlier notes already pointed at the
+        # destination while the source still sat at its old path. Now any
+        # staging, swap, or move failure restores every already-swapped file
+        # from its recorded original in reverse order, removes leftover temps,
+        # and returns the same refusal as before, with the vault untouched.
+        staged: list[tuple[Path, Path]] = []  # (target, temp) in stage order
+        swapped: list[tuple[Path, str]] = []  # (target, original) committed
+
+        def _restore() -> None:
+            for target, original in reversed(swapped):
+                target.write_text(original, encoding="utf-8")
+            for _, temp in staged:
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        failing = source
+        try:
+            for rel, abs_path, _original, new_text in pending:
+                failing = rel
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    delete=False,
+                    dir=abs_path.parent,
+                    prefix=f".{abs_path.name}.",
+                    suffix=".tmp",
+                ) as handle:
+                    handle.write(new_text)
+                    temp = Path(handle.name)
+                # A fresh temp file lands at 0600 and os.replace would silently
+                # tighten the rewritten note's permissions; carry the old mode over.
+                try:
+                    os.chmod(temp, abs_path.stat().st_mode & 0o7777)
+                except OSError:
+                    pass
+                staged.append((abs_path, temp))
+            for (target, temp), (rel, _abs_path, original, _new_text) in zip(
+                staged, pending
+            ):
+                failing = rel
+                os.replace(temp, target)
+                swapped.append((target, original))
+        except OSError as exc:
+            _restore()
+            out["refusals"].append(f"could not rewrite {failing}: {exc}")
+            return out
+
+        try:
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            code, output = _run_git(install_root, "mv", source, destination)
+            if code != 0:
+                # Untracked, or no repository: still a move, just without history
+                # following it. Recorded so the caller can say which happened.
                 source_file.replace(dest_file)
-            except OSError as exc:
-                out["refusals"].append(f"could not move the note: {exc}")
-                return out
+        except OSError as exc:
+            # The move failing takes the link commits down with it: links that
+            # point at a note which never arrived are exactly the state this
+            # transaction exists to prevent.
+            _restore()
+            out["refusals"].append(f"could not move the note: {exc}")
+            return out
+        # Past this point there is deliberately no rollback: once the move has
+        # happened it stays happened. Both callers read a refusal as "retrying
+        # is safe" — the queue row stays clickable — and retrying a finished
+        # move lands in the `already_moved` branch above, which reports
+        # success; un-moving a completed `git mv` would fight exactly that
+        # recovery path, while the indexes below are derived data that rebuild.
+        if code != 0:
             out["git_mv"] = output.strip()[:200] or "not tracked"
         else:
             out["git_mv"] = "ok"

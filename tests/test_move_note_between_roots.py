@@ -16,6 +16,7 @@ direction while reporting success.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -80,6 +81,108 @@ def _broken(root: Path) -> list[str]:
             if not (f.parent / ref).exists():
                 bad.append(f"{f.relative_to(root)} -> {ref}")
     return bad
+
+
+def _bytes(root: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*.md"))
+        if ".git" not in p.parts
+    }
+
+
+def test_a_late_rewrite_failure_leaves_every_note_untouched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A backlink write that fails mid-commit used to strand the earlier ones:
+    notes already pointing at the destination while the source still sat at its
+    old path, and the move reported as refused. The rewrites are one transaction
+    now — a failure anywhere restores every note byte for byte."""
+    root, targets = _install(tmp_path)
+    before = _bytes(root)
+
+    from ciao import vault_rehome
+
+    real_replace = os.replace
+    swaps = {"n": 0}
+
+    def flaky_replace(src, dst, *args, **kwargs):
+        if str(dst).endswith(".md"):
+            swaps["n"] += 1
+            if swaps["n"] == 3:
+                raise OSError("disk full")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(vault_rehome.os, "replace", flaky_replace)
+
+    result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+
+    assert result["applied"] is False
+    assert any("could not rewrite" in r for r in result["refusals"])
+    assert result["files_rewritten"] == 3
+    assert _bytes(root) == before, "every touched note is byte-identical afterwards"
+    assert (root / "personal/memory-vault/People/Mo.md").is_file()
+    assert not (root / "work/memory-vault/People/Mo.md").exists()
+    assert not list(root.rglob(".*.tmp")), "no temp files left behind"
+
+
+def test_a_failed_move_rolls_the_committed_rewrites_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The source move participates in the same transaction: if it fails after
+    the link commits are in, the link commits come back out."""
+    root, targets = _install(tmp_path)
+    before = _bytes(root)
+    dest = root / "work" / "memory-vault" / "People" / "Mo.md"
+
+    from ciao import vault_rehome
+
+    real_replace = os.replace
+
+    def blocked_replace(src, dst, *args, **kwargs):
+        if str(dst) == str(dest):
+            raise OSError("move refused")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(vault_rehome, "_run_git", lambda root_, *a: (1, "fatal: nope"))
+    monkeypatch.setattr(vault_rehome.os, "replace", blocked_replace)
+
+    result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+
+    assert result["applied"] is False
+    assert any("could not move the note" in r for r in result["refusals"])
+    assert _bytes(root) == before, "the committed link edits came back out"
+    assert (root / "personal/memory-vault/People/Mo.md").is_file()
+    assert not dest.exists()
+    assert not list(root.rglob(".*.tmp")), "no temp files left behind"
+
+
+def test_an_applied_multi_backlink_move_writes_exactly_the_predicted_rewrites(
+    tmp_path: Path,
+) -> None:
+    """The transactional commit writes what the dry run predicted, nothing else.
+
+    Guarding the refactor from per-note `write_text` to staged-and-swapped: a
+    four-note move (the moved note itself, two backlinks, and MEMORY.md) must
+    land byte-for-byte on the dry run's plan with no broken links.
+    """
+    root, targets = _install(tmp_path)
+    _note(
+        root / "personal" / "memory-vault" / "MEMORY.md",
+        "# Memory\n\nSee [Mo](./People/Mo.md).\n",
+    )
+
+    predicted = _move(root, targets, "personal/memory-vault/People/Mo.md", "work")
+    applied = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+
+    assert applied["applied"] is True
+    assert applied["refusals"] == []
+    assert applied["rewrites"] == predicted["rewrites"]
+    assert applied["files_rewritten"] == predicted["files_rewritten"] == 4
+    for row in applied["rewrites"]:
+        text = (root / row["path"]).read_text(encoding="utf-8")
+        assert row["to"] in text, row
+    assert _broken(root) == []
 
 
 def test_a_move_leaves_no_broken_markdown_link(tmp_path: Path) -> None:
