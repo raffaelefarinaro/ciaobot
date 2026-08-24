@@ -439,6 +439,27 @@ def _is_retryable_provider_startup_error(text: str) -> bool:
     return "opencode serve did not become healthy" in low
 
 
+def _is_retryable_auth_error(text: str) -> bool:
+    """Recognize a transient OAuth session expiry that can recover on retry.
+
+    The Claude CLI surfaces ``Failed to authenticate: OAuth session expired
+    and could not be refreshed`` when its in-memory credentials lapsed
+    mid-turn. The credentials are refreshed on the next process spawn, so
+    retrying the turn (fast 30s interval, bounded like connection errors)
+    recovers without user intervention. Keep this narrow: only the
+    ``oauth session expired`` / ``could not be refreshed`` shape is
+    retried, not every ``Failed to authenticate`` (e.g. revoked keys).
+    """
+    low = (text or "").lower()
+    if "oauth session expired" in low:
+        return True
+    if "failed to authenticate" in low and "could not be refreshed" in low:
+        return True
+    if "session expired" in low and "could not be refreshed" in low:
+        return True
+    return False
+
+
 def _has_running_loop() -> bool:
     try:
         asyncio.get_running_loop()
@@ -5709,10 +5730,10 @@ class ProjectChatManager:
         had_progress: bool,
         reason: str,
     ) -> bool:
-        """Arm a deferred retry for a quota/connection/startup failure.
+        """Arm a deferred retry for a quota/connection/startup/auth failure.
 
-        ``kind`` is ``"quota"``, ``"connection"``, or ``"startup"``. A
-        connection failure that dropped *after* streaming output
+        ``kind`` is ``"quota"``, ``"connection"``, ``"startup"``, or ``"auth"``.
+        A connection/auth failure that dropped *after* streaming output
         (``had_progress``) resumes the session with a "continue" nudge instead
         of replaying the prompt — replaying could re-run tool calls the partial
         turn already executed — and is capped at
@@ -5736,10 +5757,10 @@ class ProjectChatManager:
             and chat is not None
             and bool(chat.session_id)
         )
-        # The connection/startup cap guards against a transient-looking local
-        # failure looping forever; quota retries are time-gated by the hourly
-        # retry interval instead.
-        if kind in {"connection", "startup"}:
+        # The connection/startup/auth cap guards against a transient-looking
+        # local failure looping forever; quota retries are time-gated by the
+        # hourly retry interval instead.
+        if kind in {"connection", "startup", "auth"}:
             attempts = chat.retry_attempts if chat is not None else 0
             if attempts >= _MAX_CONNECTION_DROP_RETRIES:
                 logger.warning(
@@ -5760,7 +5781,7 @@ class ProjectChatManager:
             image_refs = self._image_refs(current_images)
         interval = (
             _RETRY_CONNECTION_INTERVAL_SECONDS
-            if kind in {"connection", "startup"}
+            if kind in {"connection", "startup", "auth"}
             else _RETRY_INTERVAL_SECONDS
         )
         armed = self.set_chat_retry(
@@ -6322,6 +6343,16 @@ class ProjectChatManager:
                                             had_progress=had_provider_progress,
                                             reason=result_text or "connection error",
                                         )
+                                    elif _is_retryable_auth_error(result_text):
+                                        self._arm_retry(
+                                            chat_id,
+                                            stream,
+                                            kind="auth",
+                                            current_prompt=current_prompt,
+                                            current_images=current_images,
+                                            had_progress=had_provider_progress,
+                                            reason=result_text or "auth error",
+                                        )
                                 else:
                                     turn_assistant_text = event.result or ""
                     except Exception as exc:
@@ -6428,6 +6459,16 @@ class ProjectChatManager:
                                     chat_id,
                                     stream,
                                     kind="connection",
+                                    current_prompt=current_prompt,
+                                    current_images=current_images,
+                                    had_progress=had_provider_progress,
+                                    reason=error_msg,
+                                )
+                            elif _is_retryable_auth_error(error_msg):
+                                self._arm_retry(
+                                    chat_id,
+                                    stream,
+                                    kind="auth",
                                     current_prompt=current_prompt,
                                     current_images=current_images,
                                     had_progress=had_provider_progress,
@@ -7089,7 +7130,11 @@ class ProjectChatManager:
             thinking_level=self._thinking_level_for_chat(chat),
         )
         try:
-            return await provider.steer(request)
+            impl = provider.provider
+            steer = getattr(impl, "steer", None) if impl is not None else None
+            if not callable(steer):
+                return False
+            return await steer(request)
         except Exception:  # noqa: BLE001 — a failed nudge must not kill the watcher
             logger.exception(
                 "Subagent synthesis nudge failed for chat %s", chat_id
