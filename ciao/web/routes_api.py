@@ -1191,6 +1191,20 @@ def _vault_relocation_problems(
     raw = Path(target_raw).expanduser()
     if not raw.is_absolute():
         return ["target must be an absolute path"], None
+    # Symlinks have to be judged on the path AS GIVEN. `raw.resolve()` below
+    # follows every link in the chain, so a check against the resolved path is
+    # `is_symlink() == False` by construction: the guard this route's docstring
+    # and PWA_API.md advertise never fired once. A vault could be hooked or
+    # moved through a link, after which the registry names a path whose meaning
+    # is changeable from outside Ciao — repoint the link and the workspace
+    # reads and writes somewhere else entirely.
+    if raw.is_symlink():
+        return ["target path must not be a symlink"], None
+    try:
+        if raw.parent.is_symlink():
+            return ["target's parent must not be a symlink"], None
+    except OSError:
+        pass
     try:
         target = raw.resolve()
     except (OSError, RuntimeError, ValueError):
@@ -1227,18 +1241,107 @@ def _vault_relocation_problems(
     if owner is not None:
         return [f"target vault folder is already owned by '{owner}'"], target
 
-    if target.is_symlink():
-        errors.append("target path must not be a symlink")
-    try:
-        if target.parent.is_symlink():
-            errors.append("target's parent must not be a symlink")
-    except OSError:
-        pass
     return errors, target
 
 
-def _move_vault_contents(current: Path, target: Path) -> None:
+# Filesystem bookkeeping a folder picker cannot avoid creating. Opening a
+# folder in Finder writes `.DS_Store` into it, which made `any(iterdir())`
+# report "not empty" for a folder the operator had only LOOKED at — with no way
+# forward from the UI, because the picker offers no delete. Deliberately a
+# short, named list rather than "every dotfile": a folder holding `.git` or
+# `.obsidian` is a real folder with real contents, and adopting it silently as
+# a move target is a different decision.
+_OS_METADATA_ENTRIES = frozenset({
+    ".DS_Store",
+    ".localized",
+    ".Spotlight-V100",
+    ".TemporaryItems",
+    ".Trashes",
+    ".fseventsd",
+    "Thumbs.db",
+    "desktop.ini",
+})
+
+
+def _contains(parent: Path, child: Path) -> bool:
+    """Whether *child* sits strictly inside *parent*. Both must be resolved."""
+    if child == parent:
+        return False
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _move_source_problem(config, current: Path) -> str | None:
+    """Why ``mode="move"`` must refuse to empty *current*, or None if it may.
+
+    On the "adopted existing folder" layout the vault root IS the install root
+    (``CIAO_VAULT_ROOT`` pointing at the install directory, or a ``.`` registry
+    root), so its top-level entries are not only notes: ``.env`` holds the
+    operator's credentials and the runtime directory holds ``state.json``,
+    ``workspaces.json`` and the search database. Moving "every top-level entry"
+    dragged all of that into the notes folder, and the
+    ``persist_workspace_registry()`` call that follows then recreated an empty
+    runtime directory at the old root — leaving the install with two runtime
+    directories and its secrets inside the vault. That layout is exactly what
+    the ``vault-location`` operator action flags, so it is the one people press
+    "Move vault here" on.
+
+    Refusing rather than excluding is deliberate. An exclusion list would have
+    to name every install artifact that happens to sit at that root — ``.env``,
+    the runtime directory, a promoted ``Logs/``, ``projects/``, a ``.git``
+    checkout, desktop receipts — and it can only ever be a snapshot: anything
+    added later is dragged into the vault, and anything the list over-reaches on
+    is left behind. A wrong-but-successful move is also the single failure
+    `_move_vault_contents` cannot unwind, because nothing raised. A refusal is
+    always recoverable: the operator moves the notes themselves and re-points
+    with ``mode="hook"``, or re-roots the install, which is what "separate the
+    vault from the install root" actually means.
+    """
+    checks = (
+        ("this install's runtime directory", Path(config.state_path).parent),
+        ("this install's root", Path(config.workspace_root)),
+    )
+    for label, candidate in checks:
+        try:
+            path = candidate.resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path == current or _contains(current, path):
+            return (
+                f"the vault folder is also {label} ({path}), so moving its "
+                "contents would relocate .env and the runtime directory along "
+                "with the notes. Move the notes yourself and re-point with "
+                "mode='hook', or re-root the install."
+            )
+    return None
+
+
+def _unwind_vault_move(moved: Sequence[tuple[Path, Path]]) -> None:
+    """Put every already-relocated entry back where it came from.
+
+    Shared by the two ways a relocation can fail after files have started
+    moving: the copy itself, and the registry write that has to succeed for the
+    move to mean anything. One unwind covering the whole operation, rather than
+    one per failure point — the second one is always the one nobody adds.
+    """
+    for source, destination in reversed(list(moved)):
+        try:
+            shutil.move(str(destination), str(source))
+        except OSError:
+            logger.exception(
+                "could not move %s back after a failed vault relocation",
+                destination,
+            )
+
+
+def _move_vault_contents(current: Path, target: Path) -> list[tuple[Path, Path]]:
     """Move every top-level vault entry into *target*, unwinding on failure.
+
+    Returns the ``(source, destination)`` pairs it moved, so the caller can
+    unwind them if a LATER step of the same relocation fails.
 
     `Path.rename` is `os.rename`, which fails with EXDEV the moment the two
     paths are on different filesystems — and "put my vault on an external
@@ -1257,21 +1360,20 @@ def _move_vault_contents(current: Path, target: Path) -> None:
     # iterating a directory while removing from it is not reliable.
     try:
         for entry in sorted(current.iterdir()):
+            # OS bookkeeping is not a note, and the target may legitimately
+            # already hold its own copy (see `_OS_METADATA_ENTRIES`): moving it
+            # would collide and turn a permitted relocation into a 500.
+            if entry.name in _OS_METADATA_ENTRIES:
+                continue
             destination = target / entry.name
             if destination.exists() or destination.is_symlink():
                 raise OSError(f"destination exists: {destination}")
             shutil.move(str(entry), str(destination))
             moved.append((entry, destination))
     except OSError:
-        for source, destination in reversed(moved):
-            try:
-                shutil.move(str(destination), str(source))
-            except OSError:
-                logger.exception(
-                    "could not move %s back after a failed vault relocation",
-                    destination,
-                )
+        _unwind_vault_move(moved)
         raise
+    return moved
 
 
 async def relocate_workspace_vault(request: Request) -> JSONResponse:
@@ -1317,14 +1419,48 @@ async def relocate_workspace_vault(request: Request) -> JSONResponse:
             {"error": f"current vault is missing: {current}"}, status_code=400
         )
 
-    if mode == "move":
-        if target.exists() and any(target.iterdir()):
+    # Entries this request relocated, so every later failure can undo them.
+    moved: list[tuple[Path, Path]] = []
+    if mode == "hook":
+        # `hook` is documented as re-pointing at an EXISTING folder, and only
+        # `move` calls `mkdir`. The sole existence check upstream is
+        # "exists and is not a directory", so a typo in the picker's path field
+        # persisted a workspace pointing at nothing: `_reindex_vault` then
+        # failed silently into its own broad `except` and the workspace had no
+        # vault at all.
+        if not target.is_dir():
+            return JSONResponse(
+                {"error": f"target folder does not exist: {target}"},
+                status_code=400,
+            )
+    else:
+        problem = _move_source_problem(config, current)
+        if problem is not None:
+            return JSONResponse({"error": problem}, status_code=400)
+        try:
+            leftovers = (
+                sorted(
+                    entry.name
+                    for entry in target.iterdir()
+                    if entry.name not in _OS_METADATA_ENTRIES
+                )
+                if target.exists()
+                else []
+            )
+        except OSError as exc:
+            # Every sibling check on this route answers 400 for a path it
+            # cannot read; this `iterdir()` sat outside any `try`, so a
+            # permission-denied target surfaced as an unhandled 500.
+            return JSONResponse(
+                {"error": f"could not read target folder: {exc}"}, status_code=400
+            )
+        if leftovers:
             return JSONResponse(
                 {"error": f"target folder is not empty: {target}"}, status_code=400
             )
         target.mkdir(parents=True, exist_ok=True)
         try:
-            _move_vault_contents(current, target)
+            moved = _move_vault_contents(current, target)
         except OSError as exc:
             return JSONResponse(
                 {"error": f"failed to move vault: {exc}"}, status_code=500
@@ -1336,12 +1472,36 @@ async def relocate_workspace_vault(request: Request) -> JSONResponse:
     # silently re-anchor the vault to a wrong location. Absolute registry roots
     # are preserved verbatim by `workspace_vault_root`.
     workspace = config.workspace(name)
+    previous_root = workspace.vault_root
+    previous_pinned = workspace.vault_pinned
     workspace.vault_root = str(target)
     workspace.vault_pinned = True
-    config.persist_workspace_registry()
+    try:
+        config.persist_workspace_registry()
+    except OSError as exc:
+        # The registry write is the step that makes a relocation real. It can
+        # fail on its own — read-only runtime directory, a full disk, an I/O
+        # error — and until now that left the files under `target`, the old
+        # vault empty, and the DURABLE registry still naming the old location:
+        # the request reported failure and the next restart showed an empty
+        # workspace. Unwind everything, live config included, so a failed
+        # relocation stays the no-op the move path already promised.
+        workspace.vault_root = previous_root
+        workspace.vault_pinned = previous_pinned
+        _unwind_vault_move(moved)
+        return JSONResponse(
+            {"error": f"failed to record the vault relocation: {exc}"},
+            status_code=500,
+        )
     _refresh_project_manager_workspaces(request)
 
-    _reindex_vault(config, target)
+    warnings = _reindex_vault(
+        config,
+        name,
+        target,
+        previous=current if mode == "move" else None,
+        adopted=mode == "hook",
+    )
 
     return JSONResponse({
         "ok": True,
@@ -1349,16 +1509,141 @@ async def relocate_workspace_vault(request: Request) -> JSONResponse:
         "mode": mode,
         "new_vault_root": str(target),
         "pinned": True,
+        # Things the relocation could not fix and the operator has to know
+        # about: a hand-written INDEX.md that was left alone, and a vault
+        # outside the install root, for which vault search returns nothing.
+        # Silence here was a lie: the call reported plain success.
+        "warnings": warnings,
     })
 
 
-def _reindex_vault(config, vault: Path) -> None:
-    """Best-effort rebuild of a relocated vault's INDEX.md and FTS rows."""
+# `write_index_file` stamps everything it writes with this, so its presence is
+# a reliable "this file is our own output, overwriting it loses nothing".
+_GENERATED_INDEX_MARKER = "generated by ciao vault-index"
+
+
+def _index_file_is_generated(path: Path) -> bool:
+    """Whether the INDEX.md at *path* was written by ``ciao vault-index``."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            head = handle.read(len(_GENERATED_INDEX_MARKER) + 256)
+    except (OSError, UnicodeDecodeError):
+        return False
+    return _GENERATED_INDEX_MARKER in head
+
+
+def _fts_key_prefix(root: Path, base: Path) -> str | None:
+    """The stored search-key prefix for *root*, or None when it has none.
+
+    Mirrors `fts_search._scope_prefix`: search keys are stored relative to the
+    install root, so a vault outside that base has no prefix at all and
+    `fts_search.vault_key_prefix` deliberately fails closed to a sentinel no
+    stored key can carry — meaning the search returns nothing for that vault.
+    ``""`` means *root* IS the base, so every row is in scope.
+    """
+    try:
+        relative = str(Path(root).relative_to(Path(base)))
+    except ValueError:
+        return None
+    return "" if relative in {"", "."} else relative + os.sep
+
+
+def _prune_fts_rows(conn, previous: Path, base: Path) -> int:
+    """Delete the search rows of a vault that has just been moved away.
+
+    `_index_directory` scopes its prune to the root it is indexing — correctly,
+    so one root's pass cannot wipe another's rows — which means nothing ever
+    removes the OLD path's rows after a relocation. Search kept returning hits
+    whose paths no longer exist on disk, indefinitely.
+    """
+    prefix = _fts_key_prefix(previous, base)
+    if not prefix:
+        # `None`: no prefix describes those rows. `""`: the old vault IS the key
+        # base, so every row in the database is in scope. Neither can be pruned
+        # without guessing, and the guess deletes other roots' notes.
+        return 0
+    removed = 0
+    for meta_table, fts_table in (
+        ("vault_meta", "vault_fts"),
+        ("transcript_meta", "transcript_fts"),
+    ):
+        stale = [
+            str(row[0])
+            for row in conn.execute(f"SELECT path FROM {meta_table}").fetchall()
+            if str(row[0]).startswith(prefix)
+        ]
+        for key in stale:
+            conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (key,))
+            conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (key,))
+            removed += 1
+    if removed:
+        conn.commit()
+    return removed
+
+
+def _vault_index_stamp(config, name: str, vault: Path) -> tuple[str, Path | None]:
+    """The ``workspace=`` stamp and ``path_prefix=`` a scan of *vault* needs.
+
+    Unstamped, `scan_vault` infers the workspace from the first path segment,
+    which for a per-workspace root is a FOLDER name ("People", "projects"), so
+    every entry in the written INDEX.md carries a workspace that does not exist
+    and any ``?workspace=`` filter drops the lot. `vault_scan_targets` is the
+    seam that already answers this per root, so reuse its answer when it names
+    this vault; otherwise fall back to the workspace's own name with
+    `scan_vault`'s default prefix, which is what every other per-root caller
+    does (`ciao/main.py`, `ciao/os_audit.py`, `ciao/cli.py`).
+    """
+    try:
+        targets = config.vault_scan_targets()
+    except Exception:  # noqa: BLE001 — call sites build minimal config stubs
+        targets = []
+    for root, workspace, prefix in targets:
+        try:
+            if Path(root).expanduser().resolve() == vault:
+                return workspace or name, prefix
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return name, None
+
+
+def _reindex_vault(
+    config,
+    name: str,
+    vault: Path,
+    *,
+    previous: Path | None = None,
+    adopted: bool = False,
+) -> list[str]:
+    """Best-effort rebuild of a relocated vault's INDEX.md and FTS rows.
+
+    Returns operator-facing warnings for what it deliberately did NOT do, which
+    the endpoint hands back in its response. ``previous`` is the vault's old
+    location when the contents were moved out of it, so its now-dangling search
+    rows can be pruned. ``adopted`` marks a folder that already belonged to the
+    operator (``mode="hook"``) rather than one this relocation just filled, and
+    so may hold files that are theirs and not ours to rewrite.
+    """
+    warnings: list[str] = []
+    index_path = vault / "INDEX.md"
     try:
         from ciao import vault_index
 
-        entries = vault_index.scan_vault(vault)
-        vault_index.write_index_file(entries, vault / "INDEX.md")
+        if adopted and index_path.is_file() and not _index_file_is_generated(index_path):
+            # `hook` mode points at a folder that already holds the operator's
+            # files, and an INDEX.md they wrote by hand is one of them. Writing
+            # generated output over it destroyed it outright — no prompt, no
+            # backup, no mention in the response.
+            warnings.append(
+                f"kept the existing INDEX.md in {vault}: it was not generated "
+                "by Ciao, so it has been left untouched. Rename or delete it "
+                "and run `ciao vault-index` to generate one."
+            )
+        else:
+            stamp, path_prefix = _vault_index_stamp(config, name, vault)
+            entries = vault_index.scan_vault(
+                vault, workspace=stamp, path_prefix=path_prefix
+            )
+            vault_index.write_index_file(entries, index_path)
     except Exception:  # noqa: BLE001 — non-fatal; the startup indexer recovers
         logger.exception("vault index refresh failed for %s", vault)
     try:
@@ -1368,17 +1653,44 @@ def _reindex_vault(config, vault: Path) -> None:
         from ciao.config import logs_root_for
 
         base = Path(config.workspace_root).resolve()
-        logs_root = logs_root_for(base, vault, base / ".runtime")
+        # The runtime root is configurable (`CIAO_RUNTIME_ROOT`) and may sit
+        # outside `workspace_root`; a hardcoded `base / ".runtime"` therefore
+        # found no re-rooting receipt on such an install, so `logs_root_for`
+        # answered `<vault>/Logs` and the transcript index was never refreshed.
+        runtime_root = Path(config.state_path).parent
+        logs_root = logs_root_for(base, vault, runtime_root)
         db_path = fts_search.get_db_path()
         conn = sqlite3.connect(db_path)
         try:
             fts_search.init_db(conn)
-            fts_search.index_vault(conn, vault, path_base=base)
-            fts_search.index_logs(conn, vault, logs_root=logs_root, path_base=base)
+            if previous is not None and previous != vault:
+                _prune_fts_rows(conn, previous, base)
+            if _fts_key_prefix(vault, base) is None:
+                # `ControlPlane.vault_search` filters on
+                # `fts_search.vault_key_prefix(root, base)`, which fails closed
+                # for a vault outside the base: the filter matches no row, so
+                # search for this workspace returns nothing, permanently.
+                # Indexing anyway only writes rows nothing can read, keyed in a
+                # way that can collide with another root's, so skip it — but
+                # say so instead of reporting plain success.
+                warnings.append(
+                    f"vault search is disabled for a vault outside {base}: "
+                    "search keys are stored relative to the install root, so "
+                    "no query can match this vault's notes. Notes and INDEX.md "
+                    "still work; keep the vault under the install root to keep "
+                    "search working."
+                )
+            else:
+                fts_search.index_vault(conn, vault, path_base=base)
+            if _fts_key_prefix(logs_root, base) is not None:
+                fts_search.index_logs(
+                    conn, vault, logs_root=logs_root, path_base=base
+                )
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 — non-fatal
         logger.exception("fts index refresh failed for %s", vault)
+    return warnings
 
 
 
@@ -2708,16 +3020,10 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
 
 
 async def create_project_chat(request: Request) -> JSONResponse:
-    import time as _t
-    import logging as _lg
-    _entry = _t.perf_counter()
-    _lg.getLogger("ciao.web.routes").info("create_chat handler entered")
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
     body = await request.json()
     try:
-        _t0 = _t.perf_counter()
-        _lg.getLogger("ciao.web.routes").info("create_chat post-body %.0fms", (_t0 - _entry) * 1000)
         chat = pcm.create_chat(
             project_id,
             title=body.get("title", "New Chat"),
@@ -7924,6 +8230,15 @@ async def proposal_action(request: Request) -> JSONResponse:
     if ctx is None:
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
     action = request.path_params.get("action", "").strip()
+    # Validate BEFORE any file mutation, the same shape the batch endpoint uses.
+    # Unvalidated, anything that was not "accept" skipped the promotion block
+    # below but still fell through to the bullet removal and returned the
+    # dismiss-shaped success payload: a typo in the path, or a stale client,
+    # silently discarded a queued fact nobody had asked to dismiss.
+    if action not in {"accept", "dismiss"}:
+        return JSONResponse(
+            {"error": "action must be accept|dismiss", "id": pid}, status_code=400
+        )
     row = ctx["row"]
 
     if ctx.get("file"):
