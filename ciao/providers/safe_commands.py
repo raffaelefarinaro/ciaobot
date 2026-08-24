@@ -214,6 +214,8 @@ _DESTRUCTIVE_COMMANDS = frozenset({
 # ``find -delete`` and ``find -exec rm`` delete without naming rm as the
 # leading verb, so the same prefixes as ``_UNSAFE_FIND_PREFIXES`` apply.
 _DESTRUCTIVE_GIT_SUBCOMMANDS = frozenset({"clean", "reset", "restore", "rm", "prune"})
+# Force flags rewrite history the remote already keeps; the flags and refspecs
+# that REMOVE a remote ref are classified apart in `_push_arg_deletes_a_ref`.
 _DESTRUCTIVE_GIT_PUSH_FLAGS = frozenset({
     "-f", "--force", "--force-with-lease",
 })
@@ -357,13 +359,37 @@ def _git_subcommand(args: list[str]) -> list[str]:
     return []
 
 
+def _push_arg_deletes_a_ref(arg: str) -> bool:
+    """Whether one ``git push`` argument names a remote ref for removal.
+
+    `--delete` and its short bundles (`-d`, `-df`) remove the remote ref
+    exactly like the leading-colon refspec that predates the flag, so every
+    spelling counts. The long flag is matched EXACTLY: a prefix check would
+    also swallow `--dry-run` (and `--depth`, `--dissociate`), which only
+    report what they would send and delete nothing. Short flags share a dash,
+    so the deletion is found inside the bundle instead.
+    """
+    if arg.startswith("--"):
+        return arg == "--delete"
+    if arg.startswith("-"):
+        return "d" in arg[1:]
+    # An empty refspec source (`git push origin :topic`) is the colon spelling
+    # of the same removal; the leading `+` forces it and hides behind the sign.
+    return arg.removeprefix("+").startswith(":")
+
+
 def _git_is_destructive(args: list[str]) -> bool:
     args = _git_subcommand(args)
     if not args:
         return False
     subcommand, *rest = args
     if subcommand == "push":
-        return any(a.startswith(f) for a in rest for f in _DESTRUCTIVE_GIT_PUSH_FLAGS)
+        # Force rewrites what the remote keeps, the delete spellings remove
+        # refs outright — either way the operator gets the card.
+        return (
+            any(a.startswith(f) for a in rest for f in _DESTRUCTIVE_GIT_PUSH_FLAGS)
+            or any(_push_arg_deletes_a_ref(a) for a in rest)
+        )
     if subcommand in {"checkout", "switch"}:
         # `checkout` is two commands wearing one name. Moving between refs
         # (`git checkout main`, `-b feature`) destroys nothing, but the pathspec

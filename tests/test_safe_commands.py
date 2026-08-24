@@ -162,6 +162,16 @@ def test_write_capable_or_unverifiable_commands_are_unsafe(command):
     "git rm old.py",
     "git push --force origin main",
     "git push -f origin main",
+    # Deleting a remote ref is the same class of loss as forcing it, but only
+    # the force flags used to be seen — `--delete important-branch` ran with
+    # no approval card.
+    "git push origin --delete important-branch",
+    "git push origin -d topic",
+    "git push -df origin x",
+    "git push origin :old-branch",
+    "git push origin :refs/heads/old",
+    "git push origin +:refs/heads/old",
+    "git push --force-with-lease origin main",
     "git prune",
 ])
 def test_destructive_commands_are_destructive(command):
@@ -373,6 +383,10 @@ def test_an_interpreter_running_a_script_file_is_still_approved(command):
     "cat a > b",
     "git status",
     "git push origin main",  # non-force push
+    # A dry run reports what it would send and deletes nothing, so the
+    # `--delete` match must not swallow it by prefix.
+    "git push --dry-run origin main",
+    "git push -n origin main",
     "git add .",
     "git commit -m 'x'",
     "npm install",
