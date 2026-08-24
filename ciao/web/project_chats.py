@@ -7130,8 +7130,16 @@ class ProjectChatManager:
             thinking_level=self._thinking_level_for_chat(chat),
         )
         try:
-            impl = provider.provider
-            steer = getattr(impl, "steer", None) if impl is not None else None
+            # Prefer the ProviderService wrapper when available (restored in
+            # ciao/provider_service.py for the internal synthesis nudge), but
+            # also support a raw provider impl (as used in
+            # tests/test_chat_subagents.py's FakeProvider) and the direct
+            # ``provider.provider`` path suggested in #306.
+            steer = getattr(provider, "steer", None)
+            if not callable(steer):
+                impl = getattr(provider, "provider", None)
+                if impl is not None:
+                    steer = getattr(impl, "steer", None)
             if not callable(steer):
                 return False
             return await steer(request)

@@ -120,6 +120,23 @@ class ProviderService:
         async for event in drain():
             yield event
 
+    async def steer(self, request: AgentRequest) -> bool:
+        """Inject a user message into the provider's active turn (internal).
+
+        Used only by the background-subagent synthesis nudge
+        (``ProjectChatManager._nudge_synthesis_after_subagents``) to resume
+        the parent turn via the between-turns drain. User-facing same-turn
+        steering was removed in 8ede8fab — this remains so the nudge has a
+        ``ProviderService``-level entry point without reaching into
+        ``provider.provider``.
+        """
+        if self._provider is None:
+            return False
+        steer = getattr(self._provider, "steer", None)
+        if not callable(steer):
+            return False
+        return bool(await steer(request))
+
     @property
     def provider(self) -> ProviderImpl | None:
         return self._provider
