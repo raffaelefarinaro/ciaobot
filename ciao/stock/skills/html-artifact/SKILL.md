@@ -1,6 +1,6 @@
 ---
 name: html-artifact
-description: Build a self-contained interactive HTML page (an artifact) that Ciaobot renders live in the pinned panel. Use when the output is easier to look at than to read: dashboards, charts, annotated diffs, side-by-side option comparisons, timelines, interactive mockups, calculators, or anything the user asks to make visual, interactive, clickable, or "a page". Trigger on "artifact", "dashboard", "chart", "graph", "visualize this", "make it interactive", "build me a page", "show it side by side". Do NOT use for prose reports (.md), tabular data (.csv), or diagrams (.excalidraw).
+description: Build a self-contained interactive HTML page (an artifact) that Ciaobot renders live in the pinned panel. Use when the output is easier to look at than to read: dashboards, charts, annotated diffs, side-by-side option comparisons, timelines, interactive mockups, calculators, diagrams drawn as inline SVG, or anything the user wants to make visual, interactive, clickable, or "a page". Trigger on "artifact", "dashboard", "chart", "graph", "visualize this", "make it interactive", "build me a page", "show it side by side", "architecture", "flow diagram", "sequence". Do NOT use for prose reports (.md) or tabular data (.csv).
 ---
 
 # HTML artifacts
@@ -14,6 +14,7 @@ Write the file, then call `file_surface` on it. Writing alone paints an inline c
 - The output is visual or spatial: a chart, a timeline, a diff with annotations, a layout, a floor plan
 - The reader benefits from interaction: filter a table, expand a section, switch tabs, toggle a scenario, run a small calculation
 - Several things need to sit side by side and be compared at a glance
+- A diagram is the answer: an architecture, a flow, a sequence. Draw it as inline SVG. See the "Static SVG diagram" section in `reference.md`.
 - The user asks for a dashboard, a page, or "something I can click through"
 
 ## Do not use an artifact when
@@ -24,7 +25,8 @@ Ciaobot's other formats have integrations an artifact silently loses. Check this
 |---|---|---|
 | Prose: reports, plans, specs, notes | `.md` | Wikilinks, backlinks, frontmatter, inline editing, and **comments**. Comments anchor to markdown highlights or text lines, so a rendered artifact cannot be commented on at all. |
 | Tabular data | `.csv` | Renders as a sortable table with per-cell comments. |
-| Diagrams: boxes, arrows, flows | `.excalidraw` | Editable in place by the user. |
+
+Diagrams have no `.excalidraw` path here: draw them as inline SVG inside the artifact.
 
 If the answer is mostly words with one small illustration, write markdown. An artifact is for when the visual *is* the answer.
 
@@ -53,6 +55,8 @@ The page is served under a strict Content Security Policy in a sandboxed frame. 
 Avoid the defaults that make a page look machine-made: purple-to-blue gradients, everything centered, uniform 12px rounded corners on every box, Inter everywhere, a wall of equally-weighted cards. Pick one accent colour, use weight and spacing for hierarchy, and let the layout follow the data instead of the reverse.
 
 Numbers carry their source. A figure with no label, unit, or date reads as invented.
+
+Static SVG diagrams follow the same rules plus the anti-machine-made ones above: one accent reserved for 1-2 focal points, shape carries type (oval for start/end, diamond for decision), orthogonal arrows drawn behind nodes, and a legend. `reference.md` has a starting shell.
 
 ## Where to write it
 
