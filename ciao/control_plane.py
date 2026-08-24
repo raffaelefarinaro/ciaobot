@@ -1284,24 +1284,95 @@ class CiaoControlPlane:
         entry = self._schedule(principal, schedule_id)
         if entry.scope == "system" and any(key not in {"enabled", "workspace"} for key in changes):
             raise ControlPlaneError("system_schedule_read_only", "System schedules only allow enabled/workspace changes.")
-        if changes.get("project_id"):
-            project_id = self._resolve_project_id(principal, str(changes["project_id"]))
-            project = self._project(principal, project_id)
-            changes["project_id"] = project_id
-            # Keep workspace aligned with the new target (same as the HTTP API).
-            changes.setdefault("workspace", project.workspace)
-        aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
-        normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
-        # A workspace reassignment must name a registered workspace — the
-        # dispatch-time routing and provider/model inheritance both hang off
-        # this field, so silently storing garbage would strand the schedule.
-        if normalized.get("workspace") is not None:
-            target = str(normalized["workspace"]).strip().lower()
+        # Where this schedule's run bindings actually live: the bound project's
+        # own workspace when there is one (an entry written before the workspace
+        # field existed carries none of its own), else the stored field.
+        bound = self.pcm.get_project(entry.web_project_id) if entry.web_project_id else None
+        origin = str(getattr(bound, "workspace", "") or entry.workspace or principal.workspace)
+        # Settle the destination workspace *before* resolving the project, and
+        # validate it here: a reassignment must name a registered workspace
+        # because dispatch-time routing and provider/model inheritance both hang
+        # off this field, so silently storing garbage would strand the schedule.
+        if changes.get("workspace") is not None:
+            target = str(changes["workspace"]).strip().lower()
             if self.config.workspace(target) is None:
                 raise ControlPlaneError(
                     "workspace_not_found", f"Workspace '{target}' was not found."
                 )
-            normalized["workspace"] = target
+            changes["workspace"] = target
+        else:
+            target = origin
+
+        project: Any | None = None
+        if changes.get("project_id"):
+            # Resolve the reference inside the *destination* workspace, exactly
+            # as ``schedule_preview`` does. Going through
+            # ``_resolve_project_id``/``_project`` searched and authorized
+            # against the caller's own workspace instead, so
+            # ``workspace="work"`` plus a project that lives in `work` failed
+            # with project_not_found/workspace_forbidden before the new
+            # workspace was ever considered — cross-workspace targeting worked
+            # on create but never on update.
+            project = self._resolve_project_in_workspace(
+                principal, str(changes["project_id"]), target
+            )
+            changes["project_id"] = project.project_id
+            # Keep workspace aligned with the new target (same as the HTTP API).
+            changes.setdefault("workspace", project.workspace)
+        aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
+        normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
+        if project is not None:
+            # The recorded name is what survives per-instance project-id
+            # regeneration (dispatch re-homes by it), so leaving the previous
+            # project's name behind would let a moved schedule silently re-home
+            # onto the wrong project.
+            normalized["web_project_name"] = project.name
+        if target != origin:
+            # Reassigning the workspace has to re-point the run target too:
+            # dispatch prioritises web_chat_id/web_project_id and never checks
+            # them against entry.workspace, so a bare ``workspace="work"``
+            # update left the schedule listed under `work` while every
+            # unattended run still created chats in — or posted into — the old
+            # workspace's project/chat: a silent cross-workspace write.
+            if normalized.get("web_chat_id"):
+                # Same boundary ``schedule_create`` draws: a chat binding cannot
+                # cross workspaces, and it resolves against the caller's own.
+                raise ControlPlaneError(
+                    "workspace_mismatch",
+                    "chat_id binds the schedule to a chat in its current workspace; "
+                    "omit it when moving the schedule to another workspace, and pass "
+                    "project_id to choose where its runs land.",
+                )
+            if entry.web_chat_id or entry.web_project_id:
+                normalized["web_chat_id"] = None
+                if "web_project_id" not in normalized:
+                    if entry.scope == "system":
+                        # System rows persist only SYSTEM_STATE_FIELDS and
+                        # resolve their project from the packaged definition
+                        # plus the workspace at dispatch, so clearing suffices.
+                        normalized["web_project_id"] = None
+                        normalized["web_project_name"] = ""
+                    else:
+                        # A user schedule with neither binding is skipped
+                        # outright at dispatch ("Schedule has no web target"),
+                        # so a bare move still has to name a destination: the
+                        # target workspace's General project, which is what an
+                        # unqualified cross-workspace target means.
+                        general = next(
+                            (
+                                item for item in self.pcm.list_projects(target)
+                                if item.name == "General"
+                            ),
+                            None,
+                        )
+                        if general is None:
+                            raise ControlPlaneError(
+                                "project_required",
+                                f"Workspace '{target}' has no General project to move this "
+                                "schedule into; pass project_id naming a project in it.",
+                            )
+                        normalized["web_project_id"] = general.project_id
+                        normalized["web_project_name"] = general.name
         known = set(ScheduleEntry.__dataclass_fields__)
         unknown = sorted(set(normalized) - known)
         if unknown:

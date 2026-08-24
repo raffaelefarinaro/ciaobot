@@ -646,11 +646,20 @@ def _chat_create_control_plane(
 
 
 def _work_project_pcm() -> _ChatCreatePcm:
-    """A pcm holding a project in a non-Personal workspace, to prove inheritance."""
+    """A pcm holding a project in a non-Personal workspace, to prove inheritance.
+
+    Also carries that workspace's General project, since every workspace gets
+    one at init and a cross-workspace reassignment re-points onto it.
+    """
     pcm = _ChatCreatePcm()
     pcm.projects["project-work"] = SimpleNamespace(
         project_id="project-work",
         name="AI-NATIVE-SDK",
+        workspace="work",
+    )
+    pcm.projects["project-work-general"] = SimpleNamespace(
+        project_id="project-work-general",
+        name="General",
         workspace="work",
     )
     return pcm
@@ -916,8 +925,90 @@ def test_schedule_create_cross_workspace_rejects_chat_binding(
     assert pcm.created == []
 
 
+def test_schedule_update_cross_workspace_resolves_project_in_target(
+    tmp_path: Path,
+) -> None:
+    """A move that names a project in the destination must resolve it there.
+
+    Resolving the reference against the caller's own workspace first rejected
+    the valid destination project before the new workspace was considered, so
+    cross-workspace targeting worked on create and not on update.
+    """
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    entry = schedules.create(
+        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        chat_id=0, workspace="personal",
+        web_project_id="project-1", web_project_name="Ciaobot Improvements",
+    )
+
+    updated = control_plane.schedule_update(
+        _chat_create_principal(),  # personal
+        entry.schedule_id,
+        workspace="work",
+        project_id="ai-native-sdk",  # work project, resolved by name
+    )
+
+    assert updated["data"]["workspace"] == "work"
+    assert updated["data"]["web_project_id"] == "project-work"
+    assert updated["data"]["web_project_name"] == "AI-NATIVE-SDK"
+    stored = schedules.list_entries()[0]
+    assert stored.workspace == "work"
+    assert stored.web_project_id == "project-work"
+
+
+def test_schedule_update_workspace_move_repoints_stale_bindings(
+    tmp_path: Path,
+) -> None:
+    """Moving a schedule must move where its runs land.
+
+    Dispatch prefers web_chat_id/web_project_id and never checks them against
+    the entry's workspace, so preserving them across a reassignment left the
+    schedule listed under the new workspace while every run kept writing into
+    the old one.
+    """
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    entry = schedules.create(
+        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        chat_id=0, workspace="personal",
+        web_chat_id="chat-1",
+        web_project_id="project-1", web_project_name="Ciaobot Improvements",
+    )
+
+    updated = control_plane.schedule_update(
+        _chat_create_principal(), entry.schedule_id, workspace="work"
+    )
+
+    assert updated["data"]["workspace"] == "work"
+    assert updated["data"]["web_chat_id"] is None
+    assert updated["data"]["web_project_id"] == "project-work-general"
+    assert updated["data"]["web_project_name"] == "General"
+    stored = schedules.list_entries()[0]
+    assert stored.web_chat_id is None
+    assert stored.web_project_id == "project-work-general"
+
+
+def test_schedule_update_workspace_move_rejects_chat_binding(
+    tmp_path: Path,
+) -> None:
+    """Same boundary ``schedule_create`` draws: no chat binding across a move."""
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    entry = schedules.create(
+        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        chat_id=0, workspace="personal",
+    )
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_update(
+            _chat_create_principal(), entry.schedule_id,
+            workspace="work", chat_id="chat-1",
+        )
+    assert excinfo.value.code == "workspace_mismatch"
+    assert "project_id" in str(excinfo.value)
+    assert schedules.list_entries()[0].workspace == "personal"
+
+
 def test_schedule_update_rejects_unregistered_workspace(tmp_path: Path) -> None:
-    control_plane, schedules = _schedule_control_plane(tmp_path, _ChatCreatePcm())
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
     entry = schedules.create(
         daily_time_utc="09:00", prompt="p", model="", mode="auto",
         chat_id=0, workspace="personal",
