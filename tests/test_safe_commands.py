@@ -216,6 +216,14 @@ def test_destructive_commands_are_destructive(command):
     "KEEP=0 rm -rf /tmp/valuable",
     "FOO=1 BAR=2 git push --force origin main",
     "A=x sh -c 'rm -rf ~/x'",
+    # A verb the shell expands at runtime names nothing the text can classify,
+    # so it fails closed.
+    "X=rm; $X -rf /tmp/valuable",
+    "${CMD} shred ~/x",
+    # An inline `-c alias.*` makes git run the VALUE as a command while the
+    # subcommand slot holds an innocent-looking name.
+    "git -c alias.nuke='!rm -rf /tmp/valuable' nuke",
+    "git -c alias.reset='reset --hard' reset-all",
 ])
 def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
     """Every one of these was auto-approved before.

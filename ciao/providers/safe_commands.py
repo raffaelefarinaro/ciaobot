@@ -293,6 +293,10 @@ _SUBSTITUTION_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 # command follows it. Only the segment's first word was ever classified, so
 # `KEEP=0 rm -rf /tmp/x` presented `KEEP=0` as the verb and ran approved.
 _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# A verb the shell expands before exec (`$X`, `${X}`, `$(...)`) is unknowable
+# from the text: whatever it names is only decided at runtime, so it cannot be
+# classified and gets the card instead of the permissive default.
+_EXPANDED_VERB_RE = re.compile(r"\$")
 
 
 def _verb(name: str) -> str:
@@ -384,6 +388,35 @@ def _push_arg_deletes_a_ref(arg: str) -> bool:
 
 
 def _git_is_destructive(args: list[str]) -> bool:
+    # `-c name=value` overrides config for this invocation, and an alias.* name
+    # makes git run the VALUE as a command: `git -c alias.nuke='!rm -rf /tmp/x'
+    # nuke` executes the removal while the subcommand slot holds the harmless
+    # word "nuke". Vet every alias defined inline before anything is approved;
+    # --config-env hides its value behind another environment variable, so it
+    # cannot be vetted and fails closed instead.
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if not token.startswith("-"):
+            break
+        if token in {"-c", "--config-env"}:
+            name, sep, cfg = (args[index + 1] if index + 1 < len(args) else "").partition("=")
+            if sep and name.startswith("alias."):
+                if token == "--config-env":
+                    return True
+                cmd = cfg[1:] if cfg.startswith("!") else cfg
+                try:
+                    words = shlex.split(cmd)
+                except ValueError:
+                    return True
+                if not words or is_destructive_command(cmd) or _git_is_destructive(words):
+                    return True
+            index += 2  # the option and its separate value
+            continue
+        if token in _GIT_GLOBAL_VALUE_OPTS:
+            index += 2
+            continue
+        index += 1
     args = _git_subcommand(args)
     if not args:
         return False
@@ -551,6 +584,10 @@ def is_destructive_command(command: str) -> bool:
         lead = 0
         while lead < len(segment) - 1 and _ASSIGNMENT_WORD_RE.match(segment[lead]):
             lead += 1
+        # `X=rm; $X -rf /tmp/x` classifies `$X` as an unknown verb unless the
+        # expansion itself is treated as the red flag it is.
+        if _EXPANDED_VERB_RE.search(segment[lead]):
+            return True
         if _segment_is_destructive(segment[lead], segment[lead + 1:]):
             return True
     return False
