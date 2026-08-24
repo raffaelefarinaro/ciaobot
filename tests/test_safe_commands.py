@@ -241,6 +241,15 @@ def test_destructive_commands_are_destructive(command):
     # force-updates the rest on the way past.
     "git push --mirror origin",
     "git push --prune origin",
+    # A deleted tag can drop the only reference to unreachable commits, and
+    # tag deletion has no unmerged-work safety net to lean on.
+    "git tag -d only-copy",
+    "git tag --delete v1",
+    "git tag -d v1 v2",
+    # The trap payload is a shell snippet the shell runs when the signal
+    # fires, so it is classified as its own command.
+    "trap 'rm -rf /tmp/valuable' EXIT",
+    'trap "shred ~/x" INT TERM',
 ])
 def test_the_classifier_is_not_fooled_by_wrappers_or_substitution(command):
     """Every one of these was auto-approved before.
@@ -486,6 +495,14 @@ def test_deleting_copies_and_branches_are_destructive(command):
     "git branch --list",
     # A bare bracket is the test(1) builtin, not a pathname expansion.
     "[ -f /tmp/x ] && echo yes",
+    # Listing, printing, and resetting traps arms nothing; a harmless payload
+    # is judged on its own text.
+    "trap -l",
+    "trap -p",
+    "trap '' EXIT",
+    "trap 'echo bye' EXIT",
+    "git tag v1",
+    "git tag -a v1 -m 'release'",
 ])
 def test_copies_and_safe_branch_work_stay_approved(command):
     assert is_destructive_command(command) is False

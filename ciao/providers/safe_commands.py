@@ -403,6 +403,16 @@ def _push_arg_deletes_a_ref(arg: str) -> bool:
     return arg.removeprefix("+").startswith(":")
 
 
+def _short_flag_letters(rest: list[str]) -> set[str]:
+    """Letters bundled into single-dash tokens (`-df` -> {d, f})."""
+    return {
+        ch
+        for arg in rest
+        if arg.startswith("-") and not arg.startswith("--")
+        for ch in arg[1:]
+    }
+
+
 def _git_is_destructive(args: list[str]) -> bool:
     # `-c name=value` overrides config for this invocation, and an alias.* name
     # makes git run the VALUE as a command: `git -c alias.nuke='!rm -rf /tmp/x'
@@ -466,15 +476,18 @@ def _git_is_destructive(args: list[str]) -> bool:
         # removes unmerged work exactly like `-D`. Shell parsing delivers the
         # long flags as two tokens, so the pair is tested separately, and a
         # short bundle (`-df`) carries both letters inside one token.
-        shorts = {
-            ch
-            for arg in rest
-            if arg.startswith("-") and not arg.startswith("--")
-            for ch in arg[1:]
-        }
+        shorts = _short_flag_letters(rest)
         forced = "--force" in rest or "f" in shorts
         deleted = "-d" in rest or "--delete" in rest or "d" in shorts
         return "-D" in rest or (deleted and forced)
+    if subcommand == "tag":
+        # A deleted tag can drop the only reference to otherwise unreachable
+        # commits, and unlike branches the safe-looking spelling has no
+        # unmerged-work refusal backing it up - `git tag -d` deletes without
+        # asking. Every deletion spelling counts; creating, listing, and
+        # annotating stay approved.
+        shorts = _short_flag_letters(rest)
+        return any(a in {"-d", "--delete"} for a in rest) or "d" in shorts
     if subcommand in _DESTRUCTIVE_GIT_SUBCOMMANDS:
         return True
     return False
@@ -534,6 +547,23 @@ def _segment_is_destructive(name: str, args: list[str]) -> bool:
         return not any(
             not a.startswith("-") and a != _REDIRECT_IN for a in args
         )
+    if name == "trap":
+        # The first argument is a shell snippet the shell runs when the signal
+        # fires, so it is judged on its own text (`trap 'rm -rf /tmp/x' EXIT`
+        # deletes on the way out). Listing or printing handlers is a query,
+        # and resetting one (`trap - INT`, `trap '' EXIT`) removes code rather
+        # than arming it; anything else with an unparseable payload fails
+        # closed, since there is no reading what would run.
+        if not args or args[0] in {"-l", "-p"}:
+            return False
+        handler = args[0]
+        if handler in {"-", ""}:
+            return False
+        try:
+            words = shlex.split(handler)
+        except ValueError:
+            return True
+        return bool(words) and is_destructive_command(handler)
     if name == "git":
         return _git_is_destructive(args)
     if name == "find":
