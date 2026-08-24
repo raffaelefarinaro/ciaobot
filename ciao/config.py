@@ -218,6 +218,11 @@ class WorkspaceConfig:
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
+    # True when the operator intentionally re-pointed this workspace's vault to
+    # a nonstandard folder through Settings. The "vault not in its standard
+    # folder" operator action and audit notice are skipped for pinned vaults so
+    # a deliberate relocation is not treated as an accident needing a chat fix.
+    vault_pinned: bool = False
 
 
 def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
@@ -262,6 +267,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         ),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
+        vault_pinned=bool(data.get("vault_pinned", False)),
     )
 
 
@@ -977,6 +983,7 @@ class CiaoConfig:
                 "allowed_mcp_servers": workspace.allowed_mcp_servers,
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
+                "vault_pinned": workspace.vault_pinned,
             }
             for workspace in self.workspaces.values()
         ]

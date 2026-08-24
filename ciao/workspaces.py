@@ -71,6 +71,7 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         ),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
+        "vault_pinned": bool(getattr(workspace, "vault_pinned", False)),
     }
 
 
