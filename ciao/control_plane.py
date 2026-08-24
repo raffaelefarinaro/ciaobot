@@ -258,6 +258,37 @@ class CiaoControlPlane:
             return principal.chat_id
         return value
 
+    def _resolve_project_in_workspace(
+        self, principal: McpPrincipal, ref: str, workspace: str
+    ) -> Any:
+        """Resolve a project reference against one explicit workspace.
+
+        Like ``_resolve_project`` but both the name lookup and the ownership
+        check target ``workspace`` instead of the caller's own, so a caller can
+        name a project in a workspace its principal is not scoped to (used by
+        cross-workspace schedule targeting).
+        """
+        exact = self.pcm.get_project(ref)
+        if exact is not None:
+            if exact.workspace != workspace:
+                raise ControlPlaneError(
+                    "workspace_mismatch",
+                    f"Project '{ref}' lives in workspace '{exact.workspace}', not '{workspace}'.",
+                )
+            return exact
+        matches = [
+            p for p in self.pcm.list_projects(workspace)
+            if p.name.casefold() == ref.casefold()
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ControlPlaneError(
+                "project_ambiguous",
+                f"'{ref}' matches more than one project; use its exact id instead.",
+            )
+        raise ControlPlaneError("project_not_found", f"Project '{ref}' was not found.")
+
     def _chat_scope(self, principal: McpPrincipal, chat_id: str | None = None) -> tuple[Any, Any]:
         """Resolve a chat plus the project that owns it, in one authorization pass.
 
@@ -1138,29 +1169,59 @@ class CiaoControlPlane:
         When ``chat_id`` is omitted, ``project_id`` defaults to the caller's
         active project (same as ``chat_create``) so MCP-created schedules land
         in the chat's workspace+project instead of an unscoped Personal fallback.
+
+        An explicit ``workspace`` may name any registered workspace. Dispatch is
+        global and every run starts a fresh chat inside the entry's workspace,
+        so a schedule is safe to create from any principal — but a
+        cross-workspace target never inherits the caller's active project and
+        never binds to the caller's chat: without an explicit project the run
+        lands in the target workspace's General project at dispatch time.
         """
-        workspace = self._workspace(principal)
+        requested = str(values.get("workspace") or "").strip().lower()
+        cross_workspace = bool(requested) and requested != principal.workspace
+        if cross_workspace:
+            if self.config.workspace(requested) is None:
+                raise ControlPlaneError(
+                    "workspace_not_found", f"Workspace '{requested}' was not found."
+                )
+            workspace: str = requested
+        else:
+            workspace = self._workspace(principal)
+
         chat_ref = values.get("chat_id")
         project_ref = values.get("project_id")
         web_chat_id: str | None = None
         project: Any | None = None
 
         if chat_ref:
+            if cross_workspace:
+                raise ControlPlaneError(
+                    "workspace_mismatch",
+                    "chat_id binds the schedule to this workspace's chat history; "
+                    "omit it when targeting another workspace.",
+                )
             chat = self._chat(principal, str(chat_ref))
             web_chat_id = chat.chat_id
-            if project_ref:
+
+        if project_ref:
+            if cross_workspace:
+                project = self._resolve_project_in_workspace(
+                    principal, str(project_ref), workspace
+                )
+            else:
                 project = self._resolve_project(principal, str(project_ref))
-        else:
+        elif not web_chat_id and not cross_workspace:
             # Inherit the active project when omitted — preferred for vault-aware
             # automation and keeps the schedule in the same workspace as this chat.
-            project = self._resolve_project(
-                principal, None if project_ref is None else str(project_ref)
-            )
+            project = self._resolve_project(principal, None)
 
         web_project_id: str | None = None
         if project is not None:
             web_project_id = project.project_id
-            workspace = self._workspace(principal, project.workspace)
+            if not cross_workspace:
+                # Re-stamp from the resolved project (same as the HTTP route);
+                # a cross-workspace project was already verified above.
+                workspace = self._workspace(principal, project.workspace)
 
         now = datetime.now(UTC).isoformat(timespec="seconds")
         entry = ScheduleEntry(
@@ -1231,6 +1292,16 @@ class CiaoControlPlane:
             changes.setdefault("workspace", project.workspace)
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
+        # A workspace reassignment must name a registered workspace — the
+        # dispatch-time routing and provider/model inheritance both hang off
+        # this field, so silently storing garbage would strand the schedule.
+        if normalized.get("workspace") is not None:
+            target = str(normalized["workspace"]).strip().lower()
+            if self.config.workspace(target) is None:
+                raise ControlPlaneError(
+                    "workspace_not_found", f"Workspace '{target}' was not found."
+                )
+            normalized["workspace"] = target
         known = set(ScheduleEntry.__dataclass_fields__)
         unknown = sorted(set(normalized) - known)
         if unknown:

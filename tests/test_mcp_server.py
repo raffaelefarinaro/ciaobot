@@ -24,6 +24,10 @@ class _FakeControlPlane:
         self.mode = mode
         self.create_calls = 0
         self.schedule_values = None
+        self.schedule_create_values: dict | None = None
+        self.schedule_updates: list[tuple[str, dict]] = []
+        self.loop_updates: list[tuple[str, dict]] = []
+        self.loop_lifecycle: list[tuple[str, str]] = []
 
     def chat_mode(self, _principal) -> str:
         return self.mode
@@ -42,11 +46,28 @@ class _FakeControlPlane:
 
     def schedule_create(self, _principal, **values) -> dict:
         self.create_calls += 1
+        self.schedule_create_values = values
         return {"ok": True, "data": values}
 
     def schedule_preview(self, _principal, **values) -> dict:
         self.schedule_values = values
         return {"ok": True, "data": values}
+
+    def schedule_update(self, _principal, schedule_id, **changes) -> dict:
+        self.schedule_updates.append((schedule_id, changes))
+        return {"ok": True, "data": {"schedule_id": schedule_id, **changes}}
+
+    def loop_update(self, _principal, loop_id, **changes) -> dict:
+        self.loop_updates.append((loop_id, changes))
+        return {"ok": True, "data": {"loop_id": loop_id, **changes}}
+
+    def loop_start(self, _principal, loop_id) -> dict:
+        self.loop_lifecycle.append(("start", loop_id))
+        return {"ok": True, "data": {"loop_id": loop_id}}
+
+    def loop_stop(self, _principal, loop_id) -> dict:
+        self.loop_lifecycle.append(("stop", loop_id))
+        return {"ok": True, "data": {"loop_id": loop_id, "running": False}}
 
 
 def _service(tmp_path: Path, *, mode: str = "auto") -> tuple[CiaoMcpService, _FakeControlPlane]:
@@ -364,6 +385,157 @@ def test_schedule_handler_does_not_forward_closed_over_service(tmp_path: Path) -
     assert "self" not in control_plane.schedule_values
 
 
+def _schedule_token(service: CiaoMcpService) -> str:
+    token, _ = service.registry.issue(
+        chat_id="chat-1",
+        project_id="project-1",
+        workspace="personal",
+        provider="opencode",
+    )
+    return token
+
+
+def _call(service: CiaoMcpService, name: str, arguments: dict) -> dict:
+    """Call one tool over the real MCP transport and return its JSON-RPC result.
+
+    Tool-level raises (bad `action`, missing id) come back as `isError` with no
+    structuredContent, so tests read the whole result rather than just the
+    payload.
+    """
+    token = _schedule_token(service)
+    with _client(service) as client:
+        called = _rpc(client, token, "tools/call", {"name": name, "arguments": arguments})
+    result: dict = called.json()["result"]
+    return result
+
+
+def test_schedule_update_forwards_values_that_equal_the_create_defaults(
+    tmp_path: Path,
+) -> None:
+    """"Move the daily report to 09:00" reported ok and changed nothing.
+
+    The update branch dropped every field equal to a create default, so
+    daily_time="09:00", frequency="weekly", archive_policy="manual" and the ""
+    clears never reached schedule_update — which then ran with an empty payload
+    and still returned ok.
+    """
+    service, control_plane = _service(tmp_path)
+
+    result = _call(
+        service,
+        "schedule",
+        {
+            "action": "update",
+            "schedule_id": "sched-1",
+            "daily_time": "09:00",
+            "frequency": "weekly",
+            "archive_policy": "manual",
+            "title": "",
+        },
+    )
+
+    assert result["structuredContent"]["ok"] is True
+    # Exactly the fields the caller passed — no omitted field is invented.
+    assert control_plane.schedule_updates == [
+        (
+            "sched-1",
+            {
+                "daily_time": "09:00",
+                "frequency": "weekly",
+                "archive_policy": "manual",
+                "title": "",
+            },
+        )
+    ]
+
+
+def test_schedule_update_refuses_a_payload_with_nothing_to_change(tmp_path: Path) -> None:
+    """A no-op update must not report success — that is how the silent no-op
+    above stayed invisible."""
+    service, control_plane = _service(tmp_path)
+
+    result = _call(service, "schedule", {"action": "update", "schedule_id": "sched-1"})
+
+    assert result["isError"] is True
+    assert "at least one field" in result["content"][0]["text"]
+    assert control_plane.schedule_updates == []
+
+
+def test_schedule_create_still_applies_the_documented_defaults(tmp_path: Path) -> None:
+    """The signature defaults moved to None, so create has to materialize them."""
+    service, control_plane = _service(tmp_path)
+
+    result = _call(service, "schedule", {"action": "create", "prompt": "do a thing"})
+
+    assert result["structuredContent"]["ok"] is True
+    assert control_plane.schedule_create_values is not None
+    assert control_plane.schedule_create_values["daily_time"] == "09:00"
+    assert control_plane.schedule_create_values["timezone"] == "UTC"
+    assert control_plane.schedule_create_values["frequency"] == "weekly"
+    assert control_plane.schedule_create_values["archive_policy"] == "manual"
+    assert control_plane.schedule_create_values["workspace"] == ""
+    # Fields with no create default stay unset rather than becoming "".
+    assert control_plane.schedule_create_values["days_of_week"] is None
+    assert "self" not in control_plane.schedule_create_values
+
+
+def test_update_refuses_to_clear_a_prompt(tmp_path: Path) -> None:
+    """"" now reaches the control plane (that is how a title/provider/model is
+    cleared), but neither schedule_update nor loop_update rejects a blank
+    prompt — an automation with no prompt would keep firing on nothing."""
+    # One service per call: the streamable-HTTP session manager refuses a
+    # second lifespan.
+    schedule_service, schedule_plane = _service(tmp_path / "schedule")
+    loop_service, loop_plane = _service(tmp_path / "loop")
+
+    schedule_result = _call(
+        schedule_service,
+        "schedule",
+        {"action": "update", "schedule_id": "sched-1", "prompt": ""},
+    )
+    loop_result = _call(
+        loop_service, "loop", {"action": "update", "loop_id": "loop-1", "prompt": ""}
+    )
+
+    assert schedule_result["isError"] is True
+    assert loop_result["isError"] is True
+    assert schedule_plane.schedule_updates == []
+    assert loop_plane.loop_updates == []
+
+
+def test_loop_update_forwards_the_create_default_interval(tmp_path: Path) -> None:
+    """interval_minutes=10 equals the create default, so it was dropped and the
+    loop kept its old cadence while the call reported ok."""
+    service, control_plane = _service(tmp_path)
+
+    result = _call(
+        service,
+        "loop",
+        {"action": "update", "loop_id": "loop-1", "interval_minutes": 10},
+    )
+
+    assert result["structuredContent"]["ok"] is True
+    assert control_plane.loop_updates == [("loop-1", {"interval_minutes": 10})]
+
+
+def test_loop_update_applies_start_false_through_the_lifecycle(tmp_path: Path) -> None:
+    """`start` is a runtime flag, not a stored field: forwarding it to
+    loop_update failed with `invalid_fields: start`, so an update that also
+    stopped the loop errored out entirely."""
+    service, control_plane = _service(tmp_path)
+
+    result = _call(
+        service,
+        "loop",
+        {"action": "update", "loop_id": "loop-1", "title": "watch", "start": False},
+    )
+
+    assert result["structuredContent"]["ok"] is True
+    assert control_plane.loop_updates == [("loop-1", {"title": "watch"})]
+    assert control_plane.loop_lifecycle == [("stop", "loop-1")]
+    assert result["structuredContent"]["data"]["running"] is False
+
+
 class _LifecyclePcm:
     def __init__(self) -> None:
         self.project = SimpleNamespace(project_id="project-1", workspace="personal")
@@ -640,6 +812,125 @@ def test_schedule_create_with_chat_id_skips_project_default(tmp_path: Path) -> N
     assert result["data"]["web_chat_id"] == "chat-fixed"
     assert result["data"]["web_project_id"] is None
     assert result["data"]["workspace"] == "work"
+
+
+# ── cross-workspace schedule targeting ───────────────────────────────────
+#
+# A principal scoped to one workspace may create a schedule for another
+# registered workspace: dispatch is global and each run starts a fresh chat
+# inside the entry's workspace. The boundary that stays firm is content —
+# no inheriting the caller's project and no binding the caller's chats.
+
+
+def test_schedule_create_targets_another_workspace_without_inheriting(
+    tmp_path: Path,
+) -> None:
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    principal = _chat_create_principal()  # personal, project-1
+
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Run the weekly self-improvement review.",
+        daily_time="02:01",
+        timezone="Europe/Zurich",
+        frequency="weekly",
+        days_of_week=["sun"],
+        workspace="work",
+    )
+
+    assert result["data"]["workspace"] == "work"
+    # The caller's active project must not leak across the workspace boundary.
+    assert result["data"]["web_project_id"] is None
+    stored = schedules.list_entries()[0]
+    assert stored.workspace == "work"
+    assert stored.web_project_id is None
+
+
+def test_schedule_create_cross_workspace_resolves_project_by_name(
+    tmp_path: Path,
+) -> None:
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    principal = _chat_create_principal()
+
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Seed the weekly skills CSV.",
+        daily_time="08:00",
+        timezone="UTC",
+        frequency="weekly",
+        project_id="ai-native-sdk",  # work project, resolved by name
+        workspace="work",
+    )
+
+    assert result["data"]["workspace"] == "work"
+    assert result["data"]["web_project_id"] == "project-work"
+
+
+def test_schedule_create_rejects_unknown_workspace(tmp_path: Path) -> None:
+    control_plane, _schedules = _schedule_control_plane(tmp_path, _ChatCreatePcm())
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_preview(
+            _chat_create_principal(),
+            prompt="p",
+            daily_time="09:00",
+            frequency="daily",
+            workspace="does-not-exist",
+        )
+    assert excinfo.value.code == "workspace_not_found"
+
+
+def test_schedule_create_cross_workspace_rejects_foreign_project_id(
+    tmp_path: Path,
+) -> None:
+    control_plane, _schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_preview(
+            _chat_create_principal(),  # personal
+            prompt="p",
+            daily_time="09:00",
+            frequency="daily",
+            project_id="project-1",  # personal project named for a work target
+            workspace="work",
+        )
+    assert excinfo.value.code == "workspace_mismatch"
+
+
+def test_schedule_create_cross_workspace_rejects_chat_binding(
+    tmp_path: Path,
+) -> None:
+    control_plane, _schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    pcm = _ChatCreatePcm()
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_preview(
+            _chat_create_principal(),
+            prompt="p",
+            daily_time="09:00",
+            frequency="daily",
+            chat_id="chat-1",
+            workspace="work",
+        )
+    assert excinfo.value.code == "workspace_mismatch"
+    assert pcm.created == []
+
+
+def test_schedule_update_rejects_unregistered_workspace(tmp_path: Path) -> None:
+    control_plane, schedules = _schedule_control_plane(tmp_path, _ChatCreatePcm())
+    entry = schedules.create(
+        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        chat_id=0, workspace="personal",
+    )
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_update(_chat_create_principal(), entry.schedule_id, workspace="nowhere")
+    assert excinfo.value.code == "workspace_not_found"
+
+    updated = control_plane.schedule_update(
+        _chat_create_principal(), entry.schedule_id, workspace="work"
+    )
+    assert updated["data"]["workspace"] == "work"
 
 
 def test_chat_update_resolves_omitted_chat_id() -> None:

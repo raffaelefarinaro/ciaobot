@@ -130,6 +130,37 @@ _DESTRUCTIVE = ToolAnnotations(
     openWorldHint=False,
 )
 
+# Create-time defaults for the merged `schedule` and `loop` tools. Their
+# signatures default every field to None instead, so an "update" can tell a
+# field the caller left out from one the caller set to the create default.
+# Encoding the defaults in the signature made those two cases identical, and
+# update stripped every field equal to a default: daily_time="09:00",
+# frequency="weekly", archive_policy="manual" and every ""-clear vanished, so
+# "move the daily report to 09:00" called schedule_update with an empty payload
+# and still returned ok. The same comparison left loop's start=False in the
+# payload (False != True), where loop_update rejected it as
+# `invalid_fields: start`.
+_SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
+    "prompt": "",
+    "daily_time": "09:00",
+    "timezone": "UTC",
+    "frequency": "weekly",
+    "title": "",
+    "description": "",
+    "provider": "",
+    "model": "",
+    "archive_policy": "manual",
+    "workspace": "",
+}
+_LOOP_CREATE_DEFAULTS: dict[str, Any] = {
+    "prompt": "",
+    "chat_id": "",
+    "interval_minutes": 10,
+    "title": "",
+    "autostart": False,
+    "start": True,
+}
+
 
 @dataclass(slots=True)
 class _Session:
@@ -1407,20 +1438,21 @@ class CiaoMcpService:
         @tool(name="schedule", annotations=_WRITE, structured_output=True)
         async def schedule(
             action: str,
-            prompt: str = "",
-            daily_time: str = "09:00",
-            timezone: str = "UTC",
-            frequency: str = "weekly",
+            prompt: str | None = None,
+            daily_time: str | None = None,
+            timezone: str | None = None,
+            frequency: str | None = None,
             days_of_week: list[str] | None = None,
             day_of_month: int | None = None,
             run_at_date: str | None = None,
             project_id: str | None = None,
             chat_id: str | None = None,
-            title: str = "",
-            description: str = "",
-            provider: str = "",
-            model: str = "",
-            archive_policy: str = "manual",
+            title: str | None = None,
+            description: str | None = None,
+            provider: str | None = None,
+            model: str | None = None,
+            archive_policy: str | None = None,
+            workspace: str | None = None,
             schedule_id: str = "",
         ) -> dict[str, Any]:
             """Preview, create, or update a Ciaobot schedule (recurring, one-off, or manual-only).
@@ -1443,6 +1475,11 @@ class CiaoMcpService:
                     system_schedule_read_only. Pass schedule_id to target the
                     schedule; all other fields are optional overrides.
 
+            Every field but action is optional and unset by default:
+            preview/create fall back to the default noted below, update leaves
+            an unset field untouched. Pass a field (including "" to clear a
+            title, provider, or model) only when you mean to change it.
+
             Field semantics (identical for preview/create; update treats all but
             schedule_id as optional overrides):
 
@@ -1457,11 +1494,12 @@ class CiaoMcpService:
                     {{ISSUE_REPORT}} (server errors + failed background jobs);
                     Ciaobot clears the consumed error log after a clean run
                     that uses one.
-                daily_time: Local HH:MM in `timezone` (persisted as the legacy
-                    field daily_time_utc).
-                timezone: IANA name, e.g. "Europe/Rome". Use the user's local
-                    timezone unless they ask for UTC.
-                frequency: "daily" | "weekly" | "monthly" | "manual" | "once".
+                daily_time: Local HH:MM in `timezone`, default "09:00"
+                    (persisted as the legacy field daily_time_utc).
+                timezone: IANA name, e.g. "Europe/Rome", default "UTC". Use
+                    the user's local timezone unless they ask for UTC.
+                frequency: "daily" | "weekly" | "monthly" | "manual" | "once";
+                    default "weekly".
                 days_of_week: weekly only — lowercase "mon".."sun".
                 day_of_month: 1-31, monthly only.
                 run_at_date: "YYYY-MM-DD", once only, must be in the future.
@@ -1479,43 +1517,62 @@ class CiaoMcpService:
                     dispatch time; override only when necessary.
                 provider: Empty inherits the target workspace's default
                     provider at dispatch time; override only when necessary.
-                archive_policy: "manual" | "auto".
+                archive_policy: "manual" (default) | "auto".
+                workspace: Target workspace name (see workspaces_list). Omit to
+                    create in this chat's workspace. Naming another registered
+                    workspace creates the schedule THERE: each run starts a
+                    fresh chat in that workspace with its default model/provider,
+                    landing in its General project unless project_id names one.
+                    Cross-workspace targets cannot bind chat_id, and the caller's
+                    project is not inherited. Use this to give a second workspace
+                    its own copy of an automation without switching context.
                 schedule_id: (update only) The schedule to update.
 
             An enabled schedule with a missed latest occurrence (e.g. the
             server was off) runs once on startup; older missed intervals are
             not replayed.
             """
-            if action == "preview":
+            # Snapshot the caller's arguments before any other local exists.
+            # Doing it first is what keeps helper locals out of the payload: a
+            # leaked `_defaults` dict once reached the control plane as
+            # `Unknown schedule fields: _defaults`.
+            supplied: dict[str, Any] = {
+                key: value for key, value in locals().items()
+                if key not in {"self", "action", "schedule_id"}
+            }
+            if action in {"preview", "create"}:
                 values = {
-                    key: value for key, value in locals().items()
-                    if key not in {"self", "action", "schedule_id"}
+                    key: _SCHEDULE_CREATE_DEFAULTS.get(key, value) if value is None else value
+                    for key, value in supplied.items()
                 }
-                return await self._invoke("schedule", lambda cp, p: cp.schedule_preview(p, **values))
-            if action == "create":
-                values = {
-                    key: value for key, value in locals().items()
-                    if key not in {"self", "action", "schedule_id"}
-                }
+                if action == "preview":
+                    return await self._invoke("schedule", lambda cp, p: cp.schedule_preview(p, **values))
                 return await self._invoke("schedule", lambda cp, p: cp.schedule_create(p, **values), mutating=True)
             if action == "update":
                 if not schedule_id:
                     raise ControlPlaneError("invalid_action", "schedule_id is required for update.")
-                # update only applies fields the caller explicitly set; the
-                # control plane skips None values, so strip defaults here.
-                _defaults = {
-                    "prompt": "", "daily_time": "09:00", "timezone": "UTC",
-                    "frequency": "weekly", "days_of_week": None,
-                    "day_of_month": None, "run_at_date": None,
-                    "project_id": None, "chat_id": None, "title": "",
-                    "description": "", "provider": "", "model": "",
-                    "archive_policy": "manual",
-                }
-                values = {
-                    key: value for key, value in locals().items()
-                    if key not in {"self", "action", "schedule_id", "_defaults"}
-                    and value != _defaults.get(key)
-                }
+                # update applies exactly the fields the caller passed. None (the
+                # signature default) is the only "not supplied" marker, so a
+                # value that happens to equal a create default still goes
+                # through. Filter here rather than leaning on schedule_update's
+                # own None-skipping: its system-schedule guard inspects every
+                # key it is handed, including ones it would later skip.
+                values = {key: value for key, value in supplied.items() if value is not None}
+                if not values:
+                    raise ControlPlaneError(
+                        "invalid_action",
+                        "update needs at least one field to change besides schedule_id.",
+                    )
+                # "" now reaches the control plane instead of being dropped,
+                # which is the point for title/provider/model. A schedule with
+                # no prompt dispatches nothing though, and neither
+                # schedule_update nor schedule_preview rejects a blank one, so
+                # an accidental prompt="" must fail here rather than quietly
+                # wipe a working routine.
+                if values.get("prompt") == "":
+                    raise ControlPlaneError(
+                        "empty_prompt", "prompt cannot be cleared; pass the new prompt text."
+                    )
                 return await self._invoke(
                     "schedule",
                     lambda cp, p: cp.schedule_update(p, schedule_id, **values),
@@ -1556,12 +1613,12 @@ class CiaoMcpService:
         @tool(name="loop", annotations=_WRITE, structured_output=True)
         async def loop(
             action: str,
-            prompt: str = "",
-            chat_id: str = "",
-            interval_minutes: int = 10,
-            title: str = "",
-            autostart: bool = False,
-            start: bool = True,
+            prompt: str | None = None,
+            chat_id: str | None = None,
+            interval_minutes: int | None = None,
+            title: str | None = None,
+            autostart: bool | None = None,
+            start: bool | None = None,
             loop_id: str = "",
         ) -> dict[str, Any]:
             """Create or update an in-chat loop.
@@ -1595,7 +1652,11 @@ class CiaoMcpService:
                     running. The returned payload carries the real `running`
                     flag — report that, not your intent.
 
-            Args (update): loop_id is required; all other fields are optional.
+            Args (update): loop_id is required; every other field is unset by
+                default and only a field you pass is changed. `start` is
+                honoured here too: True starts the cadence, False stops it
+                (same as loop_action), and the returned payload carries the
+                resulting `running` flag.
 
             If the target chat is busy when a tick fires, that iteration is
             skipped and retried on the next tick (not queued). If the target
@@ -1603,31 +1664,61 @@ class CiaoMcpService:
             up missed ticks after downtime (unlike schedules, which fire once
             for a missed occurrence on startup).
             """
+            # Snapshot the arguments before any other local exists, so no helper
+            # local can leak into the control-plane payload.
+            supplied: dict[str, Any] = {
+                key: value for key, value in locals().items()
+                if key not in {"self", "action", "loop_id"}
+            }
             if action == "create":
+                values: dict[str, Any] = {
+                    key: _LOOP_CREATE_DEFAULTS.get(key, value) if value is None else value
+                    for key, value in supplied.items()
+                }
                 return await self._invoke(
                     "loop",
-                    lambda cp, p: cp.loop_create(
-                        p, chat_id, prompt, interval_minutes, title, autostart, start
-                    ),
+                    lambda cp, p: cp.loop_create(p, **values),
                     mutating=True,
                 )
             if action == "update":
                 if not loop_id:
                     raise ControlPlaneError("invalid_action", "loop_id is required for update.")
-                _defaults = {
-                    "prompt": "", "chat_id": "", "interval_minutes": 10,
-                    "title": "", "autostart": False, "start": True,
-                }
+                # Only the fields the caller passed, keyed off None rather than
+                # off equality with the create defaults: that comparison dropped
+                # interval_minutes=10 and every ""-clear (reporting ok while
+                # changing nothing) and, because False != True, forwarded
+                # start=False to loop_update, which rejected it as
+                # `invalid_fields: start`.
                 values = {
-                    key: value for key, value in locals().items()
-                    if key not in {"self", "action", "loop_id", "_defaults"}
-                    and value != _defaults.get(key)
+                    key: value for key, value in supplied.items()
+                    if key != "start" and value is not None
                 }
-                return await self._invoke(
-                    "loop",
-                    lambda cp, p: cp.loop_update(p, loop_id, **values),
-                    mutating=True,
-                )
+                if not values and start is None:
+                    raise ControlPlaneError(
+                        "invalid_action",
+                        "update needs at least one field to change besides loop_id.",
+                    )
+                # loop_create refuses an empty prompt; loop_update does not, and
+                # a loop with a blank prompt keeps ticking on nothing.
+                if values.get("prompt") == "":
+                    raise ControlPlaneError(
+                        "empty_prompt", "prompt cannot be cleared; pass the new prompt text."
+                    )
+
+                def _update(cp: CiaoControlPlane, principal: McpPrincipal) -> dict[str, Any]:
+                    result: dict[str, Any] = cp.loop_update(principal, loop_id, **values)
+                    if start is None:
+                        return result
+                    # `start` is a runtime cadence flag, not a stored loop field,
+                    # so it has to go through the lifecycle calls instead of the
+                    # update payload.
+                    if start:
+                        cp.loop_start(principal, loop_id)
+                    else:
+                        cp.loop_stop(principal, loop_id)
+                    return {"ok": True, "data": {**result.get("data", {}), "running": bool(start)}}
+
+                return await self._invoke("loop", _update, mutating=True)
             raise ControlPlaneError("invalid_action", "action must be create or update.")
 
         @tool(name="loop_action", annotations=_DESTRUCTIVE, structured_output=True)
