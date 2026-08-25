@@ -36,6 +36,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import proposal_kinds
+from ciao import proposal_outcomes
 from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
@@ -5029,6 +5030,11 @@ async def list_automation(request: Request) -> JSONResponse:
     run, recent history, and aggregate stats. Scheduled jobs whose schedule is
     not installed here are omitted — nothing would ever trigger them.
     Read-only.
+
+    ``?include=outcomes`` answers ``{"jobs": [...], "proposal_outcomes":
+    {...}}`` instead of the bare list, adding the memory-proposal
+    promoted-vs-dismissed tally the page renders next to the job stats. The
+    default stays a bare list so existing consumers keep working unchanged.
     """
     from ciao import job_runs
 
@@ -5039,7 +5045,13 @@ async def list_automation(request: Request) -> JSONResponse:
     except Exception:  # noqa: BLE001 — no schedule manager: filter nothing
         installed = None
 
-    return JSONResponse(job_runs.automation_summary(installed_schedules=installed))
+    summary = job_runs.automation_summary(installed_schedules=installed)
+    if request.query_params.get("include", "") != "outcomes":
+        return JSONResponse(summary)
+    return JSONResponse({
+        "jobs": summary,
+        "proposal_outcomes": proposal_outcomes.tally_cached(),
+    })
 
 
 async def trigger_backfill_insights(request: Request) -> JSONResponse:
@@ -7314,19 +7326,29 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
         keep = []
         section_date = None
         changed = False
+        # Swept rows are collected and recorded only AFTER the rewrite lands:
+        # a failed write must not leave phantom dismissals in the tally.
+        swept_kinds: list[str] = []
         for raw_line in lines:
             m = _SECTION_DATE_RE.match(raw_line)
             if m:
                 section_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
                 keep.append(raw_line)
                 continue
-            if proposal_kinds.parse_bullet(raw_line) is not None and section_date is not None and section_date < cutoff:
+            bullet = proposal_kinds.parse_bullet(raw_line)
+            if bullet is not None and section_date is not None and section_date < cutoff:
                 removed += 1
                 changed = True
+                swept_kinds.append(bullet.kind)
                 continue
             keep.append(raw_line)
         if changed:
             queue.write_text("\n".join(keep).rstrip() + "\n", encoding="utf-8")
+            for kind in swept_kinds:
+                if proposal_outcomes.is_extraction_kind(kind):
+                    proposal_outcomes.record(
+                        kind=kind, action="dismissed", workspace=workspace, via="pwa",
+                    )
     return JSONResponse({"ok": True, "removed": removed})
 
 
@@ -7427,6 +7449,13 @@ async def proposals_batch(request: Request) -> JSONResponse:
         entry["lines"].add(ctx["line"])
         entry["rows"].append(ctx["row"])
 
+    # Rows whose bullet THIS request actually dropped. A concurrent resolver
+    # may have removed a row between this request's scan and its write; the
+    # loser reports success to the client (the row is gone either way) but
+    # records no outcome - the winner already did.
+    self_request_removed: set[str] = set()
+    recorded: set[str] = set()
+
     for path, entry in by_file.items():
         queue = Path(path)
         # Write every promotion BEFORE dropping any bullet, and only drop the
@@ -7462,13 +7491,37 @@ async def proposals_batch(request: Request) -> JSONResponse:
         # Highest index first so the lower ones stay valid, and each removal
         # verifies the content at that index - a promotion above may have
         # awaited a model call while another request rewrote this same file.
+        removed_here: set[str] = set()
         for row in sorted(
             entry["rows"], key=lambda r: int(r.get("line", -1)), reverse=True
         ):
             if int(row.get("line", -1)) in keep_lines:
                 continue
-            _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or ""))
+            if _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or "")):
+                removed_here.add(row["id"])
         queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        self_request_removed.update(removed_here)
+        # Record THIS queue's outcomes immediately after its rewrite lands: a
+        # later file failing to persist must not take already-persisted
+        # resolutions out of the tally — their ids are gone, so a retry can
+        # never re-record them. Rows whose bullet this request did not remove
+        # (a concurrent resolver won) record nothing; the winner already did.
+        for row in entry["rows"]:
+            pid = row["id"]
+            if pid not in removed_here or pid in recorded:
+                continue
+            recorded.add(pid)
+            if not proposal_outcomes.is_extraction_kind(row["kind"]):
+                # Not recorded: this ledger measures the MEMORY extraction
+                # pipeline. Skill proposals come from skill evolution and
+                # rehome rows from vault hygiene.
+                continue
+            proposal_outcomes.record(
+                kind=row["kind"],
+                action="promoted" if action == "accept" else "dismissed",
+                workspace=entry["workspace"],
+                via="pwa",
+            )
         for row in entry["rows"]:
             if action == "accept":
                 accept = proposal_kinds.accept_for(row["kind"])
@@ -7666,6 +7719,8 @@ async def proposal_action(request: Request) -> JSONResponse:
         outcome = _dismiss_skill_proposal(ctx)
         if not outcome.get("ok"):
             return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
+        # Not recorded: this ledger measures the MEMORY extraction pipeline;
+        # skill proposals come from the separate skill-evolution pipeline.
         return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
 
     promoted: dict[str, Any] = {}
@@ -7736,8 +7791,12 @@ async def proposal_action(request: Request) -> JSONResponse:
 
     queue = Path(ctx["path"])
     lines = queue.read_text(encoding="utf-8").splitlines()
-    _remove_bullet_line(lines, ctx["line"], str(ctx["row"].get("raw") or ""))
-    queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    # A concurrent request or the CLI may have removed this bullet first; the
+    # loser must not rewrite the file around the winner's deletion, and only
+    # the request that actually removed the row records its outcome.
+    removed_ours = _remove_bullet_line(lines, ctx["line"], str(ctx["row"].get("raw") or ""))
+    if removed_ours:
+        queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])
@@ -7758,7 +7817,15 @@ async def proposal_action(request: Request) -> JSONResponse:
             result["promoted"] = False
             result["destination"] = row.get("rehome", {}).get("destination", "")
             result["justified"] = row.get("rehome", {}).get("justified", False)
+        if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
+            proposal_outcomes.record(
+                kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
+            )
         return JSONResponse({"ok": True, "result": result})
+    if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
+        proposal_outcomes.record(
+            kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",
+        )
     return JSONResponse({"ok": True, "result": {"id": pid, "action": "dismiss", "dismissed": True}})
 
 

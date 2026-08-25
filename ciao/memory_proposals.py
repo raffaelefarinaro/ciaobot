@@ -518,7 +518,8 @@ _STUB_HEADER = (
     "what lands here waited because the model was unsure or a write failed.\n\n"
     "Destinations: `[memory]` / `[profile]` are the bounded `ciao:memory` / "
     "`ciao:profile` regions of the workspace `CLAUDE.md` (edit the region "
-    "first, then dismiss with `ciao memory-proposal-dismiss <text>`); "
+    "first, then dismiss with `ciao memory-proposal-dismiss <text> "
+    "--promoted` so the outcome counts as a promotion); "
     "`[project <doc-path>]` folds into that canonical doc; `[people <Name>]` "
     "updates `People/<Name>.md`; `[learnings]` appends to "
     "`Workspace/Learnings.md`; `[review]` has no known destination yet — "
@@ -710,25 +711,25 @@ def list_proposals(
     return rows
 
 
-def dismiss_proposal_by_substring(
+def remove_proposal_by_substring(
     proposals_path: Path,
     needle: str,
-) -> bool:
+) -> str | None:
     """Remove the single proposal whose bullet matches ``needle``.
 
     Matches a unique substring case-insensitively across the pending bullets
-    (the same contract the removed MCP resolve tool used). Returns True when
-    exactly one proposal was removed, False when the file is missing or no
-    match exists. An ambiguous match (more than one) is left unresolved and
-    returns False so the caller can ask for a longer substring.
+    (the same contract the removed MCP resolve tool used). Returns the removed
+    bullet's kind, or None when the file is missing or no match exists. An
+    ambiguous match (more than one) is left unresolved and returns None so
+    the caller can ask for a longer substring.
     """
     from ciao.proposal_kinds import parse_bullet
 
     if not proposals_path.exists():
-        return False
+        return None
     needle = needle.strip()
     if not needle:
-        return False
+        return None
     lines = proposals_path.read_text(encoding="utf-8").splitlines()
     candidates: list[int] = []
     for index, line in enumerate(lines):
@@ -737,7 +738,20 @@ def dismiss_proposal_by_substring(
         if needle.casefold() in line.casefold():
             candidates.append(index)
     if len(candidates) != 1:
-        return False
+        return None
+    bullet = parse_bullet(lines[candidates[0]])
     del lines[candidates[0]]
     proposals_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    return True
+    return bullet.kind if bullet is not None else None
+
+
+def dismiss_proposal_by_substring(
+    proposals_path: Path,
+    needle: str,
+) -> bool:
+    """Remove one matching proposal, answering in booleans.
+
+    Thin view over :func:`remove_proposal_by_substring` for callers that only
+    need to know whether anything was removed.
+    """
+    return remove_proposal_by_substring(proposals_path, needle) is not None

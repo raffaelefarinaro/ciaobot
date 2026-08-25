@@ -29,6 +29,22 @@
           {{ headline }}
         </p>
 
+        <!-- Whether memory extraction is useful, not only whether it ran:
+              proposals promoted vs dismissed, over time. -->
+        <div v-if="proposalsLine" class="automation-proposals">
+          <p class="automation-proposals-total">{{ proposalsLine }}</p>
+          <!-- Visible, not hover-only: touch and keyboard users get the
+               per-workspace split too. -->
+          <p
+            v-for="entry in proposalsByWorkspace"
+            :key="entry.workspace"
+            class="automation-proposals-workspace"
+          >
+            {{ entry.workspace }}: {{ entry.counts.promoted }} promoted ·
+            {{ entry.counts.dismissed }} dismissed
+          </p>
+        </div>
+
         <!-- Failing first: the only rows that need a decision. -->
         <section v-if="groups.attention.length" class="automation-group">
           <p class="automation-group-title automation-group-title--warn">Needs attention</p>
@@ -102,7 +118,7 @@ import {
 } from '../../lib/automationView'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
-import type { AutomationProcess, RoutineSettings } from '../../lib/types'
+import type { AutomationProcess, ProposalOutcomes, RoutineSettings } from '../../lib/types'
 import AutomationRow from './AutomationRow.vue'
 
 // The automation data and the job-telemetry read helpers live in SettingsView,
@@ -114,6 +130,9 @@ const props = defineProps<{
   automationLoaded: boolean
   automationError: string
   fetchAutomation: () => Promise<void>
+  // Promoted-vs-dismissed memory-proposal tally, or null when the server does
+  // not serve it yet (or nothing has been resolved at all).
+  proposalOutcomes?: ProposalOutcomes | null
   notifySaved: (body: string, title?: string) => void
   // The failure channel. `alert` cannot be used: it shows nothing at all in the
   // desktop webview, so a failed run looked like a button that did nothing.
@@ -131,6 +150,28 @@ const projectStore = useProjectStore()
 
 const groups = computed(() => groupAutomations(props.automationItems))
 const headline = computed(() => automationHeadline(props.automationItems))
+
+// One compact pipeline-health line beside the job stats. Hidden until at least
+// one decision exists: "0 promoted · 0 dismissed" on a fresh install reads as
+// breakage, not as an empty ledger.
+const proposalsLine = computed(() => {
+  const outcomes = props.proposalOutcomes
+  if (!outcomes || (!outcomes.promoted && !outcomes.dismissed)) return ''
+  const recent = (outcomes.recent_30d?.promoted ?? 0) + (outcomes.recent_30d?.dismissed ?? 0)
+  return (
+    `Memory proposals: ${outcomes.promoted} promoted · ` +
+    `${outcomes.dismissed} dismissed (${recent} in last 30 days)`
+  )
+})
+
+// The per-workspace split, rendered as visible lines — a title tooltip is
+// unreachable on touch and not keyboard-focusable.
+const proposalsByWorkspace = computed(() =>
+  Object.entries(props.proposalOutcomes?.by_workspace ?? {}).map(([workspace, counts]) => ({
+    workspace: workspace || 'shared',
+    counts,
+  })),
+)
 
 const retryModelOptions = computed(() =>
   buildRetryModelOptions(props.providerModels, props.providerLabels),
@@ -271,6 +312,20 @@ async function runJob(item: AutomationProcess, model: string) {
 
 .automation-headline--warn {
   color: var(--warning);
+}
+
+.automation-proposals {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.automation-proposals-total,
+.automation-proposals-workspace {
+  margin: 0;
+}
+
+.automation-proposals-workspace {
+  color: var(--fg3);
 }
 
 .automation-group {

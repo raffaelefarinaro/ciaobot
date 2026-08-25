@@ -602,6 +602,30 @@ def test_a_batch_dismiss_covers_skill_rows_and_bullets_together(tmp_path: Path) 
     assert client.get("/api/proposals").json()["rows"] == []
 
 
+def test_skill_dismissals_stay_out_of_the_memory_outcome_tally(tmp_path: Path) -> None:
+    """The outcome ledger measures the memory extraction pipeline; skill
+    proposals come from skill evolution, so rejecting one must not inflate the
+    dismissed count — singly or inside a batch."""
+    from ciao import proposal_outcomes as po
+
+    config = _config(tmp_path)
+    _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+
+    skill_row = next(r for r in rows if r["kind"] == "skill")
+    assert client.post(f"/api/proposals/{skill_row['id']}/dismiss").status_code == 200
+    assert po.tally()["dismissed"] == 0
+
+    bullet_rows = [r["id"] for r in rows if r["kind"] != "skill"]
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": bullet_rows})
+    assert response.status_code == 200
+    tally = po.tally()
+    assert tally["dismissed"] == 1
+    assert tally["by_workspace"]["personal"]["dismissed"] == 1
+
+
 def test_dismissing_the_same_skill_twice_deletes_both(tmp_path: Path) -> None:
     """Two proposals can share a name across runs; each dismiss deletes its own
     file, so dismissing the second run's copy is unaffected by the first."""
@@ -747,6 +771,239 @@ def test_a_batch_keeps_the_rows_whose_move_failed(tmp_path: Path) -> None:
     assert len(left) == 1
     assert "Ida" in left[0]["rehome"]["note"]
     assert (config.workspace_vault_root("personal") / "People" / "Ida.md").is_file()
+
+
+# -- every resolution leaves one outcome event --------------------------------
+#
+# Settings → Automation measures whether memory extraction is *useful*
+# (promoted vs dismissed), not only whether it ran. These pin that each resolve
+# path records exactly the decisions it settled — and nothing for the ones it
+# refused.
+
+
+def _outcome_events(tmp_path: Path) -> list[dict]:
+    import json as _json
+
+    from ciao import proposal_outcomes
+
+    path = tmp_path / proposal_outcomes.PROPOSAL_OUTCOMES_NAME
+    if not path.exists():
+        return []
+    return [
+        _json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_single_accept_and_dismiss_record_outcomes(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    memory = _accept_kind_row(client, "memory")
+    profile = _accept_kind_row(client, "profile")
+
+    client.post(f"/api/proposals/{memory['id']}/accept")
+    client.post(f"/api/proposals/{profile['id']}/dismiss")
+
+    events = _outcome_events(tmp_path)
+    assert [e["action"] for e in events] == ["promoted", "dismissed"]
+    assert all(e["workspace"] == "personal" for e in events)
+    assert {e["kind"] for e in events} == {"memory", "profile"}
+    assert all(e["via"] == "pwa" for e in events)
+
+
+def test_a_failed_accept_records_no_outcome(tmp_path: Path) -> None:
+    """A refused write leaves the bullet queued: an attempt, not a decision."""
+    config = _default_vault(tmp_path)
+    _corrupt_guide(config, "personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 409
+
+    assert _outcome_events(tmp_path) == []
+
+
+def test_an_unknown_batch_id_records_nothing(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+
+    resp = client.post(
+        "/api/proposals/batch",
+        json={"action": "dismiss", "ids": [rows[0]["id"], "does-not-exist"]},
+    )
+
+    assert resp.status_code == 404
+    assert _outcome_events(tmp_path) == []
+
+
+def test_a_batch_records_one_event_per_resolved_row(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    rows = [
+        r for r in client.get("/api/proposals").json()["rows"]
+        if r["kind"] in {"memory", "profile", "user"}
+    ]
+
+    resp = client.post(
+        "/api/proposals/batch",
+        json={"action": "dismiss", "ids": [r["id"] for r in rows]},
+    )
+
+    assert resp.status_code == 200
+    events = _outcome_events(tmp_path)
+    assert len(events) == len(rows)
+    assert all(e["action"] == "dismissed" for e in events)
+    assert all(e["workspace"] == "personal" for e in events)
+
+
+def test_a_batch_accept_records_promotions_not_failures(tmp_path: Path) -> None:
+    """The batch keeps unwritable bullets queued; those are not promotions."""
+    # Per-root layout: in the shared layout both workspaces resolve ONE guide,
+    # so corrupting work's would refuse personal's rows too.
+    config = _per_root_config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "Workspace").mkdir(parents=True, exist_ok=True)
+    _rerooted_vault(config, tmp_path)
+    _write_queue(config, "personal", (
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        "- [memory] A personal fact.  _(from: Decisions)_\n"
+    ))
+    # Corrupting only work's guide splits the batch: personal's rows write,
+    # work's refuse, and only the writes may count as decisions.
+    _write_queue(config, "work", (
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        "- [memory] A work-origin fact.  _(from: Decisions)_\n"
+    ))
+    _corrupt_guide(config, "work")
+    client = _client(config)
+    rows = [
+        r for r in client.get("/api/proposals").json()["rows"]
+        if r["kind"] == "memory"
+    ]
+    assert {r["workspace"] for r in rows} == {"personal", "work"}
+
+    resp = client.post(
+        "/api/proposals/batch",
+        json={"action": "accept", "ids": [r["id"] for r in rows]},
+    )
+
+    results = resp.json()["results"]
+    promoted_count = sum(1 for r in results if r.get("promoted"))
+    assert promoted_count == 1
+    assert any(not r.get("promoted") for r in results)
+
+    events = _outcome_events(tmp_path)
+    assert len(events) == promoted_count
+    assert [e["workspace"] for e in events] == ["personal"]
+    assert all(e["action"] == "promoted" for e in events)
+
+
+def test_the_bulk_sweep_records_one_event_per_removed_row(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    _write_queue(config, "work", (
+        "## 2026-07-01 curation pass\n\n"
+        "- [memory] An old work fact.  _(from: Decisions)_\n\n"
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        "- [memory] A recent work fact.  _(from: Decisions)_\n"
+    ))
+    client = _client(config)
+
+    resp = client.post("/api/proposals/dismiss-older-than?date=2026-08-01")
+
+    assert resp.json()["removed"] == 1
+    events = _outcome_events(tmp_path)
+    assert len(events) == 1
+    assert events[0]["kind"] == "memory"
+    assert events[0]["action"] == "dismissed"
+    # The workspace is threaded from the queue the row was swept out of.
+    assert events[0]["workspace"] == "work"
+
+
+def test_dismissing_a_skill_row_records_no_outcome(tmp_path: Path) -> None:
+    """Skill proposals belong to skill evolution, not the memory pipeline, so
+    their dismissal must not land in the memory outcome tally."""
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+
+    response = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert response.status_code == 200
+    assert not source.exists()
+    assert _outcome_events(tmp_path) == []
+
+
+def test_a_rehome_accept_records_no_outcome(tmp_path: Path) -> None:
+    """Rehome rows are note-move judgements queued by vault hygiene, not
+    memory-extraction output; accepting one must not enter the promoted
+    tally."""
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+
+    assert _outcome_events(tmp_path) == []
+
+
+def test_a_batch_rehome_accept_is_recorded_once(tmp_path: Path) -> None:
+    """A successful batch rehome produces two results (the move above the
+    grouping and the bullet drop inside it); it is also a vault-hygiene
+    decision, so the extraction tally records nothing either way."""
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+
+    assert response.status_code == 200, response.json()
+    assert all(r.get("dismissed") for r in response.json()["results"]), response.json()
+    assert _outcome_events(tmp_path) == []
+
+
+def test_a_batch_row_removed_by_another_request_records_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When a concurrent resolver drops the bullet between this batch's scan
+    and its write, ``_remove_bullet_line`` matches nothing; the loser reports
+    success to the client but must not record a second outcome."""
+    from ciao.web import routes_api
+
+    config = _config(tmp_path)
+    queue_path = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory")
+
+    monkeypatch.setattr(routes_api, "_remove_bullet_line", lambda *a, **k: False)
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["dismissed"] is True  # gone from review either way
+    # The loser did not rewrite the queue around the winner's deletion.
+    assert "Remember the thing" in queue_path.read_text()
+    assert _outcome_events(tmp_path) == []
+
+
+def test_an_accept_that_loses_the_bullet_race_records_nothing(tmp_path: Path, monkeypatch) -> None:
+    """A concurrent resolver (another request, or the CLI) removes the bullet
+    between this request's scan and its write: ``_remove_bullet_line`` matches
+    nothing. The loser must not rewrite the queue around the winner's deletion
+    — and must not record an outcome for a decision it did not carry out."""
+    from ciao.web import routes_api
+
+    config = _config(tmp_path)
+    _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory")
+
+    monkeypatch.setattr(routes_api, "_remove_bullet_line", lambda *a, **k: False)
+    response = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert response.status_code == 200
+    # The queue was left as the winner wrote it, and the loser recorded nothing.
+    queue_path = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    assert "- [memory] Remember the thing" in queue_path.read_text()
+    assert _outcome_events(tmp_path) == []
 
 
 # ---- concurrent queue rewrites ---------------------------------------------

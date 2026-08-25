@@ -865,6 +865,7 @@
           :automation-loaded="automationLoaded"
           :automation-error="automationError"
           :fetch-automation="fetchAutomation"
+          :proposal-outcomes="proposalOutcomes"
           :notify-saved="notifySaved"
           :notify-failed="notifyFailed"
           :routines="routines"
@@ -2021,6 +2022,7 @@ import {
 } from '../composables/useFontScale'
 import type {
   AgentAssetsResponse,
+  AutomationPayload,
   AutomationProcess,
   CommandAsset,
   CommandsResponse,
@@ -2036,6 +2038,7 @@ import type {
   McpProjectServer,
   McpEnvKey,
   ProviderConfigSettings,
+  ProposalOutcomes,
   RoutineSettings,
   SkillInventory,
   SlashCommand,
@@ -3686,6 +3689,7 @@ async function createSkillViaChat() {
 const automationItems = ref<AutomationProcess[]>([])
 const automationLoaded = ref(false)
 const automationError = ref('')
+const proposalOutcomes = ref<ProposalOutcomes | null>(null)
 
 function getJobTelemetry(job: string): AutomationProcess | undefined {
   return automationItems.value.find((i) => i.job === job)
@@ -3732,7 +3736,15 @@ function lastError(item: AutomationProcess): string {
 async function fetchAutomation() {
   automationError.value = ''
   try {
-    automationItems.value = await api.get<AutomationProcess[]>('/api/automation')
+    const data = await api.get<AutomationPayload | AutomationProcess[]>('/api/automation?include=outcomes')
+    if (Array.isArray(data)) {
+      // An older server ignores the include hint and answers with the bare
+      // job list; the outcomes line simply stays hidden.
+      automationItems.value = data
+    } else {
+      automationItems.value = data.jobs
+      proposalOutcomes.value = data.proposal_outcomes ?? null
+    }
   } catch (e) {
     automationError.value = `Failed to load automation: ${errorMessage(e)}`
   } finally {

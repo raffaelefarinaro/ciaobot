@@ -323,8 +323,10 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # route finished startup phases (sync, vault index, rebuild, ...) into it
     # so the Automation page can show system-task status.
     from ciao import job_runs
+    from ciao import proposal_outcomes
 
     job_runs.configure(config.state_path.parent)
+    proposal_outcomes.configure(config.state_path.parent)
     tracker = StartupTracker(on_finish=job_runs.record_startup_phase)
     # Live job events reach the PWA through the chat manager's event bus, so a
     # surface can show background work as it happens rather than only after it
