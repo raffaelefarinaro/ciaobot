@@ -7530,11 +7530,11 @@ async def proposals_batch(request: Request) -> JSONResponse:
     for result in results:
         if not result.get("dismissed"):
             continue
-        ctx = by_pid.get(str(result.get("id") or ""))
+        row_ctx = by_pid.get(str(result.get("id") or ""))
         proposal_outcomes.record(
-            kind=str(ctx["row"].get("kind", "")) if ctx else "",
+            kind=str(row_ctx["row"].get("kind", "")) if row_ctx else "",
             action="promoted" if action == "accept" else "dismissed",
-            workspace=str(ctx["workspace"]) if ctx else "",
+            workspace=str(row_ctx["workspace"]) if row_ctx else "",
             via="pwa",
         )
     return JSONResponse({"ok": True, "action": action, "results": results})

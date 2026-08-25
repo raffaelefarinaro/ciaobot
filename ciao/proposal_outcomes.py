@@ -194,7 +194,7 @@ _tally_cache: dict[str, Any] = {"value": None, "expires": 0.0}
 def tally_cached() -> dict[str, Any]:
     """Tally through the short TTL cache. Never raises."""
     now = time.monotonic()
-    cached = _tally_cache["value"]
+    cached: dict[str, Any] | None = _tally_cache["value"]
     if cached is not None and now < _tally_cache["expires"]:
         return cached
     fresh = tally()
