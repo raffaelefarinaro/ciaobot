@@ -8,8 +8,8 @@ This document is the contract. When adding or changing UI in `web/`, follow it.
 When it and an existing component disagree, the component is wrong — but do not
 rewrite unrelated code to fix that; note it and move on.
 
-Companion docs: `docs/plans/HOME_LANES_REDESIGN_PLAN.md` (the first surface built
-on this system).
+Companion docs: the home lanes redesign (merged via PR #258) was the first
+surface built on this system.
 
 ---
 
@@ -148,7 +148,7 @@ Existing and wanted:
 ### L3 — Patterns
 
 Named compositions with rules, documented where they live. Current: workspace
-lanes and priority tiers (`docs/plans/HOME_LANES_REDESIGN_PLAN.md`). Proposed:
+lanes and priority tiers (home screen, `web/src/lib/homeLanes.ts`). Proposed:
 the chat context bar and action dock.
 
 ---
@@ -186,12 +186,11 @@ part of the signal spec.
 **Rule S8 — Background work that produces a decision needs two surfaces.**
 A transient *working* mark where the work originates, and a persistent
 *needs you* count where its output waits. One without the other either hides
-that anything happened, or hides that something is now pending. See
-`docs/plans/MEMORY_VISIBILITY_PLAN.md` for the worked example. Half of the
-insights/memory-proposal pipeline is covered now: post-archive work shows a
+that anything happened, or hides that something is now pending. Worked
+example — the insights/memory-proposal pipeline: post-archive work shows a
 transient `tidying` working signal (ChatSignals + `chatIsPostprocessing` in
-the store), but there is still no persistent "needs you" surface where memory
-proposals wait — that half remains open.
+the store), and the persistent waiting count is the memory rail badge
+(proposals store counts rendered in `ProjectSidebar.vue`).
 
 **Rule S5 — Counts are real counts.**
 `chatUnread()` returns 0 or 1 by design. Never render it as a digit; a per-chat

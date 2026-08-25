@@ -13,8 +13,8 @@ Each kind also declares its own accept semantics (decision D3 of the agent
 roots plan). ``[rehome]`` is a file move with a destination and a reason, not
 a bounded-region edit, so its accept descriptor is a distinct type and can
 never be mistaken for an "add to memory" action. The destination kinds added
-with the routing plan (``docs/plans/MEMORY_PROPOSAL_ROUTING_PLAN.md``) follow
-the same rule: ``[project <doc-path>]``, ``[people <Name>]``, and
+by the proposal-routing work follow the same rule: ``[project <doc-path>]``,
+``[people <Name>]``, and
 ``[learnings]`` each carry a descriptor of their own, and ``[review]`` — the
 "the model was not sure" bucket — deliberately accepts only by manual routing,
 so no one-click action can guess a destination for it.

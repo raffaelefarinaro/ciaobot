@@ -4,6 +4,16 @@ Status: implementation plan with strict feasibility gate
 Research date: 2026-07-10  
 Target repository: `raffaelefarinaro/ciaobot`
 
+> **Refresh note (2026-08-25):** still a valid roadmap, but re-ground before
+> executing. Three assumptions are stale: (1) it may assume a shared
+> `stdio_rpc.py` JSON-RPC transport from the Codex work — that file was deleted
+> when the Codex provider was removed (`9ab168ee`, v0.10.0), so the transport is
+> greenfield; (2) its same-turn-steering parity analysis is moot — user-facing
+> steering was removed app-wide and `ProviderCapabilities` no longer carries a
+> `steer` field; (3) its execution-mode table predates "Auto is the only
+> execution mode". The supported-provider set today is exactly `claude` +
+> `opencode` (`ciao/provider_registry.py`).
+
 ## Verdict
 
 Gemini CLI can be added as a first-class Ciaobot provider and users can authenticate with the Google account attached to a Google AI Pro or Ultra subscription. Its official ACP mode provides durable sessions, streamed messages and thoughts, tool state, images, approval requests, cancellation, model/mode controls, and session usage.
