@@ -352,7 +352,7 @@ function peopleMergePrompt(row: ProposalRow): string {
     `A \`[people ${target}]\` proposal is queued (${where}) but \`People/${target}.md\` already exists, so a direct accept correctly refused to overwrite it.\n\n` +
     `Fact to merge: ${row.text}\n\n` +
     `Read \`People/${target}.md\` in the ${row.workspace} vault, merge this fact into it without duplicating anything already there (keep \`tags: [person]\`, add a sentence under the heading or appropriate section), and write it back.\n\n` +
-    `After the note is updated, dismiss the queued proposal that contains this exact text (remove its bullet from \`Workspace/Memory-Proposals.md\` or run \`ciao memory-proposal-dismiss "<substring>"\`) so it disappears from Review. ` +
+    `After the note is updated, dismiss the queued proposal that contains this exact text (remove its bullet from \`Workspace/Memory-Proposals.md\` or run \`ciao memory-proposal-dismiss "<substring>" --promoted\`) so it disappears from Review. ` +
     `If the fact is already present verbatim, just dismiss the proposal. Leave other proposals untouched. Nothing is broken – this is the expected merge path for existing person notes.`
   )
 }
@@ -364,7 +364,7 @@ function projectMergePrompt(row: ProposalRow, errorMsg: string): string {
     `A \`[project ${target}]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\n` +
     `Fact to merge: ${row.text}\n\n` +
     `Read \`${target}\` (vault-relative, in the ${row.workspace} workspace), merge this fact into the appropriate section without duplicating existing content, and write it back. Keep frontmatter and structure intact.\n\n` +
-    `After the doc is updated, dismiss the queued proposal that contains this exact text (remove its bullet from \`Workspace/Memory-Proposals.md\`). If the fact is already covered, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected merge path when the fold guards refuse.`
+    `After the doc is updated, dismiss the queued proposal that contains this exact text (remove its bullet from \`Workspace/Memory-Proposals.md\` or run \`ciao memory-proposal-dismiss "<substring>" --promoted\`). If the fact is already covered, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected merge path when the fold guards refuse.`
   )
 }
 
@@ -375,7 +375,7 @@ function memoryMergePrompt(row: ProposalRow, errorMsg: string): string {
     `A \`[${row.kind}]\` proposal is queued (${where}) for region \`${region}\` but direct accept refused: ${errorMsg}\n\n` +
     `Fact to merge: ${row.text}\n\n` +
     `Read \`${row.workspace}/CLAUDE.md\` bounded region \`${region}\`, merge this fact there without duplication and within the char limit – curate/consolidate nearby bullets if needed to make room, never exceed the cap.\n\n` +
-    `After the region is updated, dismiss the queued proposal that contains this exact text. If the fact is already present verbatim, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected path when the region is over cap or needs curation.`
+    `After the region is updated, dismiss the queued proposal that contains this exact text (run \`ciao memory-proposal-dismiss "<substring>" --promoted\` or remove its bullet from \`Workspace/Memory-Proposals.md\`). If the fact is already present verbatim, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected path when the region is over cap or needs curation.`
   )
 }
 
@@ -385,7 +385,7 @@ function learningsMergePrompt(row: ProposalRow, errorMsg: string): string {
     `A \`[learnings]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\n` +
     `Fact to merge: ${row.text}\n\n` +
     `Read \`Workspace/Learnings.md\` in the ${row.workspace} vault, append this fact under \`## Active\` without duplication, and write it back.\n\n` +
-    `After the file is updated, dismiss the queued proposal that contains this exact text. If the fact is already present, just dismiss. Leave other proposals untouched.`
+    `After the file is updated, dismiss the queued proposal that contains this exact text (run \`ciao memory-proposal-dismiss "<substring>" --promoted\` or remove its bullet from \`Workspace/Memory-Proposals.md\`). If the fact is already present, just dismiss. Leave other proposals untouched.`
   )
 }
 

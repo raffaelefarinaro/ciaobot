@@ -602,6 +602,30 @@ def test_a_batch_dismiss_covers_skill_rows_and_bullets_together(tmp_path: Path) 
     assert client.get("/api/proposals").json()["rows"] == []
 
 
+def test_skill_dismissals_stay_out_of_the_memory_outcome_tally(tmp_path: Path) -> None:
+    """The outcome ledger measures the memory extraction pipeline; skill
+    proposals come from skill evolution, so rejecting one must not inflate the
+    dismissed count — singly or inside a batch."""
+    from ciao import proposal_outcomes as po
+
+    config = _config(tmp_path)
+    _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+
+    skill_row = next(r for r in rows if r["kind"] == "skill")
+    assert client.post(f"/api/proposals/{skill_row['id']}/dismiss").status_code == 200
+    assert po.tally()["dismissed"] == 0
+
+    bullet_rows = [r["id"] for r in rows if r["kind"] != "skill"]
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": bullet_rows})
+    assert response.status_code == 200
+    tally = po.tally()
+    assert tally["dismissed"] == 1
+    assert tally["by_workspace"]["personal"]["dismissed"] == 1
+
+
 def test_dismissing_the_same_skill_twice_deletes_both(tmp_path: Path) -> None:
     """Two proposals can share a name across runs; each dismiss deletes its own
     file, so dismissing the second run's copy is unaffected by the first."""
@@ -897,7 +921,9 @@ def test_the_bulk_sweep_records_one_event_per_removed_row(tmp_path: Path) -> Non
     assert events[0]["workspace"] == "work"
 
 
-def test_dismissing_a_skill_row_records_its_kind(tmp_path: Path) -> None:
+def test_dismissing_a_skill_row_records_no_outcome(tmp_path: Path) -> None:
+    """Skill proposals belong to skill evolution, not the memory pipeline, so
+    their dismissal must not land in the memory outcome tally."""
     config = _config(tmp_path)
     source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
     client = _client(config)
@@ -907,10 +933,7 @@ def test_dismissing_a_skill_row_records_its_kind(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert not source.exists()
-    events = _outcome_events(tmp_path)
-    assert len(events) == 1
-    assert events[0]["kind"] == "skill"
-    assert events[0]["action"] == "dismissed"
+    assert _outcome_events(tmp_path) == []
 
 
 def test_a_rehome_accept_records_a_promotion(tmp_path: Path) -> None:

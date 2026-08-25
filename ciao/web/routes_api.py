@@ -7534,8 +7534,13 @@ async def proposals_batch(request: Request) -> JSONResponse:
         if not result.get("dismissed"):
             continue
         row_ctx = by_pid.get(str(result.get("id") or ""))
+        kind = str(row_ctx["row"].get("kind", "")) if row_ctx else ""
+        if kind == "skill":
+            # Not recorded: this ledger measures the MEMORY extraction
+            # pipeline; skill proposals come from skill evolution.
+            continue
         proposal_outcomes.record(
-            kind=str(row_ctx["row"].get("kind", "")) if row_ctx else "",
+            kind=kind,
             action="promoted" if action == "accept" else "dismissed",
             workspace=str(row_ctx["workspace"]) if row_ctx else "",
             via="pwa",
@@ -7707,9 +7712,8 @@ async def proposal_action(request: Request) -> JSONResponse:
         outcome = _dismiss_skill_proposal(ctx)
         if not outcome.get("ok"):
             return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
-        proposal_outcomes.record(
-            kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",
-        )
+        # Not recorded: this ledger measures the MEMORY extraction pipeline;
+        # skill proposals come from the separate skill-evolution pipeline.
         return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
 
     promoted: dict[str, Any] = {}
