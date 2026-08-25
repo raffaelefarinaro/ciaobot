@@ -1440,6 +1440,11 @@ def _gws_profile_payload(
         token_error = str(health.get("token_error") or "")
         needs_relogin = not token_valid
 
+    # Installed/desktop OAuth clients accept any loopback port, so the one-click
+    # loopback flow works for them; web clients require a registered redirect
+    # URI and must use the manual paste flow instead.
+    loopback_eligible = bool(gws_auth.client_uses_loopback(config_dir))
+
     return {
         "name": profile,
         "label": meta["label"],
@@ -1458,6 +1463,7 @@ def _gws_profile_payload(
         "token_valid": token_valid,
         "token_error": token_error,
         "needs_relogin": needs_relogin,
+        "loopback_eligible": loopback_eligible,
     }
 
 
