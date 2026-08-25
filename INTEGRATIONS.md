@@ -40,6 +40,30 @@ archived, deleted, or reset, Ciaobot disconnects its server and then calls
 `DELETE /session/{id}` to reclaim the persisted opencode session; cleanup is
 fail-open if the provider is unavailable.
 
+### Auto mode (automatic permission review)
+
+Ciaobot's opencode chats run in auto mode: the session permission ruleset is
+`allow` for routine tools, with `bash` (every shell command) and Ciaobot's
+destructive control-plane tools routed to `ask`. Each `ask` surfaces an
+approval card in the chat that the operator approves or denies.
+
+To get a Claude-Code/Codex-style **automatic** approval classifier instead of
+manual cards, install the [`opencode-auto-permissions`](https://github.com/hueyexe/opencode-auto-permissions)
+plugin into opencode's global config:
+
+```bash
+opencode plugin -g opencode-auto-permissions
+```
+
+The plugin answers each `permission.asked` with a reviewer model (your
+session's model by default) that auto-approves routine work and denies
+destructive or out-of-scope calls, so `rm`/`sudo`/`git push`/shell pipelines
+are reviewed rather than prompting you. It is designed for opencode's Auto
+mode; keep chats in Auto and opt into the plugin deliberately. See the
+plugin's README and opencode's
+[permissions docs](https://opencode.ai/docs/permissions/#auto-mode) for
+configuration.
+
 ### Live eval provider access
 
 `ciao eval` uses the selected provider's existing CLI authentication and the

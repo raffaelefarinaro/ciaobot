@@ -861,12 +861,12 @@ def test_tool_use_id_for_unknown_request_is_empty(tmp_path):
     assert _provider(tmp_path).tool_use_id_for_request("nope") == ""
 
 
-# ── mode-aware auto-approval ────────────────────────────────────────────
-# The session ruleset is fixed at creation and PATCH does not apply (see
-# `_ensure_session`); mode changes rotate the session before the prompt runs.
-# `permission.asked` is still answered against the *current* mode: bypass
-# approves everything, auto approves verifiably read-only work, and every other
-# mode surfaces the card as before.
+# ── permission.asked surfaces a card ────────────────────────────────────
+# There is no local classifier. The auto ruleset keeps `bash` and the
+# destructive control-plane tools behind `ask`; every `permission.asked` that
+# reaches Ciaobot surfaces an approval card, which the
+# `opencode-auto-permissions` plugin answers with a reviewer model when the
+# user opts into it, and otherwise the operator approves or denies.
 
 
 class _RecordingPermissionClient:
@@ -889,77 +889,43 @@ async def _drain_tasks():
         await asyncio.sleep(0)
 
 
-def _armed_provider(tmp_path, mode) -> tuple[OpencodeProvider, _RecordingPermissionClient]:
+def _armed_provider(tmp_path) -> tuple[OpencodeProvider, _RecordingPermissionClient]:
     provider = _provider(tmp_path)
     client = _RecordingPermissionClient()
     provider._client = client  # type: ignore[assignment]
-    provider._current_mode = mode
     return provider, client
 
 
-@pytest.mark.asyncio
-async def test_bypass_mode_approves_without_a_card(tmp_path):
-    """Bypass means bypass: even an unsafe command is approved, card-free."""
-    provider, client = _armed_provider(tmp_path, "bypass")
-    payload = {**LIVE_PERMISSION, "metadata": {"command": "rm -rf /tmp/x"}}
-    assert _convert(provider, "permission.asked", payload) == []
-    await _drain_tasks()
-    assert client.calls == [("/permission/per_live1/reply", {"reply": "once"})]
-    # Answered immediately, so nothing is left pending for the operator.
-    assert provider._permission_requests == {}
-
-
-@pytest.mark.asyncio
-async def test_auto_mode_approves_any_non_destructive_bash_command(tmp_path, caplog):
-    """The permissive auto default allows any non-destructive shell command,
-    not just read-only ones."""
-    provider, client = _armed_provider(tmp_path, "auto")
+def test_any_permission_ask_surfaces_a_card(tmp_path):
+    """Every permission.asked becomes an approval card, naming what is asked."""
+    provider, client = _armed_provider(tmp_path)
     payload = {**LIVE_PERMISSION, "metadata": {"command": "git status && git push"}}
-    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
-        events = _convert(provider, "permission.asked", payload)
-    assert events == []
-    await _drain_tasks()
-    assert client.calls == [("/permission/per_live1/reply", {"reply": "once"})]
-    logged = [record.getMessage() for record in caplog.records]
-    assert any("auto-approved bash" in line and "git push" in line for line in logged)
-
-
-def test_auto_mode_surfaces_a_destructive_bash_command(tmp_path):
-    provider, client = _armed_provider(tmp_path, "auto")
-    payload = {**LIVE_PERMISSION, "metadata": {"command": "rm -rf /tmp/cache"}}
     events = _convert(provider, "permission.asked", payload)
     assert isinstance(events[0], PermissionRequestEvent)
+    assert events[0].tool_input == "git status && git push"
     assert "per_live1" in provider._permission_requests
     assert client.calls == []
 
 
-def test_auto_mode_surfaces_bash_without_a_command_to_classify(tmp_path):
-    provider, client = _armed_provider(tmp_path, "auto")
+def test_permission_ask_names_the_command_detail(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    payload = {**LIVE_PERMISSION, "metadata": {"command": "rm -rf /tmp/cache"}}
+    events = _convert(provider, "permission.asked", payload)
+    assert isinstance(events[0], PermissionRequestEvent)
+    assert events[0].tool_input == "rm -rf /tmp/cache"
+    assert client.calls == []
+
+
+def test_permission_ask_without_metadata_uses_patterns(tmp_path):
+    provider, client = _armed_provider(tmp_path)
     payload = {**LIVE_PERMISSION, "metadata": {}}
     events = _convert(provider, "permission.asked", payload)
     assert isinstance(events[0], PermissionRequestEvent)
     assert client.calls == []
 
 
-@pytest.mark.asyncio
-async def test_auto_mode_approves_a_read_only_tool_from_a_stale_ruleset(tmp_path):
-    """A chat created in `normal` keeps `{"*": ask}` forever, so even `list`
-    raises asks once the operator switches it to auto. Answer those here."""
-    provider, client = _armed_provider(tmp_path, "auto")
-    events = _convert(
-        provider,
-        "permission.asked",
-        {"id": "perm_ls", "sessionID": "ses_1", "permission": "list", "patterns": ["/workspace"]},
-    )
-    assert events == []
-    await _drain_tasks()
-    assert client.calls == [("/permission/perm_ls/reply", {"reply": "once"})]
-
-
-def test_auto_mode_surfaces_a_non_read_only_tool_ask(tmp_path):
-    """A stale session can still raise an *ask* for an already-allowed tool; a
-    non-read-only tool ask is not auto-approved, so it keeps the card."""
-    provider, client = _armed_provider(tmp_path, "auto")
+def test_permission_ask_surfaces_for_any_tool_action(tmp_path):
+    provider, client = _armed_provider(tmp_path)
     events = _convert(
         provider,
         "permission.v2.asked",
@@ -969,32 +935,16 @@ def test_auto_mode_surfaces_a_non_read_only_tool_ask(tmp_path):
     assert client.calls == []
 
 
-def test_normal_mode_surfaces_even_a_safe_command(tmp_path):
-    provider, client = _armed_provider(tmp_path, "normal")
-    events = _convert(provider, "permission.asked", LIVE_PERMISSION)
-    assert isinstance(events[0], PermissionRequestEvent)
-    assert client.calls == []
-
-
-def test_plan_mode_surfaces_even_a_safe_command(tmp_path):
-    provider, client = _armed_provider(tmp_path, "plan")
-    events = _convert(provider, "permission.asked", LIVE_PERMISSION)
-    assert isinstance(events[0], PermissionRequestEvent)
-    assert client.calls == []
-
-
-def test_auto_approval_needs_a_client_to_post_the_reply(tmp_path):
-    """Without a client the approval could not be delivered and the turn would
-    wedge with neither a card nor an answer; fail safe to the card."""
+def test_permission_ask_works_without_a_client(tmp_path):
+    """No client just means the card stands; there is nothing to post."""
     provider = _provider(tmp_path)
-    provider._current_mode = "bypass"
     events = _convert(provider, "permission.asked", LIVE_PERMISSION)
     assert isinstance(events[0], PermissionRequestEvent)
 
 
 @pytest.mark.asyncio
 async def test_failed_permission_reply_keeps_request_for_retry(tmp_path):
-    provider, client = _armed_provider(tmp_path, "normal")
+    provider, client = _armed_provider(tmp_path)
     _convert(provider, "permission.asked", LIVE_PERMISSION)
     client.status_code = 500
 
@@ -1006,7 +956,7 @@ async def test_failed_permission_reply_keeps_request_for_retry(tmp_path):
 
 @pytest.mark.asyncio
 async def test_failed_question_reply_keeps_request_for_retry(tmp_path):
-    provider, client = _armed_provider(tmp_path, "normal")
+    provider, client = _armed_provider(tmp_path)
     _convert(
         provider,
         "question.v2.asked",
@@ -1030,7 +980,7 @@ async def test_failed_question_reply_keeps_request_for_retry(tmp_path):
 
 @pytest.mark.asyncio
 async def test_question_reply_uses_provider_question_order(tmp_path):
-    provider, client = _armed_provider(tmp_path, "normal")
+    provider, client = _armed_provider(tmp_path)
     _convert(
         provider,
         "question.v2.asked",
