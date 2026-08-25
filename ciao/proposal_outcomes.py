@@ -294,10 +294,8 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
         reference = reference.replace(tzinfo=UTC)
     cutoff_day = (reference - timedelta(days=RECENT_DAYS)).date()
 
-    totals = _read_totals(reference)
-    by_workspace: dict[str, dict[str, int]] = {
-        name: dict(counts) for name, counts in totals["by_workspace"].items()
-    }
+    totals: dict[str, Any] = _empty_totals()
+    by_workspace: dict[str, dict[str, int]] = {}
     recent = {"promoted": 0, "dismissed": 0}
 
     def bucket(name: str) -> dict[str, int]:
@@ -305,14 +303,23 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
 
     lines: list[str] = []
     try:
+        # Sidecar and log are read under ONE shared lock: a rotation that
+        # lands between two unlocked reads would combine the pre-rotation
+        # sidecar with the post-rotation log and silently drop every rotated
+        # event from the counts.
         with _writer_lock(exclusive=False):
+            totals = _read_totals(reference)
             path = _log_path()
             if path.exists():
                 with path.open("r", encoding="utf-8", errors="replace") as f:
                     lines = f.readlines()
     except Exception:  # noqa: BLE001 — a broken log is zeros, not a failed page
         logger.debug("Failed to tally proposal outcomes", exc_info=True)
+        totals = _empty_totals()
         lines = []
+    by_workspace = {
+        name: dict(counts) for name, counts in totals["by_workspace"].items()
+    }
 
     for line in lines:
         line = line.strip()
