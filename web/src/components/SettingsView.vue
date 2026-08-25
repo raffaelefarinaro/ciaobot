@@ -753,6 +753,36 @@
                     </template>
                   </div>
                 </div>
+                <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
+                  <label class="settings-field">
+                    <span class="ws-label">Default model</span>
+                    <ModelSelector
+                      v-if="getProviderSection(String(connKey))?.configurable"
+                      :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
+                      :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
+                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                      @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
+                    />
+                    <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Default thinking</span>
+                    <select
+                      class="routine-select"
+                      :value="providerDefaultThinkingValue(String(connKey) as AliasProviderKey)"
+                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                      @change="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option
+                        v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
+                        :key="option.value"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </option>
+                    </select>
+                  </label>
+                </div>
                 <div class="action-row provider-connection-actions">
                   <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
                     {{ conn.ok ? 'Reconnect' : 'Connect' }}
@@ -809,59 +839,8 @@
               </button>
             </div>
             <div v-if="providerKeysResult" class="action-result">{{ providerKeysResult }}</div>
-          </div>
-
-
-          <!-- Per-provider default model and thinking for new chats. Moved
-               here from the removed model-routing card; these are the
-               per-provider knobs that used to be four tier pins each. -->
-          <div v-if="aliasProviderSections.length" class="card">
-            <div class="settings-card-header">
-              <p class="section-title">defaults per provider</p>
-              <p class="hint">
-                Choose the default model and thinking level new chats start on
-                for each provider. "Automatic" uses that provider's own default.
-              </p>
-            </div>
-            <div class="provider-defaults">
-              <div
-                v-for="section in aliasProviderSections"
-                :key="section.key"
-                class="provider-defaults-row"
-              >
-                <span class="provider-defaults-title ws-label">{{ section.label }}</span>
-                <label class="settings-field">
-                  <span class="ws-label">Default model</span>
-                  <ModelSelector
-                    v-if="section.configurable"
-                    :model-value="providerDefaultModelSelectorValue(section.key)"
-                    :sections="providerDefaultModelSectionsFor(section.key)"
-                    :disabled="routinesSaving || !section.available"
-                    @update:model-value="saveProviderDefaultModel(section.key, $event)"
-                  />
-                  <span v-else class="hint hint--compact">Automatic — Claude Code picks its own default.</span>
-                </label>
-                <label class="settings-field">
-                  <span class="ws-label">Default thinking</span>
-                  <select
-                    class="routine-select"
-                    :value="providerDefaultThinkingValue(section.key)"
-                    :disabled="routinesSaving || !section.available"
-                    @change="saveProviderDefaultThinking(section.key, ($event.target as HTMLSelectElement).value)"
-                  >
-                    <option
-                      v-for="option in providerThinkingOptions(section.key)"
-                      :key="option.value"
-                      :value="option.value"
-                    >
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
-              </div>
-            </div>
-          </div>
-        </template>
+           </div>
+         </template>
       </template>
 
       <!-- AUTOMATIONS TAB -->
@@ -2664,6 +2643,10 @@ const aliasProviderLabels = computed<Record<string, string>>(() => {
   for (const section of aliasProviderSections.value) labels[section.key] = section.label
   return labels
 })
+
+function getProviderSection(provider: string): AliasProviderSection | undefined {
+  return aliasProviderSections.value.find((s) => s.key === provider)
+}
 
 // ── Per-provider default model / thinking (Models tab) ─────────────────
 const DEFAULT_MODEL_SELECTION = '__ciao_default_model__'
@@ -5804,6 +5787,19 @@ a.btn-secondary {
 .provider-defaults-title {
   font-weight: 600;
   color: var(--fg);
+}
+.provider-inline-defaults {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+  margin-bottom: var(--space-3);
+}
+@media (max-width: 720px) {
+  .provider-inline-defaults { grid-template-columns: 1fr; }
 }
 @media (max-width: 720px) {
   .provider-defaults {

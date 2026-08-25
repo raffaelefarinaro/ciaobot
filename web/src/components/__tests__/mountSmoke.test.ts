@@ -789,10 +789,13 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    expect(wrapper.text()).toContain('defaults per provider')
+    // Defaults are now per-CLI inside the connection rows (no separate "defaults per provider" card).
+    expect(wrapper.text()).toContain('Default model')
+    expect(wrapper.text()).toContain('Default thinking')
+    expect(wrapper.text()).not.toContain('defaults per provider')
     expect(wrapper.text()).not.toContain('model routing')
-    // opencode exposes an editable default-model selector.
-    const opencodeSelector = wrapper.find('.model-selector')
+    // opencode exposes an editable default-model selector inside its provider card.
+    const opencodeSelector = wrapper.find('.provider-connections .model-selector')
     expect(opencodeSelector.exists()).toBe(true)
     await opencodeSelector.find('.model-selector__trigger').trigger('click')
     await flushPromises()
@@ -856,9 +859,12 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
-      const rowTitles = wrapper.findAll('.provider-defaults-row .provider-defaults-title').map((el) => el.text())
-      expect(rowTitles).toContain('Anthropic (via Claude Code)')
-      expect(rowTitles).not.toContain('opencode')
+      // Per-CLI defaults live inside the connection rows now; opencode's
+      // inline defaults are hidden when its catalog is empty.
+      const inlineBlocks = wrapper.findAll('.provider-inline-defaults')
+      expect(inlineBlocks.length).toBe(1)
+      expect(wrapper.text()).toContain('Automatic — Claude Code picks its own default.')
+      expect(wrapper.findAll('.provider-connections .model-selector')).toHaveLength(0)
     } finally {
       wrapper.unmount()
       testApi.setResponse('/api/models', originalModels)
