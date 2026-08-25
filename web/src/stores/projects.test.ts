@@ -4023,6 +4023,297 @@ describe('envelope history window', () => {
       'one', 'local activity', 'two',
     ])
   })
+
+  test('mid-turn refresh reconciles the live user bubble instead of appending the server copy', async () => {
+    // Repro: a send renders an optimistic bubble, the echo upgrades it with a
+    // turn_index, and a refresh lands mid-turn (WS reconnect, chat switch
+    // back). The server session already holds the user row, the window is
+    // truncated to it by the streaming guard, and the index merge appended
+    // that copy below the live one — the same user turn rendered twice.
+    const store = useProjectStore()
+    const chatId = 'chat-echo-dup'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 4,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    // Live turn: optimistic bubble, then the echo upgrade.
+    store.messages[chatId].push({
+      role: 'user',
+      content: 'follow up',
+      timestamp: '2026-08-25T09:23:00Z',
+    })
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'follow up',
+        turn_index: 1,
+        sent_at: '2026-08-25T09:23:00Z',
+      }),
+    })
+    expect(store.messages[chatId].filter(m => m.content === 'follow up').length).toBe(1)
+
+    // Mid-turn refresh: the session file already holds the user turn, and the
+    // streaming guard truncates the window to end at it.
+    store.projectStreaming[chatId] = true
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'follow up'), role: 'user', turn_index: 1, sent_at: '2026-08-25T09:23:00Z' },
+      { ...row(3, 'Read file.md'), role: 'system', tool_name: '_activity' },
+    ]))
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'follow up',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].i).toBe(2)
+    expect(userMsgs[0].turn_index).toBe(1)
+    // The bubble stays ahead of the live trace, not appended after it.
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'prior question', 'prior reply', 'follow up',
+    ])
+  })
+
+  test('settled-turn refresh reconciles the whole live turn instead of appending its server copy', async () => {
+    // Repro: a turn streams live (user bubble, activity group, final answer
+    // with usage) and the post-result refresh lands once the events socket
+    // already cleared projectStreaming, so nothing truncates the window. The
+    // index merge appended every server row of that turn below the live
+    // copies — the answer rendered twice, each under its own Activity group.
+    const store = useProjectStore()
+    const chatId = 'chat-turn-dup'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 5,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    // The turn renders live: optimistic bubble, streamed activity group, and
+    // the final answer bubble carrying result-event metadata.
+    store.messages[chatId].push(
+      { role: 'user', content: 'do the thing', timestamp: '2026-08-25T09:24:00Z', turn_index: 1 },
+      { role: 'system', content: '⚙️ Read notes.md', timestamp: '2026-08-25T09:24:10Z', tool_name: '_activity' },
+      {
+        role: 'assistant',
+        content: 'Done — the thing is done.',
+        timestamp: '2026-08-25T09:24:55Z',
+        phase: 'final_answer',
+        usage: { input_tokens: '4', output_tokens: '3513' },
+        effective_model: 'claude-opus-5',
+        duration_ms: 55000,
+      },
+    )
+
+    // Settled refresh: projectStreaming already cleared, so the window holds
+    // the full turn with server indices and no usage.
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'do the thing'), role: 'user', turn_index: 1, sent_at: '2026-08-25T09:24:00Z' },
+      { ...row(3, '⚙️ Read notes.md'), role: 'system', tool_name: '_activity' },
+      row(4, 'Done — the thing is done.'),
+    ]))
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'prior question', 'prior reply', 'do the thing', '⚙️ Read notes.md', 'Done — the thing is done.',
+    ])
+    // The surviving answer is the live copy: result metadata survives the
+    // reconcile, only the server index is adopted.
+    const answer = store.messages[chatId][4]
+    expect(answer.i).toBe(4)
+    expect(answer.phase).toBe('final_answer')
+    expect(answer.usage).toEqual({ input_tokens: '4', output_tokens: '3513' })
+    expect(answer.effective_model).toBe('claude-opus-5')
+  })
+
+  test('wire-pruned lazy thinking row reconciles with the live full-text copy', async () => {
+    // The server elides an oversized _thinking row's middle (head + marker +
+    // tail) while the live copy still holds the full text, so exact-content
+    // matching can never pair them. Without lazy-aware matching the pruned
+    // copy appended after the final answer: duplicated reasoning, out of
+    // order.
+    const store = useProjectStore()
+    const chatId = 'chat-lazy-thinking'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 4,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    // Live turn with a large reasoning trace (1200 chars — over the 2×512
+    // keep + 64 gap threshold the server prunes at).
+    const fullThinking = 'a'.repeat(600) + 'b'.repeat(600)
+    store.messages[chatId].push(
+      { role: 'user', content: 'think hard', timestamp: '2026-08-25T09:30:00Z', turn_index: 1 },
+      { role: 'system', content: fullThinking, timestamp: '2026-08-25T09:30:10Z', tool_name: '_thinking' },
+      { role: 'assistant', content: 'Answer.', timestamp: '2026-08-25T09:31:00Z', phase: 'final_answer' },
+    )
+
+    // Settled refresh: the thinking row arrives pruned, the rest verbatim.
+    const pruned = fullThinking.slice(0, 512)
+      + '\n… (176 chars hidden, expand to load)\n'
+      + fullThinking.slice(-512)
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'think hard'), role: 'user', turn_index: 1 },
+      { ...row(3, pruned), role: 'system', tool_name: '_thinking', lazy: true, full_length: 1200 },
+      row(4, 'Answer.'),
+    ]))
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'prior question', 'prior reply', 'think hard', fullThinking, 'Answer.',
+    ])
+    // The surviving copy keeps the full text — no lazy marker needed.
+    const thinking = store.messages[chatId][3]
+    expect(thinking.i).toBe(3)
+    expect(thinking.content).toBe(fullThinking)
+    expect(thinking.lazy).toBeUndefined()
+  })
+
+  test('reconciled user bubble keeps the unattended marker on an older server', async () => {
+    // A loop/schedule turn observed live carries unattended on the echo
+    // bubble. A server row without the field (older backend) must not strip
+    // it during the reconcile, or the ↻ marker disappears on the first
+    // refresh and the automated turn reads as user-authored.
+    const store = useProjectStore()
+    const chatId = 'chat-unattended-reconcile'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 3,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    store.messages[chatId].push({
+      role: 'user',
+      content: 'nightly check',
+      timestamp: '2026-08-25T09:30:00Z',
+      turn_index: 1,
+      unattended: true,
+    })
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'nightly check'), role: 'user', turn_index: 1 },
+    ]))
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'nightly check',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].unattended).toBe(true)
+    expect(userMsgs[0].i).toBe(2)
+  })
+
+  test('hydrated user rows map the unattended marker from the server', async () => {
+    // Reload path: the backend records unattended per turn, so history rows
+    // must carry it or every automated turn reads as user-authored after a
+    // reload.
+    const store = useProjectStore()
+    const chatId = 'chat-unattended-hydrate'
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'nightly check', sent_at: '2026-08-25T09:30:00Z', turn_index: 0, unattended: true },
+      { role: 'assistant', content: 'done', sent_at: '2026-08-25T09:31:00Z' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs[0].unattended).toBe(true)
+    expect(msgs[1].unattended).toBeUndefined()
+  })
 })
 
 describe('older history pages', () => {

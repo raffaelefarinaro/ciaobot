@@ -6,6 +6,7 @@
 - Current checkpoint: C0
 - Next action: Review plan and HTML companion, decide on zip validation scope and migration message
 - Blocker: none
+- Note (2026-08-25): still unimplemented — `ciao/skills_sync.py`, `scripts/skills_add.py`, and the `auto_update_github_skills` config/routes surface are all present. Written before the Codex provider removal (`9ab168ee`); where it mentions Codex projection in `sync_skills.py`, read that as the surviving claude/opencode projection.
 - Implementation repository: /Users/raffaelefarinaro/repos/ciaobot
 - Generated plan output: docs/plans/SKILLS_GITHUB_SIMPLIFICATION_PLAN.md
 - Visual companions: docs/plans/SKILLS_GITHUB_SIMPLIFICATION_PLAN.html (side-by-side Settings before/after)
@@ -45,7 +46,7 @@ Observed (read):
 - `web/src/components/SettingsView.vue:1481` `github / package skills` section + toggle `autoUpdateGithubSkills` (lines 1371,3124,3332). Also `web/src/lib/types.ts:637` `auto_update_github_skills`.
 - `ciao/stock/skills` 29 packaged skills (observed `ls`). Installed via `_install_stock_skills` with `.ciao-stock-skill` marker, shadowed correctly by `skills/<name>`.
 - `tests/test_sync_skills.py:340` stock marker test, `388/443` lock file tests for auto-update on/off.
-- `docs/plans/WORKSPACE_ISOLATION_PLAN.md:1486` lists `skills-lock.json` as migrated file; `ciao/workspace_reroot.py:1486` treats it as catalog half.
+- `ciao/workspace_reroot.py` treats `skills-lock.json` as a migrated catalog file (the workspace-isolation plan that introduced this is implemented and removed from `docs/plans/`).
 
 Assumed: users who installed GitHub skills have them cached under `.agents/skills` and `.claude/skills` (installed check). Their count is small (<5 per install from trajectories).
 

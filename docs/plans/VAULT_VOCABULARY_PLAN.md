@@ -8,8 +8,9 @@ Scope: `ciao/vault_lint.py`, `ciao/vault_index.py`, `ciao/os_audit.py`,
 Stops the agent from inventing a new category every time it files a note, by
 giving it a vocabulary to consult and a check that fails when it doesn't.
 
-Related: [`PER_WORKSPACE_MEMORY_CURATION_PLAN.md`](PER_WORKSPACE_MEMORY_CURATION_PLAN.md)
-— same routine (`system-workspace-hygiene`) and the same global-vs-per-workspace
+Related: per-workspace memory curation (implemented 2026-08-19; removed from
+`docs/plans/` as done — see git history) — shares the
+`system-workspace-hygiene` routine and the same global-vs-per-workspace
 scope question.
 
 ---

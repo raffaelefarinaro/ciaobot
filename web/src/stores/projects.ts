@@ -1236,6 +1236,9 @@ export const useProjectStore = defineStore('projects', () => {
     if (lMsg.is_error !== undefined && sMsg.is_error === undefined) merged.is_error = lMsg.is_error
     if (lMsg.turn_index != null && sMsg.turn_index == null) merged.turn_index = lMsg.turn_index
     if (lMsg.duration_ms != null && sMsg.duration_ms == null) merged.duration_ms = lMsg.duration_ms
+    // Loop/schedule marker observed live but missing on the server row (older
+    // servers, or a row built before the turn was recorded) — keep the ↻.
+    if (lMsg.unattended && !sMsg.unattended) merged.unattended = lMsg.unattended
     if (!merged.timestamp && lMsg.timestamp) merged.timestamp = lMsg.timestamp
     return merged
   }
@@ -2598,7 +2601,7 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number }
+  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean }
   const toChatMessage = (m: ServerRow) => ({
     role: m.role as 'user' | 'assistant' | 'system',
     content: m.content,
@@ -2617,6 +2620,10 @@ export const useProjectStore = defineStore('projects', () => {
     turn_index: m.turn_index,
     duration_ms: m.duration_ms,
     is_error: m.is_error,
+    // Loop/schedule tick marker (↻). The backend records it per turn at
+    // send time; without mapping it here a reload made automated turns
+    // read as user-authored.
+    unattended: m.unattended || undefined,
     // _filecard fields. Empty/undefined for non-file rows.
     file_path: m.file_path,
     action: m.action,
@@ -2739,22 +2746,83 @@ export const useProjectStore = defineStore('projects', () => {
             if (typeof row.i === 'number') posByIndex.set(row.i, pos)
           })
           const merged = local.slice()
+          // Where the un-indexed live tail begins: everything the client
+          // rendered from streaming events (optimistic user bubble, activity
+          // groups, the final answer) sits after the last server-indexed row.
+          let tailStart = merged.length
+          for (let p = merged.length - 1; p >= 0; p--) {
+            if (typeof merged[p].i === 'number') {
+              tailStart = p + 1
+              break
+            }
+          }
+          // Exact identity, except for wire-pruned lazy rows: the server
+          // elides an oversized _thinking row's middle, so its content can
+          // never equal the live copy that holds the full text. Match those
+          // on head + tail + minimum length instead.
+          const LAZY_MARKER_RE = /\n… \(\d+ chars hidden, expand to load\)\n/
+          const sameRow = (row: ChatMessage, item: ChatMessage) => {
+            if (row.role !== item.role) return false
+            if ((row.tool_name || '') !== (item.tool_name || '')) return false
+            if (row.content === item.content) return true
+            if (item.lazy && item.full_length != null) {
+              const m = item.content.match(LAZY_MARKER_RE)
+              if (m && m.index !== undefined) {
+                const head = item.content.slice(0, m.index)
+                const tail = item.content.slice(m.index + m[0].length)
+                return row.content.length >= item.full_length
+                  && row.content.startsWith(head)
+                  && row.content.endsWith(tail)
+              }
+            }
+            return false
+          }
           for (const item of windowRows) {
             const abs = item.i
             if (typeof abs !== 'number') continue
             const pos = posByIndex.get(abs)
             if (pos !== undefined) {
               merged[pos] = item
-            } else if (abs >= cachedEnd) {
-              // Beyond the cached extent: genuinely new tail rows, appended in
-              // the window's own ascending order (after any un-indexed local
-              // rows, which are older than anything arriving now).
-              posByIndex.set(abs, merged.length)
-              merged.push(item)
+              continue
             }
-            // An index below cachedEnd that we don't hold is a hole in the
-            // cache (loadOlderMessages fills those); skip it rather than
-            // appending it out of order at the tail.
+            if (abs < cachedEnd) {
+              // An index below cachedEnd that we don't hold is a hole in the
+              // cache (loadOlderMessages fills those); skip it rather than
+              // appending it out of order at the tail.
+              continue
+            }
+            // A server row the cache holds only as an un-indexed live copy
+            // (optimistic user bubble, streamed activity group or final
+            // answer) must REPLACE that copy, not land next to it. A refresh
+            // while the turn was live (WS reconnect, chat switch back, the
+            // post-result reconcile) otherwise appended the server copy of
+            // the whole turn — the reported "double message", on the user
+            // bubble first and then on the Activity group + answer. Scan the
+            // live tail in order so server rows pair with their own turn's
+            // copies; identical texts pair one-to-one, so a genuine repeat
+            // send keeps both copies countable.
+            let reconciled = false
+            for (let p = tailStart; p < merged.length; p++) {
+              const row = merged[p]
+              if (typeof row.i === 'number') continue
+              if (!sameRow(row, item)) continue
+              // The live copy is the richer one for streamed turns (usage,
+              // phase, duration); the server row contributes only its index.
+              // A user bubble is the exception: the server owns the canonical
+              // turn_index/sent_at, so merge onto the server row.
+              merged[p] = item.role === 'user'
+                ? mergeMessageFields(item, row)
+                : { ...row, i: item.i }
+              posByIndex.set(abs, p)
+              reconciled = true
+              break
+            }
+            if (reconciled) continue
+            // Beyond the cached extent: genuinely new tail rows, appended in
+            // the window's own ascending order (after any un-indexed local
+            // rows, which are older than anything arriving now).
+            posByIndex.set(abs, merged.length)
+            merged.push(item)
           }
           messages.value[chatId] = merged
         }
