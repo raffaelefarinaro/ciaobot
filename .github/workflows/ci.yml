@@ -72,12 +72,11 @@ jobs:
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@1.90.0
       with:
-        targets: aarch64-apple-darwin,x86_64-apple-darwin
+        targets: aarch64-apple-darwin
         components: rustfmt,clippy
 
-    # The embedded x86_64 runtime may build a native dependency from source
-    # under Rosetta. Select a universal Xcode before that build so its linker
-    # and SDK are usable by both architecture toolchains.
+    # The Swift sidecar needs a working Xcode toolchain; pick the newest
+    # available so the aarch64 build targets a current SDK.
     - name: Select newest Xcode
       run: |
         newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
@@ -102,16 +101,12 @@ jobs:
         {
           echo "arm64_url=$CIAO_PYTHON_ARM64_URL"
           echo "arm64_sha256=$CIAO_PYTHON_ARM64_SHA256"
-          echo "x86_64_url=$CIAO_PYTHON_X86_64_URL"
-          echo "x86_64_sha256=$CIAO_PYTHON_X86_64_SHA256"
         } >> "$GITHUB_OUTPUT"
 
     - name: Build embedded Ciaobot runtime
       env:
         CIAO_PYTHON_ARM64_URL: ${{ steps.python-runtime.outputs.arm64_url }}
         CIAO_PYTHON_ARM64_SHA256: ${{ steps.python-runtime.outputs.arm64_sha256 }}
-        CIAO_PYTHON_X86_64_URL: ${{ steps.python-runtime.outputs.x86_64_url }}
-        CIAO_PYTHON_X86_64_SHA256: ${{ steps.python-runtime.outputs.x86_64_sha256 }}
       run: ./scripts/build-bundled-runtime.sh desktop/runtime
 
     - name: Install desktop dependencies

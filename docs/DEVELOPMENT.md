@@ -59,8 +59,9 @@ The supported macOS release path is the one-line installer:
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-The installer downloads the signed universal app archive, verifies it with the
-published native verifier, and installs the bundled runtime into `Ciaobot.app`.
+The installer downloads the signed Apple Silicon (aarch64) app archive, verifies
+it with the published native verifier, and installs the bundled runtime into
+`Ciaobot.app`.
 When a configured workspace is already referenced by the LaunchAgent, it
 preserves that workspace and password; on a clean machine it leaves setup to
 the app's bootstrap onboarding rather than generating a hidden password. It
@@ -89,7 +90,7 @@ scripts/prepare-release --apply --create-pr --ready
   checks, and opens a PR into `main`. Use
   `--bump minor` or `--version X.Y.Z` when needed.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA, embedded runtimes, universal app, native verifier, installer, and updater metadata. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA, the embedded aarch64 runtime, the aarch64 app, the native verifier, installer, and updater metadata. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 
@@ -118,9 +119,9 @@ npm test             # 61 test files under web/src
 
 ## macOS desktop development
 
-The Tauri 2 shell requires macOS 13+, Node 22.x, Rust 1.90.0 with
-`aarch64-apple-darwin` and `x86_64-apple-darwin` targets, and `swiftc` from the
-Xcode Command Line Tools (it builds the `ciaobot-native` sidecar).
+The Tauri 2 shell requires macOS 13+ on Apple Silicon (arm64), Node 22.x, Rust
+1.90.0 with the `aarch64-apple-darwin` target, and `swiftc` from the Xcode
+Command Line Tools (it builds the `ciaobot-native` sidecar).
 
 `desktop/native/main.swift` uses Apple's FoundationModels, whose
 `GenerationOptions` initialiser was renamed: `sampling:` on the macOS 26 SDK,
@@ -136,8 +137,8 @@ before building the sidecar and print `xcodebuild -version`, so a toolchain skew
 is visible in the log instead of looking like a code regression.
 
 `./scripts/check-desktop.sh` runs the whole gate — the same commands CI's
-`build-desktop` job does — and asserts the sidecar ends up bundled, universal,
-signed, and runnable inside the built app. Run it after any change under
+`build-desktop` job does — and asserts the sidecar ends up bundled, signed, and
+runnable inside the built aarch64 app. Run it after any change under
 `desktop/`; `--fast` skips the bundle build when you have not touched
 `desktop/native/` or `tauri.conf.json`. `prepare-release` runs it too.
 
@@ -153,7 +154,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cd ..
-npm run tauri build -- --target universal-apple-darwin
+npm run tauri build -- --target aarch64-apple-darwin
 ```
 
 The main webview loads the live localhost PWA and must never be added to a

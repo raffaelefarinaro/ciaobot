@@ -126,7 +126,8 @@ done
 
 [ "$(uname -s)" = "Darwin" ] || fail "this installer supports macOS only"
 case "$(uname -m)" in
-    arm64|x86_64) ;;
+    arm64) ;;
+    x86_64) fail "Ciaobot now requires Apple Silicon (arm64); Intel Macs are no longer supported" ;;
     *) fail "unsupported macOS architecture: $(uname -m)" ;;
 esac
 
@@ -152,9 +153,9 @@ case "$version" in
     *) base="$release_base/v$version" ;;
 esac
 
-archive_name=${CIAO_ARCHIVE_NAME:-Ciaobot_${version}_universal.app.tar.gz}
+archive_name=${CIAO_ARCHIVE_NAME:-Ciaobot_${version}_aarch64.app.tar.gz}
 signature_name=${archive_name}.sig
-verifier_name=${CIAO_VERIFIER_NAME:-ciaobot-installer-verify_universal}
+verifier_name=${CIAO_VERIFIER_NAME:-ciaobot-installer-verify_aarch64}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-install.XXXXXX")
 # The staging bundle cannot live under $tmp: it has to sit next to the install
 # target so the final move is a rename on one filesystem rather than a ~350 MB

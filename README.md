@@ -8,7 +8,8 @@ Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspac
 
 ## Install
 
-**macOS 13+** — the supported end-user installation is:
+**macOS 13+ on Apple Silicon (M1 or newer)** — the supported end-user
+installation is:
 
 ```bash
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh

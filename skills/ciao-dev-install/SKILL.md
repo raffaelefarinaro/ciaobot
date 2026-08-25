@@ -83,7 +83,7 @@ npm run tauri build -- --bundles app --config '{"bundle":{"createUpdaterArtifact
 
 - `--bundles app` skips the DMG; disabling updater artifacts drops the signing requirement (a dev machine has no `TAURI_SIGNING_PRIVATE_KEY`).
 - The `pretauri` hook compiles the Swift voice sidecar automatically.
-- Native-arch only (like `ciao/desktop_build.py`'s dev builds) — the universal release target is dead weight for local testing.
+- Native-arch only (like `ciao/desktop_build.py`'s dev builds), matching the aarch64-only release target.
 - Verify the result: `desktop/src-tauri/target/release/bundle/macos/Ciaobot.app` must exist with a runnable `Contents/MacOS/ciaobot-desktop` and `Contents/Resources/ciao-runtime/bin/ciao`.
 
 ### 5. Install (staged swap, preserving the workspace)
