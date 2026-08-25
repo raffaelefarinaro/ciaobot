@@ -4172,6 +4172,148 @@ describe('envelope history window', () => {
     expect(answer.usage).toEqual({ input_tokens: '4', output_tokens: '3513' })
     expect(answer.effective_model).toBe('claude-opus-5')
   })
+
+  test('wire-pruned lazy thinking row reconciles with the live full-text copy', async () => {
+    // The server elides an oversized _thinking row's middle (head + marker +
+    // tail) while the live copy still holds the full text, so exact-content
+    // matching can never pair them. Without lazy-aware matching the pruned
+    // copy appended after the final answer: duplicated reasoning, out of
+    // order.
+    const store = useProjectStore()
+    const chatId = 'chat-lazy-thinking'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 4,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    // Live turn with a large reasoning trace (1200 chars — over the 2×512
+    // keep + 64 gap threshold the server prunes at).
+    const fullThinking = 'a'.repeat(600) + 'b'.repeat(600)
+    store.messages[chatId].push(
+      { role: 'user', content: 'think hard', timestamp: '2026-08-25T09:30:00Z', turn_index: 1 },
+      { role: 'system', content: fullThinking, timestamp: '2026-08-25T09:30:10Z', tool_name: '_thinking' },
+      { role: 'assistant', content: 'Answer.', timestamp: '2026-08-25T09:31:00Z', phase: 'final_answer' },
+    )
+
+    // Settled refresh: the thinking row arrives pruned, the rest verbatim.
+    const pruned = fullThinking.slice(0, 512)
+      + '\n… (176 chars hidden, expand to load)\n'
+      + fullThinking.slice(-512)
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'think hard'), role: 'user', turn_index: 1 },
+      { ...row(3, pruned), role: 'system', tool_name: '_thinking', lazy: true, full_length: 1200 },
+      row(4, 'Answer.'),
+    ]))
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'prior question', 'prior reply', 'think hard', fullThinking, 'Answer.',
+    ])
+    // The surviving copy keeps the full text — no lazy marker needed.
+    const thinking = store.messages[chatId][3]
+    expect(thinking.i).toBe(3)
+    expect(thinking.content).toBe(fullThinking)
+    expect(thinking.lazy).toBeUndefined()
+  })
+
+  test('reconciled user bubble keeps the unattended marker on an older server', async () => {
+    // A loop/schedule turn observed live carries unattended on the echo
+    // bubble. A server row without the field (older backend) must not strip
+    // it during the reconcile, or the ↻ marker disappears on the first
+    // refresh and the automated turn reads as user-authored.
+    const store = useProjectStore()
+    const chatId = 'chat-unattended-reconcile'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 3,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    store.messages[chatId].push({
+      role: 'user',
+      content: 'nightly check',
+      timestamp: '2026-08-25T09:30:00Z',
+      turn_index: 1,
+      unattended: true,
+    })
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'nightly check'), role: 'user', turn_index: 1 },
+    ]))
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'nightly check',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].unattended).toBe(true)
+    expect(userMsgs[0].i).toBe(2)
+  })
+
+  test('hydrated user rows map the unattended marker from the server', async () => {
+    // Reload path: the backend records unattended per turn, so history rows
+    // must carry it or every automated turn reads as user-authored after a
+    // reload.
+    const store = useProjectStore()
+    const chatId = 'chat-unattended-hydrate'
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'nightly check', sent_at: '2026-08-25T09:30:00Z', turn_index: 0, unattended: true },
+      { role: 'assistant', content: 'done', sent_at: '2026-08-25T09:31:00Z' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs[0].unattended).toBe(true)
+    expect(msgs[1].unattended).toBeUndefined()
+  })
 })
 
 describe('older history pages', () => {
