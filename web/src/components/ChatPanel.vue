@@ -1489,7 +1489,8 @@ function refreshSlashCommandPicker(): void {
 async function loadSlashCommands(): Promise<void> {
   try {
     const provider = encodeURIComponent(chat.value.provider || '')
-    const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}`)
+    const workspace = encodeURIComponent(project.value?.workspace || store.activeWorkspace || '')
+    const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}&workspace=${workspace}`)
     slashCommands.value = [
       ...(response.commands || []),
       ...(response.skills || []),
