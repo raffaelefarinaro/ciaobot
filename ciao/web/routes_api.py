@@ -7345,9 +7345,10 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
         if changed:
             queue.write_text("\n".join(keep).rstrip() + "\n", encoding="utf-8")
             for kind in swept_kinds:
-                proposal_outcomes.record(
-                    kind=kind, action="dismissed", workspace=workspace, via="pwa",
-                )
+                if proposal_outcomes.is_extraction_kind(kind):
+                    proposal_outcomes.record(
+                        kind=kind, action="dismissed", workspace=workspace, via="pwa",
+                    )
     return JSONResponse({"ok": True, "removed": removed})
 
 
@@ -7452,6 +7453,12 @@ async def proposals_batch(request: Request) -> JSONResponse:
         entry["lines"].add(ctx["line"])
         entry["rows"].append(ctx["row"])
 
+    # Rows whose bullet THIS request actually dropped. A concurrent resolver
+    # may have removed a row between this request's scan and its write; the
+    # loser reports success to the client (the row is gone either way) but
+    # records no outcome - the winner already did.
+    self_request_removed: set[str] = set()
+
     for path, entry in by_file.items():
         queue = Path(path)
         # Write every promotion BEFORE dropping any bullet, and only drop the
@@ -7487,13 +7494,16 @@ async def proposals_batch(request: Request) -> JSONResponse:
         # Highest index first so the lower ones stay valid, and each removal
         # verifies the content at that index - a promotion above may have
         # awaited a model call while another request rewrote this same file.
+        removed_here: set[str] = set()
         for row in sorted(
             entry["rows"], key=lambda r: int(r.get("line", -1)), reverse=True
         ):
             if int(row.get("line", -1)) in keep_lines:
                 continue
-            _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or ""))
+            if _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or "")):
+                removed_here.add(row["id"])
         queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        self_request_removed.update(removed_here)
         for row in entry["rows"]:
             if action == "accept":
                 accept = proposal_kinds.accept_for(row["kind"])
@@ -7540,12 +7550,15 @@ async def proposals_batch(request: Request) -> JSONResponse:
         # event.
         if pid in recorded:
             continue
+        if pid not in self_request_removed:
+            continue
         recorded.add(pid)
         row_ctx = by_pid.get(pid)
         kind = str(row_ctx["row"].get("kind", "")) if row_ctx else ""
-        if kind == "skill":
+        if not proposal_outcomes.is_extraction_kind(kind):
             # Not recorded: this ledger measures the MEMORY extraction
-            # pipeline; skill proposals come from skill evolution.
+            # pipeline. Skill proposals come from skill evolution and rehome
+            # rows from vault hygiene (vault_rehome judgement cases).
             continue
         proposal_outcomes.record(
             kind=kind,
@@ -7818,12 +7831,12 @@ async def proposal_action(request: Request) -> JSONResponse:
             result["promoted"] = False
             result["destination"] = row.get("rehome", {}).get("destination", "")
             result["justified"] = row.get("rehome", {}).get("justified", False)
-        if removed_ours:
+        if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
             proposal_outcomes.record(
                 kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
             )
         return JSONResponse({"ok": True, "result": result})
-    if removed_ours:
+    if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
         proposal_outcomes.record(
             kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",
         )

@@ -333,3 +333,82 @@ def test_automation_include_outcomes_serves_the_envelope() -> None:
     assert outcomes["dismissed"] == 1
     assert outcomes["by_workspace"]["personal"]["promoted"] == 1
     assert outcomes["recent_30d"] == {"promoted": 1, "dismissed": 1}
+
+
+# ── rotation keeps lifetime totals ────────────────────────────────────────
+
+
+def test_rotation_preserves_lifetime_totals(tmp_path: Path, monkeypatch) -> None:
+    """Trimming the log must not make history disappear: the dropped lines are
+    folded into a sidecar, so promoted/dismissed (and the per-workspace split)
+    keep growing across rotations."""
+    monkeypatch.setattr(po, "MAX_BYTES", 4 * 1024)  # force the trim on
+    old = (datetime.now(UTC) - timedelta(days=90)).isoformat()
+    with po._log_path().open("w", encoding="utf-8") as f:
+        for n in range(po.KEEP_LINES + 25):  # enough rows that a trim drops some
+            f.write(json.dumps({
+                "ts": old, "workspace": "personal" if n % 2 else "work",
+                "kind": "memory", "action": "promoted", "via": "pwa",
+            }) + "\n")
+    po.record("learnings", "dismissed", workspace="personal")
+
+    report = po.tally()
+
+    assert report["promoted"] == po.KEEP_LINES + 25
+    assert report["dismissed"] == 1
+    # 2025 promoted events alternate work/personal; the trim drops only the
+    # oldest 25 (all work), and the sidecar carries them.
+    assert report["by_workspace"]["work"]["promoted"] == 1013
+    assert report["by_workspace"]["personal"]["promoted"] == 1012
+    # The 30-day window is derived from the live file only: rotated events are
+    # 90 days old, and the one fresh dismissal is a dismissal.
+    assert report["recent_30d"] == {"promoted": 0, "dismissed": 1}
+    assert (tmp_path / po._TOTALS_NAME).is_file()
+
+
+def test_tally_survives_a_corrupt_totals_sidecar(tmp_path: Path) -> None:
+    """A broken sidecar degrades to file-only counts, never a failed page."""
+    (tmp_path / po._TOTALS_NAME).write_text("{not json", encoding="utf-8")
+    po.record("memory", "promoted", workspace="personal")
+
+    report = po.tally()
+
+    assert report["promoted"] == 1
+    assert report["by_workspace"] == {"personal": {"promoted": 1, "dismissed": 0}}
+
+
+# ── kinds outside the extraction pipeline ─────────────────────────────────
+
+
+def test_rehome_and_skill_kinds_are_not_extraction_kinds() -> None:
+    assert not po.is_extraction_kind("skill")
+    assert not po.is_extraction_kind("rehome")
+    assert po.is_extraction_kind("review")
+
+
+def test_cli_dismiss_of_a_rehome_row_records_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Rehome rows are queued by vault hygiene; dismissing one through the CLI
+    is a hygiene decision, not an extraction outcome."""
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [rehome] Move `personal/People/Mo.md`? Uncertain.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+
+    rc = cli.main([
+        "memory-proposal-dismiss",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "--runtime-root", str(tmp_path / ".runtime"),
+        "Move `personal/People/Mo.md`",
+    ])
+
+    assert rc == 0
+    assert not (tmp_path / ".runtime" / po.PROPOSAL_OUTCOMES_NAME).exists()

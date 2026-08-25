@@ -2328,12 +2328,14 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # name rides in CIAO_ACTIVE_WORKSPACE on scheduled runs (same convention
     # as os-audit --workspace-name); a manual run without it lands in the
     # shared bucket rather than recording a filesystem path as a name.
-    proposal_outcomes.record(
-        kind=kind,
-        action="promoted" if args.promoted else "dismissed",
-        workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
-        via="agent",
-    )
+    # Rehome rows are vault-hygiene decisions, not extraction outcomes.
+    if proposal_outcomes.is_extraction_kind(kind):
+        proposal_outcomes.record(
+            kind=kind,
+            action="promoted" if args.promoted else "dismissed",
+            workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
+            via="agent",
+        )
     if args.json:
         json.dump({"removed": True, "text": needle, "workspace": args.workspace or ""}, sys.stdout)
         sys.stdout.write("\n")

@@ -10,11 +10,16 @@ line lands in ``.runtime/proposal_outcomes.jsonl``::
 
 ``via`` records which surface made the decision: the PWA routes or the
 ``ciao memory-proposal-dismiss`` CLI the nightly curation agent drives.
+Only memory-extraction kinds are counted (:data:`EXTRACTION_KINDS`): skill
+proposals and rehome judgements share the review surface but answer to
+different pipelines.
 
 Everything mirrors :mod:`ciao.job_runs`: an append-only, size-trimmed JSONL
 under ``.runtime``, written strictly best-effort so a recording failure can
 never break the resolution it is describing, plus a fail-open aggregator
 (:func:`tally`) that folds the log into the counts the Automation page shows.
+When the log rotates, the dropped lines are folded into a sidecar totals file
+(``proposal_outcomes_totals.json``) so lifetime counts survive trimming.
 """
 
 from __future__ import annotations
@@ -33,6 +38,19 @@ PROPOSAL_OUTCOMES_NAME = "proposal_outcomes.jsonl"
 ACTIONS: tuple[str, ...] = ("promoted", "dismissed")
 MAX_BYTES = 2 * 1024 * 1024  # trim the log once it passes ~2 MB
 KEEP_LINES = 2000            # lines retained after a trim
+
+# Kinds this ledger counts. It measures the MEMORY extraction pipeline's
+# usefulness; other producers share the review surface but answer to different
+# questions: `[skill]` rows come from skill evolution, `[rehome]` rows are
+# note-move judgements queued by vault hygiene (`vault_rehome`).
+EXTRACTION_KINDS: frozenset[str] = frozenset(
+    {"memory", "profile", "user", "project", "people", "learnings", "review"}
+)
+
+
+def is_extraction_kind(kind: str) -> bool:
+    """Whether a proposal kind belongs in the promoted-vs-dismissed tally."""
+    return kind in EXTRACTION_KINDS
 
 # Recent-window length for :func:`tally`, in days.
 RECENT_DAYS = 30
@@ -101,18 +119,89 @@ def _trim_if_large(path: Path) -> None:
             return
         with path.open("r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
+        dropped, kept = lines[:-KEEP_LINES], lines[-KEEP_LINES:]
+        # Rotation must not rewrite history: the lifetime totals the Settings
+        # page shows are carried in a sidecar that absorbs whatever this trim
+        # drops, so tally() = sidecar + what is still in the file.
+        _absorb_dropped_into_totals(dropped)
         with path.open("w", encoding="utf-8") as f:
-            f.writelines(lines[-KEEP_LINES:])
+            f.writelines(kept)
     except Exception:  # noqa: BLE001
         logger.debug("Failed to trim proposal-outcome log", exc_info=True)
 
 
+_TOTALS_NAME = "proposal_outcomes_totals.json"
+
+
+def _totals_path() -> Path:
+    return _runtime_dir() / _TOTALS_NAME
+
+
+def _empty_totals() -> dict[str, Any]:
+    return {"promoted": 0, "dismissed": 0, "by_workspace": {}}
+
+
+def _read_totals() -> dict[str, Any]:
+    try:
+        raw = _totals_path().read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except Exception:  # noqa: BLE001 — missing/corrupt totals degrade to zeros
+        return _empty_totals()
+    if not isinstance(data, dict):
+        return _empty_totals()
+    totals = _empty_totals()
+    for action in ACTIONS:
+        value = data.get(action)
+        totals[action] = value if isinstance(value, int) and value >= 0 else 0
+    by_workspace = data.get("by_workspace")
+    if isinstance(by_workspace, dict):
+        for name, counts in by_workspace.items():
+            if not isinstance(counts, dict):
+                continue
+            bucket = totals["by_workspace"].setdefault(
+                str(name), {"promoted": 0, "dismissed": 0}
+            )
+            for action in ACTIONS:
+                value = counts.get(action)
+                bucket[action] = value if isinstance(value, int) and value >= 0 else 0
+    return totals
+
+
+def _absorb_dropped_into_totals(dropped_lines: list[str]) -> None:
+    """Fold the lines a rotation is about to drop into the sidecar totals.
+
+    Best-effort and idempotent per line set: it runs only inside the trim,
+    immediately before the file is rewritten without those lines.
+    """
+    totals = _read_totals()
+    for line in dropped_lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("action") not in ACTIONS:
+            continue
+        action = event["action"]
+        workspace = str(event.get("workspace") or "")
+        totals[action] += 1  # type: ignore[literal-required]
+        bucket = totals["by_workspace"].setdefault(
+            workspace, {"promoted": 0, "dismissed": 0}
+        )
+        bucket[action] += 1  # type: ignore[literal-required]
+    tmp = _totals_path().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(totals, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(_totals_path())
+
+
 def tally(*, now: datetime | None = None) -> dict[str, Any]:
-    """Fold the whole outcome log into the Automation-page counts.
+    """Fold the outcome log into the Automation-page counts.
 
     Returns ``{"promoted": n, "dismissed": m, "by_workspace": {name:
     {"promoted": n, "dismissed": m}}, "recent_30d": {"promoted": n,
-    "dismissed": m}}``. Malformed lines are skipped, never fatal; an event
+    "dismissed": m}}``. Lifetime totals are the rotation sidecar plus whatever
+    is still in the log, so trimming never makes history disappear;
+    ``recent_30d`` is derived from the live file only (a 30-day window always
+    is). Malformed lines are skipped, never fatal; an event
     with an unreadable timestamp still counts in the totals, just not in the
     30-day window. Never raises: a broken log degrades to zeros rather than
     failing the page that reads it.
@@ -122,42 +211,38 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
         reference = reference.replace(tzinfo=UTC)
     cutoff = reference - timedelta(days=RECENT_DAYS)
 
-    totals = {"promoted": 0, "dismissed": 0}
+    totals = _read_totals()
+    by_workspace: dict[str, dict[str, int]] = {
+        name: dict(counts) for name, counts in totals["by_workspace"].items()
+    }
     recent = {"promoted": 0, "dismissed": 0}
-    by_workspace: dict[str, dict[str, int]] = {}
 
     def bucket(name: str) -> dict[str, int]:
         return by_workspace.setdefault(name, {"promoted": 0, "dismissed": 0})
 
     try:
         path = _log_path()
-        if not path.exists():
-            return {
-                "promoted": 0,
-                "dismissed": 0,
-                "by_workspace": {},
-                "recent_30d": dict(recent),
-            }
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(event, dict):
-                    continue
-                action = event.get("action")
-                if action not in ACTIONS:
-                    continue
-                workspace = str(event.get("workspace") or "")
-                totals[action] += 1  # type: ignore[literal-required]
-                bucket(workspace)[action] += 1  # type: ignore[literal-required]
-                ts = _parsed_ts(event.get("ts"))
-                if ts is not None and ts >= cutoff:
-                    recent[action] += 1  # type: ignore[literal-required]
+        if path.exists():
+            with path.open("r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    action = event.get("action")
+                    if action not in ACTIONS:
+                        continue
+                    workspace = str(event.get("workspace") or "")
+                    totals[action] += 1  # type: ignore[literal-required]
+                    bucket(workspace)[action] += 1  # type: ignore[literal-required]
+                    ts = _parsed_ts(event.get("ts"))
+                    if ts is not None and ts >= cutoff:
+                        recent[action] += 1  # type: ignore[literal-required]
     except Exception:  # noqa: BLE001 — a broken log is zeros, not a failed page
         logger.debug("Failed to tally proposal outcomes", exc_info=True)
 

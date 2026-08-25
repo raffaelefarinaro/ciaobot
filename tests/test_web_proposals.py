@@ -936,28 +936,52 @@ def test_dismissing_a_skill_row_records_no_outcome(tmp_path: Path) -> None:
     assert _outcome_events(tmp_path) == []
 
 
-def test_a_rehome_accept_records_a_promotion(tmp_path: Path) -> None:
-    """A rehome accept is a decision on a queued row like any other kind."""
+def test_a_rehome_accept_records_no_outcome(tmp_path: Path) -> None:
+    """Rehome rows are note-move judgements queued by vault hygiene, not
+    memory-extraction output; accepting one must not enter the promoted
+    tally."""
     config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
 
     assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
 
-    events = _outcome_events(tmp_path)
-    assert [(e["kind"], e["action"]) for e in events] == [("rehome", "promoted")]
+    assert _outcome_events(tmp_path) == []
 
 
 def test_a_batch_rehome_accept_is_recorded_once(tmp_path: Path) -> None:
     """A successful batch rehome produces two results (the move above the
-    grouping and the bullet drop inside it); one decision must record exactly
-    one event."""
+    grouping and the bullet drop inside it); it is also a vault-hygiene
+    decision, so the extraction tally records nothing either way."""
     config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
 
     response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
 
     assert response.status_code == 200, response.json()
     assert all(r.get("dismissed") for r in response.json()["results"]), response.json()
-    events = _outcome_events(tmp_path)
-    assert [(e["kind"], e["action"]) for e in events] == [("rehome", "promoted")]
+    assert _outcome_events(tmp_path) == []
+
+
+def test_a_batch_row_removed_by_another_request_records_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When a concurrent resolver drops the bullet between this batch's scan
+    and its write, ``_remove_bullet_line`` matches nothing; the loser reports
+    success to the client but must not record a second outcome."""
+    from ciao.web import routes_api
+
+    config = _config(tmp_path)
+    queue_path = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory")
+
+    monkeypatch.setattr(routes_api, "_remove_bullet_line", lambda *a, **k: False)
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["dismissed"] is True  # gone from review either way
+    # The loser did not rewrite the queue around the winner's deletion.
+    assert "Remember the thing" in queue_path.read_text()
+    assert _outcome_events(tmp_path) == []
 
 
 def test_an_accept_that_loses_the_bullet_race_records_nothing(tmp_path: Path, monkeypatch) -> None:
