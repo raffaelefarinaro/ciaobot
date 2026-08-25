@@ -1372,6 +1372,14 @@
                           Re-authenticate
                         </button>
                         <button
+                          v-if="profile.needs_relogin"
+                          class="btn-small"
+                          :disabled="gwsSavingProfile === profile.name"
+                          @click="startGwsAuth(profile.name)"
+                        >
+                          Manual connect (paste code)
+                        </button>
+                        <button
                           class="btn-small btn-danger"
                           @click="disconnectGwsProfile(profile.name, false)"
                           :disabled="gwsSavingProfile === profile.name"
@@ -1398,6 +1406,39 @@
                         <button class="btn-small" @click="gwsReloginCancel(profile.name)">Cancel</button>
                       </p>
                       <p v-else-if="gwsReloginError[profile.name]" class="gws-action-hint hint--warn">{{ gwsReloginError[profile.name] }}</p>
+                      <div v-else-if="gwsAuthUrls[profile.name]" class="gws-auth-flow-box">
+                        <p class="gws-flow-step">
+                          1. Follow the Google auth flow. If the browser did not open, click here:
+                          <a :href="gwsAuthUrls[profile.name]" target="_blank" class="gws-auth-link">Open authorization page</a>
+                        </p>
+                        <p class="gws-flow-step">
+                          2. After signing in, copy the full redirect URL (even if it fails to load) or authorization code, and paste it below:
+                        </p>
+                        <input
+                          type="text"
+                          class="routine-input gws-auth-input"
+                          v-model="gwsRedirectUrls[profile.name]"
+                          placeholder="Paste redirect URL (http://localhost/?code=...) or code"
+                          :disabled="gwsSavingProfile === profile.name"
+                          @keyup.enter="exchangeGwsCode(profile.name)"
+                        />
+                        <div class="gws-flow-buttons">
+                          <button
+                            class="btn-primary btn-small"
+                            @click="exchangeGwsCode(profile.name)"
+                            :disabled="!gwsRedirectUrls[profile.name]?.trim() || gwsSavingProfile === profile.name"
+                          >
+                            {{ gwsSavingProfile === profile.name ? 'Connecting...' : 'Complete Sign-In' }}
+                          </button>
+                          <button
+                            class="btn-small"
+                            @click="cancelGwsAuth(profile.name)"
+                            :disabled="gwsSavingProfile === profile.name"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
                     </template>
                   </div>
                 </div>
