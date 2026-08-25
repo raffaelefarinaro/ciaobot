@@ -210,7 +210,19 @@ def list_picker_entries(workspace_root: Path, provider: str) -> tuple[list[Comma
 
 
 def _workspace_root(request: Request) -> Path:
+    """Resolve the agent root for the picker's caller.
+
+    ``config.workspace_root`` is the bare install root, which after the
+    per-workspace re-rooting migration holds none of a workspace's own
+    ``skills/`` — those moved to ``agent_root(name)``. The picker must match
+    the root a chat's own provider CLI actually runs from
+    (see ``ProjectChatService._agent_root_for_chat``), or workspace-local
+    skills silently vanish from the slash picker.
+    """
     config = request.app.state.config
+    workspace = request.query_params.get("workspace", "") or config.primary_workspace()
+    if workspace and config.workspace(workspace):
+        return config.agent_root(workspace)
     return Path(config.workspace_root)
 
 

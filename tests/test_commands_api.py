@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 from ciao.web import commands as commands_module
 from ciao.web.commands import (
     Command,
     _parse_frontmatter,
+    _workspace_root,
     list_commands,
     list_picker_entries,
     list_provider_command_entries,
     list_skill_entries,
 )
+from ciao.workspace_reroot import write_receipt
 
 
 def _write_cmd(dir_path: Path, name: str, frontmatter: str, body: str = "body") -> None:
@@ -177,3 +181,58 @@ def test_picker_merges_provider_page_skills_and_deduplicates_workspace_skills(
     assert [skill.name for skill in skills] == ["browser", "shared"]
     assert skills[0].description == "Loaded by opencode"
     assert skills[1].description == "Workspace description"
+
+
+def _rerooted_config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
+    runtime_root = tmp_path / ".runtime"
+    write_receipt(runtime_root, {"status": "migrated", "workspaces": list(workspaces)})
+    reset_reroot_cache()
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime_root / "state.json",
+        media_root=runtime_root / "media",
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=root)
+            for name, root in workspaces.items()
+        },
+    )
+
+
+def _request(config: CiaoConfig, workspace: str = "") -> SimpleNamespace:
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(config=config)),
+        query_params=SimpleNamespace(get=lambda key, default="": {"workspace": workspace}.get(key, default)),
+    )
+
+
+def test_workspace_root_uses_agent_root_after_rerooting(tmp_path: Path) -> None:
+    """A rerooted install must resolve the picker's root per-chat-workspace.
+
+    Before this, `_workspace_root` always returned the bare install root, so a
+    custom skill living under a workspace's own `skills/` (moved there by the
+    re-rooting migration) never showed up in that workspace's slash picker.
+    """
+    config = _rerooted_config(tmp_path, {"personal": "personal", "work": "work"})
+    _write_cmd(tmp_path / "work" / "skills" / "humanizer", "SKILL", "---\ndescription: Humanize text\n---\n")
+
+    assert _workspace_root(_request(config, "work")) == tmp_path / "work"
+    skills = list_skill_entries(_workspace_root(_request(config, "work")), "claude")
+    assert [s.name for s in skills] == []  # not mirrored into .claude/skills, but root resolves correctly
+
+    (tmp_path / "work" / ".claude" / "skills" / "humanizer").mkdir(parents=True)
+    (tmp_path / "work" / ".claude" / "skills" / "humanizer" / "SKILL.md").write_text(
+        (tmp_path / "work" / "skills" / "humanizer" / "SKILL.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    skills = list_skill_entries(_workspace_root(_request(config, "work")), "claude")
+    assert [s.name for s in skills] == ["humanizer"]
+
+
+def test_workspace_root_falls_back_when_workspace_unknown_or_missing(tmp_path: Path) -> None:
+    config = _rerooted_config(tmp_path, {"personal": "personal", "work": "work"})
+
+    # No workspace param -> primary workspace's agent root, not the bare install root.
+    assert _workspace_root(_request(config)) == tmp_path / "personal"
+    # Unknown workspace name -> bare install root, never raises.
+    assert _workspace_root(_request(config, "no-such-workspace")) == tmp_path
