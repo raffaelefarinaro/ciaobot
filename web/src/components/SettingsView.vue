@@ -1289,6 +1289,7 @@
                     <template v-else-if="!profile.configured">
                       <div v-if="!gwsAuthUrls[profile.name] && !gwsReloginPending[profile.name]" class="gws-btn-group">
                         <button
+                          v-if="profile.loopback_eligible"
                           class="btn-primary btn-small"
                           :disabled="gwsSavingProfile === profile.name"
                           @click="gwsReloginStart(profile.name)"
@@ -1364,7 +1365,7 @@
                       </p>
                       <div v-if="!gwsAuthUrls[profile.name] && !gwsReloginPending[profile.name]" class="gws-btn-group">
                         <button
-                          v-if="profile.needs_relogin"
+                          v-if="profile.needs_relogin && profile.loopback_eligible"
                           class="btn-primary btn-small"
                           :disabled="gwsSavingProfile === profile.name"
                           @click="gwsReloginStart(profile.name)"
