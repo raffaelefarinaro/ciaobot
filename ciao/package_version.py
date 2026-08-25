@@ -14,7 +14,7 @@ from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    pass
 
 from ciao import __version__
 
@@ -25,17 +25,6 @@ DEFAULT_GITHUB_REPO = "raffaelefarinaro/ciaobot"
 def _github_repo() -> str:
     """Return the GitHub repo (owner/name) used for release lookups."""
     return (os.environ.get("CIAO_GITHUB_REPO") or "").strip() or DEFAULT_GITHUB_REPO
-
-
-def latest_release_url(repo: str | None = None) -> str:
-    """Return the GitHub API URL for the latest release of the app repo.
-
-    Retained for release metadata consumers that need the JSON payload. This
-    hits ``api.github.com`` and is therefore subject to the REST API rate limit;
-    the recurring update check uses ``latest_release_redirect_url`` instead.
-    """
-    repo = (repo or _github_repo()).strip("/")
-    return f"https://api.github.com/repos/{repo}/releases/latest"
 
 
 def latest_release_redirect_url(repo: str | None = None) -> str:

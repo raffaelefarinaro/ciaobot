@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skills surface — before / after</title>
+<style>
+  :root { color-scheme: light dark; --accent: #7c6cff; --bg: #fff; --fg: #1a1a1a; --muted: #6b7280; --line: #e5e7eb; --card: #f9fafb; --warn: #b45309; --ok: #0e7a5a; --bad: #b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1117; --fg: #e6e8ee; --muted: #9aa0ad; --line: #262a36; --card: #171a23; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 18px; background: var(--bg); color: var(--fg); font: 14px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  h1 { font-size: 19px; margin: 0 0 2px; letter-spacing: -.02em; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .kicker { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 6px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; border: 1px solid var(--line); background: var(--bg); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 14px 0 0; }
+  .tabs label { padding: 7px 12px; font-size: 13px; color: var(--muted); cursor: pointer; border: 1px solid transparent; border-bottom: none; border-radius: 8px 8px 0 0; }
+  .tabs input { position: absolute; opacity: 0; pointer-events: none; }
+  .tabs input:checked + label { color: var(--fg); background: var(--card); border-color: var(--line); font-weight: 600; }
+  .pane { display: none; padding: 14px; border: 1px solid var(--line); border-top: none; border-radius: 0 0 10px 10px; background: var(--card); }
+  #t-before:checked ~ .panes #p-before, #t-after:checked ~ .panes #p-after, #t-flow:checked ~ .panes #p-flow { display: block; }
+  .mock { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .mock-hd { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--line); font-weight: 600; font-size: 12px; }
+  .mock-bd { padding: 12px; display: grid; gap: 10px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); font-size: 13px; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .tag { font-size: 10px; padding: 2px 6px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); }
+  .check { list-style: none; padding: 0; margin: 6px 0 0; }
+  .check li { display: flex; gap: 8px; font-size: 13px; padding: 4px 0; }
+  .check .ok { color: var(--ok); } .check .bad { color: var(--bad); } .check .warn { color: var(--warn); }
+  .tl { list-style: none; margin: 10px 0 0; padding: 0 0 0 18px; border-left: 2px solid var(--line); }
+  .tl li { position: relative; padding: 0 0 12px 14px; }
+  .tl li::before { content: ''; position: absolute; left: -25px; top: 4px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+  .tl time { display: block; font-size: 11px; color: var(--muted); }
+  .tl b { display: block; margin: 1px 0 2px; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <p class="kicker">Plan companion — docs/plans/SKILLS_GITHUB_SIMPLIFICATION_PLAN.md</p>
+  <h1>Skills surface — remove GitHub, keep folder / zip</h1>
+  <p class="sub">Ciaobot Settings → Skills. Toggle comparison to inspect the before/after. Source: ciao/sync_skills.py:319, ciao/skills_sync.py:1, web/src/components/SettingsView.vue:1481.</p>
+
+  <div class="grid">
+    <div class="card"><div class="hint">Current packaged stock</div><div style="font-size:20px;font-weight:700">29 <span class="tag">ciao.stock/skills</span></div><div class="hint">Installed into .claude/skills via _install_stock_skills</div></div>
+    <div class="card"><div class="hint">Current GitHub overhead</div><div style="font-size:20px;font-weight:700">~300 <span class="tag">lines</span></div><div class="hint">npx + git ls-remote + skills-lock.json + toggle</div></div>
+    <div class="card"><div class="hint">Boot risk</div><div style="font-size:20px;font-weight:700">180s <span class="tag">timeout</span></div><div class="hint">SKILLS_NPX_TIMEOUT, hangs "booting" overlay</div></div>
+  </div>
+
+  <div class="tabbed" style="margin-top:14px">
+    <div class="tabs">
+      <input type="radio" name="opt" id="t-before" checked><label for="t-before">Before (today)</label>
+      <input type="radio" name="opt" id="t-after"><label for="t-after">After (proposed)</label>
+      <input type="radio" name="opt" id="t-flow"><label for="t-flow">Agent &amp; zip flow</label>
+    </div>
+    <div class="panes">
+      <div class="pane" id="p-before">
+        <div class="mock">
+          <div class="mock-hd"><span>Settings → Skills</span><span class="pill"><span class="dot" style="background:var(--bad)"></span> npx + GitHub</span></div>
+          <div class="mock-bd">
+            <div class="row"><span>stock skills <span class="hint">29 from ciao.stock</span></span><span class="tag">.claude/skills + .ciao-stock-skill</span></div>
+            <div class="row"><span>custom skills <span class="hint">from workspace <span class="mono">skills/</span></span></span><span class="tag">symlink</span></div>
+            <div class="card" style="border-style: dashed">
+              <div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:13px">github / package skills</b><span class="pill"><span class="dot" style="background:#9aa0ad"></span> skills-lock.json</span></div>
+              <p class="hint" style="margin:6px 0 8px">Installed via <span class="mono">npx skills add</span> (vercel-labs/skills). Source: skills-lock.json. GitHub fetch via <span class="mono">git ls-remote</span> + <span class="mono">npx skills update</span>.</p>
+              <div class="row"><span class="mono">owner/repo → .agents/skills/foo</span><span class="tag">source: github.com/owner/repo</span></div>
+              <div class="row"><span class="mono">CIAO_AUTO_UPDATE_GITHUB_SKILLS</span><span class="tag">false by default</span></div>
+              <div class="hint" style="margin-top:8px">Auto-update toggle in Settings (web/src/lib/types.ts:637, routes_api.py:981). When true, boot runs remote_heads → plan → npx.</div>
+            </div>
+            <ul class="check">
+              <li><span class="bad">✕</span> Requires <span class="mono">npx</span> + <span class="mono">git</span> at boot and at add</li>
+              <li><span class="bad">✕</span> <span class="mono">skills-lock.json</span> diverges from workspace git</li>
+              <li><span class="warn">○</span> Two truths: <span class="mono">skills/</span> vs <span class="mono">skills-lock.json</span></li>
+            </ul>
+          </div>
+        </div>
+        <table style="margin-top:10px">
+          <tr><th>File</th><th>Role</th></tr>
+          <tr><td class="mono">ciao/skills_sync.py</td><td>git ls-remote + plan cache</td></tr>
+          <tr><td class="mono">ciao/sync_skills.py:304</td><td>_refresh_upstream_skills, npx add/update</td></tr>
+          <tr><td class="mono">scripts/skills_add.py</td><td>wrapper for npx skills add</td></tr>
+          <tr><td class="mono">ciao/skills_inventory.py</td><td>github label from lock file</td></tr>
+        </table>
+      </div>
+
+      <div class="pane" id="p-after">
+        <div class="mock">
+          <div class="mock-hd"><span>Settings → Skills</span><span class="pill"><span class="dot" style="background:var(--ok)"></span> folder / zip only</span></div>
+          <div class="mock-bd">
+            <div class="row"><span>stock skills <span class="hint">29, read-only</span></span><span class="tag">ciao.stock/skills</span></div>
+            <div class="row"><span>custom skills <span class="hint">from <span class="mono">skills/</span> — the only writable source</span></span><span class="tag">workspace/skills/*/SKILL.md</span></div>
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><b style="font-size:13px">+ Add skill</b><span class="hint">Two inputs, one validator</span></div>
+              <div class="grid" style="margin-top:8px">
+                <div class="card" style="background:var(--bg)"><b style="font-size:12px">Choose folder</b><p class="hint" style="margin:4px 0">Pick <span class="mono">skills/my-skill/</span> via folder picker or Tauri drop grant. Copied to <span class="mono">skills/&lt;name&gt;/</span>.</p><span class="tag">→ ciao sync-skills</span></div>
+                <div class="card" style="background:var(--bg)"><b style="font-size:12px">Upload zip</b><p class="hint" style="margin:4px 0">Single zip containing one top-level folder with <span class="mono">SKILL.md</span>. Validated, then extracted.</p><span class="tag">POST /api/skills/import</span></div>
+              </div>
+              <ul class="check">
+                <li><span class="ok">✓</span> Validation: zip-slip, one <span class="mono">SKILL.md</span>, frontmatter <span class="mono">name/description</span>, ≤15 KB</li>
+                <li><span class="ok">✓</span> Discoverable immediately: <span class="mono">.claude/skills</span> + <span class="mono">.agents/skills</span> symlink</li>
+                <li><span class="ok">✓</span> Sync between operators = workspace git (no npx)</li>
+              </ul>
+            </div>
+            <div class="hint">Removed: <span class="mono">skills-lock.json</span>, <span class="mono">CIAO_AUTO_UPDATE_GITHUB_SKILLS</span>, github section, npx calls.</div>
+          </div>
+        </div>
+        <p class="hint" style="margin-top:8px">Implementation files: <span class="mono">ciao/sync_skills.py</span>, <span class="mono">ciao/skills_inventory.py</span>, <span class="mono">ciao/config.py</span>, <span class="mono">ciao/web/routes_api.py</span>, <span class="mono">web/src/components/SettingsView.vue</span>, new <span class="mono">ciao/skill_import.py</span> (validator).</p>
+      </div>
+
+      <div class="pane" id="p-flow">
+        <p class="kicker">Agent workflow — linked golder / folder</p>
+        <ol class="tl">
+          <li><time>Operator A — add</time><b>Drop folder or zip</b><span class="hint">Agent instruction: "place skill folder in <span class="mono">skills/&lt;name&gt;/SKILL.md</span> (or upload zip via Settings → Skills), then run <span class="mono">ciao sync-skills</span>". Zip validator rejects bad shape before extract.</span></li>
+          <li><time>Sync</time><b>ciao sync-skills mirrors</b><span class="hint"><span class="mono">skills/ → .claude/skills</span> symlink + <span class="mono">.agents/skills</span> + Codex/Opencode projections. Skill instantly discoverable to all providers.</span></li>
+          <li><time>Operator B — receive</time><b>Workspace git sync</b><span class="hint">Skills are plain folders under git. Existing <span class="mono">.runtime/schedules</span> + git sync propagates to other devices. No GitHub fetch, no <span class="mono">npx</span>.</span></li>
+          <li><time>Guardrails</time><b>Validation before write</b><span class="hint">Zip must contain exactly one top-level folder with <span class="mono">SKILL.md</span>, frontmatter <span class="mono">name</span> matches folder, size ≤15 KB, no <span class="mono">../</span> traversal. Errors shown inline; success toast "Skill &lt;name&gt; added".</span></li>
+        </ol>
+        <div class="card" style="margin-top:10px">
+          <b style="font-size:13px">Comparison</b>
+          <table>
+            <tr><th></th><th>Before</th><th>After</th></tr>
+            <tr><td>Add</td><td class="hint"><span class="mono">npx skills add owner/repo --skill foo</span> → lock file</td><td class="hint">Copy folder or upload zip → <span class="mono">skills/foo/</span></td></tr>
+            <tr><td>Sync</td><td class="hint">Per-machine <span class="mono">git ls-remote</span> + <span class="mono">npx update</span> (180s)</td><td class="hint">Workspace git (already exists)</td></tr>
+            <tr><td>Discover</td><td class="hint"><span class="mono">.agents/skills</span> via npx</td><td class="hint"><span class="mono">.claude/skills</span> symlink + .agents mirror</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="hint" style="margin-top:10px">Plan: <span class="mono">docs/plans/SKILLS_GITHUB_SIMPLIFICATION_PLAN.md</span> — Decisions D-01..D-06, Q-01..Q-04. Ask before implementing: confirm zip strictness (Q-01) and whether to keep stock list visible.</p>
+</body>
+</html>

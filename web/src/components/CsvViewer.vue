@@ -259,7 +259,7 @@ defineExpose({
 }
 
 .csv-empty {
-  color: var(--fg2, var(--text-muted, #b4b4c4));
+  color: var(--fg2);
   font-size: var(--text-sm, 12px);
   padding: 16px 0;
 }
@@ -278,13 +278,13 @@ defineExpose({
 
 .csv-meta,
 .csv-meta-bar {
-  color: var(--fg2, var(--text-muted, #b4b4c4));
+  color: var(--fg2);
   font-size: var(--text-xs, 11px);
   letter-spacing: 0.02em;
 }
 
 .csv-hint {
-  color: var(--fg2, var(--text-muted, #b4b4c4));
+  color: var(--fg2);
   font-size: var(--text-xs, 11px);
   opacity: 0.8;
 }
@@ -420,7 +420,7 @@ defineExpose({
   max-width: 56px;
   width: 44px;
   text-align: center;
-  color: var(--fg2, var(--text-muted, #b4b4c4));
+  color: var(--fg2);
   background: var(--bg2, #1f2240);
   vertical-align: middle;
   padding: 4px !important;

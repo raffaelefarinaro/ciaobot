@@ -13,6 +13,7 @@ import subprocess
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -101,6 +102,12 @@ def test_store_credentials_writes_0600_and_retires_stale(tmp_path: Path) -> None
     config_dir = tmp_path / "secrets" / "gws-personal"
     config_dir.mkdir(parents=True)
     (config_dir / "credentials.enc").write_text("stale", encoding="utf-8")
+    # simulate an older install that left the dir and any previous credentials
+    # group/world-readable; storing must repair both, not just new files
+    config_dir.chmod(0o755)
+    creds_path = config_dir / "credentials.json"
+    creds_path.write_text("{}", encoding="utf-8")
+    creds_path.chmod(0o644)
     gws_auth.store_credentials(
         config_dir,
         client_id="cid",
@@ -108,11 +115,11 @@ def test_store_credentials_writes_0600_and_retires_stale(tmp_path: Path) -> None
         refresh_token="rtok",
         email="me@example.com",
     )
-    creds_path = config_dir / "credentials.json"
     creds = json.loads(creds_path.read_text())
     assert creds["refresh_token"] == "rtok"
     assert creds["email"] == "me@example.com"
     assert (creds_path.stat().st_mode & 0o777) == 0o600
+    assert (config_dir.stat().st_mode & 0o777) == 0o700
     # Stale encrypted copy is moved aside so gws doesn't keep using it.
     assert not (config_dir / "credentials.enc").exists()
     assert (config_dir / "credentials.enc.old").exists()
@@ -485,8 +492,17 @@ def test_relogin_completes_via_loopback(tmp_path: Path) -> None:
     manager = gws_auth.GwsReloginManager(cfg, exchange_fn=fake_exchange, session_ttl=10)
     started = manager.start("personal")
     assert started["ok"] is True
-    assert "accounts.google.com" in started["auth_url"]
+    auth = urlparse(started["auth_url"])
+    assert auth.scheme == "https"
+    assert auth.hostname == "accounts.google.com"
+    assert auth.path == "/o/oauth2/auth"
+    query = parse_qs(auth.query)
+    assert query["client_id"] == ["cid"]
+    assert query["response_type"] == ["code"]
+    assert query["state"] == [started["state"]]
+    assert query["redirect_uri"][0] == started["redirect_uri"]
     port, state = started["port"], started["state"]
+    assert urlparse(query["redirect_uri"][0]).port == port
     assert f":{port}/" in started["redirect_uri"]
 
     # A mismatched state must be ignored (session stays pending).

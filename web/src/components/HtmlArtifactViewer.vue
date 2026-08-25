@@ -99,7 +99,7 @@ const sourceLines = computed(() => props.source.split('\n'))
   border: 1px solid var(--border, #2e3258);
   border-radius: var(--radius-sm, 6px);
   background: var(--bg3, var(--bg2, #2a2e54));
-  color: var(--fg2, var(--text-muted, #b4b4c4));
+  color: var(--fg2);
   font-size: var(--text-xs, 11px);
   cursor: pointer;
 }
@@ -143,7 +143,7 @@ const sourceLines = computed(() => props.source.split('\n'))
   padding: 0 4px;
 }
 .hav-note {
-  color: var(--fg2, var(--text-muted, #b4b4c4));
+  color: var(--fg2);
   font-size: var(--text-sm, 12px);
   padding: 8px 4px;
 }

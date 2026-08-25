@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ArchiveOutcome, ProjectChatManager
@@ -252,15 +252,25 @@ async def test_archive_postprocess_runs_insights_for_multiturn_chats(
 
 
 @pytest.mark.asyncio
-async def test_codex_archive_uses_configured_insights_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_archive_postprocess_names_the_guide_promotion_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The live archive path has to say which guide auto-promotion writes.
+
+    ``apply_proposals`` deliberately leaves ``[memory]`` and ``[profile]`` facts
+    queued when no guide is supplied, so omitting this argument silently turned
+    ``auto_promote_memory=True`` into a no-op for durable facts: the backfill
+    path passed the workspace's agent-root guide, the live one passed nothing.
+    """
     pcm = _make_manager(tmp_path)
-    pcm._config.insights_model_override = "opencode:vendor/insights-model"
-    project = pcm.create_project("insights-codex-project", workspace="work")
-    chat = pcm.create_chat(
-        project.project_id, title="codex insights", provider="codex", model="gpt-chat"
+    # A chat always runs in a registered workspace; the guard on the call mirrors
+    # the backfill path and resolves nothing for an unknown one.
+    pcm._config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root=str(tmp_path / "work" / "memory-vault")
     )
+    project = pcm.create_project("guide-project", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="guide chat")
     calls: list[dict] = []
 
     async def fake_extract_and_append(**kwargs: object) -> None:
@@ -272,7 +282,7 @@ async def test_codex_archive_uses_configured_insights_model(
         chat.chat_id,
         ArchiveOutcome(
             path=tmp_path / "archive.md",
-            session_id="session-1",
+            session_id="session-guide",
             turn_count=2,
             filtered_jsonl="filtered transcript",
         ),
@@ -281,14 +291,23 @@ async def test_codex_archive_uses_configured_insights_model(
     )
     await asyncio.sleep(0)
 
-    assert calls[0]["model"] == "opencode:vendor/insights-model"
+    assert calls, "the insights pipeline never started"
+    guide = calls[0]["guide_path"]
+    assert guide is not None, "no guide means every durable fact stays queued"
+    assert guide == Path(pcm._config.agent_root("work")) / "CLAUDE.md"
 
 
 # ── Empty-chat cleanup ──────────────────────────────────────────────────
 
 
-def test_create_chat_sweeps_prior_empty_chat(tmp_path: Path) -> None:
-    """Creating a second chat while the first is still empty drops the first."""
+def test_create_chat_preserves_prior_empty_chat(tmp_path: Path) -> None:
+    """Creating a second chat does NOT drop the first, even if it is empty.
+
+    The automatic empty-chat sweep was removed: it raced the just-created
+    chat on every new-chat POST (deleting the chat the user had just opened),
+    which closed the panel and caused the "new chat flashes then opens" bug.
+    Empty chats now live until the user deletes them explicitly.
+    """
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("2026-q2-sweep", workspace="work")
 
@@ -298,13 +317,11 @@ def test_create_chat_sweeps_prior_empty_chat(tmp_path: Path) -> None:
     cap = _EventCapture(pcm)
     fresh = pcm.create_chat(project.project_id)
 
-    assert empty.chat_id not in pcm._chats, "empty chat should have been swept"
+    assert empty.chat_id in pcm._chats, "empty chat must NOT be swept"
     assert fresh.chat_id in pcm._chats
 
     deleted = [e for e in cap.drain() if e.get("type") == "chat_deleted"]
-    assert len(deleted) == 1
-    assert deleted[0]["chat_id"] == empty.chat_id
-    assert deleted[0]["reason"] == "empty"
+    assert len(deleted) == 0, "no chat_deleted event expected"
 
 
 def test_create_chat_preserves_non_empty_chats(tmp_path: Path) -> None:
@@ -325,8 +342,12 @@ def test_create_chat_preserves_non_empty_chats(tmp_path: Path) -> None:
     assert renamed.chat_id in pcm._chats
 
 
-def test_startup_sweeps_empty_chats(tmp_path: Path) -> None:
-    """An empty chat saved to disk should not survive a manager restart."""
+def test_startup_preserves_empty_chats(tmp_path: Path) -> None:
+    """An empty chat saved to disk survives a manager restart.
+
+    The automatic empty-chat sweep was removed (it raced new-chat creation
+    and closed the panel). Empty chats are cleaned up by hand instead.
+    """
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("2026-q2-startup", workspace="work")
     orphan = pcm.create_chat(project.project_id)
@@ -334,7 +355,7 @@ def test_startup_sweeps_empty_chats(tmp_path: Path) -> None:
 
     # Simulate restart by building a fresh manager against the same state dir.
     pcm2 = _make_manager(tmp_path)
-    assert orphan.chat_id not in pcm2._chats
+    assert orphan.chat_id in pcm2._chats
 
 
 def test_delete_chat_publishes_event(tmp_path: Path) -> None:
@@ -629,40 +650,12 @@ async def test_archive_route_reports_the_cascade_per_subchat(
     assert "transcript write failed" in rows[bad.chat_id]["error"]
 
 
-async def test_delete_and_archive_reclaim_provider_sessions(
+async def test_delete_and_archive_reclaim_opencode_sessions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("provider-reclaim", workspace="work")
     deleted: list[tuple[str, str]] = []
-
-    async def _fake_codex_delete(_workspace, thread_id: str, command=None) -> bool:
-        deleted.append(("codex", thread_id))
-        return True
-
-    monkeypatch.setattr(
-        "ciao.web.project_chats.CodexProvider.delete_thread",
-        _fake_codex_delete,
-    )
-
-    chat = pcm.create_chat(project.project_id, title="to-delete")
-    chat.provider = "codex"
-    chat.session_id = "thread-delete"
-    chat.user_turn_count = 1
-    assert pcm.delete_chat(chat.chat_id) is True
-    await asyncio.sleep(0)
-    assert deleted == [("codex", "thread-delete")]
-
-    archived = pcm.create_chat(project.project_id, title="to-archive")
-    archived.provider = "codex"
-    archived.session_id = "thread-archive"
-    archived.previous_session_ids = ["thread-archive-old"]
-    await pcm.archive_chat(archived.chat_id)
-    assert deleted == [
-        ("codex", "thread-delete"),
-        ("codex", "thread-archive-old"),
-        ("codex", "thread-archive"),
-    ]
 
     async def _fake_opencode_delete(_workspace, session_id: str) -> bool:
         deleted.append(("opencode", session_id))
@@ -687,39 +680,3 @@ async def test_delete_and_archive_reclaim_provider_sessions(
     opencode_archived.session_id = "opencode-archive-session"
     await pcm.archive_chat(opencode_archived.chat_id)
     assert deleted[-1] == ("opencode", "opencode-archive-session")
-
-
-def test_new_session_reclaims_codex_thread_lineage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("codex-new-session", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="rotate")
-    chat.provider = "codex"
-    chat.session_id = "thread-current"
-    chat.previous_session_ids = ["thread-old"]
-    chat.user_turn_count = 1
-
-    deleted_ids: list[str] = []
-
-    async def _fake_delete(_workspace, thread_id: str, command=None) -> bool:
-        deleted_ids.append(thread_id)
-        return True
-
-    monkeypatch.setattr(
-        "ciao.web.project_chats.CodexProvider.delete_thread",
-        _fake_delete,
-    )
-
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        pcm.new_session(chat.chat_id)
-        loop.run_until_complete(asyncio.sleep(0))
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
-
-    assert deleted_ids == ["thread-old", "thread-current"]
-    assert chat.session_id == ""
-    assert chat.previous_session_ids == []

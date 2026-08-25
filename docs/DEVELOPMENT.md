@@ -12,7 +12,7 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. Setup no longer generates the retired rumps agent or `Ciaobot Server.app`; it removes them when an older install left them behind. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
+`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for shared runtime discovery, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. Setup no longer generates the retired rumps agent or `Ciaobot Server.app`; it removes them when an older install left them behind. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
 The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
 
@@ -38,11 +38,8 @@ ciao public-preflight export . /tmp/ciao-public-export
 ciao public-preflight scan /tmp/ciao-public-export --private-patterns /tmp/private-patterns.txt
 ciao package-smoke --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
-ciao auth codex --print-only               # show Codex / ChatGPT login command
 ciao auth opencode --print-only            # show opencode login command
 ciao auth opencode                         # run provider login helper
-ciao scaffold eval example --workspace .  # create evals/example.json
-ciao eval --suite evals/example.json --workspace .
 ```
 
 ### macOS venv workarounds
@@ -84,15 +81,13 @@ archive, its signature, and `latest.json`.
 - **Release prep:** from a clean checkout, run:
 
 ```bash
-scripts/prepare-release --apply --run-release-evals --create-pr --ready
+scripts/prepare-release --apply --create-pr --ready
 ```
 
   That cuts `release/vX.Y.Z` from `develop`, aligns the Python, PWA, desktop
   npm/Cargo/Tauri versions and lockfiles, refreshes `CHANGELOG.md`, runs release
-  checks, runs the Claude/Codex release scorecard, commits sanitized evidence
-  under `release-evidence/vX.Y.Z/`, and opens a PR into `main`. Use
-  `--bump minor` or `--version X.Y.Z` when needed. Live release evals require
-  both provider logins and may spend provider tokens.
+  checks, and opens a PR into `main`. Use
+  `--bump minor` or `--version X.Y.Z` when needed.
 
 - **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA, embedded runtimes, universal app, native verifier, installer, and updater metadata. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
@@ -244,98 +239,10 @@ ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
-ciao memory-audit --json # Bounded-memory rot only (regions, no vault scan)
+ciao memory-audit --json # Bounded-memory rot only (regions; add --with-vault for note aging)
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
-
-### Declarative live evaluations
-
-Create a starter suite, then run it against the current workspace:
-
-```bash
-ciao scaffold eval example --workspace .
-ciao eval --suite evals/example.json --workspace .
-```
-
-The suite is schema-version 1 JSON. It declares routing defaults and ordered
-scenarios; each scenario selects exactly one `skill` or `subagent` target and
-contains deterministic assertions such as output text, regular expressions,
-and required or forbidden tools. Use `--filter` to select scenarios and
-`--provider`, `--model`, `--output`, `--turn-timeout`, or `--startup-timeout`
-to override execution settings. Routing precedence is CLI override, scenario,
-then suite default.
-
-Each scenario runs in a fresh temporary workspace and isolated Ciaobot server.
-Only the selected target is staged, workspace-owned targets take precedence
-over packaged targets, and the source workspace is not modified. Path and
-symlink boundary checks reject targets that escape their canonical source.
-
-The normal tests mock provider execution and require no credentials:
-
-```bash
-pytest -q tests/test_evals.py tests/test_eval_targets.py \
-  tests/test_eval_runner.py tests/test_eval_cli.py
-```
-
-Two opt-in fixtures exercise real provider credentials and may spend tokens:
-
-```bash
-ciao eval --suite tests/fixtures/evals/skill-smoke.json \
-  --workspace . --provider claude --output /tmp/ciao-eval-claude-skill
-
-ciao eval --suite tests/fixtures/evals/subagent-smoke.json \
-  --workspace . --provider codex --model sonnet \
-  --output /tmp/ciao-eval-codex-subagent
-
-ciao eval --suite tests/fixtures/evals/visual-plan.json \
-  --workspace . --provider claude --output /tmp/ciao-eval-visual-plan-claude
-
-ciao eval --suite tests/fixtures/evals/visual-plan.json \
-  --workspace . --provider codex --output /tmp/ciao-eval-visual-plan-codex
-```
-
-After every scenario, the output directory contains atomic `results.json` and
-`REPORT.md` snapshots. Results include status, assertion outcomes, output or
-error, routing, selected/effective model, normalized tools, usage, token
-totals, and timings. Live runs use the existing provider login and are not part
-of the normal credential-free test suite.
-
-### Public release evidence
-
-Release scorecards use the schema-version-2 suite in `evals/release.json`.
-They run both supported providers three times in cold, warm, and restart
-mode. Cold runs use a fresh isolated workspace; warm runs repeat the measured
-turns in one chat; restart runs preserve the synthetic vault while starting a
-new server and chat.
-
-```bash
-ciao eval release \
-  --suite evals/release.json \
-  --workspace . \
-  --version 0.0.0 \
-  --output release-evidence/v0.0.0 \
-  --from-ref v0.0.0
-
-ciao eval compare \
-  --baseline release-evidence/vPREVIOUS/summary.json \
-  --current release-evidence/vCURRENT/summary.json
-```
-
-The generated `REPORT.md`, `summary.json`, `changes.json`, and
-`rationale.md` are sanitized public artifacts. They contain aggregate
-context/cache/token/latency metrics, tool and memory-source summaries, and
-structural skill/MCP changes, but never prompts, model answers, vault content,
-tool arguments, or credentials. Performance and cache regressions are
-advisory; missing provider coverage and correctness failures stop release
-preparation. The evidence remains reviewable in the release PR and worktree;
-the release owner may attach or link it manually. No CI job runs or publishes
-the scorecard.
-
-Synthetic vault fixtures are the default. A local, sanitized vault can be used
-for a private operator run with `--vault-root /path/to/vault`; external source
-paths are hashed in the resulting public evidence and the vault is never copied
-into the repository or release assets.
 
 The Settings → Automations list is registry-driven: `GET /api/automation` carries
 each job's static `trigger` sentence, `schedule_id`, `one_time`, `uses_model`,
@@ -351,7 +258,7 @@ that schedule is not installed.
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
 For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests.
 For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths. An open `AskUserQuestion` card takes those digits over for its own options while it is up (Design System rule S7) and hands them back when it closes, so check both states after touching either handler.
-On the home screen, also verify that arrow keys follow the rendered lane layout: stacked workspace lanes use up/down between lanes and left/right within a lane, while side-by-side lanes retain the opposite mapping.
+On the home screen, also verify that it shows only the selected workspace's chats (switching workspaces swaps the content) and that arrow keys follow the rendered lane layout: up/down moves between stacked lanes, left/right moves within a lane.
 For sidebar chat-group changes, verify that a supervisor's delegate disclosure has a visible `aria-expanded` state, keeps a 44px touch target, hides and restores only its delegate rows, and automatically reopens when the selected chat is a delegate.
 For composer drag-and-drop changes, test both local host and remote client roles:
 host paths must be absolute, while client files must upload into the active
@@ -439,30 +346,43 @@ matching `rule_overlaps_found`. It is a judgement the user may legitimately
 decline, and a finding that can never be cleared would pin the whole audit at
 `needs_attention` until people stop reading it.
 
+The same state/event rule also decides how **age** is read on vault notes: an
+entity note (person, project) asserts current state, so going unverified past
+its type's horizon is a review candidate; logs and journals record events,
+which never go stale. `find_stale_notes` ages each note from frontmatter
+`updated:` (a deliberate "I re-checked this" claim) or file mtime, against
+per-type horizons (project 30d, person 90d, everything else 180d; `Workspace/`
+queue files exempt — flagging an inbox for being an inbox is noise). Like
+`superseded_state_candidates` these findings are informational: they surface in
+`os-audit`'s memory section, the Memory Map sidebar ("Needs review"), and the
+daily `system-memory-curation` run, which re-verifies each note and stamps
+`updated:` when the facts still hold.
+
 `ciao memory-audit` reads one file and skips the vault scan, so the daily
 `system-memory-curation` schedule can afford to call it and fix what it finds.
-Exit 0 clean, 1 findings, 2 a region could not be read.
+`--with-vault` adds the note-aging pass (still informational, never changes the
+exit code). Exit 0 clean, 1 findings, 2 a region could not be read.
 
 ## Skills, subagents, and slash commands
 
-Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories and projects `.mcp.json` MCP servers into `.codex/config.toml` for Codex chats. The generated MCP block preserves user-owned Codex server tables and copies only environment references, never literal credentials. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
+Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
 
 The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions live in `gws-shared`; only the short profile-wrapper routing rule belongs in the compact core (`ciao/system_prompt.md`).
 
-The stock `visual-plan` skill produces local Markdown plans with optional HTML and Excalidraw companions. It is the one-stop planning surface for work that needs an approval gate and a cross-session resume contract. It deliberately draws a boundary against the stock `workspace-authoring` skill: `workspace-authoring` owns routine working docs (notes, analyses, drafts with no approval gate), while `visual-plan` owns plans that must be approved and survive a provider switch. Each skill's description names the other's territory. Visual plans are local Markdown artifacts; only one file is pinned at a time, and Plan mode cannot produce one (the skill refuses and explains instead of failing on the write). Interactive HTML companions are authored by loading the stock `html-artifact` skill. A same-named workspace skill overrides the packaged copy; refresh a workspace with `ciao sync-skills --skip-upstream`, and roll back a future removal at the package level by reverting the stock skill from the next build.
+The stock `visual-plan` skill produces local Markdown plans with an optional self-contained HTML companion, including diagrams drawn as inline SVG. It is the one-stop planning surface for work that needs an approval gate and a cross-session resume contract. It deliberately draws a boundary against the stock `workspace-authoring` skill: `workspace-authoring` owns routine working docs (notes, analyses, drafts with no approval gate), while `visual-plan` owns plans that must be approved and survive a provider switch. Each skill's description names the other's territory. Visual plans are local Markdown artifacts; only one file is pinned at a time, and Plan mode cannot produce one (the skill refuses and explains instead of failing on the write). Interactive HTML companions are authored by loading the stock `html-artifact` skill. A same-named workspace skill overrides the packaged copy; refresh a workspace with `ciao sync-skills --skip-upstream`, and roll back a future removal at the package level by reverting the stock skill from the next build.
 
 ### Provider context and native memory
 
 Normal chats send one compact provider-neutral context capsule containing the
 active workspace/project, canonical document, date, retrieval hint, entity
 matches, and unattended-turn marker. Stable routing facts are sent once per
-provider session; handovers use a separate bounded excerpt. Claude, Codex, and
-OpenCode receive the same compact Ciaobot core, while their native
+provider session; handovers use a separate bounded excerpt. Claude and OpenCode
+receive the same compact Ciaobot core, while their native
 `CLAUDE.md`/`AGENTS.md` loaders remain the only source of bounded memory.
 `memory_tool.py` prunes valid expired entries before provider startup and
 exposes `memory_status`/`memory_update` without creating a second memory store.
 
-Edit canonical sources, not the generated `.claude/`, `.agents/`, or `.codex/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
+Edit canonical sources, not the generated `.claude/` or `.agents/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
 
 ## DAG-style schedules (maintainers)
 
@@ -488,7 +408,7 @@ workspace/project/chat access, and have focused protocol plus domain tests.
 Self-affecting operations must defer until the caller chat drains. Provider
 tokens must never enter the model's shell environment or telemetry arguments.
 
-See `docs/MCP.md` for the catalog and Claude/Codex configuration.
+See `docs/MCP.md` for the catalog and provider configuration.
 
 ## Change guidelines
 

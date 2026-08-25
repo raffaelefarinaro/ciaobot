@@ -1,65 +1,61 @@
 <template>
   <div class="memory-map">
-    <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')">
-      <template #actions>
-        <div class="mm-seg">
-          <button type="button" :class="{ active: view === 'graph' }" @click="view = 'graph'">Graph</button>
-          <button type="button" :class="{ active: view === 'list' }" @click="view = 'list'">List</button>
-        </div>
-      </template>
-    </PaneHeader>
+    <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')" />
 
-    <div class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode }">
-      <div v-if="mm.loading" class="mm-empty">Loading vault graph…</div>
+    <ProposalReviewPanel v-if="mm.view === 'review'" />
+
+    <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode }">
+      <div v-if="mm.loading" class="mm-skeleton" role="status" aria-live="polite" aria-label="Loading vault graph">
+        <div class="mm-brain-skeleton" aria-hidden="true">
+          <svg viewBox="0 0 200 140" class="mm-brain-svg">
+            <!-- brain/network skeleton: nodes + interconnections -->
+            <line x1="45" y1="38" x2="82" y2="52" class="mm-brain-edge" />
+            <line x1="82" y1="52" x2="118" y2="42" class="mm-brain-edge" />
+            <line x1="118" y1="42" x2="155" y2="58" class="mm-brain-edge" />
+            <line x1="82" y1="52" x2="92" y2="92" class="mm-brain-edge" />
+            <line x1="118" y1="42" x2="108" y2="92" class="mm-brain-edge" />
+            <line x1="92" y1="92" x2="108" y2="92" class="mm-brain-edge" />
+            <line x1="45" y1="38" x2="38" y2="86" class="mm-brain-edge" />
+            <line x1="38" y1="86" x2="70" y2="118" class="mm-brain-edge" />
+            <line x1="155" y1="58" x2="162" y2="92" class="mm-brain-edge" />
+            <line x1="162" y1="92" x2="130" y2="118" class="mm-brain-edge" />
+            <line x1="70" y1="118" x2="100" y2="128" class="mm-brain-edge" />
+            <line x1="130" y1="118" x2="100" y2="128" class="mm-brain-edge" />
+            <circle cx="45" cy="38" r="13" class="mm-brain-node mm-brain-node--1" />
+            <circle cx="82" cy="52" r="10" class="mm-brain-node mm-brain-node--2" />
+            <circle cx="118" cy="42" r="11" class="mm-brain-node mm-brain-node--3" />
+            <circle cx="155" cy="58" r="12" class="mm-brain-node mm-brain-node--4" />
+            <circle cx="92" cy="92" r="11" class="mm-brain-node mm-brain-node--2" />
+            <circle cx="108" cy="92" r="10" class="mm-brain-node mm-brain-node--1" />
+            <circle cx="38" cy="86" r="9" class="mm-brain-node mm-brain-node--3" />
+            <circle cx="162" cy="92" r="9" class="mm-brain-node mm-brain-node--2" />
+            <circle cx="70" cy="118" r="10" class="mm-brain-node mm-brain-node--4" />
+            <circle cx="130" cy="118" r="10" class="mm-brain-node mm-brain-node--1" />
+            <circle cx="100" cy="128" r="9" class="mm-brain-node mm-brain-node--3" />
+          </svg>
+        </div>
+        <div class="mm-skeleton-text"><span class="history-loading-spinner" aria-hidden="true"></span> Mapping your vault…</div>
+        <div class="mm-skeleton-bars" aria-hidden="true">
+          <span class="mm-shimmer-line" style="width: 42%; height: 8px;"></span>
+          <span class="mm-shimmer-line" style="width: 58%; height: 8px; margin-top: 8px;"></span>
+        </div>
+      </div>
       <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
-      <div v-else-if="view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
+      <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
         <canvas
           ref="canvasEl"
+          :class="{ 'mm-canvas--node-hover': !!hoveredNode }"
           @mousedown="onMouseDown"
+          @mousemove="onCanvasHover"
+          @mouseleave="clearHover"
           @wheel.prevent="onWheel"
         />
         <div class="mm-zoom-controls">
-          <button type="button" class="btn-icon touch-hit" @click="zoom(1.25)">+</button>
-          <button type="button" class="btn-icon touch-hit" @click="zoom(0.8)">−</button>
-          <button type="button" class="btn-icon touch-hit" @click="resetCamera">⤢</button>
+          <button type="button" class="btn-icon touch-hit" title="Zoom in" aria-label="Zoom in" @click="zoom(1.25)">+</button>
+          <button type="button" class="btn-icon touch-hit" title="Zoom out" aria-label="Zoom out" @click="zoom(0.8)">−</button>
+          <button type="button" class="btn-icon touch-hit" title="Fit the whole graph" aria-label="Fit the whole graph" @click="resetCamera(true)">⤢</button>
         </div>
         <div class="mm-toolbar">
-          <div class="mm-seg mm-seg--sm" role="group" aria-label="Graph scope">
-            <button
-              type="button"
-              :class="{ active: mm.scope === 'local' }"
-              :aria-pressed="mm.scope === 'local'"
-              title="Show a neighbourhood around one note"
-              @click="mm.setScope('local')"
-            >Local</button>
-            <button
-              type="button"
-              :class="{ active: mm.scope === 'overview' }"
-              :aria-pressed="mm.scope === 'overview'"
-              title="Show the whole filtered vault"
-              @click="mm.setScope('overview')"
-            >Overview</button>
-          </div>
-
-          <div v-if="mm.scope === 'local'" class="mm-toolbar-group">
-            <span class="mm-toolbar-label">depth</span>
-            <button
-              type="button"
-              class="mm-step"
-              aria-label="Decrease depth"
-              :disabled="mm.localDepth <= 1"
-              @click="mm.setLocalDepth(mm.localDepth - 1)"
-            >−</button>
-            <span class="mm-toolbar-value">{{ mm.localDepth }}</span>
-            <button
-              type="button"
-              class="mm-step"
-              aria-label="Increase depth"
-              :disabled="mm.localDepth >= 4"
-              @click="mm.setLocalDepth(mm.localDepth + 1)"
-            >+</button>
-          </div>
-
           <div class="mm-seg mm-seg--sm" role="group" aria-label="Colour by">
             <button
               type="button"
@@ -80,43 +76,86 @@
           <button
             type="button"
             class="mm-toggle"
-            :class="{ on: mm.hideOrphans }"
-            :aria-pressed="mm.hideOrphans"
+            :class="{ on: mm.orphanFilter === 'hide' }"
+            :aria-pressed="mm.orphanFilter === 'hide'"
             :title="`${mm.orphanCount} notes have no links; hiding them declutters the layout`"
             @click="mm.toggleHideOrphans()"
-          >{{ mm.hideOrphans ? 'Orphans hidden' : 'Hide orphans' }}</button>
+          >{{ mm.orphanFilter === 'hide' ? 'Orphans hidden' : 'Hide orphans' }}</button>
+          <button
+            type="button"
+            class="mm-toggle"
+            :class="{ on: mm.orphanFilter === 'only' }"
+            :aria-pressed="mm.orphanFilter === 'only'"
+            :title="mm.orphanFilter === 'only' ? 'Showing only unlinked notes' : 'Show only unlinked notes — useful when you want to link them up'"
+            @click="mm.toggleOnlyOrphans()"
+          >{{ mm.orphanFilter === 'only' ? 'Only orphans ✓' : 'Only orphans' }}</button>
         </div>
 
         <div class="mm-hint-overlay">
-          <span v-if="mm.scope === 'local' && localRootNode">
-            Around <strong>{{ localRootNode.title }}</strong> · {{ mm.visibleNodes.length }} of {{ mm.nodes.length }} notes ·
-            click a note to walk there
-          </span>
-          <span v-else>
+          <span>
             {{ mm.visibleNodes.length }} notes ·
-            <template v-if="zoomedOut">zoom in for note titles</template>
-            <template v-else>shift-click two notes to trace a path</template>
+            <template v-if="zoomedOut">hover a note to name it and trace its links · zoom in for titles</template>
+            <template v-else>hover to trace links · click to pin the neighbourhood · shift-click two to find a path</template>
           </span>
         </div>
+        <div
+          v-if="hoveredNode"
+          class="mm-hover-tip"
+          :style="{ left: hoverPos.x + 'px', top: hoverPos.y + 'px' }"
+        >{{ hoveredNode.title }}</div>
       </div>
       <div v-else class="mm-list-wrap">
         <table>
           <thead>
+            <!-- Sortable headers state which way they are sorted, in both the
+                 caret and aria-sort. They were clickable with no indicator at
+                 all, so a second click on the same column looked like nothing
+                 had happened. -->
             <tr>
-              <th @click="setSort('title')">Name</th>
-              <th @click="setSort('type')">Type</th>
-              <th>Tags</th>
-              <th @click="setSort('degree')">Links</th>
+              <th :aria-sort="ariaSort('title')">
+                <button type="button" class="mm-sort" @click="setSort('title')">
+                  Name<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('title') }}</span>
+                </button>
+              </th>
+              <th :aria-sort="ariaSort('type')">
+                <button type="button" class="mm-sort" @click="setSort('type')">
+                  Type<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('type') }}</span>
+                </button>
+              </th>
+              <th class="th-plain">Tags</th>
+              <th :aria-sort="ariaSort('degree')">
+                <button type="button" class="mm-sort" @click="setSort('degree')">
+                  Links<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('degree') }}</span>
+                </button>
+              </th>
+              <th :aria-sort="ariaSort('age')">
+                <button type="button" class="mm-sort" title="Days since the note's facts were last verified" @click="setSort('age')">
+                  Checked<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('age') }}</span>
+                </button>
+              </th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="n in sortedVisibleNodes" :key="n.id" @click="mm.selectNode(n.id)">
+            <tr
+              v-for="n in sortedVisibleNodes"
+              :key="n.id"
+              :class="{ current: mm.selectedId === n.id }"
+              @click="mm.selectNode(n.id)"
+            >
               <td><span class="dot" :style="{ background: colorForNode(n) }" />{{ n.title }}</td>
               <td class="muted">{{ categoryLabelFor(n) }}</td>
               <td>
                 <span v-for="t in n.tags.slice(0, 4)" :key="t" class="tag-mini">{{ t }}</span>
               </td>
-              <td>{{ n.degree }}</td>
+              <!-- Link count as a bar as well as a number: sorted by links,
+                   the shape of the distribution (a few hubs, a long tail of
+                   twos) is the useful reading, and a column of digits hides
+                   it. -->
+              <td class="deg-cell">
+                <span class="deg-bar" aria-hidden="true"><span :style="{ width: degreeBarPct(n) + '%' }"></span></span>
+                <span class="deg-n">{{ n.degree }}</span>
+              </td>
+              <td :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past its type's horizon">needs review</span></td>
             </tr>
           </tbody>
         </table>
@@ -131,9 +170,35 @@
           @click="mm.selectNode(null)"
         >×</button>
         <div class="mm-detail-type">{{ categoryLabelFor(mm.selectedNode) }}</div>
-        <div class="mm-detail-title">{{ mm.selectedNode.title }}</div>
+        <div class="mm-detail-title">
+          {{ mm.selectedNode.title }}
+          <span v-if="mm.selectedNode.stale" class="stale-badge" title="Unverified past this note type's staleness horizon">needs review</span>
+        </div>
+        <div v-if="ageLabelOfSelected" class="mm-detail-verified">Last verified {{ ageLabelOfSelected }} ago</div>
         <div v-if="mm.selectedNode.description" class="mm-detail-desc">{{ mm.selectedNode.description }}</div>
         <button type="button" class="mm-detail-path" @click="openNoteFile(mm.selectedNode.id)">{{ mm.selectedNode.id }}</button>
+
+        <div class="mm-detail-section mm-detail-preview">
+          <h4>Content</h4>
+          <div v-if="previewLoading" class="mm-preview-skeleton" aria-hidden="true">
+            <span class="mm-shimmer-line" style="width: 100%; height: 8px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 92%; height: 8px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 8px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 60%; height: 8px;"></span>
+          </div>
+          <div v-else-if="previewError" class="mm-preview-error">{{ previewError }}</div>
+          <template v-else>
+            <div v-if="previewContent" class="mm-preview-wrap" :class="{ 'mm-preview--collapsed': isTruncated && !expandedPreview }">
+              <pre class="mm-preview-text">{{ displayedPreview }}</pre>
+              <div v-if="isTruncated && !expandedPreview" class="mm-preview-fade" aria-hidden="true"></div>
+            </div>
+            <div v-if="!previewContent && !previewError" class="mm-hint">Empty note.</div>
+            <div v-if="previewContent" class="mm-preview-actions">
+              <button v-if="isTruncated" type="button" class="mm-link" @click="expandedPreview = !expandedPreview">{{ expandedPreview ? 'Show less' : 'Show more' }}</button>
+              <button type="button" class="mm-link mm-link--primary" @click="openNoteFile(mm.selectedNode.id)">Open full file →</button>
+            </div>
+          </template>
+        </div>
 
         <div v-if="mm.selectedNode.tags.length" class="mm-detail-section">
           <h4>Tags</h4>
@@ -175,8 +240,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
+import ProposalReviewPanel from './ProposalReviewPanel.vue'
+import { useProposalsStore } from '../stores/proposals'
+import { router } from '../router'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import {
@@ -185,7 +253,7 @@ import {
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
 import { isLightTheme } from '../lib/theme'
-import { MIN_CLUSTER_SIZE } from '../lib/vaultAnalysis'
+import { easeOutCubic, prefersReducedMotion, tweenCamera, type CameraState } from '../lib/cameraTween'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -202,33 +270,35 @@ const fileViewer = useFileViewerStore()
 const themeColors = reactive({
   light: false,
   label: 'rgba(231,232,240,0.85)',
-  labelDim: 'rgba(231,232,240,0.25)',
-  clusterLabel: '#e8e8f0',
-  surface: '#1a1a2e',
   edge: 'rgba(150,160,190,0.35)',
-  edgeDim: 'rgba(120,126,150,0.08)',
+  edgeDim: 'rgba(120,126,150,0.14)',
+  edgeHot: 'rgba(215,222,245,0.85)',
   selectRing: '#fff',
+  staleRing: 'rgba(255,152,0,0.85)',
 })
 function refreshThemeColors() {
   const light = isLightTheme.value
   themeColors.light = light
   themeColors.label = light ? 'rgba(32,33,48,0.88)' : 'rgba(231,232,240,0.85)'
-  themeColors.labelDim = light ? 'rgba(32,33,48,0.3)' : 'rgba(231,232,240,0.25)'
-  themeColors.clusterLabel = light ? '#1a1a2e' : '#e8e8f0'
-  themeColors.surface = light ? '#f4f4fa' : '#1a1a2e'
   themeColors.edge = light ? 'rgba(80,86,120,0.35)' : 'rgba(150,160,190,0.35)'
-  themeColors.edgeDim = light ? 'rgba(120,126,150,0.12)' : 'rgba(120,126,150,0.08)'
+  themeColors.edgeDim = light ? 'rgba(120,126,150,0.18)' : 'rgba(120,126,150,0.14)'
+  // The hover-preview edge has to read as brighter than a normal edge in dark
+  // and *darker* in light; on light theme a whiter line would disappear.
+  themeColors.edgeHot = light ? 'rgba(40,44,70,0.75)' : 'rgba(215,222,245,0.85)'
   themeColors.selectRing = light ? '#1a1a2e' : '#fff'
+  // Amber on white needs to go darker to stay visible, same as the CSS
+  // --warning token does between themes.
+  themeColors.staleRing = light ? 'rgba(196,110,0,0.9)' : 'rgba(255,152,0,0.85)'
 }
 function colorForNode(n: MemoryGraphNode): string {
   if (mm.colorMode === 'cluster') return clusterColorFor(mm.clusterSlotOf(n.id), themeColors.light)
   return categoryColorFor(catKeyFor(n))
 }
 
-const localRootNode = computed(() => (mm.localRoot ? mm.nodesById.get(mm.localRoot) || null : null))
-// Mirrors the canvas's own cluster-label threshold so the hint can tell the
-// user why they are looking at cluster names rather than note titles.
-const zoomedOut = computed(() => zoomRatio() < CLUSTER_LABEL_MAX_RATIO)
+// Mirrors the canvas's own label threshold so the hint can tell the user why
+// note titles are not on screen yet (they appear past this zoom; before it,
+// names are available on hover).
+const zoomedOut = computed(() => zoomRatio() < LABEL_MIN_RATIO)
 
 // The graph always follows the workspace switcher shared with every other
 // view (sidebar toggle, number-key shortcut, chat header) — the store
@@ -268,14 +338,81 @@ async function deleteNote(id: string) {
   }
 }
 
+// ---------- content preview in detail panel ----------
+const previewContent = ref('')
+const previewLoading = ref(false)
+const previewError = ref('')
+const expandedPreview = ref(false)
+const PREVIEW_LIMIT = 1200
+let previewToken = 0
+
+watch(() => mm.selectedId, async (id) => {
+  expandedPreview.value = false
+  if (!id) {
+    previewContent.value = ''
+    previewError.value = ''
+    previewLoading.value = false
+    return
+  }
+  previewLoading.value = true
+  previewError.value = ''
+  const token = ++previewToken
+  try {
+    const resp = await fetch(`/api/workspace-file?path=${encodeURIComponent(id)}`, { credentials: 'same-origin' })
+    if (token !== previewToken) return
+    if (!resp.ok) {
+      if (resp.status === 404) previewError.value = 'File not found.'
+      else if (resp.status === 413) previewError.value = 'File too large to preview.'
+      else if (resp.status === 403) previewError.value = 'Cannot preview this file.'
+      else previewError.value = `Failed to load (HTTP ${resp.status}).`
+      previewContent.value = ''
+      return
+    }
+    let text = await resp.text()
+    // Strip YAML frontmatter for a cleaner preview — the description/tags
+    // already surface frontmatter above, so showing raw `---` is noise.
+    if (text.startsWith('---')) {
+      const end = text.indexOf('\n---', 3)
+      if (end !== -1) {
+        const after = text.indexOf('\n', end + 4)
+        if (after !== -1) text = text.slice(after + 1)
+      }
+    }
+    previewContent.value = text.trimStart()
+  } catch (e) {
+    if (token !== previewToken) return
+    previewError.value = e instanceof Error ? e.message : String(e)
+    previewContent.value = ''
+  } finally {
+    if (token === previewToken) previewLoading.value = false
+  }
+})
+
+const isTruncated = computed(() => previewContent.value.length > PREVIEW_LIMIT)
+const displayedPreview = computed(() => {
+  if (!isTruncated.value || expandedPreview.value) return previewContent.value
+  return previewContent.value.slice(0, PREVIEW_LIMIT).trimEnd() + ' …'
+})
+
+// How far in a magnified focus zooms, as a multiple of the framed view. Past
+// LABEL_MIN_RATIO by a margin so the note that was just focused arrives with
+// its title painted rather than as an anonymous dot in the middle.
+const FOCUS_ZOOM_RATIO = 2.6
 watch(() => mm.focusSignal.seq, () => {
   const id = mm.focusSignal.id
   if (!id) return
-  const n = mm.nodesById.get(id)
-  if (n) {
-    camera.x = -n.x * camera.scale
-    camera.y = -n.y * camera.scale
-  }
+  // Falls back to the full node map: the sidebar's unlinked list can focus a
+  // note that the current filter keeps out of the visible mirror.
+  const n = simById.get(id) || mm.nodesById.get(id)
+  if (!n) return
+  const magnify = mm.focusSignal.magnify && zoomRatio() < FOCUS_ZOOM_RATIO
+  const scale = magnify
+    ? Math.max(0.15, Math.min(3, (fitScale.value || 0.55) * FOCUS_ZOOM_RATIO))
+    : camera.scale
+  flyTo({ x: -n.x * scale, y: -n.y * scale, scale })
+  // The pulse is what answers "which one is it?" on arrival. A centred dot in
+  // a field of dots does not read as the destination on its own.
+  pulseNode(id)
 })
 
 // ---------- canvas force layout ----------
@@ -351,9 +488,14 @@ const fitScale = ref(0.55)
 function zoomRatio(): number {
   return camera.scale / (fitScale.value || 0.55)
 }
-function fitCamera() {
-  const vis = mm.visibleNodes
+/** @param animate Ease there instead of cutting — for the reset control, where
+ * the user is asking to go back to a view they have seen and the tween is what
+ * shows them how the current view relates to it. Layout-driven fits (first
+ * paint, a filter change) still cut, since there is no continuity to preserve. */
+function fitCamera(animate = false) {
+  const vis = simNodes
   if (!vis.length || !W || !H) {
+    cancelCameraTween()
     camera.x = 0
     camera.y = 0
     camera.scale = 0.55
@@ -378,20 +520,85 @@ function fitCamera() {
   // from the framed view" instead of absolute scale values. Absolute thresholds
   // stopped being meaningful the moment the default zoom became data-dependent.
   fitScale.value = scale
-  camera.scale = scale
-  camera.x = -cx * scale
-  camera.y = -cy * scale
+  const target = { x: -cx * scale, y: -cy * scale, scale }
+  if (animate) {
+    flyTo(target)
+    return
+  }
+  cancelCameraTween()
+  applyCamera(target)
   requestRedraw()
 }
-function resetCamera() {
+function resetCamera(animate = false) {
   // draw() only runs inside the RAF loop; without this, resetting the
   // camera while the graph is at rest changed the reactive state but the
   // canvas kept showing the old view until something else woke it up.
-  fitCamera()
+  fitCamera(animate)
 }
 function zoom(factor: number) {
-  camera.scale = Math.max(0.15, Math.min(3, camera.scale * factor))
-  requestRedraw()
+  flyTo({ x: camera.x, y: camera.y, scale: Math.max(0.15, Math.min(3, camera.scale * factor)) }, ZOOM_TWEEN_MS)
+}
+
+// ---------- camera tween + arrival pulse ----------
+// Both are driven by one RAF loop, separate from the physics loop: a camera
+// move needs frames but must not nudge the layout, and the physics loop stops
+// itself the moment the graph is calm. `animRafId` runs only while something
+// is actually animating and then stops, so an idle graph still costs nothing.
+const FLY_TWEEN_MS = 420
+const ZOOM_TWEEN_MS = 160
+const PULSE_MS = 700
+let camTween: { from: CameraState; to: CameraState; startedAt: number; durMs: number } | null = null
+let pulse: { id: string; startedAt: number } | null = null
+let animRafId = 0
+
+function applyCamera(state: CameraState) {
+  camera.x = state.x
+  camera.y = state.y
+  camera.scale = state.scale
+}
+
+/** Ease the camera to `to`. Snaps instead when the OS asks for reduced motion. */
+function flyTo(to: CameraState, durMs = FLY_TWEEN_MS) {
+  if (prefersReducedMotion() || durMs <= 0) {
+    camTween = null
+    applyCamera(to)
+    requestRedraw()
+    return
+  }
+  camTween = { from: { x: camera.x, y: camera.y, scale: camera.scale }, to, startedAt: performance.now(), durMs }
+  startAnimLoop()
+}
+
+/** A ring that expands and fades once around a node, marking where we landed. */
+function pulseNode(id: string) {
+  if (prefersReducedMotion()) return
+  pulse = { id, startedAt: performance.now() }
+  startAnimLoop()
+}
+
+// Any hands-on camera control wins over an in-flight tween — otherwise a fly-to
+// kept dragging the view out from under a pan or a wheel gesture.
+function cancelCameraTween() {
+  camTween = null
+}
+
+function startAnimLoop() {
+  if (animRafId) return
+  animRafId = requestAnimationFrame(stepAnim)
+}
+
+function stepAnim() {
+  animRafId = 0
+  if (camTween) {
+    const t = (performance.now() - camTween.startedAt) / camTween.durMs
+    applyCamera(tweenCamera(camTween.from, camTween.to, easeOutCubic(t)))
+    if (t >= 1) camTween = null
+  }
+  // The physics loop already draws every frame while it runs; a second draw in
+  // the same frame would be pure waste.
+  if (!rafId) draw()
+  // draw() clears a finished pulse, so this check has to come after it.
+  if (camTween || pulse) startAnimLoop()
 }
 function worldToScreen(x: number, y: number): [number, number] {
   return [x * camera.scale + W / 2 + camera.x, y * camera.scale + H / 2 + camera.y]
@@ -400,7 +607,7 @@ function screenToWorld(sx: number, sy: number): [number, number] {
   return [(sx - W / 2 - camera.x) / camera.scale, (sy - H / 2 - camera.y) / camera.scale]
 }
 function nodeRadius(n: MemoryGraphNode): number {
-  return 4 + Math.min(10, Math.sqrt(n.degree + 1) * 2.4)
+  return 5 + Math.min(12, Math.sqrt(n.degree + 1) * 2.7)
 }
 function hexToRgba(hex: string, a: number): string {
   const v = hex.replace('#', '')
@@ -426,19 +633,24 @@ function attachCanvas() {
   ro.observe(canvasWrap.value)
   resizeCanvas()
   // Every (re)attachment is a fresh graph (initial load, or a workspace
-  // switch since the canvas is torn down and rebuilt for each) — warm up
-  // before the first paint, then run the brief settle animation.
-  warmupSimulation(warmupStepsFor(mm.visibleNodes.length))
+  // switch since the canvas is torn down and rebuilt for each).
+  refreshSimNodes()
   // Frame the graph only now: at onMounted the canvas had no size and the
   // nodes were still at their random start positions, so there was no extent
-  // worth measuring.
+  // worth measuring. The warmup re-frames as the layout expands.
   fitCamera()
-  wakeSimulation()
+  // A graph restored from the store already carries settled positions from the
+  // last visit, so it only needs the short settle, not the full warmup.
+  if (mm.graphIsWarm) wakeSimulation()
+  else beginWarmup(warmupStepsFor(simNodes.length))
 }
 // A category/search filter change can bring previously-hidden nodes back
 // into the simulation; wake it so they settle instead of sitting inert at
 // whatever position they last had.
-watch(() => mm.visibleIds, () => wakeSimulation())
+watch(() => mm.visibleIds, () => {
+  refreshSimNodes()
+  wakeSimulation()
+})
 // draw() only ever runs inside the RAF loop, which stops once the layout is
 // calm (see tick()) — so changing which node is selected/on-path while the
 // graph is at rest updated the reactive state but never repainted, and the
@@ -448,18 +660,39 @@ watch(() => mm.visibleIds, () => wakeSimulation())
 watch(() => [mm.selectedId, mm.pathStart, mm.pathEnd], () => wakeSimulation())
 // Colour mode changes nothing about positions, so it needs a paint, not physics.
 watch(() => mm.colorMode, () => requestRedraw())
-// Scope and depth change *which* nodes exist in the layout, so the graph has to
-// be re-framed as well as re-settled — otherwise switching from a 12-note
-// neighbourhood to the full vault leaves the camera zoomed into empty space.
-watch(() => [mm.scope, mm.localRoot, mm.localDepth, mm.hideOrphans], async () => {
+// Hiding orphans or showing only orphans changes *which* nodes exist in the
+// layout, so the graph has to be re-framed as well as re-settled — otherwise
+// filtering leaves the camera zoomed into empty space.
+watch(() => mm.orphanFilter, async () => {
   await nextTick()
-  warmupSimulation(warmupStepsFor(mm.visibleNodes.length))
+  refreshSimNodes()
   fitCamera()
-  wakeSimulation()
+  beginWarmup(warmupStepsFor(simNodes.length))
 })
 watch(canvasEl, (el) => {
   if (el) nextTick(() => attachCanvas())
 })
+
+// ---------- raw mirror for the physics loop ----------
+// The layout reads x/y/vx/vy of every node against every other node, so one
+// step is O(n^2) property reads — on a 552-note vault, ~600k of them. The
+// store hands out Vue's deep-reactive proxies, and every one of those reads
+// goes through a Proxy get trap: measured, one step costs 102ms against the
+// proxies and 6.8ms against the objects they wrap. That 15x is the whole
+// reason opening the memory page froze the tab — the 400-step warmup ran for
+// ~40 seconds instead of ~2.7, and even the settle animation was stuck at
+// ~10fps.
+//
+// toRaw() returns the very objects the proxies wrap, so a write here is still
+// visible to anything that reads a node through the store; it just no longer
+// notifies. That is what we want: nothing renders x/y except this canvas,
+// which repaints itself every frame anyway.
+let simNodes: MemoryGraphNode[] = []
+let simById = new Map<string, MemoryGraphNode>()
+function refreshSimNodes() {
+  simNodes = mm.visibleNodes.map(n => toRaw(n))
+  simById = new Map(simNodes.map(n => [n.id, n]))
+}
 
 /** Advances the layout by one step; returns the fastest node's speed this step. */
 /** @param cooling 1 = full force, ramping to 0 forces velocity to zero regardless of residual imbalance. */
@@ -481,7 +714,7 @@ watch(canvasEl, (el) => {
 // density uniform actually buys label room.
 const MIN_GAP = 40
 function stepSimulation(cooling = 1): number {
-  const vis = mm.visibleNodes
+  const vis = simNodes
   const REPEL = 2600
   const SPRING = 0.02
   const SPRING_LEN = 90
@@ -513,11 +746,9 @@ function stepSimulation(cooling = 1): number {
     fy += -a.y * CENTER
     forces.set(a.id, { fx, fy })
   }
-  const visSet = mm.visibleIds
   mm.edges.forEach(e => {
-    if (!visSet.has(e.source) || !visSet.has(e.target)) return
-    const a = mm.nodesById.get(e.source)
-    const b = mm.nodesById.get(e.target)
+    const a = simById.get(e.source)
+    const b = simById.get(e.target)
     if (!a || !b) return
     const dx = b.x - a.x
     const dy = b.y - a.y
@@ -552,14 +783,46 @@ function stepSimulation(cooling = 1): number {
   return maxSpeed
 }
 
-/** Run the layout forward without painting, so the graph starts near its
- * settled shape instead of visibly exploding outward from random starting
- * positions — noisy and hard to read with a large vault. Step count scales
- * with node count (see warmupStepsFor) so a dense, hub-heavy vault gets
- * proportionally more (still synchronous, pre-paint) time to work out a
- * stable configuration instead of ending warmup still mid-oscillation. */
-function warmupSimulation(steps: number) {
-  for (let i = 0; i < steps; i++) stepSimulation(Math.max(0, 1 - i / steps))
+/**
+ * Run the layout forward toward its settled shape before handing it to the
+ * cooling animation, so the graph does not visibly explode outward from random
+ * starting positions.
+ *
+ * Spread across frames rather than run in one blocking loop. It used to be
+ * synchronous "so it costs load time rather than animation time", but load
+ * time is the user's time: at 6.8ms a step, a 400-step warmup is 2.7 seconds
+ * with the tab wedged — no navigation, no clicks, nothing (and it was ~40s
+ * before the raw-mirror fix above). Each frame now spends a slice of its
+ * budget stepping and then paints, so the page stays interactive and the
+ * settling is something you watch instead of something you wait out.
+ */
+const WARMUP_FRAME_BUDGET_MS = 8
+let warmupStepsLeft = 0
+let warmupStepsTotal = 0
+
+function beginWarmup(steps: number) {
+  warmupStepsTotal = Math.max(1, steps)
+  warmupStepsLeft = warmupStepsTotal
+  calmFrames = 0
+  // Cooling starts when the warmup finishes; until then every step runs at
+  // full force, as the old synchronous ramp did.
+  coolingStartedAt = 0
+  if (!rafId) rafId = requestAnimationFrame(tick)
+}
+
+/** One frame's worth of warmup. Returns true while more remains. */
+function stepWarmupFrame(): boolean {
+  const deadline = performance.now() + WARMUP_FRAME_BUDGET_MS
+  do {
+    stepSimulation(Math.max(0, warmupStepsLeft / warmupStepsTotal))
+    warmupStepsLeft -= 1
+  } while (warmupStepsLeft > 0 && performance.now() < deadline)
+  if (warmupStepsLeft > 0) return true
+  coolingStartedAt = performance.now()
+  // These positions are worth keeping: the store remembers that this
+  // workspace's layout is settled, so coming back skips the warmup entirely.
+  mm.markGraphWarm()
+  return false
 }
 
 function wakeSimulation() {
@@ -589,7 +852,9 @@ function requestRedraw() {
 function draw() {
   if (!ctx) return
   ctx.clearRect(0, 0, W, H)
-  const vis = mm.visibleNodes
+  // Same raw mirror the physics uses: 552 nodes plus their edges every frame
+  // is another few hundred thousand property reads to keep off the proxies.
+  const vis = simNodes
   const visSet = mm.visibleIds
   const highlightSet = mm.pathIds.size
     ? mm.pathIds
@@ -597,22 +862,30 @@ function draw() {
       ? new Set([mm.selectedId, ...(mm.adjacency.get(mm.selectedId) || [])])
       : null
 
+  // Hovering a note previews its links. In a hairball the one question a dot
+  // cannot answer is "what is this connected to?", and answering it only on
+  // click meant losing the current selection to ask.
+  const hoverId = hoveredNode.value && visSet.has(hoveredNode.value.id) ? hoveredNode.value.id : null
+
   ctx.lineWidth = dpr
   mm.edges.forEach(e => {
     if (!visSet.has(e.source) || !visSet.has(e.target)) return
-    const a = mm.nodesById.get(e.source)
-    const b = mm.nodesById.get(e.target)
+    const a = simById.get(e.source)
+    const b = simById.get(e.target)
     if (!a || !b) return
     const onPath = mm.pathIds.has(e.source) && mm.pathIds.has(e.target)
+    const onHover = !!hoverId && (e.source === hoverId || e.target === hoverId)
     const dim = highlightSet && !(highlightSet.has(e.source) && highlightSet.has(e.target))
     const [ax, ay] = worldToScreen(a.x, a.y)
     const [bx, by] = worldToScreen(b.x, b.y)
     ctx!.strokeStyle = onPath
       ? '#ffd166'
-      : dim
-        ? themeColors.edgeDim
-        : themeColors.edge
-    ctx!.lineWidth = onPath ? 2.5 * dpr : dpr
+      : onHover
+        ? themeColors.edgeHot
+        : dim
+          ? themeColors.edgeDim
+          : themeColors.edge
+    ctx!.lineWidth = onPath ? 2.5 * dpr : onHover ? 1.8 * dpr : dpr
     ctx!.beginPath()
     ctx!.moveTo(ax, ay)
     ctx!.lineTo(bx, by)
@@ -628,88 +901,71 @@ function draw() {
     ctx!.arc(sx, sy, r, 0, Math.PI * 2)
     ctx!.fillStyle = dim ? hexToRgba(colorForNode(n), 0.18) : colorForNode(n)
     ctx!.fill()
+    // Staleness was reported in the list, the detail panel and the sidebar —
+    // everywhere except the surface people actually look at. An amber ring
+    // (the same token the "Needs review" list uses for its dot) puts "these
+    // facts are unverified" on the map itself, without spending a hue that
+    // the category and cluster palettes need for identity.
+    if (n.stale && !dim) {
+      ctx!.beginPath()
+      ctx!.arc(sx, sy, r + 2.5 * dpr, 0, Math.PI * 2)
+      ctx!.lineWidth = 1.4 * dpr
+      ctx!.strokeStyle = themeColors.staleRing
+      ctx!.stroke()
+    }
     if (isSel) {
+      ctx!.beginPath()
+      ctx!.arc(sx, sy, r, 0, Math.PI * 2)
       ctx!.lineWidth = 2 * dpr
       ctx!.strokeStyle = themeColors.selectRing
       ctx!.stroke()
     }
   })
 
-  if (vis.length >= CLUSTER_LABEL_MIN_NODES && zoomRatio() < CLUSTER_LABEL_MAX_RATIO) {
-    drawClusterLabels(vis, highlightSet)
-  } else {
-    drawLabels(vis, highlightSet)
+  // A ring under the cursor: with labels hidden at this zoom the tooltip is
+  // the only name source, and the ring is what ties it to a specific dot.
+  if (hoverId) {
+    const n = simById.get(hoverId)!
+    const [sx, sy] = worldToScreen(n.x, n.y)
+    const r = nodeRadius(n) * dpr * Math.max(0.7, Math.min(1.6, camera.scale))
+    ctx!.beginPath()
+    ctx!.arc(sx, sy, r + 3 * dpr, 0, Math.PI * 2)
+    ctx!.lineWidth = 1.5 * dpr
+    ctx!.strokeStyle = themeColors.selectRing
+    ctx!.stroke()
   }
+
+  drawPulse()
+  drawLabels(vis, highlightSet)
 }
 
 /**
- * One label per visible cluster, at the centroid of its visible members. This
- * is the readable form of the far-out view: ~6 theme names instead of 318
- * overlapping note titles, and it doubles as the direct labelling the cluster
- * palette's validator WARNs require.
+ * One expanding, fading ring on the node a focus request landed on.
+ *
+ * Drawn last so it sits over the neighbours it sweeps across, and it clears
+ * `pulse` itself once elapsed — the anim loop reads that to decide whether it
+ * still has work.
  */
-function drawClusterLabels(vis: MemoryGraphNode[], highlightSet: Set<string> | null) {
-  const sums = new Map<number, { x: number; y: number; n: number; slot: number }>()
-  for (const n of vis) {
-    if (highlightSet && !highlightSet.has(n.id)) continue
-    const cluster = mm.clusterOf(n.id)
-    if (!cluster) continue
-    const acc = sums.get(cluster.id)
-    if (acc) { acc.x += n.x; acc.y += n.y; acc.n += 1 }
-    else sums.set(cluster.id, { x: n.x, y: n.y, n: 1, slot: cluster.slot })
+function drawPulse() {
+  if (!pulse) return
+  const n = simById.get(pulse.id)
+  if (!n || !mm.visibleIds.has(pulse.id)) {
+    pulse = null
+    return
   }
-  ctx!.textBaseline = 'middle'
-  ctx!.textAlign = 'center'
-  // Biggest clusters first: they get first claim on the space, and a smaller
-  // cluster whose centroid lands underneath is dropped rather than stacked.
-  // (Drawing them in the other order and letting later pills paint over
-  // earlier ones produced exactly the overlap this whole pass exists to avoid.)
-  const ordered = [...sums.entries()].sort((a, b) => b[1].n - a[1].n)
-  const placed: number[][] = []
-  const padX = 7 * dpr
-  const padY = 4 * dpr
-  const h = 15 * dpr
-  for (const [id, acc] of ordered) {
-    const cluster = mm.clusterById.get(id)
-    if (!cluster) continue
-    // One or two stray members of a cluster that mostly lives elsewhere is not
-    // a theme in *this* view; labelling it overstates what is on screen.
-    if (acc.n < MIN_CLUSTER_SIZE) continue
-    const [sx, sy] = worldToScreen(acc.x / acc.n, acc.y / acc.n)
-    // The count rides inside the pill. As a separate caption underneath it had
-    // no background of its own, so it read as debris floating over the nodes.
-    const text = `${cluster.label}  ${acc.n}`
-    ctx!.font = `600 ${14 * dpr}px -apple-system, sans-serif`
-    const w = ctx!.measureText(text).width
-    const x0 = sx - w / 2 - padX
-    const y0 = sy - h / 2 - padY
-    const x1 = x0 + w + padX * 2
-    const y1 = y0 + h + padY * 2
-    if (placed.some(b => x0 < b[2] && x1 > b[0] && y0 < b[3] && y1 > b[1])) continue
-    placed.push([x0, y0, x1, y1])
-    // A pill behind the text: cluster labels sit over the densest part of the
-    // graph by construction (that is where their members are), so plain text
-    // on top of nodes and edges would not read.
-    ctx!.fillStyle = themeColors.light ? 'rgba(244,244,250,0.92)' : 'rgba(26,26,46,0.9)'
-    roundRect(x0, y0, x1 - x0, y1 - y0, 5 * dpr)
-    ctx!.fill()
-    ctx!.strokeStyle = clusterColorFor(acc.slot, themeColors.light)
-    ctx!.lineWidth = 1.5 * dpr
-    ctx!.stroke()
-    ctx!.fillStyle = themeColors.clusterLabel
-    ctx!.fillText(text, sx, sy)
+  const t = (performance.now() - pulse.startedAt) / PULSE_MS
+  if (t >= 1) {
+    pulse = null
+    return
   }
-  ctx!.textAlign = 'left'
-}
-
-function roundRect(x: number, y: number, w: number, h: number, r: number) {
+  const eased = easeOutCubic(t)
+  const [sx, sy] = worldToScreen(n.x, n.y)
+  const r = nodeRadius(n) * dpr * Math.max(0.7, Math.min(1.6, camera.scale))
   ctx!.beginPath()
-  ctx!.moveTo(x + r, y)
-  ctx!.arcTo(x + w, y, x + w, y + h, r)
-  ctx!.arcTo(x + w, y + h, x, y + h, r)
-  ctx!.arcTo(x, y + h, x, y, r)
-  ctx!.arcTo(x, y, x + w, y, r)
-  ctx!.closePath()
+  ctx!.arc(sx, sy, r + (3 + 26 * eased) * dpr, 0, Math.PI * 2)
+  ctx!.lineWidth = Math.max(1, 2.5 * (1 - eased)) * dpr
+  ctx!.strokeStyle = hexToRgba(colorForNode(n), 0.7 * (1 - eased))
+  ctx!.stroke()
 }
 
 // Labels get their own pass, run after every node is on screen, because
@@ -727,20 +983,19 @@ const LABEL_MAX_W = 170
 const LABEL_PAD = 3
 const LABEL_CELL = 96
 
-// Below this zoom the canvas labels *clusters* instead of notes. At the framed
-// view a 300-note vault has no room for 300 titles no matter how they are
-// placed, but it has ample room for the handful of theme names that summarise
-// them — which is also the direct labelling that makes the cluster palette
-// legal (see CLUSTER_PALETTE).
-const CLUSTER_LABEL_MAX_RATIO = 1.6
+// Below this zoom the canvas draws *no* labels at all: at the framed view a
+// 300-note vault has no room for 300 titles, and even a handful of pills over
+// the hairball read as clutter. Names stay reachable two other ways — hover
+// shows one under the cursor, and zooming past this ratio brings titles back.
+const LABEL_MIN_RATIO = 1.6
 /**
- * Cluster labels are a response to label *pressure*, not to zoom on its own.
- * A 4-note local neighbourhood framed at fit scale has a low zoom ratio but
- * acres of free space, and summarising it as "single-barcode-ai-value · 4
- * notes" hides the only four titles the user came to read. Below this many
- * visible notes, every label goes to a note.
+ * The degree floor is a response to label *pressure*, not to zoom on its own.
+ * A small filtered view framed at fit scale has a low zoom ratio but acres of
+ * free space, and hiding every title there would hide the only four notes the
+ * user came to read. At or below this many visible notes, the canvas is sparse
+ * enough that labels are exempt from both the zoom gate and the degree floor.
  */
-const CLUSTER_LABEL_MIN_NODES = 40
+const SPARSE_VIEW_NODES = 40
 // Minimum degree a node needs before it may claim a label, graded by how far
 // the user has zoomed in from the framed view: far out only hubs are legible at
 // all, close in everything that fits is welcome. This replaces the binary
@@ -748,7 +1003,7 @@ const CLUSTER_LABEL_MIN_NODES = 40
 function labelDegreeFloor(visibleCount: number): number {
   // A sparse view has room for everything; gating by degree there would leave
   // a local neighbourhood of leaf notes completely unlabelled.
-  if (visibleCount <= CLUSTER_LABEL_MIN_NODES) return 0
+  if (visibleCount <= SPARSE_VIEW_NODES) return 0
   const ratio = zoomRatio()
   if (ratio >= 3.5) return 0
   if (ratio >= 2.5) return 1
@@ -768,6 +1023,10 @@ function ellipsize(text: string, maxW: number): string {
 }
 
 function drawLabels(vis: MemoryGraphNode[], highlightSet: Set<string> | null) {
+  // Far out, nothing at all: titles only earn their pixels once the user has
+  // zoomed in past LABEL_MIN_RATIO — or the view is sparse enough not to need
+  // the room. Identification before that is hover's job.
+  if (vis.length > SPARSE_VIEW_NODES && zoomRatio() < LABEL_MIN_RATIO) return
   ctx!.font = `${LABEL_FONT_PX * dpr}px -apple-system, sans-serif`
   ctx!.textBaseline = 'middle'
   ctx!.fillStyle = themeColors.label
@@ -832,6 +1091,16 @@ function drawLabels(vis: MemoryGraphNode[], highlightSet: Set<string> | null) {
 }
 
 function tick() {
+  // Warmup phase: step until this frame's slice is spent, keep the growing
+  // layout framed, paint, and come back next frame.
+  if (warmupStepsLeft > 0) {
+    const more = stepWarmupFrame()
+    fitCamera()
+    draw()
+    rafId = requestAnimationFrame(tick)
+    if (!more) calmFrames = 0
+    return
+  }
   // cooling ramps 1 -> 0 over COOLING_DURATION_MS of real elapsed time; once
   // past that budget it stays at 0, which forces velocity to exactly zero
   // every subsequent step (see stepSimulation) — a hard, wall-clock bound on
@@ -857,7 +1126,7 @@ function tick() {
 }
 
 function hitTest(wx: number, wy: number): MemoryGraphNode | null {
-  const vis = mm.visibleNodes
+  const vis = simNodes
   for (let i = vis.length - 1; i >= 0; i--) {
     const n = vis[i]
     const r = nodeRadius(n) + 3
@@ -866,6 +1135,43 @@ function hitTest(wx: number, wy: number): MemoryGraphNode | null {
     if (dx * dx + dy * dy <= r * r) return n
   }
   return null
+}
+
+// ---------- hover name overlay ----------
+// With labels hidden at far-out zoom (the default framing of a real vault),
+// a node's name has to be one hover away or the graph is unidentifiable.
+// DOM overlay rather than canvas text so it can follow the cursor without
+// waking the render loop for every pixel of movement; only the enter/leave
+// of a node redraws (the highlight ring).
+const hoveredNode = ref<MemoryGraphNode | null>(null)
+const hoverPos = ref({ x: 0, y: 0 })
+function onCanvasHover(e: MouseEvent) {
+  // While a press is held (node drag, pan) the surface is "grabbed", not
+  // "pointing" — a tooltip chasing the cursor mid-drag reads as noise.
+  if (!canvasEl.value || downPos) {
+    clearHover()
+    return
+  }
+  const rect = canvasEl.value.getBoundingClientRect()
+  const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
+  const n = hitTest(wx, wy)
+  if (n !== hoveredNode.value) {
+    hoveredNode.value = n
+    requestRedraw()
+  }
+  if (!n || !canvasWrap.value) return
+  // Below-right of the cursor, native-tooltip style, clamped inside the wrap.
+  const wrapRect = canvasWrap.value.getBoundingClientRect()
+  const x = e.clientX - wrapRect.left
+  const y = e.clientY - wrapRect.top
+  hoverPos.value = {
+    x: Math.max(0, Math.min(x + 14, canvasWrap.value.clientWidth - 270)),
+    y: Math.max(0, Math.min(y + 14, canvasWrap.value.clientHeight - 32)),
+  }
+}
+function clearHover() {
+  if (hoveredNode.value) requestRedraw()
+  hoveredNode.value = null
 }
 
 // A plain click has to survive a few pixels of incidental pointer jitter
@@ -882,6 +1188,7 @@ let dragged = false
 
 function onMouseDown(e: MouseEvent) {
   if (!canvasEl.value) return
+  clearHover()
   const rect = canvasEl.value.getBoundingClientRect()
   const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
   hitNode = hitTest(wx, wy)
@@ -910,6 +1217,9 @@ function onMouseMove(e: MouseEvent) {
     dragging.vx = 0
     dragging.vy = 0
   } else if (panStart) {
+    // Dragging is the user taking the camera: whatever tween was in flight
+    // would otherwise keep pulling the view out from under the gesture.
+    cancelCameraTween()
     camera.x = panStart.cx + (e.clientX - panStart.x) * dpr
     camera.y = panStart.cy + (e.clientY - panStart.y) * dpr
     requestRedraw()
@@ -926,24 +1236,59 @@ function onMouseUp() {
   window.removeEventListener('mouseup', onMouseUp)
 }
 function onWheel(e: WheelEvent) {
+  cancelCameraTween()
   const delta = -e.deltaY * 0.0012
   camera.scale = Math.max(0.15, Math.min(3, camera.scale * (1 + delta)))
   requestRedraw()
 }
 
 // ---------- list view ----------
-const view = ref<'graph' | 'list'>('graph')
-const sortKey = ref<'title' | 'type' | 'degree'>('title')
+// Review is a segment of this view rather than its own rail entry: the proposal
+// queue IS the memory system's inbox, so it belongs where you go to think about
+// what Ciaobot knows. `/proposals` still routes here (the housekeeping tiles link
+// to it), it just selects this segment instead of a separate page. The switcher
+// itself lives in the sidebar next to the workspace toggle; this component only
+// mirrors the shared `mm.view` state, seeding it from the URL on mount.
+const proposals = useProposalsStore()
+mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph'
+const sortKey = ref<'title' | 'type' | 'degree' | 'age'>('title')
 const sortDir = ref(1)
-function setSort(key: 'title' | 'type' | 'degree') {
+type SortKey = 'title' | 'type' | 'degree' | 'age'
+function setSort(key: SortKey) {
   if (sortKey.value === key) sortDir.value *= -1
   else { sortKey.value = key; sortDir.value = 1 }
 }
+function sortCaret(key: SortKey): string {
+  if (sortKey.value !== key) return ''
+  return sortDir.value > 0 ? '\u25b4' : '\u25be'
+}
+function ariaSort(key: SortKey): 'ascending' | 'descending' | 'none' {
+  if (sortKey.value !== key) return 'none'
+  return sortDir.value > 0 ? 'ascending' : 'descending'
+}
+/** Link count as a share of the busiest visible note, for the list's bar. */
+const maxVisibleDegree = computed(() => mm.visibleNodes.reduce((m, n) => Math.max(m, n.degree), 0))
+function degreeBarPct(n: MemoryGraphNode): number {
+  if (!maxVisibleDegree.value) return 0
+  return Math.round((n.degree / maxVisibleDegree.value) * 100)
+}
+/** Age for the detail heading; empty when the note carries no date at all. */
+const ageLabelOfSelected = computed(() => {
+  const n = mm.selectedNode
+  if (!n) return ''
+  return mm.ageLabelOf(n)
+})
 const sortedVisibleNodes = computed(() => {
   const arr = [...mm.visibleNodes]
   arr.sort((a, b) => {
-    const av = sortKey.value === 'degree' ? a.degree : (a as any)[sortKey.value] || ''
-    const bv = sortKey.value === 'degree' ? b.degree : (b as any)[sortKey.value] || ''
+    let av: string | number
+    let bv: string | number
+    if (sortKey.value === 'degree') { av = a.degree; bv = b.degree }
+    else if (sortKey.value === 'age') {
+      // Oldest first by default: the point of sorting by age is triage.
+      av = a.ageDays ?? Number.MAX_SAFE_INTEGER
+      bv = b.ageDays ?? Number.MAX_SAFE_INTEGER
+    } else { av = (a as any)[sortKey.value] || ''; bv = (b as any)[sortKey.value] || '' }
     if (av < bv) return -1 * sortDir.value
     if (av > bv) return 1 * sortDir.value
     return 0
@@ -953,7 +1298,10 @@ const sortedVisibleNodes = computed(() => {
 
 // ---------- lifecycle ----------
 onMounted(async () => {
-  await mm.loadGraph(store.activeWorkspace)
+  // ensureGraph, not loadGraph: a workspace already in the store's snapshot
+  // cache paints immediately and revalidates in the background, so returning
+  // to this page costs no skeleton and no re-layout.
+  await mm.ensureGraph(store.activeWorkspace)
   resetCamera()
   await nextTick()
   attachCanvas()
@@ -967,6 +1315,9 @@ watch(isLightTheme, () => {
 onBeforeUnmount(() => {
   if (rafId) cancelAnimationFrame(rafId)
   if (redrawRafId) cancelAnimationFrame(redrawRafId)
+  if (animRafId) cancelAnimationFrame(animRafId)
+  camTween = null
+  pulse = null
   ro?.disconnect()
   window.removeEventListener('mousemove', onMouseMove)
   window.removeEventListener('mouseup', onMouseUp)
@@ -1002,6 +1353,17 @@ onBeforeUnmount(() => {
   padding: var(--space-3);
   background: var(--bg2);
   border-left: 1px solid var(--border);
+  /* The panel is created by v-if, so a mount animation is all it needs. It
+     used to appear instantly, which reads as the layout jumping rather than a
+     panel opening — the graph column resizes at the same moment. */
+  animation: mm-detail-in 180ms ease-out;
+}
+@keyframes mm-detail-in {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mm-detail { animation: none; }
 }
 .mm-detail-close {
   position: absolute;
@@ -1046,6 +1408,24 @@ onBeforeUnmount(() => {
 
 .mm-canvas-wrap { position: relative; overflow: hidden; background: var(--bg); }
 .mm-canvas-wrap canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+.mm-canvas-wrap canvas.mm-canvas--node-hover { cursor: pointer; }
+/* Name overlay for the label-free far-out view. pointer-events:none so it can
+   never sit between the cursor and the node it names. */
+.mm-hover-tip {
+  position: absolute;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+  pointer-events: none;
+  z-index: 2;
+}
 .mm-zoom-controls { position: absolute; top: var(--space-3); right: var(--space-3); display: flex; flex-direction: column; gap: 6px; }
 .mm-hint-overlay {
   position: absolute; bottom: var(--space-3); left: var(--space-3); font-size: var(--text-xs); color: var(--fg3);
@@ -1054,21 +1434,143 @@ onBeforeUnmount(() => {
 
 .mm-empty { color: var(--fg3); font-size: var(--text-sm); padding: var(--space-5); text-align: center; }
 
+.mm-skeleton {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  min-height: 320px;
+  color: var(--fg3);
+  text-align: center;
+}
+.mm-brain-skeleton {
+  width: min(360px, 80%);
+  display: flex;
+  justify-content: center;
+}
+.mm-brain-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.mm-brain-edge {
+  stroke: var(--border);
+  stroke-width: 2;
+  stroke-linecap: round;
+  opacity: 0.55;
+}
+.mm-brain-node {
+  fill: var(--bg3);
+  stroke: var(--border);
+  stroke-width: 1.6;
+}
+.mm-brain-node--1 { animation: mm-brain-pulse 1.6s ease-in-out infinite; }
+.mm-brain-node--2 { animation: mm-brain-pulse 1.6s ease-in-out infinite 0.2s; }
+.mm-brain-node--3 { animation: mm-brain-pulse 1.6s ease-in-out infinite 0.4s; }
+.mm-brain-node--4 { animation: mm-brain-pulse 1.6s ease-in-out infinite 0.6s; }
+@keyframes mm-brain-pulse {
+  0%, 100% { fill: var(--bg3); opacity: 1; }
+  50% { fill: var(--bg-elev, var(--bg3)); opacity: 0.7; }
+}
+.history-loading-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: mm-spin 0.7s linear infinite;
+  flex: none;
+}
+@keyframes mm-spin { to { transform: rotate(360deg); } }
+.mm-skeleton-text {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+.mm-skeleton-bars {
+  width: min(280px, 60%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.mm-skeleton-bars .mm-shimmer-line {
+  display: block;
+  background: var(--bg3);
+  border-radius: 4px;
+  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+}
+@keyframes title-shimmer-sweep {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mm-brain-node { animation: none; }
+  .mm-skeleton-bars .mm-shimmer-line { animation: none; }
+}
+
 .mm-list-wrap { overflow: auto; padding: var(--space-4); }
 .mm-list-wrap table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
 .mm-list-wrap thead th {
-  text-align: left; padding: 6px 10px; color: var(--fg3); font-weight: 500; font-size: var(--text-xs);
-  text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; border-bottom: 1px solid var(--border);
+  text-align: left; padding: 0; color: var(--fg3); font-weight: 500; font-size: var(--text-xs);
+  text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--bg); z-index: 1;
 }
+/* Sortable headers put their padding on the button so the whole cell is the
+   hit target; the one non-sortable header keeps it on the cell. */
+.mm-list-wrap thead th.th-plain { padding: 6px 10px; }
+.mm-sort {
+  display: flex; align-items: center; gap: 4px; width: 100%;
+  background: none; border: none; padding: 6px 10px; cursor: pointer;
+  font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; text-align: left;
+}
+.mm-sort:hover { color: var(--fg2); }
+.mm-sort:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.mm-sort-caret { font-size: 9px; line-height: 1; color: var(--accent); }
 .mm-list-wrap tbody td { padding: 6px 10px; border-bottom: 1px solid var(--bg3); }
-.mm-list-wrap tbody tr:hover { background: var(--bg3); cursor: pointer; }
+.mm-list-wrap tbody tr { cursor: pointer; }
+.mm-list-wrap tbody tr:hover { background: var(--bg3); }
+/* The row whose note the detail panel is showing. Without it, clicking a row
+   opened the panel with no indication of which row it came from. */
+.mm-list-wrap tbody tr.current { background: var(--bg2); box-shadow: inset 2px 0 0 var(--accent); }
 .mm-list-wrap .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; }
 .mm-list-wrap .muted { color: var(--fg3); }
+.deg-cell { white-space: nowrap; }
+.deg-bar {
+  display: inline-block; width: 46px; height: 4px; border-radius: 2px;
+  background: var(--bg3); overflow: hidden; vertical-align: middle; margin-right: 7px;
+}
+.deg-bar > span {
+  display: block; height: 100%; border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.deg-n { color: var(--fg2); font-variant-numeric: tabular-nums; }
+.stale-age { color: var(--warning, #ff9800); white-space: nowrap; }
+.stale-flag {
+  display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--warning, #ff9800) 15%, transparent);
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
+}
 .tag-mini { display: inline-block; background: var(--bg3); color: var(--fg2); border-radius: 4px; padding: 1px 6px; font-size: var(--text-xs); margin: 0 3px 2px 0; }
 
 .mm-detail-type { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg3); }
 .mm-detail-title { font-size: var(--text-lg); font-weight: 600; margin: 4px 0 var(--space-2); }
 .mm-detail-desc { color: var(--fg2); font-size: var(--text-sm); margin-bottom: var(--space-3); }
+/* Age is a warning state, not a category, so it uses the app's warning token
+   rather than any type hue. */
+.stale-badge {
+  display: inline-block; vertical-align: middle;
+  background: color-mix(in srgb, var(--warning, #ff9800) 15%, transparent);
+  color: var(--warning, #ff9800);
+  border-radius: var(--radius-pill); padding: 1px 9px; margin-left: 6px;
+  font-size: var(--text-xs); font-weight: 500; letter-spacing: normal; text-transform: none;
+}
+.mm-detail-verified { color: var(--fg3); font-size: var(--text-xs); margin: -2px 0 var(--space-2); }
 .mm-detail-path {
   display: block; width: 100%; text-align: left; background: none; border: none; padding: 0;
   font-family: var(--font); font-size: var(--text-xs); color: var(--fg3); word-break: break-all; cursor: pointer;
@@ -1082,6 +1584,85 @@ onBeforeUnmount(() => {
 .mm-delete-btn:hover:not(:disabled) { color: #f7768e; border-color: #f7768e; }
 .mm-delete-btn:disabled { opacity: 0.6; cursor: default; }
 .pill { display: inline-block; background: var(--bg3); border-radius: var(--radius-pill); padding: 2px 9px; font-size: var(--text-xs); margin: 0 4px 4px 0; color: var(--fg2); }
+
+.mm-detail-preview .mm-preview-skeleton {
+  padding: 4px 0;
+}
+.mm-detail-preview .mm-shimmer-line {
+  display: block;
+  background: var(--bg3);
+  border-radius: 4px;
+  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+}
+.mm-preview-wrap {
+  position: relative;
+  max-height: 260px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.mm-preview-wrap.mm-preview--collapsed {
+  max-height: 220px;
+}
+.mm-preview-text {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg2);
+  max-height: 260px;
+  overflow: auto;
+}
+.mm-preview--collapsed .mm-preview-text {
+  max-height: 180px;
+  overflow: hidden;
+}
+.mm-preview-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 48px;
+  background: linear-gradient(to bottom, transparent, var(--bg));
+  pointer-events: none;
+}
+.mm-preview-error {
+  color: var(--warning, #ff9800);
+  font-size: var(--text-xs);
+  padding: 6px 0;
+}
+.mm-preview-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.mm-detail-preview .mm-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  cursor: pointer;
+}
+.mm-detail-preview .mm-link:hover { text-decoration: underline; }
+.mm-detail-preview .mm-link--primary {
+  margin-left: auto;
+  color: var(--fg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+}
+.mm-detail-preview .mm-link--primary:hover {
+  color: var(--fg);
+  background: var(--bg3);
+  text-decoration: none;
+}
 
 .mm-seg { display: flex; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
 .mm-seg button {
@@ -1098,22 +1679,9 @@ onBeforeUnmount(() => {
   max-width: calc(100% - 96px);
 }
 .mm-seg--sm button { padding: 4px 10px; font-size: var(--text-xs); }
-.mm-toolbar-group {
-  display: flex; align-items: center; gap: 4px;
-  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 2px 6px;
-}
-.mm-toolbar-label { color: var(--fg3); font-size: var(--text-xs); }
-.mm-toolbar-value { color: var(--fg); font-size: var(--text-xs); min-width: 10px; text-align: center; }
-.mm-step {
-  background: transparent; border: none; color: var(--fg2); cursor: pointer;
-  font-family: var(--font); font-size: var(--text-sm); line-height: 1; padding: 2px 4px;
-}
-.mm-step:disabled { color: var(--fg3); cursor: default; }
 .mm-toggle {
   background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--fg2); font-family: var(--font); font-size: var(--text-xs); padding: 4px 10px; cursor: pointer;
 }
 .mm-toggle.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-.mm-hint-overlay strong { color: var(--fg2); font-weight: 600; }
 </style>

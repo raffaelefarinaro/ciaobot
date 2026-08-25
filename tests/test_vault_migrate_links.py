@@ -21,6 +21,7 @@ from ciao.vault_index import (
 from ciao.vault_migrate_links import (
     migrate_links,
     migrate_vault_links,
+    peek_receipt,
     read_receipt,
     receipt_path,
     rewrite_note,
@@ -447,6 +448,108 @@ def test_unmigrate_ignores_a_receipt_with_nothing_recorded(tmp_path: Path) -> No
     assert summary["skipped"]
 
 
+# ---- a run that could not finish -------------------------------------------
+
+
+def _unwritable(vault: Path, relative: str) -> Path:
+    """Make one note fail to write, the way a permission or quota problem does."""
+    note = vault / relative
+    note.chmod(0o444)
+    return note
+
+
+def test_a_partial_run_is_not_recorded_as_complete(tmp_path: Path) -> None:
+    """One note that could not be written means the vault is not converted. A
+    receipt saying otherwise made the migration stop short of done and report that
+    it had finished: the next normal run was refused as "already migrated" while
+    the note it never touched kept its wikilinks."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    blocked = _unwritable(vault, "personal/Projects/Foo.md")
+    try:
+        summary = migrate_links(vault, runtime, apply=True)
+
+        assert [item["path"] for item in summary["failed"]] == ["personal/Projects/Foo.md"]
+        assert summary["complete"] is False
+        assert "[[People/Mo]]" in blocked.read_text(encoding="utf-8"), "still unconverted"
+        # No *completed* receipt — so nothing downstream reads the vault as done.
+        assert read_receipt(runtime) is None
+        # But what did land is recorded, or it could never be taken back.
+        recorded = peek_receipt(runtime)
+        assert recorded is not None
+        assert recorded["status"] == "partial"
+        assert {item["path"] for item in recorded["rewrites"]} == {
+            "Root.md",
+            "personal/MEMORY.md",
+        }
+        # And the retry is a plain re-run, not something that needs --force.
+        assert "skipped" not in migrate_links(vault, runtime, apply=True)
+    finally:
+        blocked.chmod(0o644)
+
+
+def test_a_retry_after_a_partial_run_can_undo_both_batches(tmp_path: Path) -> None:
+    """The reverse map has to stay usable across retries. Rotating it away on the
+    second pass left the notes converted by the first with nothing to restore
+    them — exactly what the map exists to promise."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    before = _snapshot(vault)
+    blocked = _unwritable(vault, "personal/Projects/Foo.md")
+    migrate_links(vault, runtime, apply=True)
+    blocked.chmod(0o644)
+
+    retry = migrate_links(vault, runtime, apply=True)
+
+    assert "skipped" not in retry, "a partial run must not gate its own retry"
+    assert retry["complete"] is True
+    assert [item["path"] for item in retry["rewrites"]] != []
+    assert read_receipt(runtime)["status"] == "migrated", "the vault is done now"
+    assert unmigrate_links(vault, runtime, apply=True)["restored"] == [
+        "Root.md",
+        "personal/MEMORY.md",
+        "personal/Projects/Foo.md",
+    ]
+    assert _snapshot(vault) == before, "both batches restored, byte for byte"
+
+
+def test_a_completed_receipt_is_downgraded_when_a_note_stops_being_readable(
+    tmp_path: Path,
+) -> None:
+    """A forced pass that cannot even read a note has not verified it, so the
+    vault stops counting as converted — while every entry already recorded is
+    kept, because none of them was touched."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    migrate_links(vault, runtime, apply=True)
+    first = read_receipt(runtime)
+    unreadable = vault / "personal/MEMORY.md"
+    unreadable.chmod(0o000)
+    try:
+        migrate_links(vault, runtime, apply=True, force=True)
+
+        assert read_receipt(runtime) is None
+        assert peek_receipt(runtime)["rewrites"] == first["rewrites"]
+    finally:
+        unreadable.chmod(0o644)
+
+
+def test_a_receipt_written_before_status_existed_still_reads_as_complete(
+    tmp_path: Path,
+) -> None:
+    """Installs that did the work before the field existed must not be re-nagged,
+    nor have their migration re-run."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    migrate_links(vault, runtime, apply=True)
+    legacy = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    del legacy["status"]
+    receipt_path(runtime).write_text(json.dumps(legacy), encoding="utf-8")
+
+    assert read_receipt(runtime) is not None
+    assert migrate_links(vault, runtime, apply=True)["skipped"] == "already migrated"
+
+
 # ---- receipt and rails -----------------------------------------------------
 
 
@@ -491,10 +594,11 @@ def test_the_receipt_gates_a_second_run(tmp_path: Path) -> None:
     assert summary["skipped"] == "already migrated"
 
 
-def test_force_moves_the_old_receipt_aside(tmp_path: Path) -> None:
-    """Two receipts cannot be merged — the second pass shifts the offsets the
-    first recorded — so the earlier reverse map is kept under its own name
-    instead of being overwritten."""
+def test_force_adds_to_the_reverse_map_instead_of_replacing_it(tmp_path: Path) -> None:
+    """A second pass must not narrow what can be undone. It shifts only the
+    offsets of the notes *it* rewrites, so every other note's entries stay exactly
+    true and are carried into the new receipt; the earlier file is still archived
+    under its own name."""
     vault = _vault(tmp_path)
     runtime = tmp_path / ".runtime"
     migrate_links(vault, runtime, apply=True)
@@ -510,9 +614,42 @@ def test_force_moves_the_old_receipt_aside(tmp_path: Path) -> None:
     ]
     assert len(kept) == 1
     assert json.loads(kept[0].read_text(encoding="utf-8"))["rewrites"] == first["rewrites"]
-    assert [item["path"] for item in read_receipt(runtime)["rewrites"]] == [
-        "personal/Notes/late.md"
+    merged = read_receipt(runtime)["rewrites"]
+    assert "personal/Notes/late.md" in {item["path"] for item in merged}
+    for item in first["rewrites"]:
+        assert item in merged, "the first batch stays restorable"
+    assert unmigrate_links(vault, runtime, apply=True)["restored"] == [
+        "Root.md",
+        "personal/MEMORY.md",
+        "personal/Notes/late.md",
+        "personal/Projects/Foo.md",
     ]
+
+
+def test_a_note_rewritten_twice_keeps_only_the_live_entries(tmp_path: Path) -> None:
+    """The carry-forward is per note, not wholesale. A note that gained a wikilink
+    after the first pass was hand-edited, which already invalidated its recorded
+    offsets — and one stale span disqualifies the *whole* file in the undo, so
+    keeping them would take the second pass's good entries down too."""
+    vault = _vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+    migrate_links(vault, runtime, apply=True)
+    root = vault / "Root.md"
+    root.write_text(
+        root.read_text(encoding="utf-8") + "\nLater: [[Ideas/Thing]].\n", encoding="utf-8"
+    )
+
+    migrate_links(vault, runtime, apply=True, force=True)
+
+    entries = read_receipt(runtime)["rewrites"]
+    assert [item["from"] for item in entries if item["path"] == "Root.md"] == [
+        "[[Ideas/Thing]]"
+    ]
+    # Untouched notes keep every entry they had.
+    assert {item["path"] for item in entries} >= {"personal/MEMORY.md", "personal/Projects/Foo.md"}
+    # And the file that was rewritten twice still reverses cleanly for that pass.
+    unmigrate_links(vault, runtime, apply=True)
+    assert "[[Ideas/Thing]]" in root.read_text(encoding="utf-8")
 
 
 def test_a_forced_rerun_with_nothing_to_do_keeps_the_reverse_map(tmp_path: Path) -> None:
@@ -588,3 +725,37 @@ def test_a_custom_frontmatter_key_keeps_the_full_ref(tmp_path: Path) -> None:
     # ...while prose keeps the label a reader was meant to see.
     assert "description: asked Mo Salah to help" in text
     assert "[[" not in text
+
+
+def test_the_cli_does_not_claim_a_clean_vault_after_a_failed_write(
+    tmp_path: Path, capsys
+) -> None:
+    """"No wikilinks found" was a flat lie on a retry.
+
+    When every note carrying wikilinks fails to write, `rewrites` is empty — and
+    the CLI printed the same line it uses for a genuinely clean vault, on stdout,
+    while the failures went to stderr. An operator reading stdout was told the
+    vault had nothing to migrate.
+    """
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "People" / "Mo.md").write_text(
+        "---\ntype: person\n---\n# Mo\n", encoding="utf-8"
+    )
+    note = vault / "Root.md"
+    note.write_text("---\ntype: doc\n---\nSee [[People/Mo]].\n", encoding="utf-8")
+    note.chmod(0o444)
+    try:
+        code = cli.main(
+            ["vault-migrate-links", "--apply", "--vault-root", str(vault)]
+        )
+    finally:
+        note.chmod(0o644)
+
+    out = capsys.readouterr()
+    assert code == 1
+    assert "No wikilinks found" not in out.out
+    assert "failed to write" in out.out
+    assert "Permission denied" in out.err

@@ -112,16 +112,18 @@ Ciaobot is a focused control surface for a personal AI assistant. Its visual ide
 
 The PWA is information-dense but not cramped. Monospaced typography, compact labels, restrained animation, and a deep indigo foundation establish the console character. A warm pink accent supplies personality and orientation. The interface must remain understandable without color, animation, hover, or prior knowledge of its icons.
 
-The home screen ("jump back in") is the primary entry point: active chats are
-sorted into recency tiers rendered as lanes with key-badge navigation, unread
-and needs-input signals, and per-lane "+ new" project entry. One lane holds
-chats that carry a needs-your-input question or decision; an explicit unread
-lane sits between the working and quiet tiers; long-idle chats fade into the
-quiet lane rather than disappearing. Lanes collapse into a single stacked
-column under ~760px; arrow-key navigation follows that visual order, using
-up/down between stacked workspace lanes and left/right within a lane. Signals
-are shape-and-text-first (tier labels, badges,
-weight, dots) so no lane relies on color alone.
+The home screen ("jump back in") is the primary entry point: it shows the
+selected workspace's active chats sorted into recency tiers with key-badge
+navigation, unread and needs-input signals, and a "+ new" project entry.
+Switching workspaces swaps the home content instead of adding a column — one
+workspace at a time is what makes the switch mean something. Within the lane,
+chats carrying a needs-your-input question or decision tier first; an explicit
+unread tier sits between working and quiet; long-idle chats fade into the
+quiet tier rather than disappearing. Rescue lanes for stale or unknown
+workspaces stack beneath the selected workspace's lane; arrow-key navigation
+follows that visual order, using up/down between stacked lanes and left/right
+within a lane. Signals are shape-and-text-first (tier labels, badges,
+weight, dots) so no tier relies on color alone.
 
 `Ciaobot.app` owns the macOS Dock window, native menu-bar item, and
 notifications. Desktop preferences live in the tray itself rather than a
@@ -197,7 +199,7 @@ Borders are structural, not decorative. Active navigation is marked by a slim pi
 - **Cards and panels:** Group related information with a tonal surface, border, 10px radius, and 16px padding. Avoid nesting multiple bordered cards without a clear hierarchy.
 - **Data tables:** Compact tables should fit their content instead of stretching across a message. At narrow widths, preserve readable row labels and contain horizontal overflow in a visibly focused, keyboard-scrollable region.
 - **Inputs and composer:** Inputs use the deep background, visible border, pink focus ring, and plain-language labels. The chat composer remains the strongest persistent interaction affordance.
-- **Badges and status:** Badges are compact supporting signals, never the sole explanation. Running, unread, failed, and disabled states need accessible text equivalents.
+- **Badges and status:** Badges are compact supporting signals, never the sole explanation. The PWA rail places global attention counts on the destination icons: chats needing attention on chats, queued proposals on memory. Workspace toggles show the section's scoped count. Running, unread, failed, and disabled states need accessible text equivalents.
 - **Menus and sheets:** Overflow menus contain secondary and destructive actions when horizontal space is constrained. Mobile modals become edge-to-edge sheets and honor safe areas.
 - **Onboarding:** Spotlight backdrops suppress competing content. Skip is visibly actionable but secondary; Back and Next meet the same touch-target requirements as the rest of the app.
 - **Tray:** Follow native macOS menu typography, spacing, disabled-state, and confirmation conventions. Keep the menu concise: open Ciao, server status/recovery, unread chats, and essential utilities. Badge counts reflect the full unread total even when the quick list is capped.

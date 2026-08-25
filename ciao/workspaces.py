@@ -62,6 +62,13 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
             if getattr(workspace, "disallowed_tools", None) is not None
             else None
         ),
+        "allowed_mcp_servers": (
+            list(
+                cast(Iterable[Any], getattr(workspace, "allowed_mcp_servers", None))
+            )
+            if getattr(workspace, "allowed_mcp_servers", None) is not None
+            else None
+        ),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
     }
@@ -77,6 +84,34 @@ def parse_disallowed_tools_value(raw: object) -> list[str] | None:
     if isinstance(raw, list):
         return [str(item).strip() for item in raw if str(item).strip()]
     raise ValueError("disallowed_tools must be a list, comma-separated string, or null")
+
+
+def vault_root_owner(config: Any, target: Path) -> str | None:
+    """Name of the configured workspace that already owns ``target``, if any.
+
+    Ownership is overlap, not equality. A target that is an *ancestor* of
+    another workspace's vault — or that sits inside one — leaves two registry
+    entries pointing into the same notes, so chats and vault writes in either
+    workspace can read and rewrite the other workspace's data.
+
+    One nesting is legitimate: the shared vault root itself. On installs where
+    setup pointed a workspace at ``CIAO_VAULT_ROOT`` (see
+    ``CiaoConfig.legacy_entity_workspace``) every standard per-workspace folder
+    lives inside that workspace's vault by design, so counting it as a conflict
+    would refuse every new workspace on those installs.
+    """
+    shared_root = getattr(config, "vault_root", None)
+    for raw_name in config.workspace_names():
+        configured_name = str(raw_name)
+        try:
+            configured_root = Path(config.workspace_vault_root(configured_name))
+        except ValueError:
+            continue
+        if configured_root == target or configured_root.is_relative_to(target):
+            return configured_name
+        if target.is_relative_to(configured_root) and configured_root != shared_root:
+            return configured_name
+    return None
 
 
 def workspace_from_request(
@@ -96,16 +131,11 @@ def workspace_from_request(
                     f"'{configured_name}'"
                 )
         target_root = config.canonical_workspace_vault_root(name)
-        for configured_name in config.workspace_names():
-            try:
-                configured_root = config.workspace_vault_root(configured_name)
-            except ValueError:
-                continue
-            if configured_root == target_root:
-                raise ValueError(
-                    f"workspace vault folder is already owned by "
-                    f"'{configured_name}'"
-                )
+        owner = vault_root_owner(config, Path(target_root))
+        if owner is not None:
+            raise ValueError(
+                f"workspace vault folder is already owned by '{owner}'"
+            )
     if "default_provider" in data:
         requested_provider = str(data["default_provider"]).strip() or "claude"
     else:
@@ -130,6 +160,14 @@ def workspace_from_request(
         disallowed_tools = existing.disallowed_tools
     else:
         disallowed_tools = None
+    if "allowed_mcp_servers" in data:
+        allowed_mcp_servers = parse_disallowed_tools_value(
+            data.get("allowed_mcp_servers")
+        )
+    elif existing is not None:
+        allowed_mcp_servers = existing.allowed_mcp_servers
+    else:
+        allowed_mcp_servers = None
     if "color" in data:
         color = coerce_workspace_color(data.get("color"))
     elif existing is not None:
@@ -155,6 +193,7 @@ def workspace_from_request(
         default_provider=provider,
         default_model=default_model,
         disallowed_tools=disallowed_tools,
+        allowed_mcp_servers=allowed_mcp_servers,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
         color=color,
     )

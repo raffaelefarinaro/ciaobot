@@ -80,27 +80,6 @@ def test_remote_subscription_is_pushed_and_local_still_logs(tmp_path: Path, monk
     assert endpoints == ["https://push.example/phone"]  # remote device pushed
 
 
-def test_send_test_pushes_only_to_local_subscriptions(tmp_path: Path, monkeypatch) -> None:
-    """``send_test`` verifies the local browser displays a push, so it targets
-    local subscriptions (and reports how many the push service accepted)."""
-    import pywebpush
-
-    endpoints: list[str] = []
-    monkeypatch.setattr(
-        pywebpush,
-        "webpush",
-        lambda **kwargs: endpoints.append(kwargs["subscription_info"]["endpoint"]),
-    )
-    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
-    manager.add({"endpoint": "https://push.example/local"}, local=True)
-    manager.add({"endpoint": "https://push.example/phone"}, local=False)
-
-    result = manager.send_test({"title": "t", "body": "hi", "chat_id": ""})
-
-    assert endpoints == ["https://push.example/local"]  # only the local sub
-    assert result == {"local_subscriptions": 1, "accepted": 1}
-
-
 def test_clear_chat_logs_control_and_pushes_to_every_subscription(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -2,8 +2,8 @@
 
 Each model in the panel is called through
 :func:`ciao.providers.oneshot.run_oneshot`. A panel entry may name the provider
-that runs it -- ``codex:fable`` and ``opencode:fable`` route to those
-providers' app-servers -- and an unprefixed entry runs through Claude Code, so
+that runs it -- ``opencode:fable`` routes to that provider's app-server -- and
+an unprefixed entry runs through Claude Code, so
 a bare tier alias means Anthropic. That is what makes the panel genuinely
 adversarial: the default lists one voice per signed-in vendor rather than three
 models from the same one.
@@ -12,7 +12,7 @@ The artifact is inlined in the prompt (the one-shot call runs with no
 tools, ``max_turns=1``), so no file-read tool is needed.
 
 Exposed as a CLI (``python -m ciao.critique``) and, via :func:`run_panel`, as
-the ``adversarial_review`` MCP tool (``ciao/control_plane.py``) — both call
+the ``/critique`` command / ``ciao-command-critique`` skill — both call
 the same panel-running logic so they can't drift.
 """
 
@@ -35,13 +35,11 @@ from ciao.providers.oneshot import run_oneshot
 DEFAULT_TIMEOUT = 120  # seconds per model
 
 # A panel entry may name the provider that should run it. Unprefixed entries
-# run through Claude Code; these two route to their own provider's app-server.
-CODEX_PREFIX = "codex:"
+# run through Claude Code; prefixed entries route to their provider's app-server.
 OPENCODE_PREFIX = "opencode:"
 
-_CODEX_AVAILABLE_CACHE: tuple[float, bool] | None = None
 _OPENCODE_AVAILABLE_CACHE: tuple[float, bool] | None = None
-_CODEX_AVAILABLE_TTL = 30.0  # seconds — panel resolution is read-hot
+_PROVIDER_AVAILABLE_TTL = 30.0  # seconds — panel resolution is read-hot
 
 def is_anthropic_available() -> bool:
     """True when Anthropic API key or Claude Code OAuth credentials are present."""
@@ -68,42 +66,19 @@ def is_anthropic_available() -> bool:
     return False
 
 
-def is_codex_available() -> bool:
-    """True when the Codex CLI is installed and signed in (OpenAI / ChatGPT).
-
-    Backs the "add the OpenAI voice to the critique panel" default. Result is
-    cached briefly because :func:`default_critique_panel` runs on every
-    Settings → Models read and ``codex login status`` spawns a subprocess;
-    when no Codex binary is present the check returns immediately without one.
-    """
-    global _CODEX_AVAILABLE_CACHE
-    now = time.monotonic()
-    cached = _CODEX_AVAILABLE_CACHE
-    if cached is not None and now - cached[0] < _CODEX_AVAILABLE_TTL:
-        return cached[1]
-    try:
-        from ciao.providers.codex import codex_login_status
-
-        ok = bool(codex_login_status().get("ok"))
-    except Exception:  # noqa: BLE001 — availability probe must never crash the panel
-        ok = False
-    _CODEX_AVAILABLE_CACHE = (now, ok)
-    return ok
-
-
 def is_opencode_available() -> bool:
     """True when opencode is installed and has at least one connected provider.
 
-    Backs the "add a third vendor to the panel" default. Installed-but-empty is
+    Backs the "add an opencode voice to the panel" default. Installed-but-empty is
     not available: opencode with nothing authenticated has no model to run, and
     listing it would put a guaranteed failure in the panel. Cached on the same
-    TTL as the Codex probe for the same reason -- panel resolution is read-hot
+    TTL for the same reason -- panel resolution is read-hot
     and the probe spawns a subprocess.
     """
     global _OPENCODE_AVAILABLE_CACHE
     now = time.monotonic()
     cached = _OPENCODE_AVAILABLE_CACHE
-    if cached is not None and now - cached[0] < _CODEX_AVAILABLE_TTL:
+    if cached is not None and now - cached[0] < _PROVIDER_AVAILABLE_TTL:
         return cached[1]
     try:
         from ciao.providers.opencode import opencode_login_status
@@ -118,26 +93,23 @@ def is_opencode_available() -> bool:
 def default_critique_panel(config: CiaoConfig) -> list[str]:
     """Provider-aware default when Settings → Models has no critique override.
 
-    Aims for one voice per signed-in vendor: an adversarial panel of three
+    Aims for one voice per signed-in vendor: an adversarial panel of multiple
     Anthropic models would mostly agree with itself, so breadth across vendors
     beats depth within one. Every entry is gated on that vendor being usable --
     listing a signed-out provider would only put a guaranteed failure in the
     panel.
 
     Claude entries use the tier aliases (``opus``/``fable``), which Claude Code
-    resolves itself. Codex and opencode entries resolve to the operator's
-    per-provider default model (Settings → Models); when none is set the model
+    resolves itself. opencode entries resolve to the operator's per-provider
+    default model (Settings → Models); when none is set the model
     id is left empty so the provider's own account catalog picks the default.
     """
     models = []
 
     if is_anthropic_available():
         models.extend(["opus", "fable"])
-    # The prefixed entries route through their own provider's app-server. The
-    # model id is the operator's per-provider default (not a tier alias, which
-    # only Claude Code understands); empty lets the provider pick its own.
-    if is_codex_available():
-        models.append(f"{CODEX_PREFIX}{config.default_model_for_provider('codex')}")
+    # The prefixed entry routes through opencode's app-server. The model id is
+    # the operator's per-provider default; empty lets the provider pick its own.
     if is_opencode_available():
         models.append(f"{OPENCODE_PREFIX}{config.default_model_for_provider('opencode')}")
 
@@ -174,7 +146,7 @@ def apply_app_settings_overlay(config: CiaoConfig) -> None:
     """Overlay `.runtime/app_settings.json` onto ``config`` (Settings → Models)."""
     from ciao.app_settings import AppSettingsStore
 
-    runtime_env = os.environ.get("CIAO_RUNTIME_ROOT", os.environ.get("TELEGRAM_BRIDGE_RUNTIME_ROOT", "")).strip()
+    runtime_env = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
     runtime_root = Path(runtime_env) if runtime_env else config.state_path.parent
     AppSettingsStore(runtime_root / "app_settings.json").apply_to_config(config)
 
@@ -253,12 +225,9 @@ def extract_json(text: str) -> dict | None:
 def _split_provider(model: str) -> tuple[str, str]:
     """Map a panel entry to its ``(provider, model_id)`` dispatch pair.
 
-    A ``codex:`` prefix selects the Codex (OpenAI / ChatGPT) app-server and an
-    ``opencode:`` prefix selects opencode's. Every other id runs through Claude
+    An ``opencode:`` prefix selects opencode's app-server. Every other id runs through Claude
     Code, so a bare tier alias means Anthropic.
     """
-    if model.startswith(CODEX_PREFIX):
-        return "codex", model[len(CODEX_PREFIX):].strip()
     if model.startswith(OPENCODE_PREFIX):
         return "opencode", model[len(OPENCODE_PREFIX):].strip()
     return "claude", model
@@ -303,7 +272,7 @@ async def run_panel(
 ) -> list[ModelResult]:
     """Run every model in ``panel`` concurrently and return results in panel order.
 
-    Shared by the CLI (``async_main``) and the ``adversarial_review`` MCP tool
+    Shared by the CLI (``async_main``) and the ``/critique`` command path
     so the two entrypoints can't drift on how the panel is actually run.
     """
     sem = asyncio.Semaphore(max_parallel)

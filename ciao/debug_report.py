@@ -15,7 +15,7 @@ from pathlib import Path
 from collections.abc import Collection
 
 from ciao import job_runs
-from ciao.error_log import ERROR_LOG_NAME, tail_error_log
+from ciao.error_log import DEBUG_LOG_NAME, ERROR_LOG_NAME, tail_debug_log, tail_error_log
 
 DEFAULT_LOG_LINES = 200
 DEFAULT_MAX_FAILED_JOBS = 20
@@ -101,15 +101,23 @@ def build_issue_report(
     their own runs.
     """
     error_log = tail_error_log(workspace_root, log_lines)
+    debug_log = tail_debug_log(workspace_root, log_lines)
     failed_jobs = recent_job_failures(
         max_failed_jobs, exclude_schedule_ids=exclude_schedule_ids
     )
     error_line_count = sum(1 for line in error_log.splitlines() if line.strip())
+    debug_line_count = sum(1 for line in debug_log.splitlines() if line.strip())
     report = {
         "error_log": error_log,
         "error_log_lines": error_line_count,
         "error_log_path": str(workspace_root / ".runtime" / ERROR_LOG_NAME),
+        "debug_log": debug_log,
+        "debug_log_lines": debug_line_count,
+        "debug_log_path": str(workspace_root / ".runtime" / DEBUG_LOG_NAME),
         "failed_jobs": failed_jobs,
+        # Only errors and failed jobs count as issues: the debug log is
+        # ambient verbose output (empty unless CIAO_LOG_LEVEL=debug), so it
+        # must never trip the startup triage on its own.
         "has_issues": bool(error_log.strip() or failed_jobs),
     }
     report["report_text"] = format_issue_report(report)
@@ -134,5 +142,13 @@ def format_issue_report(report: dict) -> str:
         path = report.get("error_log_path") or "server_errors.log"
         parts.append(f"## Server error log tail ({path})")
         parts.append("```\n" + error_log + "\n```")
+
+    debug_log = (report.get("debug_log") or "").strip()
+    if debug_log:
+        path = report.get("debug_log_path") or "server_debug.log"
+        parts.append(
+            f"## Debug log tail ({path}, verbose CIAO_LOG_LEVEL=debug output)"
+        )
+        parts.append("```\n" + debug_log + "\n```")
 
     return "\n\n".join(parts)

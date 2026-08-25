@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import functools
+import hashlib
 import json
 import logging
 import mimetypes
@@ -15,26 +16,38 @@ import shlex
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict, replace
+import tempfile
+import time
+from dataclasses import asdict
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Any, Callable, Iterable, cast
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
+
+# Imported lazily inside the handlers (see `_housekeeping_context`); only
+# the annotations need the name at module scope.
+if TYPE_CHECKING:
+    from ciao import operator_actions
+
+from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao import proposal_kinds
 from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
+from ciao import vault_rehome
+from ciao.jsonio import write_private_text
+from ciao.memory_tool import resolve_region
+from ciao.native_sessions import live_sessions_for_workspace
 from ciao.config import WorkspaceConfig
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
-    parse_disallowed_tools_value,
     persist_workspaces,
     workspace_from_request,
     workspace_provider_options,
@@ -45,7 +58,6 @@ from ciao.workspaces import (
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
-from ciao.providers.codex import CodexProvider, codex_login_status
 from ciao.providers.opencode import (
     OpencodeProvider,
     _file_touches as _opencode_file_touches,
@@ -63,11 +75,15 @@ from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
-from ciao.vault_index import _build_graph, filter_entries, scan_vault, strip_references
+from ciao.vault_index import (
+    _build_graph,
+    filter_entries,
+    scan_targets,
+    strip_references,
+)
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import (
-    RestartDrainingError,
     _ALLOWED_IMAGE_EXTENSIONS,
     _PROJECT_UPLOAD_MAX_BYTES,
     _normalize_handover_messages,
@@ -437,7 +453,14 @@ def _strip_image_manifest(content: str) -> str:
 
 
 def _strip_injected_context(content: str) -> str:
-    stripped = _CONTEXT_BLOCK_RE.sub("", content, count=1)
+    # A continuation / handover turn can stack two [CIAO_CONTEXT_BEGIN] blocks
+    # (e.g. stable context + today). Strip them all, not just the first one.
+    stripped = content
+    while True:
+        nxt = _CONTEXT_BLOCK_RE.sub("", stripped, count=1)
+        if nxt == stripped:
+            break
+        stripped = nxt
     if stripped != content:
         return _strip_image_manifest(stripped).strip() or content
     legacy = _strip_legacy_context_prefix(content)
@@ -677,16 +700,25 @@ def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
     return rendered
 
 
-def _local_session_jsonl_paths(session_id: str, workspace_root: Path) -> list[Path]:
+def _local_session_jsonl_paths(
+    session_id: str, workspace_root: Path, *, agent_root: Path | None = None
+) -> list[Path]:
     """Find local Claude Code JSONL files for ``session_id``."""
     try:
         from ciao.transcripts import _claude_projects_dir
     except ImportError:
         return []
     paths: list[Path] = []
-    preferred = _claude_projects_dir(workspace_root) / f"{session_id}.jsonl"
+    root = agent_root if agent_root is not None else workspace_root
+    preferred = _claude_projects_dir(root) / f"{session_id}.jsonl"
     if preferred.exists():
         paths.append(preferred)
+    # When an agent root is supplied, the preferred path already scopes to
+    # that root's own projects dir, so a session under another root stays
+    # invisible (the re-rooting isolation). Without a root, keep the global
+    # scan so callers that supply nothing behave exactly as today.
+    if agent_root is not None:
+        return paths
     projects_root = Path.home() / ".claude" / "projects"
     try:
         for path in projects_root.glob(f"*/{session_id}.jsonl"):
@@ -734,7 +766,9 @@ def _read_jsonl_messages(path: Path) -> list[dict]:
     return messages
 
 
-def _local_subagent_transcripts(session_id: str, workspace_root: Path) -> list[dict]:
+def _local_subagent_transcripts(
+    session_id: str, workspace_root: Path, *, agent_root: Path | None = None
+) -> list[dict]:
     """Fallback parser for nested subagent JSONL files and progress entries."""
     projects_root = Path.home() / ".claude" / "projects"
     grouped: dict[str, list[dict]] = {}
@@ -748,7 +782,7 @@ def _local_subagent_transcripts(session_id: str, workspace_root: Path) -> list[d
         if msgs:
             grouped.setdefault(path.stem, []).extend(msgs)
 
-    for path in _local_session_jsonl_paths(session_id, workspace_root):
+    for path in _local_session_jsonl_paths(session_id, workspace_root, agent_root=agent_root):
         try:
             with path.open(encoding="utf-8") as f:
                 for line in f:
@@ -784,14 +818,7 @@ def _local_subagent_transcripts(session_id: str, workspace_root: Path) -> list[d
 
 
 # ── Auth ────────────────────────────────────────────────────────────────
-
-from ciao.web.routes_auth import (
-    auth_check,
-    auth_login,
-    auth_logout,
-    auth_settings_get,
-    auth_settings_update,
-)
+# Auth handlers live in routes_auth.py; app.py imports them from there.
 
 
 # ── Projects ─────────────────────────────────────────────────────────────
@@ -817,10 +844,6 @@ def _workspaces_payload(config) -> dict:
         "app_default_model": getattr(config, "claude_default_model", "") or "",
         "provider_options": _workspace_provider_options(config),
     }
-
-
-def _parse_disallowed_tools_value(raw: object) -> list[str] | None:
-    return parse_disallowed_tools_value(raw)
 
 
 def _workspace_from_request(
@@ -863,7 +886,41 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
     config.workspaces[workspace.name] = workspace
     _persist_workspaces(config)
     _refresh_project_manager_workspaces(request)
-    return JSONResponse(_workspaces_payload(config), status_code=201 if created else 200)
+    payload = _workspaces_payload(config)
+    if created:
+        payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
+    return JSONResponse(payload, status_code=201 if created else 200)
+
+
+async def _bootstrap_new_agent_root(config, name: str) -> bool:
+    """Seed a freshly created workspace's own agent root.
+
+    Once the re-rooting receipt has flipped, a new workspace's chats run from
+    `<install>/<name>` immediately - but persisting the registry and refreshing
+    the manager only creates the General vault document. Nothing seeded
+    `CLAUDE.md`/`AGENTS.md`, commands, agents or the skill mirrors, so a chat
+    started right after creation ran with NO workspace guide and none of the
+    packaged or custom capabilities. The startup task repairs it, but only after
+    a restart, which is far too late for the chat the operator just opened.
+
+    Best-effort on purpose: the workspace is already registered and usable by
+    the time this runs, so a sync failure is reported rather than unwound. The
+    startup task remains the backstop.
+    """
+    from ciao.sync_skills import sync_workspace_skills
+
+    try:
+        root = Path(config.agent_root(name))
+    except (AttributeError, ValueError):
+        return False
+    try:
+        # `refresh_upstream=False`: this is a local seeding on a user-facing
+        # request, not the periodic upstream regeneration.
+        await asyncio.to_thread(sync_workspace_skills, root, refresh_upstream=False)
+    except Exception:  # noqa: BLE001 - creation already succeeded
+        logger.exception("Could not seed agent root for new workspace %s", name)
+        return False
+    return True
 
 
 async def delete_workspace_setting(request: Request) -> JSONResponse:
@@ -873,10 +930,140 @@ async def delete_workspace_setting(request: Request) -> JSONResponse:
         return JSONResponse({"error": "workspace not found"}, status_code=404)
     if len(config.workspaces) <= 1:
         return JSONResponse({"error": "cannot delete the last workspace"}, status_code=400)
+    target = config.primary_workspace()
+    if target == name:
+        return JSONResponse(
+            {"error": "cannot delete the primary workspace"}, status_code=400
+        )
+    # The chats outlive the registry entry, so they are MOVED rather than left
+    # pointing at a workspace that no longer exists - which resolved them to
+    # the primary agent root by accident of the fallback.
+    vault = _migrate_workspace_vault(config, name, target)
+    if vault["unsupported"]:
+        return JSONResponse({"error": vault["unsupported"]}, status_code=409)
+    if vault["refused"]:
+        # ALL OR NOTHING, and nothing has moved yet - the scan above was a dry
+        # run. Completing a partial migration would strand the refused notes:
+        # once the registry entry is gone the old vault drops out of
+        # `vault_scan_targets`, and the response's `refused` list is not
+        # surfaced by the PWA, so those notes would simply vanish from the app
+        # while still sitting on disk. Refusing the whole delete keeps the
+        # workspace registered and every note reachable.
+        return JSONResponse(
+            {
+                "error": (
+                    "cannot delete: some notes would collide in "
+                    f"{target} and were not migrated"
+                ),
+                "refused": vault["refused"],
+            },
+            status_code=409,
+        )
+    vault = _migrate_workspace_vault(config, name, target, apply=True)
+    moved_projects = _reassign_project_manager_workspace(request, name, target)
     config.workspaces.pop(name, None)
     _persist_workspaces(config)
     _refresh_project_manager_workspaces(request)
-    return JSONResponse(_workspaces_payload(config))
+    payload = _workspaces_payload(config)
+    payload["migrated"] = {
+        "into": target,
+        "projects": moved_projects,
+        "notes": len(vault["moved"]),
+        "refused": vault["refused"],
+    }
+    return JSONResponse(payload)
+
+
+def _reassign_project_manager_workspace(request: Request, old: str, new: str) -> int:
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    reassign = getattr(pcm, "reassign_workspace", None)
+    return int(reassign(old, new)) if callable(reassign) else 0
+
+
+def _migrate_workspace_vault(
+    config, name: str, target: str, *, apply: bool = False
+) -> dict[str, Any]:
+    """Move a workspace's notes into *target*, taking their links with them.
+
+    Per-note rather than a directory rename, because both directions of every
+    link have to be rewritten - a bulk move would leave every reference to
+    these notes pointing at a path that no longer exists. A note whose
+    destination is already taken is REFUSED and reported, never overwritten.
+
+    Called twice by the delete route: once with ``apply=False`` to find out
+    whether every note CAN move, and only then for real. Discovering a
+    collision halfway through would leave the vault split across two roots,
+    one of which is about to stop being registered.
+    """
+    from ciao.vault_rehome import move_note_between_roots
+
+    moved: list[str] = []
+    refused: list[dict[str, Any]] = []
+    unsupported = ""
+    install_root = Path(config.workspace_root)
+    try:
+        source_root = Path(config.workspace_vault_root(name))
+    except (ValueError, TypeError):
+        return {"moved": moved, "refused": refused, "unsupported": unsupported}
+    if not source_root.is_dir():
+        return {"moved": moved, "refused": refused, "unsupported": unsupported}
+    # Only a RE-ROOTED install needs this. There the deleted workspace's vault
+    # is its own scan target, so losing the registry entry makes those notes
+    # unreachable and they have to move. On the shared layout the vault is
+    # `memory-vault/<name>` under the single scan target that covers every
+    # workspace, so the notes stay visible either way - and the cross-root
+    # mover refuses that shape by design, which would have refused every note
+    # and made the workspace undeletable.
+    try:
+        relative_vault = source_root.relative_to(install_root)
+    except ValueError:
+        # `CIAO_VAULT_MODE=existing` can point a workspace at an absolute vault
+        # outside the install. Nothing here can move it: every note fails the
+        # same `relative_to`, so both passes reported no refusals and no moves
+        # and the delete went ahead - leaving the whole external vault on disk
+        # while it dropped out of every scan with the registry entry. Refuse
+        # rather than silently orphan somebody's vault.
+        return {
+            "moved": moved,
+            "refused": refused,
+            "unsupported": (
+                f"'{name}' uses a vault outside the install "
+                f"({source_root}); move or unlink it before deleting the "
+                "workspace"
+            ),
+        }
+    if len(relative_vault.parts) != 2 or relative_vault.parts[0] != name:
+        return {"moved": moved, "refused": refused, "unsupported": unsupported}
+    targets = config.vault_scan_targets()
+    workspaces = config.workspace_names()
+    from ciao.workspace_reroot import _REGENERATED_ROOT_NOTES
+
+    for note in sorted(source_root.rglob("*.md")):
+        # `rebuild_indexes` writes these per root, so the primary already has
+        # its own copy of each and every one collided - which, with the delete
+        # now all-or-nothing, meant a workspace could NEVER be deleted even
+        # when every user-authored note could move. They are regenerated, not
+        # authored, so they are not migrated at all: the deleted root's copies
+        # go away with it.
+        if note.parent == source_root and note.name in _REGENERATED_ROOT_NOTES:
+            continue
+        try:
+            relative = note.relative_to(install_root).as_posix()
+        except ValueError:
+            continue
+        result = move_note_between_roots(
+            install_root,
+            relative,
+            target,
+            targets=targets,
+            workspaces=workspaces,
+            apply=apply,
+        )
+        if not result.get("refusals"):
+            moved.append(relative)
+        else:
+            refused.append({"note": relative, "refusals": result.get("refusals", [])})
+    return {"moved": moved, "refused": refused, "unsupported": unsupported}
 
 
 def _env_path(config) -> Path:
@@ -911,7 +1098,9 @@ def _write_env_values(path: Path, updates: dict[str, str]) -> None:
         if value:
             out.append(f"{key}={value}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+    # .env carries provider keys and PWA_AUTH_TOKEN, so it must be owner-only
+    # from creation, not only after a follow-up chmod
+    write_private_text(path, "\n".join(out).rstrip() + "\n")
 
 
 def _read_env_value(path: Path, key: str) -> str:
@@ -951,10 +1140,6 @@ def _provider_key_auth_method(config, key: str) -> str:
     if key == "ANTHROPIC_API_KEY" and _claude_oauth_ready():
         return "oauth"
     return "missing"
-
-
-def _provider_key_configured(config, key: str) -> bool:
-    return _provider_key_auth_method(config, key) != "missing"
 
 
 def _provider_config_payload(config) -> dict:
@@ -1414,9 +1599,15 @@ async def gws_save_client_secret(request: Request) -> JSONResponse:
 
     try:
         config_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # the dir holds only this profile's Google OAuth material; tighten
+            # it for installs whose older setup left it group/world-readable
+            config_dir.chmod(0o700)
+        except OSError as exc:
+            logger.warning("Failed to tighten %s permissions: %s", config_dir, exc)
         path = config_dir / "client_secret.json"
-        path.write_text(json.dumps(secret_json, indent=2), encoding="utf-8")
-        path.chmod(0o600)
+        # owner-only from creation: the file carries the Google client secret
+        write_private_text(path, json.dumps(secret_json, indent=2))
     except Exception as e:
         return JSONResponse({"error": f"Failed to write client_secret.json: {str(e)}"}, status_code=500)
 
@@ -2239,65 +2430,17 @@ async def create_project_chat(request: Request) -> JSONResponse:
 
 # ── Chats ────────────────────────────────────────────────────────────────
 
-def _codex_reasoning_levels(catalog: list[dict]) -> dict[str, list[str]]:
-    """Per-model reasoning levels from the codex catalog."""
-    levels: dict[str, list[str]] = {}
-    for item in catalog:
-        if item.get("hidden"):
-            continue
-        model_id = str(item.get("model") or item.get("id") or "")
-        if not model_id:
-            continue
-        efforts = item.get("supportedReasoningEfforts")
-        levels[model_id] = [
-            str(option.get("reasoningEffort"))
-            for option in efforts or []
-            if isinstance(option, dict) and option.get("reasoningEffort")
-        ]
-    return levels
-
-
-async def _unsupported_codex_level_error(
-    config, pcm, chat_id: str, body: dict
-) -> JSONResponse | None:
-    """Reject a codex thinking level the target model doesn't support.
-
-    ``update_chat`` validates against the static ``THINKING_LEVELS`` union;
-    the model catalog is authoritative when discovery works, so narrow the
-    check to the target model here. Fails open when the catalog is
-    unavailable or has no levels for the model, leaving the union check as
-    the backstop.
-    """
-    level = body.get("thinking_level")
-    if not level:
-        return None
-    chat = pcm.get_chat(chat_id)
-    if chat is None:
-        return None
-    provider = body.get("provider") or chat.provider
-    if provider != "codex":
-        return None
-    model = body.get("model") or chat.model
-    try:
-        catalog = await CodexProvider.model_catalog(config.workspace_root)
-    except Exception:
-        return None
-    allowed = _codex_reasoning_levels(catalog).get(model)
-    if allowed and level not in allowed:
-        return JSONResponse(
-            {
-                "error": (
-                    f"Unknown thinking level '{level}' for codex model "
-                    f"'{model}' (allowed: {', '.join(allowed)})"
-                )
-            },
-            status_code=400,
-        )
-    return None
-
-
 async def list_all_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
+    # `?active_only=1` skips archived chats. The PWA's frequent syncLatest poll
+    # uses it: the archive can be huge (thousands of rows) and is not needed to
+    # keep the sidebar/home in sync — archived rows are already held locally and
+    # loaded once at boot. Filter BEFORE the per-chat `is_session_local` probe
+    # (filesystem stat) so the poll never touches the archived rows at all.
+    active_only = request.query_params.get("active_only") in {"1", "true"}
+    if active_only:
+        chats = [c for c in pcm.list_chats() if not c.archived]
+        return JSONResponse([c.to_dict(local=True) for c in chats])
     return JSONResponse(pcm.list_chats_dicts())
 
 
@@ -2305,6 +2448,13 @@ async def chat_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     if request.method == "DELETE":
+        import logging
+        # Log who deletes a chat so an unexpected deletion is auditable: the
+        # explicit close (only_if_empty) vs a plain DELETE.
+        logging.getLogger("ciao.web.routes").info(
+            "chat DELETE %s only_if_empty=%r", chat_id,
+            request.query_params.get("only_if_empty"),
+        )
         # `only_if_empty` is how closing a chat discards a never-used draft.
         # The check has to happen here: "empty" means default title, no user
         # turns, no session and no live stream, and `user_turn_count` is not
@@ -2314,6 +2464,7 @@ async def chat_detail(request: Request) -> JSONResponse:
             if not pcm.is_empty_chat(chat_id):
                 return JSONResponse({"ok": False, "deleted": False, "reason": "not empty"})
         ok = pcm.delete_chat(chat_id)
+        logging.getLogger("ciao.web.routes").info("chat DELETE %s -> ok=%r", chat_id, ok)
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
@@ -2324,11 +2475,6 @@ async def chat_detail(request: Request) -> JSONResponse:
                 {"error": "control_surface must be legacy, mcp, auto, or empty"},
                 status_code=400,
             )
-    level_error = await _unsupported_codex_level_error(
-        request.app.state.config, pcm, chat_id, body
-    )
-    if level_error is not None:
-        return level_error
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2465,6 +2611,24 @@ async def chat_retry(request: Request) -> JSONResponse:
     if chat is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(chat.to_dict(local=pcm.is_session_local(chat)))
+
+
+async def chat_stop(request: Request) -> JSONResponse:
+    """Stop an in-flight turn over plain HTTP.
+
+    The websocket ``stop`` message (see routes_chat.py) is the normal path,
+    but it depends on that chat's socket being connected at the moment the
+    user clicks Stop. A socket cycling through reconnects (e.g. the per-chat
+    liveness watchdog force-reconnecting under load) can swallow the message
+    indefinitely with no visible error, leaving a turn nobody can interrupt.
+    This route reaches ``stop_chat`` independently of any socket state.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    stopped = await pcm.stop_chat(chat_id)
+    return JSONResponse({"stopped": stopped})
 
 
 async def chat_prompt(request: Request) -> JSONResponse:
@@ -2631,205 +2795,9 @@ def _overlay_assistant_timings(
             entries[idx]["duration_ms"] = int(duration)
 
 
-def _codex_content_text(raw: object) -> str:
-    """Extract text from a Codex app-server user-message content array."""
-    if isinstance(raw, str):
-        return raw
-    if not isinstance(raw, list):
-        return ""
-    parts: list[str] = []
-    for block in raw:
-        if isinstance(block, str):
-            parts.append(block)
-        elif isinstance(block, dict) and str(block.get("type") or "") in {
-            "text",
-            "inputText",
-        }:
-            parts.append(str(block.get("text") or ""))
-    return "\n".join(part for part in parts if part)
-
-
-def _strip_codex_command_expansion(content: str) -> str:
-    if not content.startswith("[CIAO_COMMAND_BEGIN]\n"):
-        return content
-    for line in content.splitlines()[1:4]:
-        if not line.startswith("user_input_json="):
-            continue
-        try:
-            original = json.loads(line.split("=", 1)[1])
-        except (json.JSONDecodeError, ValueError):
-            return content
-        return str(original) if isinstance(original, str) else content
-    return content
-
-
-def _render_codex_thread(thread: dict, chat) -> list[dict]:
-    """Render Codex thread items into the provider-neutral PWA row shape."""
-    result: list[dict] = []
-    turns = thread.get("turns")
-    if not isinstance(turns, list):
-        turns = []
-    user_idx = 0
-    for turn in turns:
-        if not isinstance(turn, dict):
-            continue
-        items = turn.get("items")
-        if not isinstance(items, list):
-            continue
-        agent_message_items = [
-            item
-            for item in items
-            if isinstance(item, dict)
-            and item.get("type") == "agentMessage"
-            and str(item.get("text") or "").strip()
-        ]
-        has_final_answer = any(
-            isinstance(item, dict)
-            and item.get("type") == "agentMessage"
-            and str(item.get("phase") or "") == "final_answer"
-            and str(item.get("text") or "").strip()
-            for item in items
-        )
-        fallback_agent_message_id = ""
-        commentary_only = bool(agent_message_items) and all(
-            str(item.get("phase") or "") == "commentary"
-            for item in agent_message_items
-        )
-        if (
-            str(turn.get("status") or "") == "completed"
-            and not has_final_answer
-            and commentary_only
-        ):
-            # A completed Codex turn can contain only a substantive commentary
-            # item. Match the live provider fallback so reopening the chat does
-            # not fold the completed response back into Activity.
-            for item in reversed(items):
-                if (
-                    isinstance(item, dict)
-                    and item.get("type") == "agentMessage"
-                    and str(item.get("text") or "").strip()
-                ):
-                    fallback_agent_message_id = str(item.get("id") or "")
-                    break
-        pending_tools: list[str] = []
-
-        def flush_tools() -> None:
-            if pending_tools:
-                result.append({
-                    "role": "system",
-                    "content": "\n".join(pending_tools),
-                    "tool_name": "_activity",
-                })
-                pending_tools.clear()
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            kind = str(item.get("type") or "")
-            if kind == "userMessage":
-                flush_tools()
-                content = _strip_injected_context(
-                    _codex_content_text(item.get("content"))
-                ).strip()
-                content = _strip_codex_command_expansion(content).strip()
-                if not content:
-                    continue
-                entry: dict = {
-                    "role": "user",
-                    "content": content,
-                    "turn_index": user_idx,
-                }
-                refs = chat.user_turn_images.get(str(user_idx))
-                if refs:
-                    entry["images"] = list(refs)
-                timing = chat.user_turn_timings.get(str(user_idx)) or {}
-                if timing.get("sent_at"):
-                    entry["sent_at"] = timing["sent_at"]
-                if chat.user_turn_unattended.get(str(user_idx)):
-                    entry["unattended"] = True
-                result.append(entry)
-                user_idx += 1
-                continue
-            if kind == "agentMessage":
-                flush_tools()
-                text = str(item.get("text") or "").strip()
-                if text:
-                    entry = {"role": "assistant", "content": text}
-                    phase = str(item.get("phase") or "")
-                    if (
-                        fallback_agent_message_id
-                        and str(item.get("id") or "") == fallback_agent_message_id
-                    ):
-                        phase = "final_answer"
-                    if phase in {"commentary", "final_answer"}:
-                        entry["phase"] = phase
-                    result.append(entry)
-                continue
-            if kind == "fileChange":
-                flush_tools()
-                changes = item.get("changes")
-                for change in changes if isinstance(changes, list) else []:
-                    if not isinstance(change, dict):
-                        continue
-                    file_path = str(change.get("path") or "")
-                    if file_path:
-                        kind_name = str(change.get("kind") or "update").lower()
-                        action = (
-                            "created"
-                            if kind_name in {"add", "create"}
-                            else "edited"
-                        )
-                        result.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": file_path,
-                            "file_path": file_path,
-                            "action": action,
-                            "tool": "Write" if action == "created" else "Edit",
-                        })
-                continue
-            if kind == "commandExecution":
-                command = item.get("command")
-                if isinstance(command, list):
-                    label = " ".join(str(part) for part in command)
-                else:
-                    label = str(command or "")
-                touches = extract_file_touches("Bash", {"command": label})
-                if touches:
-                    flush_tools()
-                    for touch in touches:
-                        result.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": touch["file_path"],
-                            "file_path": touch["file_path"],
-                            "action": touch.get("action") or "touched",
-                            "tool": "Bash",
-                        })
-                else:
-                    pending_tools.append(
-                        f"{_tool_icon('Bash')} Bash {label}".strip()
-                    )
-                continue
-            if kind in {"mcpToolCall", "dynamicToolCall"}:
-                name = str(item.get("tool") or item.get("name") or kind)
-                server = str(item.get("server") or "")
-                label = f"{server}/{name}" if server else name
-                pending_tools.append(f"{_tool_icon(name)} {label}")
-                continue
-            if kind == "collabAgentToolCall":
-                status = str(item.get("status") or "")
-                prompt = str(item.get("prompt") or "").strip()
-                detail = f" {prompt[:180]}" if prompt else ""
-                pending_tools.append(
-                    f"{_tool_icon('Task')} Agent {status}{detail}".strip()
-                )
-        flush_tools()
-    _overlay_assistant_timings(result, chat.user_turn_timings)
-    return result
-
-
-def _render_opencode_thread(thread: dict, chat, *, metadata: bool = True) -> list[dict]:
+def _render_opencode_thread(
+    thread: dict, chat, *, metadata: bool = True, start_user_idx: int = 0
+) -> list[dict]:
     """Render opencode session messages into the provider-neutral PWA row shape.
 
     ``thread`` is :meth:`OpencodeProvider.read_thread`'s ``{"info", "messages"}``
@@ -2839,12 +2807,15 @@ def _render_opencode_thread(thread: dict, chat, *, metadata: bool = True) -> lis
     onto the rows. Pass ``False`` when ``thread`` is a *child* session: its
     turn numbering restarts at 0, so the parent chat's turn metadata does not
     apply to it.
+
+    ``start_user_idx`` offsets per-session user numbering when stitching
+    ``previous_session_ids``.
     """
     messages = thread.get("messages")
     if not isinstance(messages, list):
         messages = []
     result: list[dict] = []
-    user_idx = 0
+    user_idx = int(start_user_idx) if isinstance(start_user_idx, int) else 0
     pending_tools: list[str] = []
 
     def flush_tools() -> None:
@@ -3055,25 +3026,130 @@ def _messages_from_archived_transcript(
     return parsed
 
 
-async def chat_messages(request: Request) -> JSONResponse:
-    """Return conversation history for a chat.
+def _read_session_segment(session_id: str, directories: list[str]) -> list:
+    """One session's messages, from whichever root recorded it.
 
-    Claude chats read the SDK session file via ``get_session_messages``.
-    Codex chats read the app-server thread via ``thread/read``; opencode chats
-    read the session history from a short-lived ``opencode serve``. Both fall
-    back to the durable ``.runtime`` transcript when the provider-side session
-    is unreadable.
+    The projects directory is slugged from the cwd the session ran in, so a chat's
+    own agent root is where to look first and the install root second — the latter
+    holds every session from before the re-rooting.
 
-    When a chat is archived, provider-side session storage is deleted to reclaim
-    disk space (Claude SDK blob, Codex thread). In that case we fall back to the
-    durable markdown transcript in the vault so the PWA can still render the
-    conversation read-only.
+    An EMPTY result counts as "not in this root", not as success. That is not a
+    detail: asked for a session it does not have, `get_session_messages_full`
+    returns `[]` rather than raising — which is exactly how the original bug hid.
+    Stopping at the first empty answer would have fixed today's chats by blanking
+    every chat from before the migration instead.
+
+    Raises when no root has it, so the caller's "skip this segment" path still
+    works and the archived-transcript fallback still gets its turn.
     """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    chat = pcm.get_chat(chat_id)
-    if chat is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
+    from ciao.transcripts import get_session_messages_full
+
+    for directory in directories:
+        try:
+            segment = get_session_messages_full(session_id, directory=directory)
+        except (FileNotFoundError, ValueError):
+            continue
+        if segment:
+            return segment
+    raise FileNotFoundError(
+        f"no session {session_id!r} under any of: {', '.join(directories)}"
+    )
+
+
+_MSG_PAGE_DEFAULT_LIMIT = 50
+_MSG_PAGE_MAX_LIMIT = 200
+_THINKING_KEEP_CHARS = 512
+_PART_CACHE_TTL_SECONDS = 1.2
+_PART_CACHE_MAX_ENTRIES = 256
+_PART_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
+
+def _prune_rows_for_wire(rows: list[dict]) -> list[dict]:
+    """Annotate every row with its absolute index and prune oversized rows.
+
+    Only ``_thinking`` rows are truncated today (head+tail with a lazy marker);
+    the collapsed ``_activity`` / ``_filecard`` summaries are already small.
+    The unpruned row stays fetchable via the part endpoint using index ``i``.
+    """
+    out: list[dict] = []
+    for idx, row in enumerate(rows):
+        item = dict(row)
+        item["i"] = idx
+        if item.get("tool_name") == "_thinking":
+            text = item.get("content") or ""
+            gap = len(text) - 2 * _THINKING_KEEP_CHARS
+            if gap > 64:
+                item["content"] = (
+                    text[:_THINKING_KEEP_CHARS]
+                    + f"\n… ({gap} chars hidden, expand to load)\n"
+                    + text[-_THINKING_KEEP_CHARS:]
+                )
+                item["lazy"] = True
+                item["full_length"] = len(text)
+        out.append(item)
+    return out
+
+
+def _request_params(request: Request) -> dict[str, str]:
+    """Query params tolerant of hand-built request scopes.
+
+    Real HTTP requests always carry ``scope["query_string"]``, but unit tests
+    construct bare scopes; Starlette's ``query_params`` raises KeyError there.
+    """
+    raw = request.scope.get("query_string", b"")
+    return {k: v for k, v in parse_qsl(raw.decode("latin-1"))}
+
+
+def _messages_json_response(request: Request, rows: list[dict]) -> JSONResponse:
+    """Serve history rows, paginated from the newest end when asked.
+
+    Without ``offset``/``limit`` params this returns the legacy flat array so
+    older clients keep working. With either param the response becomes
+    ``{items, total, offset, limit, hasMore, nextOffset}`` where ``offset``
+    counts rows back from the newest end (offset 0 is the live tail), and
+    pruning + lazy markers are applied.
+    """
+    params = _request_params(request)
+    if "offset" not in params and "limit" not in params:
+        return JSONResponse(rows)
+
+    total = len(rows)
+    try:
+        limit = int(params.get("limit", _MSG_PAGE_DEFAULT_LIMIT))
+    except ValueError:
+        limit = _MSG_PAGE_DEFAULT_LIMIT
+    limit = max(1, min(limit, _MSG_PAGE_MAX_LIMIT))
+    try:
+        offset = int(params.get("offset", 0))
+    except ValueError:
+        offset = 0
+    offset = max(0, offset)
+
+    wire = _prune_rows_for_wire(rows)
+    end = max(0, total - offset)
+    start = max(0, end - limit)
+    items = wire[start:end]
+    has_more = start > 0
+    return JSONResponse({
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "hasMore": has_more,
+        "nextOffset": offset + limit if has_more else None,
+    })
+
+
+async def _assemble_chat_messages(
+    pcm: Any, config: Any, chat: Any
+) -> list[dict]:
+    """Build the full chronological history row list for one chat.
+
+    This is the expensive part of ``GET /api/chats/{id}/messages`` — provider
+    session reads plus rendering — split out so the pagination envelope and
+    the per-part endpoint can share one assembly path.
+    """
+    chat_id = chat.chat_id
     handover_messages = list(getattr(chat, "handover_messages", []) or [])
     if not chat.session_id:
         # A provider may fail before creating its session (for example while
@@ -3083,31 +3159,74 @@ async def chat_messages(request: Request) -> JSONResponse:
         current = pcm._transcripts.current_messages(
             ChatContext.for_web(chat_id), getattr(chat, "provider", "claude")
         )
-        return JSONResponse(handover_messages + current)
+        if current:
+            return [*handover_messages, *current]
+        archived = _messages_from_archived_transcript(pcm, config, chat)
+        if archived is not None:
+            return [*handover_messages, *archived]
+        return [*handover_messages, *current]
 
-    config = request.app.state.config
     provider = getattr(chat, "provider", "claude")
-    if provider in ("codex", "opencode"):
+    # Every provider stores its sessions per-cwd, and a chat's cwd is its agent
+    # root. Reading with the install root found nothing for any chat created since
+    # the re-rooting — for Claude and opencode alike.
+    _resolver = getattr(pcm, "_agent_root_for_chat", None)
+    session_root = Path(
+        _resolver(chat_id) if _resolver is not None else config.workspace_root
+    )
+    if provider not in {"claude", "opencode"}:
+        current = pcm._transcripts.current_messages(
+            ChatContext.for_web(chat_id), provider
+        )
+        if current:
+            _overlay_assistant_timings(current, chat.user_turn_timings)
+            return [*handover_messages, *current]
+        archived = _messages_from_archived_transcript(pcm, config, chat)
+        if archived is not None:
+            return [*handover_messages, *archived]
+        return list(handover_messages)
+    if provider == "opencode":
         if getattr(chat, "archived", False):
             # An archived chat is read-only and its provider-side session may
             # be gone; serve the vault markdown without paying a provider
             # session read (for opencode, a throwaway server spawn) first.
             archived = _messages_from_archived_transcript(pcm, config, chat)
             if archived is not None:
-                return JSONResponse(handover_messages + archived)
+                return [*handover_messages, *archived]
+        # Stitch the same lineage Claude uses: each provider keeps its turns
+        # only in the session that wrote them, and ciaobot rotates via
+        # ``_rotate_session_id`` (autocompact / resume-fallback / continuation).
+        # Reading only ``chat.session_id`` blanked every chat that had rotated
+        # — exactly the bug that hid the first turn of chat-a495fc8f.
+        session_ids: list[str] = []
+        seen: set[str] = set()
+        for sid in (*getattr(chat, "previous_session_ids", []), chat.session_id):
+            sid_str = str(sid or "").strip()
+            if not sid_str or sid_str in seen:
+                continue
+            seen.add(sid_str)
+            session_ids.append(sid_str)
         rendered: list[dict] = []
-        if provider == "codex":
-            thread = await CodexProvider.read_thread(
-                config.workspace_root, chat.session_id
-            )
-            if thread is not None:
-                rendered = _render_codex_thread(thread, chat)
-        else:
-            opencode_thread = await OpencodeProvider.read_thread(
-                config.workspace_root, chat.session_id
-            )
-            if opencode_thread:
-                rendered = _render_opencode_thread(opencode_thread, chat)
+        start_user_idx = 0
+        for sid in session_ids:
+            try:
+                opencode_thread = await OpencodeProvider.read_thread(
+                    session_root, sid
+                )
+                if not opencode_thread:
+                    continue
+                segment = _render_opencode_thread(
+                    opencode_thread, chat, start_user_idx=start_user_idx
+                )
+            except Exception:  # noqa: BLE001 — one missing segment must not blank siblings
+                continue
+            if segment:
+                # Advance the global turn offset by the user-bubble count in
+                # this segment so the next segment's ``turn_index`` + timings
+                # stay aligned with ``chat.user_turn_timings``.
+                user_count = sum(1 for row in segment if row.get("role") == "user")
+                rendered.extend(segment)
+                start_user_idx += user_count
         current = pcm._transcripts.current_messages(
             ChatContext.for_web(chat_id), provider
         )
@@ -3126,16 +3245,15 @@ async def chat_messages(request: Request) -> JSONResponse:
                 rendered,
                 current,
             )
-            return JSONResponse(handover_messages + rendered)
+            return [*handover_messages, *rendered]
         if current:
             _overlay_assistant_timings(current, chat.user_turn_timings)
-            return JSONResponse(handover_messages + current)
+            return [*handover_messages, *current]
         archived = _messages_from_archived_transcript(pcm, config, chat)
         if archived is not None:
-            return JSONResponse(handover_messages + archived)
-        return JSONResponse(handover_messages)
+            return [*handover_messages, *archived]
+        return list(handover_messages)
 
-    from ciao.transcripts import get_session_messages_full
 
     result: list[dict] = []
     # A chat can rotate through more than one SDK session file within the
@@ -3144,6 +3262,21 @@ async def chat_messages(request: Request) -> JSONResponse:
     # lineage (oldest first) so history renders continuously across the
     # rotation instead of only showing the newest segment.
     session_ids = [*chat.previous_session_ids, chat.session_id]
+    # A session's JSONL lives in a directory slugged from the CWD it was started
+    # in, and that is the chat's AGENT ROOT — `~/repos/ciao/work`, not the install
+    # root. Passing the install root looked up
+    # `~/.claude/projects/-Users-me-repos-ciao/<session>.jsonl`, which does not
+    # exist for any chat created since the re-rooting; the FileNotFoundError was
+    # swallowed as "this segment is missing" and every such chat rendered EMPTY.
+    #
+    # The install root is still tried, second: chats from before the migration
+    # have their transcripts under exactly that slug, and they must keep
+    # rendering.
+    session_dirs: list[str] = []
+    for candidate in (session_root, Path(config.workspace_root)):
+        text = str(candidate)
+        if text not in session_dirs:
+            session_dirs.append(text)
     msgs: list | None = None
     for sid in session_ids:
         if not sid:
@@ -3155,7 +3288,7 @@ async def chat_messages(request: Request) -> JSONResponse:
             # every other request on the node, including the 5s chat-socket
             # keepalives whose absence trips the PWA's half-open watchdog.
             segment = await asyncio.to_thread(
-                get_session_messages_full, sid, directory=str(config.workspace_root)
+                _read_session_segment, sid, session_dirs
             )
         except (FileNotFoundError, ValueError):
             # This segment's file doesn't exist on this machine (remote chat,
@@ -3173,8 +3306,8 @@ async def chat_messages(request: Request) -> JSONResponse:
     if msgs is None or (not msgs and chat.archived):
         archived = _messages_from_archived_transcript(pcm, config, chat)
         if archived is not None:
-            return JSONResponse(handover_messages + archived)
-        return JSONResponse(handover_messages)
+            return [*handover_messages, *archived]
+        return list(handover_messages)
 
     user_idx = 0
     failed_tool_ids = _failed_tool_use_ids(msgs)
@@ -3367,7 +3500,107 @@ async def chat_messages(request: Request) -> JSONResponse:
             user_idx += 1
         result.append(entry)
     _overlay_assistant_timings(result, chat.user_turn_timings)
-    return JSONResponse(handover_messages + result)
+    return [*handover_messages, *result]
+
+
+async def chat_messages(request: Request) -> JSONResponse:
+    """Return conversation history for a chat.
+
+    Claude chats read the SDK session file via ``get_session_messages``.
+    opencode chats read the session history from a short-lived ``opencode serve``. Both fall
+    back to the durable ``.runtime`` transcript when the provider-side session
+    is unreadable.
+
+    When a chat is archived, provider-side session storage is deleted to reclaim
+    disk space (Claude SDK blob or opencode session). In that case we fall back to the
+    durable markdown transcript in the vault so the PWA can still render the
+    conversation read-only.
+
+    Pagination: without ``offset``/``limit`` query params the response is the
+    legacy flat array. With either param it becomes a
+    ``{items, total, offset, limit, hasMore, nextOffset}`` envelope where
+    ``offset=0`` is the newest tail; oversized ``_thinking`` rows are pruned
+    and flagged ``lazy`` (fetch the full row from the part endpoint).
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    rows = await _assemble_chat_messages(
+        pcm, request.app.state.config, chat
+    )
+    return _messages_json_response(request, rows)
+
+
+async def _cached_assembled_messages(pcm: Any, config: Any, chat: Any) -> list[dict]:
+    """Assemble full history with a tiny TTL cache for part fetches.
+
+    Expanding a lazy row rebuilds the whole assembly otherwise; consecutive
+    expands within the TTL reuse one build. The list endpoint never uses this
+    cache — polls must stay fresh.
+    """
+    chat_id = chat.chat_id
+    now = time.monotonic()
+    hit = _PART_CACHE.get(chat_id)
+    if hit is not None and now - hit[0] < _PART_CACHE_TTL_SECONDS:
+        return hit[1]
+    rows = await _assemble_chat_messages(pcm, config, chat)
+    if len(_PART_CACHE) >= _PART_CACHE_MAX_ENTRIES:
+        oldest = min(_PART_CACHE, key=lambda k: _PART_CACHE[k][0])
+        _PART_CACHE.pop(oldest, None)
+    _PART_CACHE[chat_id] = (now, rows)
+    return rows
+
+
+async def chat_message_part(request: Request) -> JSONResponse:
+    """Return one unpruned history row by absolute index.
+
+    Serves ``GET /api/chats/{id}/messages/part?i=<index>`` where the index is
+    the ``i`` annotated on paginated list rows. Indices are positions in the
+    full assembled list (handover messages included), stable while history is
+    append-only.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        idx = int(_request_params(request).get("i", ""))
+    except ValueError:
+        return JSONResponse({"error": "invalid i"}, status_code=400)
+    rows = await _cached_assembled_messages(
+        pcm, request.app.state.config, chat
+    )
+    if idx < 0 or idx >= len(rows):
+        return JSONResponse({"error": "out of range"}, status_code=404)
+    row = dict(rows[idx])
+    row["i"] = idx
+    return JSONResponse(row)
+
+
+async def native_sessions(request: Request) -> JSONResponse:
+    """List locally-running Claude Code CLI sessions for a workspace.
+
+    Serves ``GET /api/native/sessions?workspace=<path>``; without the param
+    the configured workspace root is used. Read-only liveness probe used by
+    the node-handover flow to warn about externally-started CLI sessions.
+    """
+    params = _request_params(request)
+    workspace = params.get("workspace") or str(
+        request.app.state.config.workspace_root
+    )
+    try:
+        sessions = live_sessions_for_workspace(workspace)
+    except OSError:
+        logger.exception("Native session scan failed for %s", workspace)
+        sessions = []
+    return JSONResponse({
+        "sessions": sessions,
+        "workspace": workspace,
+        "checked_at": datetime.now(UTC).isoformat(),
+    })
 
 
 async def chat_subagents(request: Request) -> JSONResponse:
@@ -3400,45 +3633,21 @@ async def chat_subagents(request: Request) -> JSONResponse:
         return JSONResponse([])
 
     config = request.app.state.config
-    if getattr(chat, "provider", "claude") == "codex":
-        parent = await CodexProvider.read_thread(
-            config.workspace_root, chat.session_id
-        )
-        if parent is None:
-            return JSONResponse([])
-        entries: list[dict] = []
-        for item in await CodexProvider.read_collab_tree(
-            config.workspace_root, parent
-        ):
-            thread = item.get("thread")
-            if not isinstance(thread, dict):
-                continue
-            agent_id = str(item["agent_id"])
-            raw_status = str(item.get("status") or "")
-            if raw_status in {"pendingInit", "running"}:
-                status = "running"
-            elif raw_status in {"errored", "interrupted", "notFound"}:
-                status = "failed"
-            else:
-                status = "completed"
-            entries.append({
-                "agent_id": agent_id,
-                "parent_agent_id": str(item.get("parent_agent_id") or ""),
-                "messages": _render_codex_thread(thread, chat),
-                "tool_use_id": str(item.get("tool_use_id") or ""),
-                "description": str(item.get("description") or ""),
-                "subagent_type": "codex",
-                "is_async": True,
-                "status": status,
-                "turn_index": int(item.get("root_turn_index") or 0),
-            })
-        return JSONResponse(entries)
-
     if getattr(chat, "provider", "claude") == "opencode":
         opencode_entries: list[dict] = []
-        for item in await OpencodeProvider.read_collab_tree(
-            config.workspace_root, chat.session_id
+        provider_service = pcm._providers.get(chat_id)
+        live_provider = provider_service.provider if provider_service is not None else None
+        if (
+            isinstance(live_provider, OpencodeProvider)
+            and live_provider.has_live_server
+            and live_provider.current_session_id == chat.session_id
         ):
+            collab_tree = await live_provider.read_live_collab_tree()
+        else:
+            collab_tree = await OpencodeProvider.read_collab_tree(
+                config.workspace_root, chat.session_id
+            )
+        for item in collab_tree:
             info = item.get("info")
             info = info if isinstance(info, dict) else {}
             agent_id = str(info.get("id") or "")
@@ -3463,25 +3672,42 @@ async def chat_subagents(request: Request) -> JSONResponse:
             })
         return JSONResponse(opencode_entries)
 
+    if getattr(chat, "provider", "claude") not in {"claude", "opencode"}:
+        return JSONResponse([])
+
     workspace = str(config.workspace_root)
+    resolver = getattr(pcm, "_agent_root_for_chat", None)
+    agent_root = resolver(chat_id) if resolver is not None else None
 
     def _finalize(entries: list[dict]) -> JSONResponse:
         _merge_subagent_dispatch_meta(
-            entries, chat.session_id, Path(config.workspace_root)
+            entries, chat.session_id, Path(config.workspace_root), agent_root=agent_root
         )
         return JSONResponse(entries)
 
     try:
         from claude_agent_sdk import get_subagent_messages, list_subagents
     except ImportError:
-        return _finalize(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
+        return _finalize(
+            _local_subagent_transcripts(
+                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+            )
+        )
 
     try:
         agent_ids = list_subagents(chat.session_id, directory=workspace)
     except (FileNotFoundError, ValueError):
-        return _finalize(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
+        return _finalize(
+            _local_subagent_transcripts(
+                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+            )
+        )
     except Exception:  # noqa: BLE001 — defensive against SDK surprises
-        return _finalize(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
+        return _finalize(
+            _local_subagent_transcripts(
+                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+            )
+        )
 
     result: list[dict] = []
     for agent_id in agent_ids:
@@ -3500,18 +3726,22 @@ async def chat_subagents(request: Request) -> JSONResponse:
         result.append({"agent_id": agent_id, "messages": rendered})
 
     if not result:
-        result = _local_subagent_transcripts(chat.session_id, Path(config.workspace_root))
+        result = _local_subagent_transcripts(
+            chat.session_id, Path(config.workspace_root), agent_root=agent_root
+        )
 
     return _finalize(result)
 
 
 def _merge_subagent_dispatch_meta(
-    entries: list[dict], session_id: str, workspace_root: Path
+    entries: list[dict], session_id: str, workspace_root: Path, *, agent_root: Path | None = None
 ) -> None:
     """Attach dispatch metadata from the parent session JSONL in place."""
     if not entries:
         return
-    path = subagent_tracking.find_parent_session_file(session_id, workspace_root)
+    path = subagent_tracking.find_parent_session_file(
+        session_id, workspace_root, agent_root=agent_root
+    )
     if path is None:
         return
     try:
@@ -3677,7 +3907,7 @@ _WORKSPACE_FILE_EXTS = frozenset({
     ".css", ".html", ".json",
     ".yaml", ".yml", ".toml",
     ".sh", ".rs", ".go", ".java", ".xml", ".sql",
-    ".cfg", ".ini", ".log", ".csv", ".excalidraw",
+    ".cfg", ".ini", ".log", ".csv",
 })
 # Intentionally excluded: .env, .example — these commonly hold secrets or
 # sample secrets. The viewer is a read-only inspector and should not serve
@@ -4124,11 +4354,16 @@ async def vault_graph(request: Request) -> JSONResponse:
     """
     config = request.app.state.config
     workspace = request.query_params.get("workspace", "").strip() or None
-    # scan_vault reads and parses every markdown file in the vault; run it off
-    # the event loop so a large vault doesn't stall other requests, including
-    # the 5s chat-socket keepalives (see chat_messages above for the same fix).
-    entries = await asyncio.to_thread(scan_vault, config.vault_root)
-    workspaces = sorted({e.workspace for e in entries})
+    # Every vault in the install, which is ONE shared vault before the
+    # re-rooting and one per agent root after it. Scanning `config.vault_root`
+    # returned zero notes on a migrated install, so the whole map went blank.
+    # Reads and parses every markdown file, so run it off the event loop or a
+    # large vault stalls other requests, including the 5s chat-socket keepalives
+    # (see chat_messages above for the same fix).
+    entries, absolute = await asyncio.to_thread(
+        scan_targets, config.vault_scan_targets()
+    )
+    workspaces = sorted({e.workspace for e in entries if e.workspace})
     scoped = filter_entries(entries, workspace=workspace) if workspace else entries
     graph = _build_graph(scoped)
     by_path = {str(e.path) for e in scoped}
@@ -4137,17 +4372,38 @@ async def vault_graph(request: Request) -> JSONResponse:
     # most recently, which is a far more useful entry point than "whatever the
     # biggest hub is". Entry carries no timestamp, so stat the files here; it is
     # one stat per note against files scan_vault has just read anyway.
-    vault_root = Path(config.vault_root).expanduser()
-
     def _mtime(rel: str) -> float:
-        prefix = "memory-vault/"
-        tail = rel[len(prefix):] if rel.startswith(prefix) else rel
+        # Resolved through the scan's own map. Rendered paths are no longer a
+        # fixed offset from one vault root, so stripping a `memory-vault/`
+        # prefix and joining resolved to nothing on a migrated install and every
+        # note reported mtime 0 — which silently broke the map's "most recently
+        # touched note" entry point rather than failing loudly.
+        target = absolute.get(rel)
+        if target is None:
+            return 0.0
         try:
-            return (vault_root / tail).stat().st_mtime
+            return target.stat().st_mtime
         except OSError:
             # A note indexed but unreadable (race with a delete, broken
             # symlink) must not fail the whole graph request.
             return 0.0
+
+    # Aging uses the same thresholds as the audit and the daily curation pass,
+    # so the map's "needs review" list cannot disagree with what the routine
+    # acts on. One shared detector, three consumers.
+    from ciao.memory_audit import (
+        note_last_verified,
+        note_threshold_days,
+    )
+
+    current_date = datetime.now(UTC).date()
+
+    def _staleness(e) -> tuple[bool, int | None]:
+        verified, _source = note_last_verified(e.updated, _mtime(str(e.path)))
+        if verified is None:
+            return False, None
+        age_days = (current_date - verified).days
+        return age_days >= note_threshold_days((e.type or "").strip()), age_days
 
     nodes = [
         {
@@ -4160,6 +4416,8 @@ async def vault_graph(request: Request) -> JSONResponse:
             "workspace": e.workspace,
             "degree": len(graph.get(str(e.path), ())),
             "mtime": _mtime(str(e.path)),
+            "updated": e.updated,
+            **dict(zip(("stale", "age_days"), _staleness(e))),
         }
         for e in scoped
     ]
@@ -4201,21 +4459,61 @@ async def vault_delete_note(request: Request) -> JSONResponse:
     raw = request.query_params.get("path", "").strip()
     if not raw:
         return JSONResponse({"error": "missing path"}, status_code=400)
-    if not raw.startswith("memory-vault/"):
-        return JSONResponse({"error": "not a vault note"}, status_code=400)
     if Path(raw).suffix.lower() not in {".md", ".markdown"}:
         return JSONResponse({"error": "unsupported type"}, status_code=415)
 
-    try:
-        vault_root = Path(config.vault_root).expanduser().resolve()
-        resolved = (vault_root / Path(raw[len("memory-vault/"):])).resolve()
-        resolved.relative_to(vault_root)
-    except (OSError, ValueError):
-        return JSONResponse({"error": "bad path"}, status_code=400)
+    # The id is a path rendered by the scan, which is `memory-vault/...` on a
+    # shared vault and `<root>/memory-vault/...` per agent root. Matching a fixed
+    # `memory-vault/` prefix rejected every id on a migrated install, so the
+    # Memory Map could not delete anything, and a matching prefix joined to
+    # `config.vault_root` would have resolved outside any real vault. Resolving
+    # against the scan's own targets keeps the containment check meaningful:
+    # exactly one vault can own the note, and it must be under that one.
+    vault_root = None
+    resolved = None
+    vault_prefix = None
+    for target, _name, prefix in config.vault_scan_targets():
+        marker = f"{prefix.as_posix()}/"
+        if not raw.startswith(marker):
+            continue
+        try:
+            candidate_root = Path(target).expanduser().resolve()
+            candidate = (candidate_root / Path(raw[len(marker):])).resolve()
+            candidate.relative_to(candidate_root)
+        except (OSError, ValueError):
+            continue
+        vault_root, resolved, vault_prefix = candidate_root, candidate, prefix
+        break
+    if resolved is None or vault_root is None:
+        return JSONResponse({"error": "not a vault note"}, status_code=400)
     if not resolved.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    edited = await asyncio.to_thread(strip_references, vault_root, raw)
+    # Probe the target directory before any backlink is rewritten: an
+    # unwritable folder used to fail only at the final unlink, by which time
+    # strip_references had already stripped live references out of other
+    # notes. With the probe plus the staged cleanup, the residual window on
+    # the unlink below is negligible; if it ever fires, the vault keeps both
+    # the target and its valid references.
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=resolved.parent, prefix=".ciao-delete-", suffix=".probe"
+        ):
+            pass
+    except OSError as exc:
+        return JSONResponse({"error": f"cannot delete: {exc}"}, status_code=500)
+
+    # The prefix the id was rendered with, not the helper's default: without it
+    # the cleanup scan compares `memory-vault/...` against a `<root>/...` id,
+    # matches nothing, and leaves every backlink dangling.
+    try:
+        edited = await asyncio.to_thread(
+            functools.partial(strip_references, vault_root, raw, path_prefix=vault_prefix)
+        )
+    except OSError as exc:
+        # strip_references is all-or-nothing: a raise here means every staged
+        # rewrite was rolled back and the vault is exactly as before.
+        return JSONResponse({"error": f"backlink cleanup failed: {exc}"}, status_code=500)
     try:
         await asyncio.to_thread(resolved.unlink)
     except OSError as exc:
@@ -4952,7 +5250,14 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if "enabled" in body:
         entry.enabled = bool(body["enabled"])
-    store.replace(entry)
+    try:
+        store.replace(entry)
+    except ValueError as exc:
+        # A fanned-out system routine's workspace is part of its id, so the
+        # store refuses to "move" it. That is a bad request, not a server
+        # fault: the PWA hides the control for those rows, but a direct API
+        # caller would otherwise get a 500 for asking something answerable.
+        return JSONResponse({"error": str(exc)}, status_code=400)
     pcm = request.app.state.project_chat_manager
     return JSONResponse(_enrich_schedule(entry, pcm))
 
@@ -5135,39 +5440,14 @@ async def run_loop_now(request: Request) -> JSONResponse:
 
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
-    # `?refresh=1` bypasses the provider catalog caches. Each provider serves its
-    # own catalog on demand, so there is nothing to warm at startup; this is the
-    # on-demand equivalent, used by the Settings tab so a provider connected in
-    # another window shows up without waiting out the TTL.
+    # `?refresh=1` bypasses the opencode catalog cache. The catalog is served on
+    # demand so a provider connected in another window shows up immediately.
     refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
-    # Independent per-provider discovery calls (each may spin up an app-server
-    # and round-trip an RPC) — sequential awaits summed their latencies, so a
-    # cold cache (the 5-minute TTL lapses between normal chat-creation gaps)
-    # stalled every "New Chat" for as long as both providers took combined.
-    codex_catalog, opencode_catalog = await asyncio.gather(
-        CodexProvider.model_catalog(config.workspace_root, force=refresh),
-        OpencodeProvider.model_catalog(config.workspace_root, force=refresh),
+    opencode_catalog = await OpencodeProvider.model_catalog(
+        config.workspace_root, force=refresh
     )
-    visible_codex = [item for item in codex_catalog if not item.get("hidden")]
-    codex_models = [
-        str(item.get("model") or item.get("id") or "")
-        for item in visible_codex
-        if str(item.get("model") or item.get("id") or "")
-    ]
-    codex_default = next(
-        (
-            str(item.get("model") or item.get("id") or "")
-            for item in visible_codex
-            if item.get("isDefault")
-        ),
-        codex_models[0] if codex_models else "",
-    )
-    # The operator's per-provider default model wins over the catalog default.
-    codex_operator_default = config.default_model_for_provider("codex")
-    if codex_operator_default in codex_models:
-        codex_default = codex_operator_default
     # opencode is bring-your-own-provider: its catalog is whatever backends the
     # user has connected, so an empty list simply means "not signed in yet".
     opencode_models = [
@@ -5178,30 +5458,13 @@ async def list_models(request: Request) -> JSONResponse:
         opencode_default = opencode_operator_default
     else:
         opencode_default = opencode_models[0] if opencode_models else ""
-    # Per-model reasoning-effort variants, merged into the same map the PWA
-    # already reads for Codex so the picker needs no provider-specific branch.
+    # Per-model reasoning-effort variants for opencode.
     opencode_reasoning_levels = {
         str(item.get("model")): list(item.get("variants") or [])
         for item in opencode_catalog
         if item.get("model")
     }
-    model_reasoning_levels = {
-        **opencode_reasoning_levels,
-        **_codex_reasoning_levels(codex_catalog),
-    }
-    codex_model_metadata: dict[str, dict] = {}
-    for item in visible_codex:
-        model_id = str(item.get("model") or item.get("id") or "")
-        if not model_id:
-            continue
-        codex_model_metadata[model_id] = {
-            "display_name": str(item.get("displayName") or model_id),
-            "description": str(item.get("description") or ""),
-            "default_reasoning_effort": str(
-                item.get("defaultReasoningEffort") or ""
-            ),
-            "input_modalities": list(item.get("inputModalities") or []),
-        }
+    model_reasoning_levels = opencode_reasoning_levels
     # Claude Code serves one upstream, so its models are a single list rather
     # than the work/personal split the routing-backend era needed.
     claude_models = list(config.claude_models)
@@ -5216,21 +5479,16 @@ async def list_models(request: Request) -> JSONResponse:
         "default": config.claude_default_model,
         "provider_models": {
             "claude": claude_models,
-            "codex": codex_models,
             "opencode": opencode_models,
         },
         "provider_defaults": {
             "claude": claude_default,
-            "codex": codex_default,
             "opencode": opencode_default,
         },
         "backends": {
             "anthropic": True,
-            "codex": bool(codex_models),
             "opencode": bool(opencode_models),
         },
-        "codex_models": codex_models,
-        "codex_model_metadata": codex_model_metadata,
         "opencode_models": opencode_models,
         # Registry-driven descriptors so the PWA can build its provider list
         # (labels, buckets, capabilities) without a hard-coded union.
@@ -5294,13 +5552,6 @@ def _routines_payload(config, app_settings) -> dict:
         "provider_default_thinking": s.provider_default_thinking or {},
         # Per-provider routine models, as stored (missing = provider default).
         "provider_insights_models": s.provider_insights_models or {},
-        # Per-provider default execution mode for new chats, as stored
-        # (missing = built-in default). Effective defaults below.
-        "provider_default_modes": s.provider_default_modes or {},
-        "provider_default_modes_effective": {
-            item.id: config.default_mode_for_provider(item.id)
-            for item in provider_registry.descriptors()
-        },
         # What actually runs right now, after defaults.
         "insights_model_effective": insights_effective,
         # Per-workspace resolution for the Automatic case; empty when overridden.
@@ -5337,7 +5588,18 @@ def _routines_payload(config, app_settings) -> dict:
         },
         "workspace_context": {
             "workspace_root": str(config.workspace_root),
+            # `vault_root` is the configured path, which after the re-rooting is
+            # the emptied shared one — true but useless on its own, so the vaults
+            # that actually hold notes are reported beside it.
             "vault_root": str(config.vault_root),
+            "vault_roots": [
+                {"workspace": name, "path": str(root)}
+                for root, name, _prefix in (
+                    config.vault_scan_targets()
+                    if hasattr(config, "vault_scan_targets")
+                    else []
+                )
+            ],
         },
     }
 
@@ -6318,9 +6580,39 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
 
 async def admin_skills(request: Request) -> JSONResponse:
-    """List skills known to Ciaobot, labelled as custom or GitHub/package."""
+    """List skills known to Ciaobot, labelled as custom or GitHub/package.
+
+    Merged across every agent root. Reading `workspace_root` alone showed
+    `{custom: 0, github: 0, stock: 29}` on a migrated install — measured — while
+    19 custom and 7 upstream skills sat in the primary root's catalog. The page
+    looked empty.
+
+    A skill of the same name in two roots is reported once, with the workspaces
+    that hold it, because the page is a catalog rather than a per-root listing
+    and two rows for one name reads as a duplicate rather than as sharing.
+    """
     config = request.app.state.config
-    return JSONResponse(build_skill_inventory(config.workspace_root))
+    targets = getattr(config, "agent_root_targets", None)
+    roots = list(targets()) if callable(targets) else [(config.workspace_root, "")]
+
+    merged: dict[str, dict] = {}
+    counts: dict[str, int] = {}
+    for root, name in roots:
+        inventory = build_skill_inventory(root)
+        for skill in inventory.get("skills", []):
+            key = str(skill.get("name") or "")
+            existing = merged.get(key)
+            if existing is None:
+                skill["workspaces"] = [name] if name else []
+                merged[key] = skill
+                counts[str(skill.get("label") or "")] = (
+                    counts.get(str(skill.get("label") or ""), 0) + 1
+                )
+            elif name and name not in existing.get("workspaces", []):
+                existing.setdefault("workspaces", []).append(name)
+    return JSONResponse(
+        {"counts": counts, "skills": [merged[k] for k in sorted(merged)]}
+    )
 
 
 async def admin_add_skill(request: Request) -> JSONResponse:
@@ -6577,3 +6869,981 @@ async def cli_stats(request: Request) -> JSONResponse:
     except (json.JSONDecodeError, OSError):
         return JSONResponse({"error": "failed to read stats"}, status_code=500)
     return JSONResponse(data)
+
+
+# ── Proposal queue ──────────────────────────────────────────────────────
+
+
+# A section header opens with a date (either a plain ``YYYY-MM-DD`` or the
+# timestamped ``YYYY-MM-DDThh:mm:ss+00:00`` form the curators append). The date
+# is what ``dismiss-older-than`` buckets rows against.
+_SECTION_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})")
+# The queue file lives at this relative path inside each workspace's vault.
+_PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
+# Skill-proposal files live under this folder, one dated file per candidate.
+_SKILL_PROPOSALS_REL = ("Workspace", "Skill-Proposals")
+
+
+def _proposals_file(config, workspace: str) -> Path:
+    """The proposal queue for one workspace, rooted at its vault folder."""
+    return Path(config.workspace_vault_root(workspace)).joinpath(*_PROPOSALS_REL)
+
+
+def _skill_proposals_dir(config, workspace: str) -> Path:
+    """The skill-proposal queue folder for one workspace."""
+    return Path(config.workspace_vault_root(workspace)).joinpath(*_SKILL_PROPOSALS_REL)
+
+
+def _remove_bullet_line(lines: list[str], line_index: int, raw: str) -> bool:
+    """Drop the bullet *raw*, verifying the index before trusting it.
+
+    `_scan_proposal_rows` captures a line index, and an accept can then await an
+    unbounded model call before the queue file is rewritten - with no lock
+    anywhere. A second accept or dismiss landing in that window shifts every
+    later index, so deleting by index alone removed an UNRELATED proposal and
+    left the accepted one queued. The index is now only a hint: the content has
+    to match, otherwise the bullet is located by text, and a bullet that is
+    already gone is a no-op rather than someone else's line.
+    """
+    wanted = raw.strip()
+    if 0 <= line_index < len(lines) and lines[line_index].strip() == wanted:
+        del lines[line_index]
+        return True
+    for index, line in enumerate(lines):
+        if line.strip() == wanted:
+            del lines[index]
+            return True
+    return False
+
+
+def _stable_proposal_id(workspace: str, path: str, kind: str, text: str, source: str, dup: int) -> str:
+    """A content-derived, stable id for one queued proposal.
+
+    The id hashes the bullet's content plus the workspace and file it lives in,
+    so dismissing a neighbouring row never renumbers or renames a survivor.
+    ``dup`` is the occurrence index among identical bullets inside one file,
+    used only to keep two textually identical rows addressable; it is stable
+    because it counts only same-file duplicates, which are unaffected by rows
+    in other files (or non-duplicate rows in this one) being removed.
+    """
+    digest = hashlib.sha256(f"{workspace}\x00{path}\x00{kind}\x00{text}\x00{source}".encode("utf-8")).hexdigest()[:16]
+    return f"{digest}{f':{dup}' if dup else ''}"
+
+
+def _rehome_signal(config) -> dict[str, dict[str, Any]]:
+    """Live rehome evidence for every person note, keyed by its queue path.
+
+    Re-computed from the vault rather than trusted from the bullet text: the
+    bullet records the destination and reason at queue time, but the UI needs
+    to know whether that destination is backed by a tag signal *now*. Keys are
+    the vault-relative path forms the bullet names (``personal/People/Mo.md``).
+    """
+    try:
+        candidates = vault_rehome.detect_misfiled_people(
+            config.vault_root,
+            workspaces=config.workspace_names(),
+            # Every vault in the install. Scanning `config.vault_root` returned
+            # zero candidates on a migrated install, so the proposals UI silently
+            # lost every re-home hint.
+            targets=(
+                config.vault_scan_targets()
+                if hasattr(config, "vault_scan_targets")
+                else None
+            ),
+        )
+    except Exception:  # noqa: BLE001 — a broken scan must not fail the list route
+        logger.exception("proposal list: rehome signal scan failed")
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    roles = vault_rehome.resolve_role_workspaces(list(config.workspace_names()))
+    for candidate in candidates:
+        # Only a single clean signal makes a destination justified; every
+        # judgement case the queue holds is explicitly not that.
+        justified = candidate.bucket == "mechanical" and bool(candidate.destination)
+        # The candidate set is tag-derived, not the guess: a no-tag note names
+        # no workspace even though a default counterpart was computed, and a
+        # dual-tag note names both. A UI renders these as a picker.
+        signalled_roles = {
+            vault_rehome.TAG_WORKSPACE_ROLES[t]
+            for t in candidate.tags
+            if t in vault_rehome.TAG_WORKSPACE_ROLES
+        }
+        candidate_ws = sorted({roles[role] for role in signalled_roles if role in roles} - {""})
+        out[candidate.path] = {
+            "destination": candidate.destination,
+            "target_workspace": candidate.target_workspace,
+            "reason": candidate.reason,
+            "justified": justified,
+            # Every workspace the tags name is a candidate destination. A
+            # dual-tag row yields two, so a UI can render a picker instead of a
+            # single pre-filled accept.
+            "candidates": candidate_ws,
+        }
+    return out
+
+
+def _leak_warning(config, kind: str, workspace: str) -> bool:
+    """True when accepting this row would leak a region into the wrong session.
+
+    A ``[memory]`` / ``[profile]`` accept edits one CLAUDE.md region. While one
+    guide is shared by every workspace, a proposal queued from another workspace
+    and accepted here writes a fact into sessions that did not originate it.
+    Region-edit kinds only: a rehome is a file move, not a region write, so it
+    never leaks.
+
+    Per-workspace guides have LANDED, which retires this for a migrated install:
+    ``_promote_region_row`` resolves the guide through ``agent_root``, so a work
+    row is written into work's own ``CLAUDE.md`` and nothing else loads it. The
+    condition used to be "not the primary workspace" with the comment "until
+    per-workspace guides land", so after the re-rooting it told the operator that
+    accepting their own work row would be "visible in every workspace" — of a
+    guide only that workspace reads. A warning that is false is worse than none:
+    it teaches the operator to click through warnings.
+    """
+    try:
+        accept = proposal_kinds.accept_for(kind)
+    except proposal_kinds.UnknownKindError:
+        return False
+    if accept.action != "edit_region":
+        return False
+    try:
+        shared_guide = Path(config.agent_root(workspace)) == Path(config.workspace_root)
+    except (AttributeError, ValueError):
+        # No agent_root seam to ask: assume the shared layout, which is the
+        # answer that warns rather than the one that stays quiet.
+        shared_guide = True
+    if not shared_guide:
+        return False
+    return bool(workspace != config.primary_workspace())
+
+
+def _perform_rehome_move(config, row: dict[str, Any], target: str) -> dict[str, Any]:
+    """Move a queued person note into ``target``, links and all.
+
+    Until now a rehome accept dropped the bullet and moved nothing — the panel
+    said so in prose ("Re-home rows are not moved here") and `move_file` was a
+    declared accept descriptor that nothing handled. So the queue could ask the
+    question and never carry out the answer.
+
+    The row names the note in RENDERED identity form (``personal/People/Mo.md``);
+    the mover works install-relative (``personal/memory-vault/People/Mo.md``),
+    because that is the space in which a relative link's arithmetic is real. The
+    leaf comes from the workspace's own vault directory rather than a constant,
+    for the same reason the rebuilds take it.
+    """
+    from ciao.vault_rehome import move_note_between_roots
+
+    note = str((row.get("rehome") or {}).get("note") or "")
+    parts = Path(note).parts
+    if len(parts) < 2:
+        return {"ok": False, "error": f"the bullet does not name a note ({note!r})"}
+    workspace = parts[0]
+    try:
+        install_root = Path(config.workspace_root)
+        vault = Path(config.workspace_vault_root(workspace))
+        relative_vault = vault.relative_to(install_root)
+        targets = config.vault_scan_targets()
+        names = list(config.workspace_names())
+    except (AttributeError, ValueError) as exc:
+        return {"ok": False, "error": f"could not resolve the vault layout: {exc}"}
+    # Derived from the registry, never assumed: the vault sits at
+    # `<workspace>/<leaf>` per root and at `<leaf>/<workspace>` while shared. The
+    # mover moves a note BETWEEN roots, which only exist in the first shape, so
+    # the second is refused with the reason rather than silently building
+    # `personal/personal/People/Mo.md` and reporting the note missing.
+    vault_parts = relative_vault.parts
+    if len(vault_parts) != 2 or vault_parts[0] != workspace:
+        return {
+            "ok": False,
+            "error": (
+                f"'{workspace}' does not have its own workspace folder yet "
+                f"(its vault is {relative_vault.as_posix()}), so there is no other "
+                "root to move a note into"
+            ),
+        }
+    source = (relative_vault / Path(*parts[1:])).as_posix()
+    result = move_note_between_roots(
+        install_root, source, target, targets=targets, workspaces=names, apply=True
+    )
+    if result["refusals"]:
+        return {"ok": False, "error": result["refusals"][0], "move": result}
+    return {
+        "ok": True,
+        "destination": result["destination"],
+        "files_rewritten": result["files_rewritten"],
+        "already_moved": bool(result.get("already_moved")),
+        "move": result,
+    }
+
+
+def _rehome_target(row: dict[str, Any], requested: str) -> tuple[str, str]:
+    """The workspace a rehome accept should move into, or an error.
+
+    An explicit request wins, because a row whose tags name two workspaces is a
+    question only the operator can answer. Otherwise the destination has to be
+    backed by a single clean tag signal — accepting an unjustified guess would
+    move somebody's note on the strength of nothing.
+    """
+    signal = row.get("rehome") or {}
+    if requested:
+        # Any registered workspace, not only the ones the tags name. The tags are
+        # a hint; the operator asking is the authority, and most queued rows have
+        # no tag naming anywhere — restricting the choice to tag-named candidates
+        # left every one of the reference install's fourteen rows unmovable, which
+        # is the complaint that started this. `move_note_between_roots` still
+        # refuses an unregistered name.
+        return requested, ""
+    if not signal.get("justified"):
+        return "", "no tag backs a destination for this note, so pick one explicitly"
+    destination = str(signal.get("destination") or "")
+    target = Path(destination).parts[0] if destination else ""
+    if not target:
+        return "", "the signal names no destination workspace"
+    return target, ""
+
+
+def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Scan every workspace's proposal queue and skill-proposal folder.
+
+    Returns (rows, by_id) where ``by_id`` maps a stable id to the file context
+    needed to remove that row later (workspace, absolute path, line index). Each
+    row carries the queue fields plus kind-specific signal: a rehome exposes
+    candidate destinations and whether any is justified, and a region accept
+    from a foreign workspace carries the leak warning.
+    """
+    rows: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    rehome = _rehome_signal(config)
+    ws_names = list(config.workspace_names())
+
+    for workspace in config.workspace_names():
+        queue = _proposals_file(config, workspace)
+        rel_path = Path(workspace).joinpath(*_PROPOSALS_REL).as_posix()
+        seen_dup: dict[tuple[str, str, str], int] = {}
+        if queue.is_file():
+            for line_index, raw in enumerate(queue.read_text(encoding="utf-8").splitlines()):
+                bullet = proposal_kinds.parse_bullet(raw)
+                if bullet is None:
+                    continue
+                key = (bullet.kind, bullet.text, bullet.source)
+                dup = seen_dup.get(key, 0)
+                seen_dup[key] = dup + 1
+                pid = _stable_proposal_id(workspace, rel_path, bullet.kind, bullet.text, bullet.source, dup)
+                row: dict[str, Any] = {
+                    "id": pid,
+                    "kind": bullet.kind,
+                    "text": bullet.text,
+                    "source": bullet.source,
+                    "workspace": workspace,
+                    "path": rel_path,
+                    "line": line_index,
+                    # The line as read. The index alone is not enough to delete
+                    # by: an accept can await a model call, and a concurrent
+                    # accept/dismiss rewrites the file underneath it.
+                    "raw": raw,
+                }
+                if bullet.target:
+                    # The payload a destination kind acts on: the person name
+                    # for [people], the doc path for [project]. Region kinds
+                    # and rehome carry none.
+                    row["target"] = bullet.target
+                accept = proposal_kinds.accept_for(bullet.kind)
+                if accept.action == "edit_region":
+                    row["region"] = resolve_region(bullet.kind)
+                    row["leak_warning"] = _leak_warning(config, bullet.kind, workspace)
+                elif accept.action == "move_file":
+                    # Rehome rows: expose the live signal. The destination named
+                    # in the bullet is a guess unless the tags justify it, and a
+                    # dual-tag note names more than one candidate.
+                    signal = _rehome_lookup(rehome, bullet.text, ws_names)
+                    row["rehome"] = {
+                        # The note this row is about, so a UI can show a name and
+                        # a direction instead of reprinting the whole bullet.
+                        "note": signal["note"],
+                        "destination": signal["destination"],
+                        "candidates": signal["candidates"],
+                        "justified": signal["justified"],
+                        "reason": signal["reason"],
+                    }
+                rows.append(row)
+                by_id[pid] = {
+                    "workspace": workspace,
+                    "path": str(queue),
+                    "line": line_index,
+                    "row": row,
+                }
+        # Skill proposals are files, not bullets: no parse_bullet, no accept
+        # descriptor, and a whole file is the atomic unit.
+        #
+        # They are registered in `by_id` all the same, with `file: True` so the
+        # handlers can tell a file from a bullet. Listing them without
+        # registering them left the read surface working and the write surface
+        # missing: the UI renders a dismiss button per row, and every one of the
+        # 49 skill rows on a real vault answered 404 "unknown proposal id" —
+        # from both the single-row and the batch endpoint. A row you cannot act
+        # on is a notification wearing a button.
+        skill_dir = _skill_proposals_dir(config, workspace)
+        if skill_dir.is_dir():
+            for f in sorted(skill_dir.glob("*.md")):
+                row_id = _stable_proposal_id(workspace, rel_path, "skill", f.name, "", 0)
+                row = {
+                    "id": row_id,
+                    "kind": "skill",
+                    "text": f.stem,
+                    "source": "",
+                    "workspace": workspace,
+                    "path": Path(workspace).joinpath(*_SKILL_PROPOSALS_REL, f.name).as_posix(),
+                    "line": -1,
+                }
+                rows.append(row)
+                by_id[row_id] = {
+                    "workspace": workspace,
+                    "path": str(f),
+                    "line": -1,
+                    "row": row,
+                    "file": True,
+                }
+    return rows, by_id
+
+
+def _dismiss_skill_proposal(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Take one skill-proposal FILE out of the queue.
+
+    A reviewed proposal is a resolved decision: whether it was implemented or
+    disregarded, keeping the file in the queue re-asks the same question. So
+    dismiss deletes it rather than moving it aside — the queue is globbed one
+    level deep, so either clears it, and the decision is the operator's to keep
+    in the Curation-Log. A missing file is already gone, not an error.
+    """
+    source = Path(ctx["path"])
+    if not source.is_file():
+        return {"ok": True, "deleted": True}
+    try:
+        source.unlink()
+    except OSError as exc:
+        return {"ok": False, "error": f"could not delete {source.name}: {exc}"}
+    return {"ok": True, "deleted": True}
+
+
+def _rehome_lookup(
+    rehome: dict[str, dict[str, Any]], text: str, workspaces: Sequence[str] = ()
+) -> dict[str, Any]:
+    """Resolve a rehome bullet's live signal from its named path.
+
+    The bullet names the source path in backticks (``personal/People/Mo.md``);
+    pull that out and match it against the scan keyed by path.
+
+    The alternation is built from the REGISTERED workspace names rather than
+    hardcoding ``personal|work``: a workspace named anything else never matched,
+    so its rows silently showed "no live rehome signal" forever. Escaped, because
+    a workspace name is the user's and may contain regex metacharacters.
+    """
+    names = [re.escape(n) for n in workspaces if n] or [r"[^/`]+"]
+    m = re.search(rf"`((?:{'|'.join(names)})/[^`]+\.md)`", text)
+    path = m.group(1) if m else ""
+    signal = rehome.get(path)
+    if signal is None:
+        # The bullet outlived its cause: the note was tagged, moved, or a later
+        # rule settled it, and nothing re-detects it now. Marked `stale` rather
+        # than left looking undecided — the queue rendered it identically to a
+        # genuine "needs a decision" row, so the operator could not tell which
+        # rows were asking them something and which were just litter. Two of the
+        # reference install's fourteen are in this state.
+        return {
+            "note": path,
+            "destination": "",
+            "candidates": [],
+            "justified": False,
+            "stale": True,
+            "reason": "no live rehome signal for this note",
+        }
+    return {"note": path, "stale": False, **signal}
+
+
+async def list_proposals(request: Request) -> JSONResponse:
+    """Return every queued proposal across workspaces, plus skill proposals.
+
+    Rows are keyed by a stable content-derived id so a UI can act on one without
+    a later dismiss renumbering it (see ``_stable_proposal_id``). Rehome rows
+    carry candidate destinations and a ``justified`` flag, so the UI never
+    pre-fills an accept for a destination no tag backs. Skill-proposal files are
+    surfaced under the same ``rows`` list with ``kind: "skill"``.
+    """
+    config = request.app.state.config
+    rows, _by_id = _scan_proposal_rows(config)
+    return JSONResponse({"rows": rows})
+
+
+def _resolve_batch(config, ids: list[str]) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Map ids to removable file contexts, or return an error.
+
+    Returns (None, error) on the first unknown id: the whole batch must resolve
+    before anything is written, so an unknown id aborts the batch without
+    touching any file.
+    """
+    _, by_id = _scan_proposal_rows(config)
+    resolved: list[dict[str, Any]] = []
+    for pid in ids:
+        ctx = by_id.get(pid)
+        if ctx is None:
+            return None, f"unknown proposal id: {pid}"
+        resolved.append(ctx)
+    return resolved, None
+
+
+async def dismiss_older_than(request: Request) -> JSONResponse:
+    """Atomically drop every queued row dated before a cutoff.
+
+    A July proposal about a forgotten chat is not worth promoting; this clears
+    whole dated sections at once. Atomic: all matching rows are removed in one
+    rewrite of each affected file, so a crash mid-batch leaves no file half
+    written.
+    """
+    config = request.app.state.config
+    raw = request.query_params.get("date", "").strip()
+    try:
+        cutoff = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return JSONResponse({"error": "date must be YYYY-MM-DD"}, status_code=400)
+    removed = 0
+    for workspace in config.workspace_names():
+        queue = _proposals_file(config, workspace)
+        if not queue.is_file():
+            continue
+        lines = queue.read_text(encoding="utf-8").splitlines()
+        keep = []
+        section_date = None
+        changed = False
+        for raw_line in lines:
+            m = _SECTION_DATE_RE.match(raw_line)
+            if m:
+                section_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+                keep.append(raw_line)
+                continue
+            if proposal_kinds.parse_bullet(raw_line) is not None and section_date is not None and section_date < cutoff:
+                removed += 1
+                changed = True
+                continue
+            keep.append(raw_line)
+        if changed:
+            queue.write_text("\n".join(keep).rstrip() + "\n", encoding="utf-8")
+    return JSONResponse({"ok": True, "removed": removed})
+
+
+async def proposals_batch(request: Request) -> JSONResponse:
+    """Accept or dismiss a set of proposals atomically.
+
+    Body: ``{"action": "accept"|"dismiss", "ids": [...]}``. Every id must
+    resolve or the batch is rejected with 404 and no file changes. ``accept``
+    routes through each row's own descriptor (region edit for memory/profile,
+    a file move for rehome) and returns per-row results; it never performs the
+    edit itself, matching the MCP resolve path where promotion is a separate
+    explicit step.
+    """
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    action = str(body.get("action", "")).strip()
+    raw_ids = body.get("ids")
+    if action not in {"accept", "dismiss"} or not isinstance(raw_ids, list) or not raw_ids:
+        return JSONResponse({"error": "action must be accept|dismiss and ids[] is required"}, status_code=400)
+    ids = [str(pid).strip() for pid in raw_ids]
+    requested_workspace = str(body.get("workspace", "") or "").strip()
+    resolved, error = _resolve_batch(config, ids)
+    if error or resolved is None:
+        return JSONResponse({"error": error}, status_code=404)
+
+    # Re-home rows are MOVES, so they are handled before the queue-file grouping
+    # too, and one at a time: each move rewrites references across both vaults, so
+    # the second move has to see what the first one wrote. Off the event loop for
+    # the same reason as the single-row path — a sweep per row is real work, and a
+    # cancelled handler leaves notes moved with their rows still queued.
+    move_rows = [
+        ctx for ctx in resolved
+        if action == "accept" and ctx["row"].get("kind") == "rehome"
+    ]
+    results_moves: list[dict[str, Any]] = []
+    moved_ids: set[str] = set()
+    for ctx in move_rows:
+        row = ctx["row"]
+        target, target_error = _rehome_target(row, requested_workspace)
+        if target_error:
+            results_moves.append({
+                "id": row["id"], "action": "move_file", "dismissed": False,
+                "error": target_error,
+            })
+            continue
+        outcome = await asyncio.to_thread(_perform_rehome_move, config, row, target)
+        if not outcome.get("ok"):
+            results_moves.append({
+                "id": row["id"], "action": "move_file", "dismissed": False,
+                "error": outcome["error"],
+            })
+            continue
+        moved_ids.add(row["id"])
+        results_moves.append({
+            "id": row["id"], "action": "move_file", "dismissed": True,
+            "destination": outcome.get("destination", ""),
+            "already_moved": outcome.get("already_moved", False),
+        })
+    # Only the rows whose move landed may have their bullet dropped; a failed move
+    # keeps its row so the note is not left somewhere nobody asked for with
+    # nothing recording it.
+    resolved = [
+        ctx for ctx in resolved
+        if ctx not in move_rows or ctx["row"]["id"] in moved_ids
+    ]
+
+    # Skill proposals are whole files, so they are handled before the grouping:
+    # the grouping below rewrites a queue file by dropping bullet lines, and a
+    # skill row has no line in any queue.
+    results = list(results_moves)
+    file_rows = [ctx for ctx in resolved if ctx.get("file")]
+    resolved = [ctx for ctx in resolved if not ctx.get("file")]
+    for ctx in file_rows:
+        row = ctx["row"]
+        # Same result shape a bullet dismiss returns, so the client needs no
+        # second contract for a row it renders identically.
+        if action != "dismiss":
+            results.append({
+                "id": row["id"],
+                "action": action,
+                "dismissed": False,
+                "error": "a skill proposal is a file; there is nothing to promote",
+            })
+            continue
+        outcome = _dismiss_skill_proposal(ctx)
+        entry = {"id": row["id"], "action": "dismiss", "dismissed": bool(outcome.get("ok"))}
+        if not outcome.get("ok"):
+            entry["error"] = outcome["error"]
+        results.append(entry)
+
+    # Group by file so each affected file is rewritten exactly once.
+    by_file: dict[str, dict[str, Any]] = {}
+    for ctx in resolved:
+        entry = by_file.setdefault(ctx["path"], {"workspace": ctx["workspace"], "lines": set(), "rows": []})
+        entry["lines"].add(ctx["line"])
+        entry["rows"].append(ctx["row"])
+
+    for path, entry in by_file.items():
+        queue = Path(path)
+        # Write every promotion BEFORE dropping any bullet, and only drop the
+        # ones that landed. A batch that removed the lines first would lose every
+        # fact whose region was over cap, silently and in bulk.
+        promoted: dict[str, dict[str, Any]] = {}
+        keep_lines: set[int] = set()
+        if action == "accept":
+            for row in entry["rows"]:
+                accept = proposal_kinds.accept_for(row["kind"])
+                if accept.action == "move_file":
+                    # Performed above the grouping, one at a time off the loop;
+                    # nothing to write here, only result shaping below.
+                    continue
+                if accept.action == "edit_region":
+                    outcome = _promote_region_row(config, row)
+                elif accept.action == "fold_doc":
+                    # A fold is a model call, so a large selection folds
+                    # sequentially; write-then-dismiss still holds per row.
+                    outcome = await _accept_project_row(config, row)
+                elif accept.action == "write_people_note":
+                    outcome = _accept_people_row(config, row)
+                elif accept.action == "append_learnings":
+                    outcome = _accept_learnings_row(config, row)
+                else:
+                    # route_manually: nothing to perform, and the row stays.
+                    outcome = {"ok": False, "error": "no destination yet"}
+                promoted[row["id"]] = outcome
+                if not outcome.get("ok"):
+                    keep_lines.add(int(row["line"]))
+
+        lines = queue.read_text(encoding="utf-8").splitlines()
+        # Highest index first so the lower ones stay valid, and each removal
+        # verifies the content at that index - a promotion above may have
+        # awaited a model call while another request rewrote this same file.
+        for row in sorted(
+            entry["rows"], key=lambda r: int(r.get("line", -1)), reverse=True
+        ):
+            if int(row.get("line", -1)) in keep_lines:
+                continue
+            _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or ""))
+        queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        for row in entry["rows"]:
+            if action == "accept":
+                accept = proposal_kinds.accept_for(row["kind"])
+                outcome = promoted.get(row["id"], {})
+                # An absent outcome means nothing was written here (a rehome
+                # move performed above the grouping), which is a success.
+                failed = "ok" in outcome and not outcome["ok"]
+                result = {
+                    "id": row["id"],
+                    "action": accept.action,
+                    "dismissed": not failed,
+                }
+                if accept.action == "edit_region":
+                    result["region"] = outcome.get("region", accept.region)
+                    result["promoted"] = bool(outcome.get("ok"))
+                    result["leak_warning"] = row.get("leak_warning", False)
+                    if failed:
+                        result["error"] = outcome.get("error", "could not write the region")
+                elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
+                    result["promoted"] = bool(outcome.get("ok"))
+                    result["destination"] = outcome.get("destination", "")
+                    if failed:
+                        result["error"] = outcome.get("error", "could not write the destination")
+                else:
+                    result["promoted"] = False
+                    result["destination"] = row.get("rehome", {}).get("destination", "")
+                    result["justified"] = row.get("rehome", {}).get("justified", False)
+                results.append(result)
+            else:
+                results.append({"id": row["id"], "action": "dismiss", "dismissed": True})
+    return JSONResponse({"ok": True, "action": action, "results": results})
+
+
+def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
+    """Write an accepted memory/profile fact into its workspace's region.
+
+    Accept used to remove the bullet and return a descriptor saying what SHOULD
+    happen, matching the MCP flow where the agent edits and then dismisses. In a
+    UI where a person clicks Accept that meant the fact left the queue and landed
+    nowhere — one click from losing it.
+
+    Order is write-then-dismiss, never the reverse, which is the same rule the
+    curation prompt states: the reverse loses the fact if anything fails between
+    the two steps. So this returns a failure and the caller keeps the bullet.
+
+    The guide is resolved through ``agent_root``, so before the re-rooting this
+    writes the shared guide (and the row's ``leak_warning`` is why the UI asks
+    for confirmation first) and afterwards that workspace's own.
+    """
+    from ciao.memory_tool import ensure_regions, resolve_region as _resolve, update_region
+
+    region = _resolve(row.get("region") or row["kind"])
+    limit = int(
+        getattr(config, "memory_char_limit", 2200)
+        if region == "memory"
+        else getattr(config, "user_char_limit", 1375)
+    )
+    guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
+    try:
+        # A guide with no region markers yet is not a reason to refuse a
+        # promotion — a workspace can be newer than its last skill sync. This is
+        # the same call sync makes, and it is a no-op once the markers are there.
+        ensure_regions(guide)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": f"could not prepare {guide}: {exc}", "region": region}
+    try:
+        result = update_region(
+            guide, region, action="add", entry=row["text"], char_limit=limit
+        )
+    except (ValueError, OSError) as exc:
+        return {"ok": False, "error": str(exc), "region": region}
+    return {"ok": True, "region": region, "usage": result.get("usage", {})}
+
+
+def _accept_people_row(config, row: dict[str, Any]) -> dict[str, Any]:
+    """Write an accepted `[people]` fact into a stub person note.
+
+    A note that already exists is not appended to blindly — merging a new fact
+    into someone's curated note is a judgment call, so the row stays queued
+    and the error says so.
+    """
+    from ciao.memory_proposals import write_people_note
+
+    name = str(row.get("target") or "").strip()
+    if not name:
+        return {"ok": False, "error": "the bullet names no person"}
+    try:
+        vault = config.workspace_vault_root(row["workspace"])
+    except (AttributeError, ValueError) as exc:
+        return {"ok": False, "error": f"could not resolve the vault: {exc}"}
+    try:
+        created = write_people_note(Path(vault), name, row["text"])
+    except OSError as exc:
+        return {"ok": False, "error": f"could not write the note: {exc}"}
+    if not created:
+        return {
+            "ok": False,
+            "error": f"People/{name}.md already exists; merge the fact manually, then dismiss",
+        }
+    return {"ok": True, "destination": f"People/{name}.md"}
+
+
+def _accept_learnings_row(config, row: dict[str, Any]) -> dict[str, Any]:
+    """Append an accepted `[learnings]` fact to Workspace/Learnings.md."""
+    from ciao.memory_proposals import append_learning
+
+    try:
+        vault = config.workspace_vault_root(row["workspace"])
+    except (AttributeError, ValueError) as exc:
+        return {"ok": False, "error": f"could not resolve the vault: {exc}"}
+    try:
+        append_learning(Path(vault), row["text"])
+    except OSError as exc:
+        return {"ok": False, "error": f"could not append the learning: {exc}"}
+    return {"ok": True, "destination": "Workspace/Learnings.md"}
+
+
+async def _accept_project_row(config, row: dict[str, Any]) -> dict[str, Any]:
+    """Fold an accepted `[project]` bullet into its canonical doc.
+
+    Reuses the archive-time fold (guards, NO_CHANGES sentinel, per-doc lock)
+    with just this bullet as input. ``False`` back means the model judged the
+    doc already covers the fact or a guard rejected the rewrite — ambiguous
+    enough that dropping the row silently would be wrong, so the caller keeps
+    it queued and the operator decides.
+    """
+    from ciao.project_doc_update import update_project_doc
+
+    doc_raw = str(row.get("target") or "").strip()
+    if not doc_raw:
+        return {"ok": False, "error": "the bullet names no project doc"}
+    doc = Path(doc_raw)
+    if not doc.is_absolute():
+        # Same resolution the archive-time fold uses: workspace-root-relative.
+        doc = Path(config.workspace_root) / doc
+    if not doc.is_file():
+        return {"ok": False, "error": f"project doc not found: {doc_raw}"}
+    insights = f"## Decisions\n- {row['text']}\n"
+    try:
+        wrote = await update_project_doc(
+            doc_path=doc,
+            insights_md=insights,
+            model=getattr(config, "insights_model", "") or "sonnet",
+        )
+    except Exception as exc:  # noqa: BLE001 — a failed fold keeps the row
+        return {"ok": False, "error": f"fold failed: {exc}"}
+    if not wrote:
+        return {
+            "ok": False,
+            "error": "the fold reported no changes; dismiss instead if the doc already covers this",
+        }
+    return {"ok": True, "destination": doc_raw}
+
+
+async def proposal_action(request: Request) -> JSONResponse:
+    """Accept or dismiss exactly one proposal by its stable id.
+
+    ``accept`` PERFORMS the promotion: a memory/profile row is written into that
+    workspace's bounded region, then the bullet is dropped. Write-then-dismiss,
+    never the reverse — if the write fails (over cap, unreadable guide) the bullet
+    stays and the error comes back, because the reverse order loses the fact.
+
+    ``dismiss`` drops the bullet without writing anything. Unknown id is 404.
+    """
+    config = request.app.state.config
+    pid = request.path_params["id"]
+    _rows, by_id = _scan_proposal_rows(config)
+    ctx = by_id.get(pid)
+    if ctx is None:
+        return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
+    action = request.path_params.get("action", "").strip()
+    # Validate BEFORE any file mutation, the same shape the batch endpoint uses.
+    # Unvalidated, anything that was not "accept" skipped the promotion block
+    # below but still fell through to the bullet removal and returned the
+    # dismiss-shaped success payload: a typo in the path, or a stale client,
+    # silently discarded a queued fact nobody had asked to dismiss.
+    if action not in {"accept", "dismiss"}:
+        return JSONResponse(
+            {"error": "action must be accept|dismiss", "id": pid}, status_code=400
+        )
+    row = ctx["row"]
+
+    if ctx.get("file"):
+        # A whole file, not a bullet in a queue: the line-removal path below
+        # would read it and delete line -1 of it.
+        if action != "dismiss":
+            return JSONResponse(
+                {
+                    "error": "a skill proposal is a file, so there is nothing to "
+                             "promote; open it and turn it into a skill, or dismiss it",
+                    "id": pid,
+                },
+                status_code=400,
+            )
+        outcome = _dismiss_skill_proposal(ctx)
+        if not outcome.get("ok"):
+            return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
+        return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
+
+    promoted: dict[str, Any] = {}
+    if action == "accept":
+        accept = proposal_kinds.accept_for(row["kind"])
+        if accept.action == "move_file":
+            target, error = _rehome_target(row, request.query_params.get("workspace", "").strip())
+            if error:
+                return JSONResponse({"error": error, "id": pid}, status_code=400)
+            # Off the event loop: the sweep reads and rewrites notes across both
+            # vaults, and doing that inline blocked the loop long enough for the
+            # request to time out — after the git mv and before the queue row was
+            # dropped, so the note moved and its row stayed.
+            outcome = await asyncio.to_thread(_perform_rehome_move, config, row, target)
+            if not outcome.get("ok"):
+                # Move-then-dismiss, the same order as a region write: the bullet
+                # survives a failed move so the note is not silently left where it
+                # was with nothing recording that it should not be.
+                return JSONResponse(
+                    {"error": outcome["error"], "id": pid}, status_code=409
+                )
+            promoted = outcome
+        elif accept.action == "edit_region":
+            promoted = _promote_region_row(config, row)
+            if not promoted.get("ok"):
+                # The bullet is untouched, so the fact is still queued and the
+                # operator can fix the cause (usually an over-cap region) and
+                # retry. Losing it silently is the one outcome to avoid.
+                return JSONResponse(
+                    {
+                        "error": promoted.get("error", "could not write the region"),
+                        "id": pid,
+                        "region": promoted.get("region", ""),
+                    },
+                    status_code=409,
+                )
+        elif accept.action == "fold_doc":
+            promoted = await _accept_project_row(config, row)
+            if not promoted.get("ok"):
+                return JSONResponse(
+                    {"error": promoted.get("error", "fold failed"), "id": pid},
+                    status_code=409,
+                )
+        elif accept.action == "write_people_note":
+            promoted = _accept_people_row(config, row)
+            if not promoted.get("ok"):
+                return JSONResponse(
+                    {"error": promoted.get("error", "could not write the note"), "id": pid},
+                    status_code=409,
+                )
+        elif accept.action == "append_learnings":
+            promoted = _accept_learnings_row(config, row)
+            if not promoted.get("ok"):
+                return JSONResponse(
+                    {"error": promoted.get("error", "could not append"), "id": pid},
+                    status_code=409,
+                )
+        else:
+            # route_manually: a [review] row has no known destination, so an
+            # accept would be a guess wearing a button.
+            return JSONResponse(
+                {
+                    "error": "this row has no destination yet; decide what it is first",
+                    "id": pid,
+                },
+                status_code=400,
+            )
+
+    queue = Path(ctx["path"])
+    lines = queue.read_text(encoding="utf-8").splitlines()
+    _remove_bullet_line(lines, ctx["line"], str(ctx["row"].get("raw") or ""))
+    queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+    if action == "accept":
+        accept = proposal_kinds.accept_for(row["kind"])
+        result = {"id": pid, "action": accept.action, "dismissed": True}
+        if accept.action == "edit_region":
+            result["region"] = promoted.get("region", accept.region)
+            result["promoted"] = True
+            result["usage"] = promoted.get("usage", {})
+            result["leak_warning"] = row.get("leak_warning", False)
+        elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
+            result["promoted"] = True
+            result["destination"] = promoted.get("destination", "")
+        else:
+            # Rehome: the note itself is not moved here. Moving a file and
+            # rewriting every reference to it is `vault_rehome`'s job and it is
+            # reversible through its own receipt; doing half of it from a queue
+            # row would leave the links pointing at a path that moved.
+            result["promoted"] = False
+            result["destination"] = row.get("rehome", {}).get("destination", "")
+            result["justified"] = row.get("rehome", {}).get("justified", False)
+        return JSONResponse({"ok": True, "result": result})
+    return JSONResponse({"ok": True, "result": {"id": pid, "action": "dismiss", "dismissed": True}})
+
+
+# ── Operator-action housekeeping strip ───────────────────────────────────
+
+
+def _housekeeping_context(request: Request) -> "operator_actions.DetectionContext":
+    """Build the cheap detection context from the request's app state.
+
+    The package-status fetcher is the cached one the app already owns (see
+    ``make_cached_package_status`` in ``app.py``), so detection never blocks
+    on GitHub. The schedule manager, when present, exposes the missed one-time
+    reminders.
+    """
+    from ciao import operator_actions
+
+    config = request.app.state.config
+    fetcher = getattr(request.app.state, "package_status_fetcher", None)
+    return operator_actions.DetectionContext(
+        config=config,
+        schedule_store=getattr(request.app.state, "schedule_manager", None),
+        package_status=fetcher if callable(fetcher) else None,
+    )
+
+
+async def list_housekeeping(request: Request) -> JSONResponse:
+    """Return every detectable operator action for the home strip.
+
+    This is the detector pass. Each action carries ``run_label``, ``chat_label``
+    and ``chat_prompt`` so the client can render the buttons it needs and seed
+    a chat without a second round-trip.
+    """
+    from ciao import operator_actions
+
+    actions = operator_actions.detect_actions(_housekeeping_context(request))
+    return JSONResponse({"actions": [action.as_dict() for action in actions]})
+
+
+async def run_housekeeping_action(request: Request) -> JSONResponse:
+    """Perform one action's mechanical work, then re-detect and return the list.
+
+    Re-running detection in the same response is what keeps the client from
+    rendering a stale strip: a condition that cleared is gone, and one that
+    persists returns with its detail replaced by the failure. Unknown id is
+    404, never 500.
+    """
+    from ciao import operator_actions
+
+    action_id = request.path_params["action_id"]
+    context = _housekeeping_context(request)
+    try:
+        result, summary = operator_actions.run_action(action_id, context)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:  # noqa: BLE001 — a failed run is a tile, not a crash
+        logger.exception("operator action %s failed", action_id)
+        actions = operator_actions.detect_actions(context)
+        # The condition persisted, so the same id is still detected. Replace its
+        # detail with the failure text so the client shows a failed tile rather
+        # than silently re-offering the button as though nothing happened.
+        failure = str(exc)
+        return JSONResponse(
+            {
+                "ok": False,
+                "action_id": action_id,
+                "error": failure,
+                "summary": f"Run failed: {failure}",
+                "actions": [
+                    action.as_dict()
+                    if action.id != action_id
+                    else {
+                        **action.as_dict(),
+                        "detail": f"Run failed: {failure}",
+                    }
+                    for action in actions
+                ],
+            }
+        )
+    actions = operator_actions.detect_actions(context)
+    return JSONResponse(
+        {
+            "ok": True,
+            "action_id": action_id,
+            "result": result,
+            "summary": summary,
+            "actions": [action.as_dict() for action in actions],
+        }
+    )

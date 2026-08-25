@@ -16,14 +16,11 @@ import json
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from functools import lru_cache
 from pathlib import Path
 from typing import Mapping, Any
 
 from ciao import provider_registry
-from ciao.providers.codex import codex_login_status
 
 # Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
 # stay responsive without freezing status until process restart.
@@ -436,13 +433,6 @@ def claude_status_probe(
     )
 
 
-def codex_status_probe(
-    env: Mapping[str, str],
-    **_unused: Any,
-) -> dict[str, Any]:
-    return codex_login_status(env)
-
-
 def opencode_status_probe(
     env: Mapping[str, str],
     **_unused: Any,
@@ -638,11 +628,11 @@ def _claude_oauth_account(config_path: Path) -> str:
 
 
 def _workspace_guides_linked(workspace_root: Path) -> bool:
-    """True when AGENTS.md resolves to CLAUDE.md so both CLIs share one guide."""
+    """True when AGENTS.md resolves to CLAUDE.md for shared guide loading."""
     claude_guide = workspace_root / "CLAUDE.md"
-    codex_guide = workspace_root / "AGENTS.md"
+    shared_guide = workspace_root / "AGENTS.md"
     try:
-        return claude_guide.is_file() and codex_guide.resolve() == claude_guide.resolve()
+        return claude_guide.is_file() and shared_guide.resolve() == claude_guide.resolve()
     except OSError:
         return False
 
@@ -709,7 +699,7 @@ def setup_status(
             label="Linked workspace guides",
             ok=_workspace_guides_linked(workspace_root),
             # Optional: a custom AGENTS.md is preserved on purpose, but then
-            # Claude Code and Codex read different workspace instructions.
+            # the provider guides are no longer shared.
             required=False,
             detail=str(workspace_root / "AGENTS.md"),
         ),

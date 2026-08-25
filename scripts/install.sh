@@ -156,7 +156,16 @@ archive_name=${CIAO_ARCHIVE_NAME:-Ciaobot_${version}_universal.app.tar.gz}
 signature_name=${archive_name}.sig
 verifier_name=${CIAO_VERIFIER_NAME:-ciaobot-installer-verify_universal}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-install.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+# The staging bundle cannot live under $tmp: it has to sit next to the install
+# target so the final move is a rename on one filesystem rather than a ~350 MB
+# copy. That put it outside this cleanup, so every failed install (a bad
+# archive, a runtime self-check failure, Ciaobot still running, ^C during the
+# unpack) abandoned a full staging copy in the user's Applications directory
+# forever. `stage` is empty until the unpack step claims a path, and is cleared
+# again once the bundle has been moved into place, so the trap only ever
+# removes a directory this run created and still owns.
+stage=
+trap 'rm -rf "$tmp"; [ -z "${stage:-}" ] || rm -rf "${stage:-}"' EXIT HUP INT TERM
 
 # The archive is hundreds of MB; a silent fetch froze the step line at its
 # checkpoint percentage with nothing on screen moving. On a TTY, poll the
@@ -305,6 +314,17 @@ extracted="$stage/Ciaobot.app"
     || fail "bundled Ciaobot runtime self-check failed"
 installer_done
 
+# The engine is a second LaunchAgent, and its executable lives inside the
+# bundle this install is about to replace. Booting it out used to happen only as
+# a side effect of `ciao setup --load-launchd` further down, which runs only
+# when a workspace was recovered *and* --no-start was not passed -- so on every
+# other path the new app came up talking to the previous engine build, still
+# running from a bundle that no longer exists on disk. Stop it here instead,
+# unconditionally and before the swap: setup re-bootstraps it below when it
+# runs, and when it does not, the app starts the engine itself on next launch.
+uid=$(id -u)
+launchctl bootout "gui/$uid/com.ciao.server" >/dev/null 2>&1 || true
+
 if [ -e "$destination" ]; then
     # A manually launched app is not necessarily owned by the LaunchAgent, so
     # booting that agent out alone would leave the old single-instance process
@@ -332,6 +352,9 @@ if ! mv "$extracted" "$destination"; then
     fail "could not install Ciaobot.app"
 fi
 rm -rf "$stage"
+# The bundle is in place, so there is no staging directory left to clean up.
+# Clearing the variable keeps the exit trap from touching $app_dir again.
+stage=
 installer_done
 
 engine="$destination/Contents/Resources/ciao-runtime/bin/ciao"

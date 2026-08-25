@@ -21,7 +21,7 @@ export function joinRelative(dir: string, rel: string): string {
   return out.join('/')
 }
 
-export function docDirFor(filePath: string): string {
+function docDirFor(filePath: string): string {
   const cleaned = filePath.replace(/:\d+$/, '')
   const idx = cleaned.lastIndexOf('/')
   return idx === -1 ? '' : cleaned.slice(0, idx + 1)

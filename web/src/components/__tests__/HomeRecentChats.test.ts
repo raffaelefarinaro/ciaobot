@@ -67,30 +67,81 @@ describe('HomeRecentChats lanes and tiers', () => {
     if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
   })
 
-  it('renders one lane per workspace in workspaceOptions order', async () => {
+  it('renders only the active workspace lane', async () => {
     const wrapper = await mountHome()
-    expect(wrapper.findAll('.home-lane-name').map(node => node.text())).toEqual(['personal', 'work'])
-    expect(wrapper.findAll('.home-lane')).toHaveLength(2)
+    expect(wrapper.findAll('.home-lane')).toHaveLength(1)
+    expect(wrapper.find('.home-lane-name').text()).toBe('personal')
+    expect(wrapper.find('[data-lane-key="personal"]').exists()).toBe(true)
+    expect(wrapper.find('[data-lane-key="work"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  // The point of the scoped home: the workspace toggle swaps the lane's
+  // content instead of revealing another column.
+  it('swaps the lane content when the active workspace changes', async () => {
+    seedChats()
+    const store = useProjectStore()
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    expect(wrapper.find('[data-lane-key="personal"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Needs an answer')
+
+    // What the workspace toggle in the sidebar drives.
+    store.activeWorkspace = 'work'
+    await nextTick()
+
+    expect(wrapper.find('[data-lane-key="work"]').exists()).toBe(true)
+    expect(wrapper.findAll('.home-lane')).toHaveLength(1)
+    const titles = wrapper.findAll('.home-chat-title').map(n => n.text())
+    expect(titles).toContain('Background work')
+    expect(titles).not.toContain('Needs an answer')
+    wrapper.unmount()
+  })
+
+  it('hides other workspaces chats until they are switched to', async () => {
+    const wrapper = await mountHome()
+    const titles = wrapper.findAll('.home-chat-title').map(n => n.text())
+    expect(titles).toContain('Needs an answer')
+    expect(titles).toContain('A quiet chat')
+    expect(titles).not.toContain('Background work')
+    expect(titles).not.toContain('An older chat')
+    wrapper.unmount()
   })
 
   it('assigns chats to one priority tier and shows the pending question', async () => {
     const wrapper = await mountHome()
     expect(wrapper.find('.home-tier--needsYou .home-chat-title').text()).toBe('Needs an answer')
     expect(wrapper.find('.home-chat-question').text()).toContain('Which launch date')
-    expect(wrapper.find('.home-tier--working .home-chat-title').text()).toBe('Background work')
+    // The work chat sits in another workspace, so no working tier renders here.
+    expect(wrapper.find('.home-tier--working').exists()).toBe(false)
     expect(wrapper.find('.home-tier--quiet .home-chat-title').text()).toBe('A quiet chat')
     // Older chats are listed in quiet now, not split behind a disclosure, so
     // every seeded chat renders as a row.
     expect(wrapper.find('.home-lane-older-toggle').exists()).toBe(false)
-    expect(wrapper.findAll('.home-chat-item')).toHaveLength(4)
+    expect(wrapper.findAll('.home-chat-item')).toHaveLength(2)
   })
 
   it('lists older chats inline with quiet instead of behind a disclosure', async () => {
-    const wrapper = await mountHome()
+    const store = seedChats()
+    // The seeded old chat lives in the other workspace; pull it into the
+    // active one so the tier shape is what is under test here.
+    store.chats = store.chats.map(chat =>
+      chat.chat_id === 'older' ? { ...chat, project_id: 'personal-project' } : chat,
+    ) as unknown as typeof store.chats
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
     const quietTitles = wrapper.findAll('.home-tier--quiet .home-chat-title').map(n => n.text())
     expect(quietTitles).toContain('A quiet chat')
     expect(quietTitles).toContain('An older chat')
     expect(wrapper.find('.home-tier--older').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('hides the needs-you tier entirely when nothing needs the user', async () => {
@@ -109,12 +160,14 @@ describe('HomeRecentChats lanes and tiers', () => {
     const wrapper = await mountHome()
     const labels = wrapper.findAll('.home-tier-label').map(n => n.text())
     expect(labels).toContain('needs you')
-    expect(labels).toContain('working')
+    expect(labels).toContain('quiet')
     expect(labels.some(l => l === l.toUpperCase() && /[A-Z]/.test(l))).toBe(false)
   })
 
   it('lists archived chats being tidied in their lane with the live step', async () => {
     const store = seedChats()
+    // The tidying chats live in the work workspace, so look at work.
+    store.activeWorkspace = 'work'
     store.chats = [
       ...store.chats,
       {
@@ -124,7 +177,7 @@ describe('HomeRecentChats lanes and tiers', () => {
         postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
       },
       {
-        chat_id: 'tidy-no-file', project_id: 'personal-project', title: 'Archived without file',
+        chat_id: 'tidy-no-file', project_id: 'work-project', title: 'Archived without file',
         created_at: timestamp(600), last_activity_at: timestamp(600), last_read_at: timestamp(600),
         archived: true, local: true,
         postprocess: { state: 'running', step: 'project_doc_update', expected: [], steps: {} },
@@ -138,22 +191,27 @@ describe('HomeRecentChats lanes and tiers', () => {
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
 
-    // Each lane carries its own tidying tier, and the header count has rows
+    // The lane carries its own tidying tier, and the header count has rows
     // behind it.
     const workLane = wrapper.find('[data-lane-key="work"]')
     const tidyRows = workLane.findAll('.home-tier--tidying .home-chat-item')
-    expect(tidyRows).toHaveLength(1)
+    expect(tidyRows).toHaveLength(2)
     expect(workLane.find('.home-tier--tidying .home-tier-label').text()).toBe('tidying up')
-    expect(tidyRows[0].find('.home-chat-title').text()).toBe('Archived work chat')
-    expect(tidyRows[0].text()).toContain('extracting insights')
-    expect(workLane.find('.home-lane-summary').text()).toContain('1 tidying up')
+    expect(workLane.find('.home-lane-summary').text()).toContain('2 tidying up')
+    const tidyTitles = tidyRows.map(row => row.find('.home-chat-title').text())
+    expect(tidyTitles).toContain('Archived work chat')
+    expect(tidyTitles).toContain('Archived without file')
 
-    const personalLane = wrapper.find('[data-lane-key="personal"]')
-    const noFileRow = personalLane.find('.home-tier--tidying .home-chat-item')
-    expect(noFileRow.exists()).toBe(true)
-    expect(noFileRow.text()).toContain('folding into project doc')
+    const withFileRow = tidyRows.find(row => row.find('.home-chat-title').text() === 'Archived work chat')!
+    expect(withFileRow.text()).toContain('extracting insights')
+
     // A tidying chat without an archive file has nothing to open.
+    const noFileRow = tidyRows.find(row => row.find('.home-chat-title').text() === 'Archived without file')!
+    expect(noFileRow.text()).toContain('folding into project doc')
     expect((noFileRow.element as HTMLButtonElement).disabled).toBe(true)
+
+    // The other workspace's chats stay hidden until it is switched to.
+    expect(wrapper.text()).not.toContain('Needs an answer')
 
     // Archived chats stay out of the priority tiers; the tidying row lives
     // only under the lane's own tidying tier.
@@ -164,13 +222,14 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(priorityTitles).not.toContain('Archived without file')
 
     // Clicking a row opens the archived transcript in the file viewer.
-    await tidyRows[0].trigger('click')
+    await withFileRow.trigger('click')
     expect(openSpy).toHaveBeenCalledWith('archive/tidy.md')
     wrapper.unmount()
   })
 
   it('keeps the tidying section visible when no active chats remain', async () => {
     const store = seedChats(false)
+    store.activeWorkspace = 'work'
     store.chats = [{
       chat_id: 'only-tidy', project_id: 'work-project', title: 'Archived work chat',
       created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
@@ -191,6 +250,8 @@ describe('HomeRecentChats lanes and tiers', () => {
 
   it('lists failed insights in their lane with a retry button and header count', async () => {
     const store = seedChats()
+    // The failed chat lives in the work workspace, so look at work.
+    store.activeWorkspace = 'work'
     store.chats = [
       ...store.chats,
       {
@@ -210,6 +271,8 @@ describe('HomeRecentChats lanes and tiers', () => {
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
 
+    // Only the active workspace's lane renders at all.
+    expect(wrapper.findAll('.home-lane')).toHaveLength(1)
     const workLane = wrapper.find('[data-lane-key="work"]')
     const failedRows = workLane.findAll('.home-tier--failed .home-chat-item')
     expect(failedRows).toHaveLength(1)
@@ -218,16 +281,12 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(failedRows[0].find('.home-chat-retry').exists()).toBe(true)
     // Header carries the recovery count in the warn register.
     expect(workLane.find('.home-lane-summary').text()).toContain('1 insights failed')
-
-    // A chat whose insights succeeded is not a retry case.
-    const personalLane = wrapper.find('[data-lane-key="personal"]')
-    expect(personalLane.find('.home-tier--failed').exists()).toBe(false)
-    expect(personalLane.find('.home-lane-summary').text()).not.toContain('insights failed')
     wrapper.unmount()
   })
 
   it('keeps the failed-insights section visible when no active chats remain', async () => {
     const store = seedChats(false)
+    store.activeWorkspace = 'work'
     store.chats = [{
       chat_id: 'only-failed', project_id: 'work-project', title: 'Failed chat',
       created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
@@ -245,7 +304,9 @@ describe('HomeRecentChats lanes and tiers', () => {
     wrapper.unmount()
   })
 
-  it('keeps vertical motion within a lane and horizontal motion across lanes', async () => {
+  // One lane on screen: up/down roams its rows, left/right has nowhere to go
+  // and is consumed so ChatLayout's global handler does not roam elsewhere.
+  it('roams the single lane vertically and consumes sideways arrows at its edge', async () => {
     const wrapper = await mountHome()
     const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
     const cards = wrapper.findAll('.home-chat-item')
@@ -256,21 +317,41 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(document.activeElement).toBe(cards[1].element)
     expect(vm.onArrow('ArrowUp')).toBe(true)
     expect(document.activeElement).toBe(cards[0].element)
+    // No second lane to move to; the key is still consumed.
     expect(vm.onArrow('ArrowRight')).toBe(true)
-    expect(document.activeElement).toBe(wrapper.find('.home-tier--working .home-chat-item').element)
+    expect(document.activeElement).toBe(cards[0].element)
     expect(vm.onArrow('ArrowLeft')).toBe(true)
     expect(document.activeElement).toBe(cards[0].element)
   })
 
-  it('follows the vertical workspace order when lanes are stacked', async () => {
-    const wrapper = await mountHome()
+  // Rescue lanes (stale or unknown workspaces) stack beneath the selected
+  // workspace's lane, so vertical motion crosses between them while horizontal
+  // motion stays within one.
+  it('crosses into stacked rescue lanes vertically and roams them horizontally', async () => {
+    const store = seedChats()
+    // A chat whose project vanished renders in an unknown-workspace rescue
+    // lane below the active workspace's lane.
+    store.projects = store.projects.filter(project => project.project_id !== 'work-project')
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'orphan', project_id: 'work-project', title: 'An orphaned chat',
+        created_at: timestamp(90), last_activity_at: timestamp(90), last_read_at: timestamp(90), archived: false, local: true,
+      },
+    ] as unknown as typeof store.chats
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
     const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
     const lanes = wrapper.findAll('.home-lane')
+    expect(lanes).toHaveLength(2)
+
     const laneRects = [
       { top: 0, left: 0, width: 600, height: 300 },
       { top: 320, left: 0, width: 600, height: 300 },
     ]
-
     lanes.forEach((lane, index) => {
       vi.spyOn(lane.element, 'getBoundingClientRect').mockReturnValue({
         ...laneRects[index],
@@ -283,18 +364,20 @@ describe('HomeRecentChats lanes and tiers', () => {
     })
 
     const personalCards = lanes[0].findAll('.home-chat-item')
-    const workCards = lanes[1].findAll('.home-chat-item')
+    const orphanCards = lanes[1].findAll('.home-chat-item')
 
     expect(vm.onArrow('ArrowDown')).toBe(true)
     expect(document.activeElement).toBe(personalCards[0].element)
     expect(vm.onArrow('ArrowDown')).toBe(true)
-    expect(document.activeElement).toBe(workCards[0].element)
+    expect(document.activeElement).toBe(orphanCards[0].element)
+    // Stacked lanes: sideways roams within a lane.
     expect(vm.onArrow('ArrowRight')).toBe(true)
-    expect(document.activeElement).toBe(workCards[1].element)
+    expect(document.activeElement).toBe(orphanCards[1].element)
     expect(vm.onArrow('ArrowLeft')).toBe(true)
-    expect(document.activeElement).toBe(workCards[0].element)
+    expect(document.activeElement).toBe(orphanCards[0].element)
     expect(vm.onArrow('ArrowUp')).toBe(true)
     expect(document.activeElement).toBe(personalCards[0].element)
+    wrapper.unmount()
   })
 
   it('consumes arrow keys at edges and reports no navigation without chats', async () => {
@@ -313,11 +396,10 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(wrapper.find('.home-tier--quiet .home-chat-item').element.tagName).toBe('BUTTON')
   })
 
-  // Regression: with focus on the body (empty-space click, or Esc back out of a
-  // chat), the first arrow used to jump to the first lane in DOM order. When
-  // the active workspace was the second lane, that landed on a card in a random
-  // workspace and every arrow after it stayed trapped there.
-  it('anchors the first arrow press to the active workspace lane, not the first lane', async () => {
+  // Regression: with focus on the body (empty-space click, or Esc back out of
+  // a chat), the first arrow used to jump to whichever lane came first in DOM
+  // order rather than the workspace the user is actually looking at.
+  it('anchors the first arrow press to the active workspace lane', async () => {
     const store = seedChats()
     store.activeWorkspace = 'work'
     const taskStore = useTaskStore()
@@ -330,9 +412,6 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(vm.onArrow('ArrowDown')).toBe(true)
     const workCards = wrapper.find('[data-lane-key="work"]').findAll('.home-chat-item')
     expect(document.activeElement).toBe(workCards[0].element)
-    expect(document.activeElement).not.toBe(
-      wrapper.find('[data-lane-key="personal"]').findAll('.home-chat-item')[0].element,
-    )
     wrapper.unmount()
   })
 
@@ -343,13 +422,13 @@ describe('HomeRecentChats lanes and tiers', () => {
     const wrapper = await mountHome()
     const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
 
-    const workNew = wrapper.find('[data-lane-key="work"] .home-lane-new').element as HTMLElement
-    workNew.focus()
-    expect(document.activeElement).toBe(workNew)
+    const personalNew = wrapper.find('[data-lane-key="personal"] .home-lane-new').element as HTMLElement
+    personalNew.focus()
+    expect(document.activeElement).toBe(personalNew)
 
     expect(vm.onArrow('ArrowDown')).toBe(true)
-    const workCards = wrapper.find('[data-lane-key="work"]').findAll('.home-chat-item')
-    expect(document.activeElement).toBe(workCards[0].element)
+    const personalCards = wrapper.find('[data-lane-key="personal"]').findAll('.home-chat-item')
+    expect(document.activeElement).toBe(personalCards[0].element)
     wrapper.unmount()
   })
 })

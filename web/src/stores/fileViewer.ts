@@ -15,7 +15,7 @@ import { askConfirm } from '../lib/confirm'
 // Plus an editing mode that POSTs to /api/workspace-file to save user edits
 // and snapshot them via the active chat's history.
 
-export type FileViewerKind = 'text' | 'image' | 'excalidraw' | 'pdf' | 'html'
+export type FileViewerKind = 'text' | 'image' | 'pdf' | 'html'
 export type FileViewerTab = 'preview' | 'history' | 'diff' | 'backlinks'
 // Artifacts render by default and show their source on demand. Code view is
 // also the only place they can be edited, since editing needs the source.
@@ -32,7 +32,6 @@ export interface SnapshotMeta {
 
 export function fileViewerKindForPath(filePath: string): FileViewerKind {
   const cleaned = filePath.replace(/:\d+$/, '').toLowerCase()
-  if (/\.excalidraw$/i.test(cleaned)) return 'excalidraw'
   if (/\.(pdf|pptx)$/i.test(cleaned)) return 'pdf'
   if (/\.html?$/i.test(cleaned)) return 'html'
   return 'text'
@@ -47,6 +46,13 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   const loading = ref(false)
   const error = ref('')
   const loadToken = ref(0)
+  // Generation counter for file/source FETCHES, deliberately separate from
+  // `loadToken` (which reloads the html frame and is bumped for unrelated
+  // reasons - discarding a response on one of those would drop a good result).
+  // A path check alone is not enough: open A, open B, open A again, and A's
+  // first response matches `path.value` and overwrites the newer one, which
+  // can then be saved back over the current file.
+  let fetchSeq = 0
 
   // Snapshot-related state. `chatId` is set by callers that have a chat
   // context (the inline file card) so we can fetch history. When omitted
@@ -183,6 +189,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     chatId.value = chat
     loading.value = true
     loadToken.value++
+    const seq = ++fetchSeq
     const isMarkdownFile = /\.(md|markdown)$/i.test(filePath.replace(/:\d+$/, ''))
     const pathsPromise = isMarkdownFile ? loadMarkdownPaths() : Promise.resolve([])
     try {
@@ -202,6 +209,12 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
         fetch(url, { credentials: 'same-origin' }),
         pathsPromise,
       ])
+      // Every write below belongs to `filePath`, not to whatever is open when
+      // the response lands. A slow fetch used to repaint the viewer with the
+      // file the user had already navigated away from — and since saveEdits
+      // posts `content` to `path`, the next save then wrote one file's bytes
+      // to another file's path. Anything that no longer matches is discarded.
+      if (seq !== fetchSeq) return true
       if (!resp.ok) {
         if (resp.status === 404) error.value = 'File not found.'
         else if (resp.status === 403) error.value = 'Forbidden — path is outside the workspace.'
@@ -210,11 +223,15 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
         else error.value = `Failed to load file (HTTP ${resp.status}).`
         return true
       }
-      content.value = await resp.text()
+      const text = await resp.text()
+      if (seq !== fetchSeq) return true
+      content.value = text
     } catch (e) {
-      error.value = e instanceof Error ? e.message : String(e)
+      if (seq === fetchSeq) error.value = e instanceof Error ? e.message : String(e)
     } finally {
-      loading.value = false
+      // A superseding open() owns `loading` now; clearing it here would hide
+      // its spinner while its own request is still in flight.
+      if (seq === fetchSeq) loading.value = false
     }
     return true
   }
@@ -223,25 +240,38 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
 
   async function loadSource(force = false): Promise<void> {
     if (!path.value || (sourceLoaded.value && !force)) return
+    // The file this request is for. Same race as open(), and the damaging one:
+    // the source fetch of an artifact the user has left used to land in
+    // `content` under the newly-opened file's `path`, so startEditing seeded
+    // the textarea from the wrong file and saveEdits POSTed those bytes to the
+    // open file's path — one file overwritten with another's content.
+    const requestedPath = path.value
+    // Generation, not just path: reopening the SAME artifact while an earlier
+    // request for it is still in flight leaves the path matching, so the older
+    // response passed the check and overwrote the newer one.
+    const seq = ++fetchSeq
     sourceLoading.value = true
     sourceError.value = ''
     try {
       const resp = await fetch(
-        `/api/workspace-file?path=${encodeURIComponent(path.value)}`,
+        `/api/workspace-file?path=${encodeURIComponent(requestedPath)}`,
         { credentials: 'same-origin' },
       )
+      if (seq !== fetchSeq) return
       if (!resp.ok) {
         sourceError.value = resp.status === 413
           ? 'Source is too large to show (>2 MB).'
           : `Failed to load source (HTTP ${resp.status}).`
         return
       }
-      content.value = await resp.text()
+      const text = await resp.text()
+      if (seq !== fetchSeq) return
+      content.value = text
       sourceLoaded.value = true
     } catch (e) {
-      sourceError.value = e instanceof Error ? e.message : String(e)
+      if (seq === fetchSeq) sourceError.value = e instanceof Error ? e.message : String(e)
     } finally {
-      sourceLoading.value = false
+      if (seq === fetchSeq) sourceLoading.value = false
     }
   }
 
@@ -373,7 +403,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       // Editing an artifact edits its source, so only from Code view and only
       // once the source is actually in hand.
       if (htmlView.value !== 'code' || !sourceLoaded.value) return
-    } else if (kind.value !== 'text' && kind.value !== 'excalidraw') return
+    } else if (kind.value !== 'text') return
     editing.value = true
     editBuffer.value = content.value
     editError.value = ''

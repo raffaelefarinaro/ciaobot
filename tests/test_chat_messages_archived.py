@@ -236,10 +236,10 @@ reply from archived codex
 
 
 @pytest.mark.asyncio
-async def test_archived_codex_chat_falls_back_to_transcript(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_archived_legacy_provider_chat_falls_back_to_transcript(
+    tmp_path: Path
 ) -> None:
-    """When the Codex thread is gone, archived chats render the vault transcript."""
+    """Archived chats from a removed provider render the durable transcript."""
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Codex archive fallback", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="codex-archived-fallback")
@@ -254,14 +254,6 @@ async def test_archived_codex_chat_falls_back_to_transcript(
     chat.archived = True
     chat.archive_path = str(transcript_path.relative_to(tmp_path))
     pcm._save()
-
-    async def _missing_thread(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(
-        "ciao.web.routes_api.CodexProvider.read_thread",
-        _missing_thread,
-    )
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     payload = response.body.decode()

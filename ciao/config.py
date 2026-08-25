@@ -7,13 +7,12 @@ import json
 import os
 import secrets
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from ciao.execution_modes import HARNESS_DISABLED_SKILLS, normalize_claude_mode
+from ciao.execution_modes import HARNESS_DISABLED_SKILLS
 from ciao.models import BridgeMode
-from ciao.providers.codex import CodexSettings
 from ciao.providers.opencode import OpencodeSettings
 
 if TYPE_CHECKING:
@@ -58,6 +57,62 @@ _DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
 # universalising the deny instead gave users a documented escape hatch that did
 # not work: clearing the field sends null, which restores the defaults, and the
 # value that does clear them drops the harness denies too.
+
+
+_REROOTED_CACHE: dict[str, bool] = {}
+
+
+def reset_reroot_cache() -> None:
+    """Forget whether an install has re-rooted.
+
+    Called by the migration after it writes its receipt, and by tests that build
+    several installs in one process. Without it, the first install's answer would
+    be reused for a later one that has a different runtime directory only if the
+    path matched, so this is mostly a same-path correctness hook.
+    """
+    _REROOTED_CACHE.clear()
+
+
+def agent_roots_for(workspace_root: Path, runtime_root: Path) -> list[tuple[Path, str]]:
+    """Every agent root, from explicit paths. See ``CiaoConfig.agent_root_targets``.
+
+    The standalone form, for `ciao setup`, which builds paths before any config
+    exists. Reads the registry off disk rather than through ``CiaoConfig``, and
+    deliberately does NOT apply the bootstrap fallback: setup runs on installs
+    that have no registry yet, and manufacturing two workspace names there would
+    scaffold two roots for an install that has none.
+    """
+    from ciao.workspace_reroot import read_receipt, registry_file  # noqa: PLC0415
+
+    workspace_root = Path(workspace_root)
+    if read_receipt(Path(runtime_root)) is None:
+        return [(workspace_root, "")]
+    try:
+        entries = json.loads(registry_file(Path(runtime_root)).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return [(workspace_root, "")]
+    names = [
+        str(e.get("name", "")).strip()
+        for e in entries
+        if isinstance(e, dict) and str(e.get("name", "")).strip()
+    ]
+    if not names:
+        return [(workspace_root, "")]
+    return [(workspace_root / name, name) for name in sorted(names)]
+
+
+def logs_root_for(workspace_root: Path, vault_root: Path, runtime_root: Path) -> Path:
+    """Where the derived transcript archive lives, from explicit paths.
+
+    The same receipt gate ``CiaoConfig.logs_root`` uses, exposed as a function so
+    a CLI holding only paths cannot end up with a second copy of the rule. One
+    definition of "has this install re-rooted" is the whole point of the seam.
+    """
+    from ciao.workspace_reroot import read_receipt  # noqa: PLC0415
+
+    if read_receipt(Path(runtime_root)) is not None:
+        return Path(workspace_root) / "Logs"
+    return Path(vault_root) / "Logs"
 
 
 def _clean_relative_path(raw: str) -> str:
@@ -152,6 +207,14 @@ class WorkspaceConfig:
     # Extra tools to deny (e.g. ``mcp__n8n_mcp``, ``Bash``). ``None`` = use
     # the per-workspace default extras; ``[]`` = explicit opt-out (no extras).
     disallowed_tools: list[str] | None = None
+    # The ``.mcp.json`` servers this workspace may reach, by name. A list names
+    # exactly those servers; every other declared server is denied. ``[]`` means
+    # reach nothing. ``None`` means "not yet decided" and, after the load-time
+    # migration seeds existing workspaces, only happens for a workspace created
+    # since — and ``None`` denies every declared server, the fail-closed default
+    # for anything new. ``mcp__<server>`` deny entries are derived from this at
+    # request time; this field is the source, not the deny list.
+    allowed_mcp_servers: list[str] | None = None
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
@@ -162,6 +225,18 @@ def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
         return None
     if isinstance(raw, str):
         return _parse_disallowed_tools(raw)
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return None
+
+
+def _coerce_allowed_mcp_servers(raw: object) -> list[str] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        # A CSV list, like the disallowed-tools env var, so the field round-trips
+        # through a string form as easily as a JSON list.
+        return _split_csv(raw)
     if isinstance(raw, list):
         return [str(item).strip() for item in raw if str(item).strip()]
     return None
@@ -182,6 +257,9 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         default_provider=str(data.get("default_provider", "claude")).strip() or "claude",
         default_model=str(data.get("default_model", "")).strip(),
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
+        allowed_mcp_servers=_coerce_allowed_mcp_servers(
+            data.get("allowed_mcp_servers")
+        ),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
     )
@@ -214,32 +292,82 @@ def _parse_workspaces_json(raw: str) -> dict[str, WorkspaceConfig]:
     return out
 
 
-def _legacy_workspaces(
-    *,
-    default_model_personal: str = "",
-    default_model_work: str = "",
-    disallowed_tools_personal: list[str] | None = None,
-    disallowed_tools_work: list[str] | None = None,
-    gws_default_profile: str = "personal",
+# A vault directory is a workspace when it CONTAINS one of these, not when it is
+# one. `memory-vault/personal/People/` makes `personal` a workspace;
+# `memory-vault/People/` is a note folder in a single-workspace vault and must
+# not become a workspace called "People". The nesting is what separates them.
+_WORKSPACE_EVIDENCE_DIRS: frozenset[str] = frozenset(
+    {"People", "Projects", "Places", "Ideas", "Resources", "Workspace", "journal", "projects"}
+)
+
+
+def _looks_like_workspace_dir(path: Path) -> bool:
+    """Whether ``path`` is a workspace folder inside a shared vault."""
+    if not path.is_dir() or path.name.startswith("."):
+        return False
+    if (path / "MEMORY.md").is_file():
+        return True
+    try:
+        return any(
+            child.is_dir() and child.name in _WORKSPACE_EVIDENCE_DIRS
+            for child in path.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _bootstrap_registry(
+    vault_root: Path | None = None, *, gws_default_profile: str = "personal"
 ) -> dict[str, WorkspaceConfig]:
-    """Current private-layout defaults until callers fully support N workspaces."""
+    """The registry an install gets before it has one, read off the vault.
+
+    This is the bootstrap default, not a fallback — nothing else seeds a registry
+    for an install that skipped ``ciao setup``, so returning nothing would yield
+    zero workspaces. It used to manufacture BOTH ``personal`` and ``work``
+    unconditionally, which was harmless while every workspace shared one vault
+    directory and is not harmless now:
+
+    - The re-rooting plan refuses when a registered workspace has no vault
+      directory, so a phantom ``work`` entry left such an install permanently
+      unable to migrate while the blocking gate kept telling it to.
+    - Hardcoding ONE instead, as the work order proposed, moves the same problem:
+      an install whose vault really does hold ``personal/`` and ``work/`` would
+      have ``work`` unregistered, and the plan refuses on an unregistered vault
+      directory. Also stuck, from the other side.
+
+    Neither guess is right because the answer is on disk, so read it: one
+    workspace per vault directory that looks like one, and ``personal`` when none
+    do (a fresh or single-workspace vault). The evidence test is deliberately
+    nested — see ``_WORKSPACE_EVIDENCE_DIRS`` — so a vault whose notes sit
+    directly under ``People/`` yields one workspace, not a workspace per folder.
+
+    The four ``*_PERSONAL`` / ``*_WORK`` environment variables that fed the
+    two-entry shape (default model and extra disallowed tools, one pair each)
+    went with it: they could only ever describe those two hardcoded names, and an
+    install that wants per-workspace settings puts them in ``workspaces.json``,
+    which is the supported path and works for any name.
+    """
+    names: list[str] = []
+    if vault_root is not None and Path(vault_root).is_dir():
+        names = sorted(
+            child.name
+            for child in Path(vault_root).iterdir()
+            if _looks_like_workspace_dir(child)
+        )
+    if not names:
+        names = ["personal"]
+    profile = gws_default_profile or "personal"
     return {
-        "personal": WorkspaceConfig(
-            name="personal",
-            vault_root="personal",
+        name: WorkspaceConfig(
+            name=name,
+            vault_root=name,
             default_provider="claude",
-            default_model=default_model_personal,
-            disallowed_tools=disallowed_tools_personal,
-            gws_profile=gws_default_profile or "personal",
-        ),
-        "work": WorkspaceConfig(
-            name="work",
-            vault_root="work",
-            default_provider="claude",
-            default_model=default_model_work,
-            disallowed_tools=disallowed_tools_work,
-            gws_profile="work",
-        ),
+            # The configured profile belongs to the workspace it was configured
+            # for; anything else derived from a directory name would be a guess
+            # about someone's Google account.
+            gws_profile=profile if name == "personal" else name,
+        )
+        for name in names
     }
 
 
@@ -261,11 +389,6 @@ def _parse_disallowed_tools(raw: str) -> list[str] | None:
     if cleaned.lower() == "none":
         return []
     return _split_csv(cleaned)
-
-
-def _env(source: Mapping[str, str], new_name: str, old_name: str, default: str = "") -> str:
-    """Read env var with fallback to old TELEGRAM_BRIDGE_* name for migration."""
-    return source.get(new_name, "").strip() or source.get(old_name, "").strip() or default
 
 
 def _bootstrap_workspace(source: Mapping[str, str]) -> Path:
@@ -317,7 +440,6 @@ class CiaoConfig:
     vault_root: Path = Path("memory-vault")
     max_image_size_bytes: int = 10 * 1024 * 1024
     max_voice_size_bytes: int = 25 * 1024 * 1024
-    media_ttl_hours: int = 72
     # BCP-47 language for the on-device voice engines. Dictation needs a
     # matching language installed in System Settings → Keyboard → Dictation;
     # the synthesizer uses it to choose a voice.
@@ -328,27 +450,15 @@ class CiaoConfig:
     tts_local_voice: str = ""
     claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku", "fable"])
     claude_default_model: str = "opus"
-    # Per-workspace default models. Empty string falls back to
-    # claude_default_model, so one workspace can prefer a cheaper tier
-    # than another.
-    default_model_personal: str = ""
-    default_model_work: str = ""
-    # Per-workspace tool denylists (the "extra" tools beyond the default
-    # harness set). Forwarded to ``ClaudeAgentOptions.disallowed_tools`` for the
-    # spawned CLI subprocess, so a personal chat can't accidentally touch a
-    # work-only MCP (and vice versa). ``None`` = "unset, use built-in
-    # defaults"; explicit ``[]`` = "operator opted out of the defaults".
-    disallowed_tools_personal: list[str] | None = None
-    disallowed_tools_work: list[str] | None = None
+    # Per-workspace default models and tool denylists live on the WorkspaceConfig
+    # in this registry, set through `workspaces.json`. The former top-level
+    # `*_personal` / `*_work` pairs are gone: they existed only to furnish the
+    # two-entry bootstrap registry, and that now returns one workspace.
     workspaces: dict[str, WorkspaceConfig] = field(default_factory=dict)
     _workspace_registry_changed: bool = field(
         init=False, default=False, repr=False
     )
     claude_mode: BridgeMode = "auto"
-    # Per-provider default execution mode for new chats, set from the PWA
-    # Settings → Providers tab (runtime settings store). A missing entry uses
-    # ``claude_mode`` for every provider.
-    provider_default_modes: dict[str, str] = field(default_factory=dict)
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab (runtime settings store). A missing entry uses the provider's
     # own catalog default.
@@ -367,10 +477,7 @@ class CiaoConfig:
     pwa_host: str = "127.0.0.1"
     gws_default_profile: str = "personal"
     # Per-provider default model for new chats, set from the PWA Settings →
-    # Models tab. A missing entry uses the provider's own catalog default.
-    codex: CodexSettings = field(default_factory=CodexSettings)
-    # Per-provider default model for new chats, same shape and meaning as the
-    # Codex one. Empty means the provider's own default applies.
+    # Models tab. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
     # Post-archive insights extraction: when a chat is archived, run the raw
     # Claude Code session JSONL through a fast cheap model and append a
@@ -396,20 +503,14 @@ class CiaoConfig:
     # weekly ``ciao.skill_evolution`` pass mines this directory.
     # Disable with ``CIAO_TRAJECTORIES_DISABLED=1``.
     trajectories_enabled: bool = True
-    trajectory_retention_months: int = 6
-    # Skill evolution scheduled pass. The schedule entry itself is the
-    # primary on/off switch; this flag exists so ops can hard-disable from
-    # the env (``CIAO_SKILL_EVOLUTION_DISABLED=1``) without editing
-    # schedules.json.
-    skill_evolution_enabled: bool = True
 
     # Comma-separated list of models for the adversarial_review MCP tool.
     # Empty string defaults to the script's built-in panel.
     critique_models: str = ""
     # Advisory caps for the ``ciao:memory`` / ``ciao:profile`` regions in
-    # the workspace CLAUDE.md. Injected as a frozen snapshot into Claude and
-    # Codex system prompts at session start; edited with Edit on the guide.
-    # See ``ciao/memory_injector.py`` and ``ciao/memory_tool.py``.
+    # the workspace CLAUDE.md. Loaded natively by each provider's guide
+    # loader at session start; edited with Edit on the guide.
+    # See ``ciao/memory_tool.py``.
     memory_char_limit: int = 2200
     user_char_limit: int = 1375
     # Ciaobot's managed agent control plane. MCP is the only control surface;
@@ -417,10 +518,6 @@ class CiaoConfig:
     # server is unavailable at request time.
     mcp_enabled: bool = True
     control_surface: str = "mcp"
-    # Internal evaluation mode.  It keeps the HTTP/chat stack identical while
-    # suppressing autonomous background work that would contaminate paired
-    # legacy-vs-MCP measurements.  Manual schedules/loops remain available.
-    benchmark_mode: bool = False
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
@@ -436,14 +533,17 @@ class CiaoConfig:
         if self.control_surface not in {"legacy", "mcp"}:
             self.control_surface = "legacy"
         if not self.workspaces:
-            self.workspaces = _legacy_workspaces(
-                default_model_personal=self.default_model_personal,
-                default_model_work=self.default_model_work,
-                disallowed_tools_personal=self.disallowed_tools_personal,
-                disallowed_tools_work=self.disallowed_tools_work,
+            self.workspaces = _bootstrap_registry(
+                self.vault_root,
                 gws_default_profile=self.gws_default_profile,
             )
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
+        # Migrate pre-existing workspaces onto the allowlist now, so deny
+        # resolution never sees a ``None`` allowlist on a workspace that existed
+        # before this field. Runs only when the registry actually exists on
+        # disk, so a brand-new install (legacy fallback, no file) keeps its
+        # ``None`` fail-closed default for anything created since.
+        self._seed_allowed_mcp_servers()
 
     def workspace(self, name: str | None) -> WorkspaceConfig | None:
         if not name:
@@ -519,10 +619,27 @@ class CiaoConfig:
         return self._resolve_vault_root(raw_root)
 
     def canonical_workspace_vault_root(self, workspace: str) -> Path:
-        """Standard location for a user-named workspace under the vault."""
+        """Standard location for a user-named workspace's notes, in the layout
+        this install is actually in.
+
+        Two layouts, one question. Shared: a folder per workspace under the one
+        vault (``memory-vault/<name>``). Per-root, after the re-rooting: the
+        whole vault of that workspace's agent root — which is what
+        :meth:`agent_vault_root` already derives from the same receipt.
+
+        Answering "shared" unconditionally made this a claim about the past.
+        ``_detect_vault_location`` compares the resolved vault against this and
+        raised "The personal vault is not in its standard folder" on a correctly
+        migrated install, for every workspace, permanently — with a chat prompt
+        telling the operator to move the vault back to where the migration had
+        just moved it from. A standard location that disagrees with the layout
+        is worse than no check at all.
+        """
         name = _clean_relative_path(workspace)
         if not name or len(Path(name).parts) != 1:
             raise ValueError("workspace name must identify one vault folder")
+        if self.agent_root(name) != self.workspace_root:
+            return self.agent_vault_root(name)
         candidate = self.vault_root / name
         if candidate.is_symlink():
             raise ValueError("workspace vault folder must not be a symlink")
@@ -540,6 +657,136 @@ class CiaoConfig:
             return str(root.relative_to(self.workspace_root))
         except ValueError:
             return str(root)
+
+    def agent_root(self, name: str) -> Path:
+        """Per-workspace directory that will hold that workspace's agent assets.
+
+        The future home of a workspace's own ``CLAUDE.md``, ``.mcp.json``,
+        ``.claude/`` assets, and ``memory-vault/``. The derivation is
+        ``workspace_root / name``, but the per-workspace subdirectory only
+        exists after the re-rooting release, so every workspace still resolves
+        to ``workspace_root`` itself for now. A later phase flips the return to
+        the derived path; this method is the single seam for that change.
+        """
+        name = _clean_relative_path(name)
+        if not name or len(Path(name).parts) != 1 or any(
+            sep in name for sep in ("/", "\\")
+        ):
+            raise ValueError("workspace name must identify one folder")
+        # Flipped per install by the re-rooting migration, not by a release date.
+        # Gating on the migration's own receipt is what makes the change atomic:
+        # an install that has not re-rooted keeps resolving to workspace_root, so
+        # a half-flipped state cannot exist. Deleting the legacy filters before
+        # this returns a real subdirectory would leave no filter over a still
+        # prefixed index, which is fail-open and strictly worse than today.
+        if self._rerooted():
+            return self.workspace_root / name
+        return self.workspace_root
+
+    def agent_vault_root(self, name: str) -> Path:
+        """The vault whose ``INDEX.md`` this workspace's agent root owns.
+
+        Distinct from :meth:`workspace_vault_root`, and the difference matters:
+
+        ``workspace_vault_root`` is where a workspace's NOTES live. Before the
+        re-rooting that is a subtree of one shared vault
+        (``memory-vault/<name>``); after it, the whole vault of that root.
+
+        This is where the aggregate FILES about those notes live — ``INDEX.md``
+        and ``VOCABULARY.md``. Before the re-rooting there is exactly one such
+        pair for the whole install, so every workspace resolves to the shared
+        vault root; after it, each root owns its own pair. Derived from
+        :meth:`agent_root`, so it flips on the same receipt and cannot disagree
+        with it.
+
+        Written as ``agent_root / <vault dir name>`` because that is literally
+        what the migration produces: ``workspace_reroot.plan`` moves each vault
+        to ``<name>/<vault dir name>``.
+        """
+        return self.agent_root(name) / self.vault_root.name
+
+    @property
+    def logs_root(self) -> Path:
+        """Where the derived transcript archive lives. See :func:`logs_root_for`.
+
+        D5: ``Logs/`` holds roughly 72% of the vault's notes, is derived output
+        rather than curated content, and its chat ids cannot each be resolved
+        back to one workspace, so the re-rooting PROMOTES it to
+        ``<install>/Logs/`` unmoved rather than splitting it per root. Before the
+        migration it is ``<vault>/Logs``; after, ``<install>/Logs``.
+
+        Receipt-gated through the same ``_rerooted`` check as
+        :meth:`agent_root`, so the two can never disagree about which layout the
+        install is on. Without this seam the readers keep computing
+        ``vault_root / "Logs"``, which after the migration is a path that does
+        not exist — so chat archiving would recreate it and write new
+        transcripts into a fresh empty tree, silently orphaning them from the
+        promoted archive and making the old ones invisible.
+        """
+        return (
+            self.workspace_root / "Logs" if self._rerooted() else self.vault_root / "Logs"
+        )
+
+    def agent_root_targets(self) -> list[tuple[Path, str]]:
+        """Every agent root in this install, as ``(root, workspace name)``.
+
+        One target before the re-rooting — the install root itself, unnamed,
+        because that is where the single set of provider assets lives. One per
+        workspace afterwards, because each root then owns its own ``CLAUDE.md``,
+        ``.claude/``, ``skills/`` and mirrors.
+
+        The seam for anything inspecting or listing agent assets. Reading
+        ``workspace_root`` directly still finds the install root's stale
+        ``.claude/`` after the migration, whose links point at a catalog that
+        moved — which is why the health panel reported every custom skill as
+        broken on a correctly migrated install.
+        """
+        if not self._rerooted():
+            return [(self.workspace_root, "")]
+        return [
+            (self.agent_root(name), name) for name in self.workspace_names() if name
+        ]
+
+    def vault_scan_targets(self) -> list[tuple[Path, str, Path]]:
+        """Every vault in this install, as ``(root, workspace, path prefix)``.
+
+        One target before the re-rooting — the shared vault, unstamped, so the
+        first-path-segment inference labels the workspaces exactly as it does
+        today. One target PER ROOT afterwards, each stamped with its workspace
+        and rendering paths under ``<name>/memory-vault`` so two roots holding a
+        note of the same name do not render the same path.
+
+        This is the seam for anything that means "all the notes in this install":
+        reading ``vault_root`` directly gives a directory that does not exist
+        after the migration, which is why the Memory Map came back empty.
+        """
+        if not self._rerooted():
+            return [(self.vault_root, "", Path("memory-vault"))]
+        targets: list[tuple[Path, str, Path]] = []
+        for name in self.workspace_names():
+            if not name:
+                continue
+            root = self.agent_vault_root(name)
+            targets.append((root, name, Path(name) / root.name))
+        return targets
+
+    def _rerooted(self) -> bool:
+        """Whether this install has completed the per-workspace re-rooting.
+
+        Cached in a module-level map keyed by runtime directory, because
+        ``CiaoConfig`` uses slots and ``agent_root`` is called on hot paths: a
+        stat per call would be wasteful for a value that changes exactly once in
+        an install's life. ``reset_reroot_cache`` clears it, which the migration
+        itself calls after writing its receipt.
+        """
+        key = str(self.state_path.parent)
+        cached = _REROOTED_CACHE.get(key)
+        if cached is None:
+            from ciao.workspace_reroot import read_receipt
+
+            cached = read_receipt(self.state_path.parent) is not None
+            _REROOTED_CACHE[key] = cached
+        return cached
 
     def _resolve_vault_root(self, raw_root: str) -> Path:
         cleaned = _clean_relative_path(raw_root)
@@ -720,6 +967,7 @@ class CiaoConfig:
                 ),
                 "default_model": workspace.default_model,
                 "disallowed_tools": workspace.disallowed_tools,
+                "allowed_mcp_servers": workspace.allowed_mcp_servers,
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
             }
@@ -765,8 +1013,8 @@ class CiaoConfig:
                     return workspace_config.default_model
                 if descriptor.default_model_config_key:
                     return str(getattr(self, descriptor.default_model_config_key, "") or "")
-                # A provider with an operator-settable default model (Codex,
-                # opencode) uses it; otherwise "use that provider account's
+                # A provider with an operator-settable default model uses it;
+                # otherwise "use that provider account's
                 # current catalog default": the provider resolves it and the
                 # chat records the effective model.
                 operator_default = self._operator_default_model(descriptor)
@@ -810,31 +1058,117 @@ class CiaoConfig:
     def default_mode_for_provider(self, provider: str) -> BridgeMode:
         """The default execution mode for new chats on ``provider``.
 
-        An operator pin (Settings → Providers → default mode) wins; otherwise
-        every provider falls back to ``claude_mode``. opencode used to be
-        pinned to normal here, but its auto ruleset is as tight as the other
-        adapters' (read-only tools plus ``edit`` allowed outright, shell left
-        on the wildcard so ``auto_approves_permission`` still classifies each
-        command), so there is no reason for it to be the one backend that
-        starts stricter than the app-wide default.
+        Every provider runs in auto mode by default. Auto's classifier gates
+        risky actions (destructive shell, unapproved control-plane mutations)
+        while allowing safe reads and edits, so there is no safer default and
+        no per-provider override.
         """
-        mode = (self.provider_default_modes or {}).get(provider, "")
-        if mode in {"normal", "plan", "auto", "bypass"}:
-            return cast(BridgeMode, mode)
         return self.claude_mode
+
+    def _declared_mcp_server_names(self, workspace: str | None = None) -> list[str] | None:
+        """Names of servers declared in the project ``.mcp.json``.
+
+        Returns the union of server names across the same candidate files the
+        MCP status panel discovers, ``[]`` when no ``.mcp.json`` exists (nothing
+        is declared, so nothing to deny), and ``None`` when a file exists but
+        cannot be parsed. A parse failure cannot be mapped to names, so the
+        caller fails closed against the known allowlist universe instead.
+
+        ``workspace`` adds that workspace's AGENT ROOT to the candidates, and
+        passing it is not cosmetic. A chat runs with its agent root as cwd and a
+        project-scoped ``.mcp.json`` is read from that cwd, so after the
+        re-rooting the file that actually grants servers to a chat is
+        ``<install>/<name>/.mcp.json`` — which is exactly what
+        ``operator_actions._detect_mcp_uncomposed`` tells the operator to write,
+        while deleting the shared one. Looking only under the install root and
+        its parent therefore returned ``[]`` on every composed install, so
+        :meth:`disallowed_tools_for_workspace` emitted no deny entry at all and
+        the per-workspace allowlist was silently inert: a workspace restricted
+        to two servers could reach every server its root declares.
+
+        Omitted (the seeding path), it keeps the pre-re-rooting view — the
+        shared files only. That is deliberate there: seeding writes an allowlist
+        from what a workspace can reach TODAY, and reading a per-root file into
+        it would seed a brand-new workspace with everything its root declares,
+        turning the fail-closed ``None`` default into allow-all.
+        """
+        workspace_root = self.workspace_root
+        candidates = [
+            workspace_root / ".mcp.json",
+            workspace_root.parent / ".mcp.json",
+            workspace_root.parent / "ciao" / ".mcp.json",
+        ]
+        if workspace:
+            try:
+                agent_root = self.agent_root(workspace)
+            except ValueError:
+                # An unusable workspace name names no root. The shared
+                # candidates still apply, and an unregistered workspace still
+                # gets the fail-closed allowlist default from the caller.
+                agent_root = workspace_root
+            if agent_root != workspace_root:
+                candidates.insert(0, agent_root / ".mcp.json")
+        names: list[str] = []
+        seen: set[str] = set()
+        for path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                return None
+            if not isinstance(data, dict):
+                return None
+            mcp_dict = data.get("mcpServers") or data.get("mcp_servers") or {}
+            if not isinstance(mcp_dict, dict):
+                return None
+            for raw_name in mcp_dict:
+                name = str(raw_name)
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        return names
+
+    def _known_mcp_server_names(self) -> list[str]:
+        """Every server name any workspace's allowlist can reach.
+
+        This is the known universe of servers on this install, used to fail
+        closed by name when ``.mcp.json`` is unreadable. The limitation is
+        honest: a server that was never seeded and lives only in the corrupt
+        file cannot be denied here, because nothing knows it exists.
+        """
+        known: list[str] = []
+        for workspace_config in self.workspaces.values():
+            for name in workspace_config.allowed_mcp_servers or ():
+                if name and name not in known:
+                    known.append(name)
+        return known
 
     def disallowed_tools_for_workspace(self, workspace: str | None) -> list[str]:
         """Tools to deny for a chat in this workspace.
 
         The effective denylist is the workspace's extra tools
         (``disallowed_tools``), which defaults to the harness set
-        (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every workspace. Every chat
+        (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every workspace, plus a
+        derived ``mcp__<server>`` deny for every server declared in ``.mcp.json``
+        that the workspace's ``allowed_mcp_servers`` does not name. Every chat
         blocks the PWA-irrelevant harness tools (plan mode, cron, /loop wakeup,
-        routine trigger, push, notebook edit, design-system sync). claude.ai
-        connector MCPs are always allowed: with multiple providers Ciaobot no
-        longer ships an opinion on them. The extras are overridable via the
-        per-workspace disallowed-tools env var or the "Extra disallowed tools"
-        field (the literal ``none`` denies nothing at all).
+        routine trigger, push, notebook edit, design-system sync). A workspace
+        that predates the allowlist is seeded at load; a brand new one has
+        ``None``, which denies every declared server (the fail-closed default).
+
+        Two limits stated plainly. First, this scopes REACHABILITY, not
+        authority: a shared account behind a reachable server still holds that
+        account's full authority. Second, ``disallowed_tools`` is only applied
+        when the chat's provider is ``claude`` (see the ``if chat.provider !=
+        "claude": return []`` guard in project_chats); it does NOT constrain
+         opencode chats at all. Closing that non-Claude gap needs a
+        per-provider mechanism and is out of scope here.
+
+        When ``.mcp.json`` exists but cannot be parsed, every server any
+        workspace's allowlist names is denied by explicit name: the known
+        universe of servers on this install, which fails closed with names the
+        SDK can actually match instead of a glob it may ignore.
 
         An unregistered workspace name — a stale reference, or a renamed or
         deleted workspace — gets the defaults rather than an empty denylist. It
@@ -844,12 +1178,87 @@ class CiaoConfig:
         extras = workspace_config.disallowed_tools if workspace_config else None
         if extras is None:
             extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
-        return list(dict.fromkeys(extras))
+        allowlist = (
+            workspace_config.allowed_mcp_servers
+            if workspace_config is not None
+            else None
+        )
+        allow_set = set(allowlist or ())
+        # Resolved from this workspace's agent root, not just the install root:
+        # after the re-rooting the declaration a chat actually reads lives in
+        # its own root, and reading only the install root made every allowlist
+        # a no-op (see _declared_mcp_server_names).
+        declared = self._declared_mcp_server_names(workspace)
+        if declared is None:
+            denied = [f"mcp__{name}" for name in self._known_mcp_server_names()]
+        else:
+            denied = [
+                f"mcp__{name}" for name in declared if name not in allow_set
+            ]
+        return list(dict.fromkeys([*extras, *denied]))
+
+    def _seed_allowed_mcp_servers(self) -> None:
+        """Migrate pre-existing workspaces onto the allowlist, losslessly.
+
+        Auto-apply under decision D1 of the agent-roots work order: the change
+        is confined to metadata Ciaobot generates (the workspace registry), and
+        there is exactly one correct outcome per workspace — what it can reach
+        right now. A registered workspace whose allowlist is ``None`` and that
+        exists in the registry file is seeded with every server declared in
+        ``.mcp.json`` that its ``disallowed_tools`` does not already deny. A
+        brand-new workspace created in code (legacy fallback, no file) is not
+        touched and keeps its ``None`` fail-closed default.
+
+        This reads and rewrites the raw file so unrelated or unknown keys (e.g.
+        a future field this release does not know) survive; the normal
+        ``persist_workspace_registry`` path intentionally rewrites a clean
+        payload and would drop them. The write is atomic (tmp then replace), the
+        same discipline as the regular persistence path.
+        """
+        path = self.state_path.parent / "workspaces.json"
+        if not path.is_file():
+            return
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return
+        if not isinstance(entries, list):
+            return
+        declared = self._declared_mcp_server_names()
+        if declared is None:
+            # A corrupt .mcp.json cannot be mapped to names; leave the
+            # allowlist untouched and let deny resolution fail closed by name
+            # against the known universe instead.
+            return
+        if not declared:
+            # Nothing is declared, so the effective set is empty and ``None``
+            # already denies nothing to reach (both fail closed). Persisting
+            # ``[]`` here would rewrite the registry on every fresh install and
+            # break a setup-rerun's idempotency for no behavioural change.
+            return
+        changed = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", "")).strip()
+            workspace_config = self.workspace(name)
+            if workspace_config is None or workspace_config.allowed_mcp_servers is not None:
+                continue
+            denied = set(workspace_config.disallowed_tools or ())
+            seed = [s for s in declared if f"mcp__{s}" not in denied]
+            entry["allowed_mcp_servers"] = seed
+            workspace_config.allowed_mcp_servers = seed
+            changed = True
+        if not changed:
+            return
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "CiaoConfig":
         if env is None:
-            workspace_env_val = os.environ.get("CIAO_WORKSPACE", "").strip() or os.environ.get("TELEGRAM_BRIDGE_WORKSPACE", "").strip() or "."
+            workspace_env_val = os.environ.get("CIAO_WORKSPACE", "").strip() or "."
             dotenv_path = Path(workspace_env_val).expanduser().resolve() / ".env"
             if dotenv_path.exists():
                 from dotenv import load_dotenv
@@ -885,7 +1294,7 @@ class CiaoConfig:
             pwa_auth_required = bool(pwa_auth_token)
         bootstrap_mode = not (
             (bool(pwa_auth_token) or not pwa_auth_required)
-            and (bool(source.get("CIAO_WORKSPACE")) or bool(source.get("TELEGRAM_BRIDGE_WORKSPACE")))
+            and bool(source.get("CIAO_WORKSPACE"))
         )
         if bootstrap_mode:
             workspace_root = _bootstrap_workspace(source)
@@ -895,7 +1304,7 @@ class CiaoConfig:
             )
         else:
             workspace_root = Path(
-                _env(source, "CIAO_WORKSPACE", "TELEGRAM_BRIDGE_WORKSPACE", ".")
+                source.get("CIAO_WORKSPACE", ".")
             ).expanduser().resolve()
             runtime_default = Path(".runtime")
             if not pwa_auth_token:
@@ -916,12 +1325,7 @@ class CiaoConfig:
         else:
             vault_root = (workspace_root / "memory-vault").resolve()
         runtime_root = Path(
-            _env(
-                source,
-                "CIAO_RUNTIME_ROOT",
-                "TELEGRAM_BRIDGE_RUNTIME_ROOT",
-                str(runtime_default),
-            )
+            source.get("CIAO_RUNTIME_ROOT", str(runtime_default))
         ).expanduser()
         if not runtime_root.is_absolute():
             runtime_root = workspace_root / runtime_root
@@ -939,20 +1343,9 @@ class CiaoConfig:
 
         claude_models = _split_csv(source.get("CLAUDE_MODELS", "opus,sonnet,haiku,fable"))
         claude_default_model = claude_models[0] if claude_models else "opus"
-        default_model_personal = source.get("CLAUDE_DEFAULT_MODEL_PERSONAL", "").strip()
-        default_model_work = source.get("CLAUDE_DEFAULT_MODEL_WORK", "").strip()
-        disallowed_tools_personal = _parse_disallowed_tools(
-            source.get("CIAO_DISALLOWED_TOOLS_PERSONAL", "")
-        )
-        disallowed_tools_work = _parse_disallowed_tools(
-            source.get("CIAO_DISALLOWED_TOOLS_WORK", "")
-        )
         gws_default_profile = source.get("GWS_PROFILE", "personal").strip() or "personal"
-        workspaces = _parse_workspaces_json(workspaces_json) or _legacy_workspaces(
-            default_model_personal=default_model_personal,
-            default_model_work=default_model_work,
-            disallowed_tools_personal=disallowed_tools_personal,
-            disallowed_tools_work=disallowed_tools_work,
+        workspaces = _parse_workspaces_json(workspaces_json) or _bootstrap_registry(
+            vault_root,
             gws_default_profile=gws_default_profile,
         )
 
@@ -979,29 +1372,22 @@ class CiaoConfig:
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,
             max_image_size_bytes=int(
-                _env(source, "CIAO_MAX_IMAGE_BYTES", "TELEGRAM_BRIDGE_MAX_IMAGE_BYTES", str(10 * 1024 * 1024))
+                source.get("CIAO_MAX_IMAGE_BYTES", str(10 * 1024 * 1024))
             ),
             max_voice_size_bytes=int(
-                _env(source, "CIAO_MAX_VOICE_BYTES", "TELEGRAM_BRIDGE_MAX_VOICE_BYTES", str(25 * 1024 * 1024))
-            ),
-            media_ttl_hours=int(
-                _env(source, "CIAO_MEDIA_TTL_HOURS", "TELEGRAM_BRIDGE_MEDIA_TTL_HOURS", "72")
+                source.get("CIAO_MAX_VOICE_BYTES", str(25 * 1024 * 1024))
             ),
             transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
             or "en-US",
             tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
             claude_models=list(claude_models or ["opus", "sonnet", "haiku", "fable"]),
             claude_default_model=claude_default_model,
-            claude_mode=normalize_claude_mode(
-                source.get("CLAUDE_EXECUTION_MODE", "")
-                or source.get("CLAUDE_PERMISSION_MODE", "auto")
-            ),
+            claude_mode="auto",
             restart_exit_code=int(
-                _env(source, "CIAO_RESTART_EXIT_CODE", "TELEGRAM_BRIDGE_RESTART_EXIT_CODE", "75")
+                source.get("CIAO_RESTART_EXIT_CODE", "75")
             ),
-            auto_sync_on_start=_env(
-                source, "CIAO_AUTO_SYNC_ON_START", "TELEGRAM_BRIDGE_AUTO_SYNC_ON_START", "true"
-            ).lower() not in {"0", "false", "no", "off"},
+            auto_sync_on_start=source.get("CIAO_AUTO_SYNC_ON_START", "true").lower()
+            not in {"0", "false", "no", "off"},
             auto_vault_index=source.get("CIAO_AUTO_VAULT_INDEX", "true").strip().lower()
             not in {"0", "false", "no", "off"},
             auto_update_github_skills=source.get("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "false").strip().lower()
@@ -1009,10 +1395,6 @@ class CiaoConfig:
             pwa_port=int(source.get("PWA_PORT", "8443")),
             pwa_host=source.get("PWA_HOST", "0.0.0.0").strip(),
             gws_default_profile=gws_default_profile,
-            default_model_personal=default_model_personal,
-            default_model_work=default_model_work,
-            disallowed_tools_personal=disallowed_tools_personal,
-            disallowed_tools_work=disallowed_tools_work,
             workspaces=workspaces,
             insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
             in {"", "0", "false", "no", "off"},
@@ -1026,13 +1408,6 @@ class CiaoConfig:
             not in {"0", "false", "no", "off"},
             trajectories_enabled=source.get(
                 "CIAO_TRAJECTORIES_DISABLED", ""
-            ).strip().lower()
-            in {"", "0", "false", "no", "off"},
-            trajectory_retention_months=int(
-                source.get("CIAO_TRAJECTORY_RETENTION_MONTHS", "").strip() or "6"
-            ),
-            skill_evolution_enabled=source.get(
-                "CIAO_SKILL_EVOLUTION_DISABLED", ""
             ).strip().lower()
             in {"", "0", "false", "no", "off"},
 
@@ -1052,10 +1427,6 @@ class CiaoConfig:
                 in {"legacy", "mcp"}
                 else "mcp"
             ),
-            benchmark_mode=source.get("CIAO_BENCHMARK_MODE", "false")
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"},
         )
 
 

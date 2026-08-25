@@ -140,3 +140,51 @@ def test_format_report_only_errors_no_jobs(tmp_path: Path) -> None:
     text = format_issue_report(report)
     assert "Server error log tail" in text
     assert "Failed background jobs" not in text
+
+
+def test_debug_log_included_when_present(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "server_debug.log").write_text(
+        "2026-08-22 DEBUG ciao.providers.claude: stderr noise\n",
+        encoding="utf-8",
+    )
+
+    report = build_issue_report(tmp_path)
+
+    # Ambient verbose output is never an issue by itself...
+    assert report["has_issues"] is False
+    assert report["report_text"] == "(no runtime issues logged)"
+    # ...but the raw tail is always in the payload for inspection.
+    assert report["debug_log_lines"] == 1
+    assert report["debug_log_path"].endswith(".runtime/server_debug.log")
+    assert "stderr noise" in report["debug_log"]
+
+
+def test_debug_log_rendered_alongside_real_issues(tmp_path: Path) -> None:
+    _write_error_log(tmp_path, "ERROR boom\n")
+    job_runs.record_run(JobRun(
+        job="schedule_dispatch", label="Scheduled dispatch",
+        started_at="2026-08-22T10:00:00+00:00",
+        ended_at="2026-08-22T10:00:01+00:00",
+        status="error", error="stream exploded",
+    ))
+    runtime = tmp_path / ".runtime"
+    (runtime / "server_debug.log").write_text(
+        "DEBUG provider handshake failed\n", encoding="utf-8"
+    )
+
+    report = build_issue_report(tmp_path)
+
+    assert report["has_issues"] is True
+    text = report["report_text"]
+    assert "stream exploded" in text
+    assert "Debug log tail" in text
+    assert "provider handshake failed" in text
+
+
+def test_debug_log_absent_is_empty(tmp_path: Path) -> None:
+    report = build_issue_report(tmp_path)
+    assert report["debug_log"] == ""
+    assert report["debug_log_lines"] == 0
+    assert "Debug log tail" not in report["report_text"]

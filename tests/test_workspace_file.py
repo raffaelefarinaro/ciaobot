@@ -50,7 +50,7 @@ def test_valid_relative_path_returns_content(workspace: Path) -> None:
     assert "text/plain" in resp.headers["content-type"]
 
 
-def test_excalidraw_file_returns_content(workspace: Path) -> None:
+def test_excalidraw_extension_is_no_longer_served(workspace: Path) -> None:
     drawing = workspace / "diagram.excalidraw"
     drawing.write_text(
         '{"type":"excalidraw","version":2,"source":"https://excalidraw.com"}',
@@ -58,9 +58,7 @@ def test_excalidraw_file_returns_content(workspace: Path) -> None:
     )
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "diagram.excalidraw"})
-    assert resp.status_code == 200
-    assert '"type":"excalidraw"' in resp.text
-    assert "text/plain" in resp.headers["content-type"]
+    assert resp.status_code == 415
 
 
 def test_valid_absolute_path_inside_workspace_returns_content(workspace: Path) -> None:

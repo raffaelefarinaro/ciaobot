@@ -25,9 +25,12 @@ export function collectTraceOutputs(
 
 export function formatTokenUsage(usage?: Record<string, unknown>): string {
   if (!usage) return ''
-  const hasInput = usage.input_tokens !== undefined && usage.input_tokens !== null && usage.input_tokens !== ''
-  const hasOutput = usage.output_tokens !== undefined && usage.output_tokens !== null && usage.output_tokens !== ''
-  const hasContext = usage.context_pct !== undefined && usage.context_pct !== null && usage.context_pct !== ''
+  const inputVal = (usage.input_tokens ?? usage.inputTokens) as unknown
+  const outputVal = (usage.output_tokens ?? usage.outputTokens) as unknown
+  const contextVal = (usage.context_pct ?? usage.contextPct) as unknown
+  const hasInput = inputVal !== undefined && inputVal !== null && inputVal !== ''
+  const hasOutput = outputVal !== undefined && outputVal !== null && outputVal !== ''
+  const hasContext = contextVal !== undefined && contextVal !== null && contextVal !== ''
 
   const formatNum = (val: unknown) => {
     const num = typeof val === 'number' ? val : parseInt(String(val), 10)
@@ -36,13 +39,13 @@ export function formatTokenUsage(usage?: Record<string, unknown>): string {
 
   const parts: string[] = []
   if (hasInput) {
-    parts.push(`<span class="token-number">${formatNum(usage.input_tokens)}</span> in`)
+    parts.push(`<span class="token-number">${formatNum(inputVal)}</span> in`)
   }
   if (hasOutput) {
-    parts.push(`<span class="token-number">${formatNum(usage.output_tokens)}</span> out`)
+    parts.push(`<span class="token-number">${formatNum(outputVal)}</span> out`)
   }
   if (hasContext) {
-    parts.push(`<span class="context-pct">${String(usage.context_pct)}</span> ctx`)
+    parts.push(`<span class="context-pct">${String(contextVal)}</span> ctx`)
   }
   if (!parts.length) return ''
   return `Tokens ${parts.join(' · ')}`
@@ -56,7 +59,7 @@ export type TurnPart =
 
 /** Assistant prose step (not an Activity marker). Ignores `phase` so Claude
  *  mid-turn narration can still be found before we classify it. */
-export function isAssistantTextStep(
+function isAssistantTextStep(
   m: Pick<ChatMessage, 'role' | 'tool_name'>,
 ): boolean {
   return (
@@ -69,7 +72,7 @@ export function isAssistantTextStep(
 
 /** True when a buffered step is substantive assistant answer text that should
  *  render as its own bubble — not an Activity marker (`_activity`/`_thinking`/
- *  `_filecard`, all emitted with role `system`) and not Codex `commentary`
+ *  `_filecard`, all emitted with role `system`) and not provider `commentary`
  *  narration (which stays folded into the reasoning trace). */
 export function isAnswerBubble(
   m: Pick<ChatMessage, 'role' | 'tool_name' | 'phase'>,
@@ -78,7 +81,7 @@ export function isAnswerBubble(
 }
 
 /**
- * Heuristic for Claude mid-turn progress narration (Codex already stamps
+ * Heuristic for Claude mid-turn progress narration (some providers stamp
  * `phase: commentary`). Validated against real Ciao multi-text turns:
  * fold "Now let me…", "Let me…", trailing-colon status lines; keep long
  * updates, blockers/decisions, and answer-shaped openings.
@@ -129,7 +132,7 @@ export function findFinalAnswerIndex(
 
 /** True when this assistant text should render as its own bubble (given it is
  *  not the turn-final index, which the caller always keeps). */
-export function shouldRenderAnswerBubble(
+function shouldRenderAnswerBubble(
   m: Pick<ChatMessage, 'role' | 'tool_name' | 'phase' | 'content'>,
 ): boolean {
   if (!isAssistantTextStep(m)) return false
@@ -143,7 +146,7 @@ export function shouldRenderAnswerBubble(
  *  turn's outputs/subchats attached).
  *
  *  Substantive assistant text renders as its own message bubble. Claude
- *  progress narration (`Now let me…`, short status lines) and Codex
+ *  progress narration (`Now let me…`, short status lines) and
  *  `phase: commentary` fold into the Activity trace with the tool/thinking
  *  steps between them. Bookkeeping tool calls after the final answer
  *  (`buffer` indices past `finalIdx`) fold into the trace that precedes the
@@ -263,5 +266,4 @@ export function traceSummaryMetaParts(steps: ChatMessage[], subs?: SubagentTrans
   }
   return parts
 }
-
 

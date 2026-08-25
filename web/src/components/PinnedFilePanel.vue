@@ -14,19 +14,6 @@
       </template>
       <template #actions>
         <button
-          v-if="kind === 'excalidraw'"
-          class="btn-icon"
-          :class="{ active: isEditingExcalidraw }"
-          @click="isEditingExcalidraw = !isEditingExcalidraw"
-          :title="isEditingExcalidraw ? 'Disable editing' : 'Enable editing'"
-          aria-label="Edit Diagram"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"></path>
-          </svg>
-        </button>
-        <button
           v-if="(kind === 'text' || (kind === 'html' && htmlView === 'code' && sourceLoaded)) && !isEditingText"
           class="btn-icon"
           @click="startEditingText"
@@ -70,8 +57,35 @@
       </template>
     </PaneHeader>
     <div class="pfp-main" ref="mainEl">
-      <div class="pfp-body" :class="{ 'pfp-body-excalidraw': kind === 'excalidraw', 'pfp-body-csv': isCsv }" ref="bodyEl">
-        <div v-if="loading" class="pfp-loading">Loading…</div>
+      <div class="pfp-body" :class="{ 'pfp-body-csv': isCsv }" ref="bodyEl">
+        <div v-if="loading" class="pfp-skeleton" role="status" aria-live="polite" aria-label="Loading file" aria-busy="true">
+          <div class="pfp-skeleton-meta" aria-hidden="true">
+            <span class="pfp-skeleton-pill pfp-skeleton-pill--type"></span>
+            <span class="pfp-skeleton-pill pfp-skeleton-pill--status"></span>
+            <span class="pfp-skeleton-date"></span>
+          </div>
+          <div class="pfp-skeleton-tags" aria-hidden="true">
+            <span class="pfp-skeleton-tag"></span>
+            <span class="pfp-skeleton-tag pfp-skeleton-tag--wide"></span>
+            <span class="pfp-skeleton-tag"></span>
+          </div>
+          <div class="pfp-skeleton-block" aria-hidden="true">
+            <span class="pfp-skeleton-line pfp-skeleton-line--title"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--long"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--medium"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--short"></span>
+          </div>
+          <div class="pfp-skeleton-block" aria-hidden="true">
+            <span class="pfp-skeleton-line pfp-skeleton-line--long"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--long"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--medium"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--short"></span>
+          </div>
+          <div class="pfp-skeleton-block" aria-hidden="true">
+            <span class="pfp-skeleton-line pfp-skeleton-line--medium"></span>
+            <span class="pfp-skeleton-line pfp-skeleton-line--short"></span>
+          </div>
+        </div>
         <div v-else-if="error" class="pfp-error">{{ error }}</div>
         <img
           v-else-if="kind === 'image'"
@@ -105,16 +119,6 @@
           :source-loading="sourceLoading"
           :source-error="sourceError"
           @update:view="setHtmlView"
-        />
-        <ExcalidrawViewer
-          v-else-if="kind === 'excalidraw'"
-          :content="content"
-          :name="basename"
-          :file-path="cleanPath"
-          :chat-id="projectsStore.activeChatId || ''"
-          :read-only="!isEditingExcalidraw"
-          @change="content = $event"
-          style="flex: 1; min-height: 0; height: auto;"
         />
         <template v-else>
           <!-- Text Editing Mode -->
@@ -303,7 +307,6 @@ import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
 import type { FileViewerKind, HtmlArtifactView } from '../stores/fileViewer'
-const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
@@ -327,7 +330,6 @@ const sourceError = ref('')
 const sourceLoaded = ref(false)
 const refreshed = ref(false)
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
-const isEditingExcalidraw = ref(false)
 const isEditingText = ref(false)
 const editBuffer = ref('')
 const editSaving = ref(false)
@@ -918,7 +920,7 @@ watch(
 // closing this panel's hover-pin read popover when a compose opens.
 // Commenting stays available while the model works, matching FileViewerModal:
 // a comment is staged locally and rides along on the next message the user
-// sends (queued or steered), so there is nothing to wait for.
+// sends (queued), so there is nothing to wait for.
 // Artifacts are not commentable: a comment anchors to a markdown highlight or
 // a text line, and a rendered page in a sandboxed frame offers neither. This is
 // a real capability loss versus .md, which is why the html-artifact skill tells
@@ -1158,7 +1160,7 @@ watch(() => props.filePath, () => {
 @media (max-width: 768px) { .desktop-only { display: none; } }
 
 .btn-icon.ok {
-  color: var(--ok, #4ade80);
+  color: var(--success);
 }
 
 /* ── Body + sidebar split ──────────────────────────────────────────── */
@@ -1176,21 +1178,73 @@ watch(() => props.filePath, () => {
   display: flex;
   flex-direction: column;
 }
-.pfp-body-excalidraw {
-  padding: 0 !important;
-  overflow: hidden !important;
-}
 .pfp-body-csv {
   overflow: hidden !important;
 }
-.pfp-loading,
 .pfp-error {
   padding: 24px;
   text-align: center;
-  color: var(--fg2);
-}
-.pfp-error {
   color: var(--error, #f87171);
+}
+
+/* ── Skeleton loading (mirrors file + metadata card shape) ─────────────── */
+.pfp-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 8px 0 12px;
+}
+.pfp-skeleton-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2, rgba(255, 255, 255, 0.03));
+}
+.pfp-skeleton-pill,
+.pfp-skeleton-date,
+.pfp-skeleton-tag,
+.pfp-skeleton-line {
+  display: block;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: pfp-skeleton-sweep 1.4s ease-in-out infinite;
+}
+.pfp-skeleton-pill { height: 18px; }
+.pfp-skeleton-pill--type { width: 62px; }
+.pfp-skeleton-pill--status { width: 54px; }
+.pfp-skeleton-date { width: 72px; height: 11px; margin-left: auto; }
+.pfp-skeleton-tags {
+  display: flex;
+  gap: 6px;
+  margin-top: -6px;
+}
+.pfp-skeleton-tag { width: 44px; height: 18px; border-radius: 4px; }
+.pfp-skeleton-tag--wide { width: 68px; }
+.pfp-skeleton-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pfp-skeleton-line { height: 10px; }
+.pfp-skeleton-line--title { width: 46%; height: 14px; }
+.pfp-skeleton-line--long { width: 92%; }
+.pfp-skeleton-line--medium { width: 68%; }
+.pfp-skeleton-line--short { width: 42%; }
+@keyframes pfp-skeleton-sweep {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pfp-skeleton-pill,
+  .pfp-skeleton-date,
+  .pfp-skeleton-tag,
+  .pfp-skeleton-line {
+    animation: none;
+  }
 }
 .pfp-libreoffice-notice {
   margin: 24px;
@@ -1210,8 +1264,9 @@ watch(() => props.filePath, () => {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   line-height: 1.5;
-  white-space: pre;
-  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   color: var(--fg);
 }
 .pfp-pre code {
@@ -1411,7 +1466,7 @@ watch(() => props.filePath, () => {
 /* A vault link whose target does not exist: readable, but not styled or
    shaped like something you can tap. Mirrors the file viewer modal. */
 .pfp-md :deep(.vault-link-unresolved) {
-  color: var(--fg-muted, #888);
+  color: var(--fg2);
   text-decoration: underline dotted;
   cursor: help;
 }
@@ -1704,7 +1759,7 @@ watch(() => props.filePath, () => {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  background: var(--danger, #e06c75);
+  background: var(--error);
   color: white;
   border: none;
   border-radius: 999px;

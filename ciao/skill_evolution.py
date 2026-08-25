@@ -70,8 +70,8 @@ _CIAOBOT_SKILLS_ROOTS: tuple[Path, ...] = (
 )
 
 
-def _resolve_skills_roots() -> tuple[Path, ...]:
-    """Resolve skill search roots for the current invocation.
+def _resolve_skills_roots(workspace: str = "") -> tuple[Path, ...]:
+    """Resolve skill search roots for one workspace.
 
     Since the 2026-06-30 repo split, the canonical skill catalog lives in
     the *ciao* workspace (``CIAO_WORKSPACE``, e.g. ``~/repos/ciao``) under
@@ -82,16 +82,37 @@ def _resolve_skills_roots() -> tuple[Path, ...]:
 
     The ciao workspace roots come first when set, so user edits in
     ``CIAO_WORKSPACE/skills/`` win over any stale in-tree copy.
+
+    ``workspace`` names a registered workspace, whose catalog is resolved
+    through ``CiaoConfig.agent_root``. That returns the install root until this
+    install has re-rooted, so a named call is identical to an unnamed one today
+    and reads the root's own ``skills/`` afterwards. Falling back to the install
+    root rather than raising matters: a name that is not registered, or a broken
+    registry, must still search somewhere rather than silently finding no skill
+    and reporting every skill as missing.
+
+    Called per invocation, never cached at import. The previous module-level
+    constant froze the catalog location at the first import in the process, so a
+    per-workspace pass would have searched whichever root happened to be
+    resolved first — and after the re-rooting that is a different directory per
+    workspace, which is the whole point.
     """
-    workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
+    roots: list[Path] = []
     if workspace:
-        ws = Path(workspace).expanduser()
-        ciao_roots = (ws / "skills", ws / ".claude" / "skills")
-        return (*ciao_roots, *_CIAOBOT_SKILLS_ROOTS)
-    return _CIAOBOT_SKILLS_ROOTS
+        try:
+            from ciao.config import CiaoConfig  # noqa: PLC0415
 
-
-_DEFAULT_SKILLS_ROOTS: tuple[Path, ...] = _resolve_skills_roots()
+            root = Path(CiaoConfig.from_env().agent_root(workspace))
+            roots.extend([root / "skills", root / ".claude" / "skills"])
+        except Exception:  # noqa: BLE001 — fall back to the env-derived root
+            logger.debug("could not resolve the agent root for %r", workspace)
+    env_root = os.environ.get("CIAO_WORKSPACE", "").strip()
+    if env_root:
+        ws = Path(env_root).expanduser()
+        for candidate in (ws / "skills", ws / ".claude" / "skills"):
+            if candidate not in roots:
+                roots.append(candidate)
+    return (*roots, *_CIAOBOT_SKILLS_ROOTS)
 
 
 def _resolve_proposals_dir(workspace: str | None = None) -> Path:
@@ -118,9 +139,13 @@ def _resolve_proposals_dir(workspace: str | None = None) -> Path:
 def evolution_workspaces() -> list[str]:
     """Workspaces the evolution pass should run for, one queue each.
 
-    The skill catalog is global (see :func:`_resolve_skills_roots`), so the pass
-    is not fanned out into N schedules — one run covers every workspace and
-    routes its findings. Only the *evidence* and the *queue* are per-workspace.
+    Still ONE schedule rather than N. The catalog becomes per-root only once the
+    re-rooting has run AND the user has triaged
+    ``Workspace/Skill-Triage.md``; until then every root's
+    :func:`_resolve_skills_roots` resolves to the same directory, so fanning the
+    routine out would mean N identical passes over one catalog writing duplicate
+    proposals into N queues. Evidence and queue are already per-workspace, which
+    is the part that partitions today.
     """
     from ciao.config import CiaoConfig
 
@@ -152,7 +177,7 @@ def _classify_non_skill(name: str) -> tuple[str, Path | None]:
 
     - ``"command"`` — lives in ``<workspace>/commands/<name>.md``
     - ``"subagent"`` — lives in ``<workspace>/subagents/<name>.md``
-    - ``"external"`` — neither found (impeccable plugin, codex, etc.)
+    - ``"external"`` — neither found (for example, an external plugin)
 
     Uses ``CIAO_WORKSPACE`` so the labels match the user's actual repo
     layout. Returns ``("external", None)`` when the workspace is unset,
@@ -343,15 +368,6 @@ def find_underperforming_skills(
 
 
 # ── Skill file resolution + guardrails ──────────────────────────────────
-
-
-def find_skill_file(skill_name: str, skills_root: Path) -> Path | None:
-    """Locate the SKILL.md (or <name>.md) for a skill name.
-
-    Single-root form: searches ``skills_root`` only. Kept for callers
-    and tests that explicitly pin a root.
-    """
-    return find_skill_file_in_roots(skill_name, [skills_root])
 
 
 def find_skill_file_in_roots(
@@ -646,10 +662,12 @@ async def _process_skill_dag(
     tests_root: Path | None,
 ) -> Path | None:
     """Run the per-skill DAG and return the written proposal path, or
-    ``None`` if no proposal was written (e.g. semantic drift, test
-    failure with a proposal present). A no-proposal result writes a
-    stub instead (both over-cap and under-cap), so it does not return
-    ``None`` for the no-improvement case.
+    ``None`` if no proposal was written (e.g. no clear improvement,
+    semantic drift, test failure). A no-proposal result only writes a
+    stub when the skill is over-cap (the trim surface needs human
+    attention); under-cap no-improvement is a weak signal and does not
+    clutter the review queue. The ``has_proposal=no-proposal`` node
+    still lands in ``job_runs.jsonl`` for audit.
 
     The async work (proposal generation, semantic check) happens before
     we build the DAG, because the DAG executor in :mod:`ciao.dag` is
@@ -725,37 +743,26 @@ async def _process_skill_dag(
         written_path["value"] = str(path)
         return True, str(path)
 
-    def write_stub_node(ctx: dict[str, Any]) -> tuple[bool, str]:
-        # No-proposal path: persist a stub so the next run (or a human
-        # reviewer) sees the skill has been considered. Fires for both
-        # over-cap (model couldn't propose a safe trim) and under-cap
-        # (model found no clear improvement) skills. Without the under-cap
-        # branch, flagged-but-no-proposal skills vanished from the audit
-        # trail, leaving next week's pass with no comparable record.
-        if proposal is not None:
-            return False, "no-stub-needed"
+    def write_stub_node(
+        ctx: dict[str, Any],
+    ) -> tuple[bool, str] | tuple[bool, str, bool]:
+        # Only over-cap no-proposal persists a stub. Under-cap no-improvement
+        # is a weak signal (loaded-but-not-causal) and would flood the
+        # review queue with no actionable edit. The DAG already logs
+        # has_proposal=no-proposal in job_runs.jsonl, which is sufficient
+        # audit; writing a draft proposal for it clutters the human queue.
+        if not (over_cap and proposal is None):
+            return False, "no-stub-needed", True
         size = len(skill_text.encode("utf-8"))
-        if over_cap:
-            stub = (
-                "No clear improvement found.\n\n"
-                f"Skill is {size} bytes "
-                f"(cap: {MAX_SKILL_BYTES}). The model could not "
-                "propose a safe trim that preserves the primary "
-                "workflow. Consider a manual review: the skill "
-                "may have grown organically and the trim surface "
-                "is unclear without domain context."
-            )
-        else:
-            stub = (
-                "No clear improvement found.\n\n"
-                "The model pass returned no concrete improvement for "
-                "this skill this week. The skill is under the size cap "
-                f"({size} / {MAX_SKILL_BYTES} bytes) and was flagged from "
-                f"{len(skill_trajectories)} trajectory "
-                f"({'session' if len(skill_trajectories) == 1 else 'sessions'}). "
-                "Recorded so next week's pass has a comparable audit "
-                "entry; no edit applied."
-            )
+        stub = (
+            "No clear improvement found.\n\n"
+            f"Skill is {size} bytes "
+            f"(cap: {MAX_SKILL_BYTES}). The model could not "
+            "propose a safe trim that preserves the primary "
+            "workflow. Consider a manual review: the skill "
+            "may have grown organically and the trim surface "
+            "is unclear without domain context."
+        )
         path = write_proposal(
             skill_name=skill_name,
             skill_path=skill_path,
@@ -786,7 +793,7 @@ async def _process_skill_dag(
     ]
 
     label = f"skillevo:{skill_name}"
-    ctx = run_dag(dag, edges, job="skill_evolution", label=label)
+    run_dag(dag, edges, job="skill_evolution", label=label)
 
     if written_path["value"]:
         return Path(written_path["value"])
@@ -827,8 +834,8 @@ async def run_evolution_pass(
 
     Per-skill pipeline: each flagged skill is processed by
     :func:`_process_skill_dag`, which runs ``has_proposal`` →
-    ``semantic`` → ``tests`` → ``write`` (or ``write_stub`` on any
-    no-proposal result, over-cap or under-cap) as a DAG via
+    ``semantic`` → ``tests`` → ``write`` (or ``write_stub`` on
+    over-cap-with-no-proposal) as a DAG via
     :mod:`ciao.dag`. Per-node
     timing lands in ``.runtime/job_runs.jsonl`` with label
     ``skillevo:<skill>:<node>``.
@@ -845,7 +852,7 @@ async def run_evolution_pass(
     if skills_root is not None:
         search_roots: tuple[Path, ...] = (skills_root,)
     else:
-        search_roots = _DEFAULT_SKILLS_ROOTS
+        search_roots = _resolve_skills_roots(workspace or "")
 
     written: list[Path] = []
     if flagged:
@@ -986,7 +993,7 @@ def _main(argv: list[str] | None = None) -> int:
             trajectories, min_sessions=args.min_sessions
         )
         search_roots = (
-            (args.skills_root,) if args.skills_root else _DEFAULT_SKILLS_ROOTS
+            (args.skills_root,) if args.skills_root else _resolve_skills_roots()
         )
         for name, recs in sorted(flagged.items()):
             sids = ",".join((r.get("session_id") or "")[:8] for r in recs)
@@ -1028,7 +1035,6 @@ def _main(argv: list[str] | None = None) -> int:
 
     job_runs.configure(
         os.environ.get("CIAO_RUNTIME_ROOT")
-        or os.environ.get("TELEGRAM_BRIDGE_RUNTIME_ROOT")
         or (Path(__file__).resolve().parents[1] / ".runtime")
     )
     with job_runs.track_sync(

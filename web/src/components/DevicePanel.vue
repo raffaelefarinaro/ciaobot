@@ -97,6 +97,9 @@
               Force disconnect
             </button>
           </div>
+          <p v-if="nativeSessionNote" class="hint native-session-warning">
+            {{ nativeSessionNote }}
+          </p>
         </template>
 
         <!-- Host: reachable addresses, connected clients, opt into client mode -->
@@ -441,10 +444,30 @@ async function becomeHost(force = false) {
   nodePending.value = null
 }
 
+// Externally-started CLI sessions (a terminal `claude` on this machine) are
+// invisible to Ciaobot but write to the same workspace. Surface them near the
+// handover controls so the operator knows before switching roles.
+const nativeSessionNote = ref('')
+
+async function fetchNativeSessions() {
+  try {
+    const r = await api.get<{ sessions: { session_id: string; pid: number; cwd: string }[] }>(
+      '/api/native/sessions'
+    )
+    const count = r?.sessions?.length || 0
+    nativeSessionNote.value = count
+      ? `Warning: ${count} Claude Code CLI session${count > 1 ? 's' : ''} started outside Ciaobot ${count > 1 ? 'are' : 'is'} running on this workspace (pid ${r!.sessions.map(s => s.pid).join(', ')}). Terminal activity may conflict with handover.`
+      : ''
+  } catch {
+    nativeSessionNote.value = ''
+  }
+}
+
 onMounted(() => {
   fetchNodeStatus()
   fetchLocalEngine()
   fetchPackageStatus()
+  void fetchNativeSessions()
 })
 </script>
 
@@ -454,6 +477,9 @@ onMounted(() => {
   flex-direction: column;
   gap: var(--space-4);
   width: 100%;
+}
+.native-session-warning {
+  color: var(--warning);
 }
 .device-card-actions {
   display: flex;

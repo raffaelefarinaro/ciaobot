@@ -170,9 +170,8 @@ describe('ChatPanel retry from error bubble', () => {
     await flushPromises()
 
     expect(sendMessage).toHaveBeenCalledTimes(1)
-    const [, text, mode, prepared] = sendMessage.mock.calls[0]
+    const [, text, prepared] = sendMessage.mock.calls[0]
     expect(text).toBe('Check the video')
-    expect(mode).toBe('queue')
     // The prior bubble's images must travel with the retry, and the
     // composer bucket must not be drained (no prepared message would
     // touch pendingImages, but verify imageRefs on the payload).
@@ -208,7 +207,7 @@ describe('ChatPanel retry from error bubble', () => {
     await flushPromises()
 
     expect(sendMessage).toHaveBeenCalledTimes(1)
-    const [, text, , prepared] = sendMessage.mock.calls[0]
+    const [, text, prepared] = sendMessage.mock.calls[0]
     expect(text).toBe('Just text this time')
     expect(prepared.imageRefs).toBeUndefined()
     wrapper.unmount()

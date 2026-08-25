@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.context.capsule import build_context_capsule, context_digest
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 
 
-def test_capsule_contains_routing_and_retrieval_hints(tmp_path: Path) -> None:
+def test_capsule_contains_routing_and_entity_hints(tmp_path: Path) -> None:
     (tmp_path / "INDEX.md").write_text(
         "- [People/Alba](./People/Alba.md) (aliases: Alba)\n", encoding="utf-8"
     )
@@ -25,7 +25,7 @@ def test_capsule_contains_routing_and_retrieval_hints(tmp_path: Path) -> None:
     assert "workspace=personal" in capsule
     assert 'project="Ciaobot"' in capsule
     assert "[Alba](./People/Alba.md)" in capsule
-    assert "retrieval_hint=Use vault_search" in capsule
+    assert "retrieval_hint" not in capsule
 
 
 def test_capsule_can_omit_stable_facts() -> None:
@@ -62,6 +62,10 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+            for name in ("personal", "work")
+        },
     )
     return ProjectChatManager(
         config,
@@ -77,7 +81,7 @@ def test_prompt_prefix_reads_the_top_level_entity_index(tmp_path: Path) -> None:
     `vault-index --write` writes exactly one index, at the top-level vault
     root. Passing the per-workspace vault root here made `find_entities` read
     a non-existent (in practice, a stale empty stub) index, so every PWA turn
-    silently matched nothing while the Codex provider path still worked.
+    silently matched nothing while another provider path still worked.
     """
     vault = tmp_path / "memory-vault"
     (vault / "personal").mkdir(parents=True)

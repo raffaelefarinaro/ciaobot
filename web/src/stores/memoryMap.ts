@@ -13,8 +13,18 @@ export interface MemoryGraphNode {
   description: string
   workspace: string
   degree: number
-  /** Epoch seconds from the server, used to seed the local view. */
+  /** Epoch seconds from the server, ordering the recently-written entry points. */
   mtime: number
+  /** Frontmatter `updated:` (YYYY-MM-DD) — when the facts were last verified. */
+  updated: string
+  /**
+   * True when the note's age passes its type's staleness horizon, computed
+   * server-side by the same detector the audit and daily curation consume.
+   * Event types (logs, journals) never go stale and are never flagged.
+   */
+  stale: boolean
+  /** Days since last verification; null when the note carries no usable date. */
+  ageDays: number | null
   // simulation state, owned by the canvas but persisted here so the graph
   // does not re-scatter every time the sidebar touches the store.
   x: number
@@ -56,8 +66,8 @@ export const MEMORY_TYPE_META: Record<string, { label: string; color: string }> 
  * dE 1.6); a brute-force search over its slots found four to be the largest
  * subset that clears every gate in both themes. The two residual WARNs (dark
  * CVD dE 6.9, light contrast on yellow/magenta) are both relieved by direct
- * labels, which is why cluster labels on the canvas and the sidebar legend are
- * not optional decoration here — they are what makes the colour legal.
+ * labels — the sidebar legend names every coloured cluster, and hovering a
+ * node names it — so the colour never has to carry identification alone.
  *
  * Slots are assigned by cluster size and never cycled: a fifth cluster takes
  * the neutral, it does not get an invented hue.
@@ -130,23 +140,35 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    * Orphans are 21% of a real vault and have no edges, so in the layout they
    * only feel centering and repulsion — they push the connected structure
    * apart while carrying no relational information themselves. Hiding them is
-   * the single biggest legibility win available from a toggle.
+   * the single biggest legibility win available from a toggle, but showing
+   * *only* them is the to-do view for linking or deleting.
    */
-  const hideOrphans = ref(false)
+  const orphanFilter = ref<'all' | 'hide' | 'only'>('all')
+  // Backward-compat: existing UI/tests address `hideOrphans` as a boolean.
+  const hideOrphans = computed({
+    get: () => orphanFilter.value === 'hide',
+    set: (v: boolean) => { orphanFilter.value = v ? 'hide' : 'all' },
+  })
   /** 'category' is the note's own type; 'cluster' is detected community. */
   const colorMode = ref<'category' | 'cluster'>('category')
   /**
-   * 'overview' is the whole (filtered) vault; 'local' is a neighbourhood
-   * around one note. Local is the default because a 300-node global view is a
-   * hairball, while a depth-2 neighbourhood is the thing people actually read.
+   * Which surface the memory page shows. The switcher itself lives in the
+   * sidebar next to the workspace toggle, so this state is shared between
+   * `ProjectSidebar` (the buttons) and `MemoryMapView` (the surfaces).
    */
-  const scope = ref<'overview' | 'local'>('local')
-  const localRoot = ref<string | null>(null)
-  const localDepth = ref(2)
+  const view = ref<'graph' | 'list' | 'review'>('graph')
   // Bumped whenever something outside the canvas (the sidebar's "most
   // connected" list, a neighbor link) asks the canvas to pan/zoom onto a
   // node. The canvas owns camera state and only needs to watch this signal.
-  const focusSignal = reactive<{ id: string | null; seq: number }>({ id: null, seq: 0 })
+  //
+  // `magnify` separates the two reasons to focus. A name in a sidebar list is
+  // a note the user cannot see on the canvas, so the camera zooms in far
+  // enough for its title to be painted; a click on a dot is a note they are
+  // already looking at, and zooming there would throw away the overview on
+  // every click.
+  const focusSignal = reactive<{ id: string | null; seq: number; magnify: boolean }>(
+    { id: null, seq: 0, magnify: true },
+  )
 
   const nodesById = computed(() => {
     const map = new Map<string, MemoryGraphNode>()
@@ -192,45 +214,15 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     return clusterOf(id)?.slot
   }
 
-  /**
-   * Notes within `localDepth` hops of the local root. The root is always
-   * included even when a category filter would exclude it, so the view can
-   * never end up empty while pointing at a real note.
-   */
-  const localIds = computed<Set<string>>(() => {
-    const root = localRoot.value
-    if (!root || !nodesById.value.has(root)) return new Set()
-    const seen = new Set([root])
-    let frontier = [root]
-    for (let d = 0; d < localDepth.value; d++) {
-      const next: string[] = []
-      for (const id of frontier) {
-        for (const nb of adjacency.value.get(id) || []) {
-          if (seen.has(nb)) continue
-          seen.add(nb)
-          next.push(nb)
-        }
-      }
-      if (!next.length) break
-      frontier = next
-    }
-    return seen
-  })
-
   function passesFilters(n: MemoryGraphNode): boolean {
     if (!activeCats.has(catKeyFor(n))) return false
     if (search.value.trim() && !matchesSearch(n, search.value)) return false
-    if (hideOrphans.value && n.degree === 0) return false
+    if (orphanFilter.value === 'hide' && n.degree === 0) return false
+    if (orphanFilter.value === 'only' && n.degree !== 0) return false
     return true
   }
 
-  const visibleNodes = computed(() => {
-    if (scope.value === 'local' && localRoot.value) {
-      const ids = localIds.value
-      return nodes.value.filter(n => ids.has(n.id) && (n.id === localRoot.value || passesFilters(n)))
-    }
-    return nodes.value.filter(passesFilters)
-  })
+  const visibleNodes = computed(() => nodes.value.filter(passesFilters))
   const visibleIds = computed(() => new Set(visibleNodes.value.map(n => n.id)))
   const visibleEdgeCount = computed(
     () => edges.value.filter(e => visibleIds.value.has(e.source) && visibleIds.value.has(e.target)).length,
@@ -250,6 +242,17 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       .sort((a, b) => b.mtime - a.mtime),
   )
   /**
+   * Notes whose facts have gone unverified past their type's horizon. Same
+   * to-do-list shape as orphans: each one is worth re-checking, correcting,
+   * or deleting — and the daily curation routine works from the same list,
+   * so what shows here is exactly what that run will touch.
+   */
+  const staleNotes = computed(() =>
+    nodes.value
+      .filter(n => n.stale && activeCats.has(catKeyFor(n)))
+      .sort((a, b) => (b.ageDays ?? 0) - (a.ageDays ?? 0)),
+  )
+  /**
    * High betweenness with modest degree = a note that sits *between* clusters
    * rather than at the centre of one. Those are the notes whose deletion would
    * actually fragment the vault, which a degree ranking never surfaces.
@@ -267,6 +270,21 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   /** Entry points for the local view, most recently written first. */
   const recentNotes = computed(() => [...nodes.value].sort((a, b) => b.mtime - a.mtime).slice(0, 6))
   const selectedNode = computed(() => (selectedId.value ? nodesById.value.get(selectedId.value) || null : null))
+
+  /**
+   * Compact age for list rows and the detail panel: "5mo" style, or an empty
+   * string when the note carries no usable date at all.
+   */
+  function ageLabelOf(n: MemoryGraphNode): string {
+    if (n.ageDays === null && !n.updated && !n.mtime) return ''
+    const days = n.ageDays ?? Math.floor((Date.now() / 1000 - n.mtime) / 86400)
+    if (!Number.isFinite(days)) return ''
+    if (days < 1) return 'today'
+    if (days < 30) return `${days}d`
+    if (days < 365) return `${Math.floor(days / 30)}mo`
+    const years = days / 365
+    return `${years >= 2 ? Math.floor(years) : years.toFixed(1)}y`
+  }
 
   const pathIds = computed<Set<string>>(() => {
     if (!pathStart.value || !pathEnd.value) return new Set()
@@ -302,35 +320,154 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     return (adjacency.value.get(id) || []).map(nid => nodesById.value.get(nid)).filter(Boolean) as MemoryGraphNode[]
   }
 
-  async function loadGraph(workspace: string) {
-    loading.value = true
+  /**
+   * One snapshot per workspace, kept for the life of the session.
+   *
+   * The map used to be rebuilt from scratch on every visit: a full re-fetch
+   * (the server reads and parses every note in every vault), a full skeleton,
+   * and a full force-layout warmup — for a graph that had not changed since
+   * the user left the page thirty seconds earlier. Snapshots hold the same
+   * node objects the canvas mutates, so a workspace you have already looked
+   * at comes back instantly, with its settled layout intact.
+   */
+  interface GraphSnapshot {
+    nodes: MemoryGraphNode[]
+    edges: MemoryGraphEdge[]
+    signature: string
+    /** The canvas has already run a layout warmup on these positions. */
+    warm: boolean
+  }
+  const graphCache = new Map<string, GraphSnapshot>()
+  const loadedWorkspace = ref('')
+  /**
+   * Ticket for the newest in-flight graph request; older responses are dropped.
+   *
+   * Every load races the workspace switcher (and the background revalidation
+   * ensureGraph fires). A slow /api/vault/graph for the workspace the user has
+   * just left used to publish anyway, overwriting `nodes`/`loadedWorkspace`
+   * with the abandoned scope's graph — the map then showed the wrong vault
+   * until something else forced a reload.
+   */
+  let graphRequestSeq = 0
+  /** Whether the current positions are settled, i.e. the canvas can skip the
+   * warmup and go straight to the short settle. */
+  const graphIsWarm = ref(false)
+  function markGraphWarm() {
+    graphIsWarm.value = true
+    const snap = graphCache.get(loadedWorkspace.value)
+    if (snap) snap.warm = true
+  }
+
+  /** Cheap identity of a graph's content, to tell a no-op refresh from a real
+   * change without diffing every field. */
+  function signatureOf(ns: { id: string; updated: string; degree: number; stale: boolean }[], es: MemoryGraphEdge[]): string {
+    const nodePart = ns.map(n => `${n.id}|${n.updated}|${n.degree}|${n.stale ? 1 : 0}`).join('\n')
+    return `${ns.length}:${es.length}\n${nodePart}`
+  }
+
+  function adopt(workspace: string, snap: GraphSnapshot) {
+    nodes.value = snap.nodes
+    edges.value = snap.edges
+    loadedWorkspace.value = workspace
+    graphIsWarm.value = snap.warm
+    loading.value = false
+    loadError.value = ''
+  }
+
+  /**
+   * Show the graph for `workspace`, fetching only when we have nothing to
+   * show. A workspace already in the cache is adopted immediately and then
+   * revalidated in the background, so the common case (leaving the page and
+   * coming back) costs no skeleton and no re-layout.
+   */
+  async function ensureGraph(workspace: string) {
+    const cached = graphCache.get(workspace)
+    if (cached && cached.nodes.length) {
+      if (loadedWorkspace.value !== workspace) adopt(workspace, cached)
+      void loadGraph(workspace, { background: true })
+      return
+    }
+    await loadGraph(workspace)
+  }
+
+  async function loadGraph(workspace: string, opts?: { background?: boolean }) {
+    const background = opts?.background === true
+    const seq = ++graphRequestSeq
+    if (!background) loading.value = true
     loadError.value = ''
     try {
       const data = await api.get<{ nodes: any[]; edges: MemoryGraphEdge[] }>(
         `/api/vault/graph?workspace=${encodeURIComponent(workspace)}`,
       )
-      nodes.value = (data.nodes || []).map(n => ({
+      // Superseded by a newer load (a workspace switch, or a later refresh):
+      // this response describes a scope nobody is looking at, so it must not
+      // touch the graph, the cache, or the spinner.
+      if (seq !== graphRequestSeq) return
+      const incoming: MemoryGraphNode[] = (data.nodes || []).map(n => ({
         ...n,
         tags: n.tags || [],
         aliases: n.aliases || [],
         description: n.description || '',
         mtime: typeof n.mtime === 'number' ? n.mtime : 0,
+        updated: typeof n.updated === 'string' ? n.updated : '',
+        stale: n.stale === true,
+        ageDays: typeof n.age_days === 'number' ? n.age_days : null,
         x: (Math.random() - 0.5) * 800,
         y: (Math.random() - 0.5) * 800,
         vx: 0,
         vy: 0,
       }))
-      edges.value = (data.edges || []).filter(e => e.source !== e.target)
+      const incomingEdges = (data.edges || []).filter(e => e.source !== e.target)
+      const signature = signatureOf(incoming, incomingEdges)
+      const previous = graphCache.get(workspace)
+      // Nothing changed on disk: keep the layout the user is looking at rather
+      // than swapping in identical data and re-settling it for no reason.
+      if (previous && previous.signature === signature) {
+        if (loadedWorkspace.value !== workspace) adopt(workspace, previous)
+        return
+      }
+      // Carry positions across for notes we already had, so a refresh that adds
+      // one note does not re-scatter the other five hundred.
+      let carried = 0
+      if (previous) {
+        const prevById = new Map(previous.nodes.map(n => [n.id, n]))
+        for (const n of incoming) {
+          const old = prevById.get(n.id)
+          if (!old) continue
+          n.x = old.x
+          n.y = old.y
+          carried += 1
+        }
+      }
+      const snap: GraphSnapshot = {
+        nodes: incoming,
+        edges: incomingEdges,
+        signature,
+        // Positions inherited wholesale are already settled; a graph that is
+        // mostly new notes at random coordinates is not.
+        warm: Boolean(previous?.warm) && carried >= incoming.length * 0.5,
+      }
+      graphCache.set(workspace, snap)
+      nodes.value = snap.nodes
+      edges.value = snap.edges
+      loadedWorkspace.value = workspace
+      graphIsWarm.value = snap.warm
       activeCats.clear()
       categoryList.value.forEach(c => activeCats.add(c.key))
       selectedId.value = null
       pathStart.value = null
       pathEnd.value = null
-      localRoot.value = defaultLocalRoot()
     } catch (err) {
-      loadError.value = err instanceof Error ? err.message : 'Failed to load the vault graph.'
+      // A silent background refresh must not replace the graph on screen with
+      // an error card; the data we are showing is still the data we had. Nor
+      // may a superseded load report a failure for a scope nobody is on.
+      if (!background && seq === graphRequestSeq) {
+        loadError.value = err instanceof Error ? err.message : 'Failed to load the vault graph.'
+      }
     } finally {
-      loading.value = false
+      // The newest load owns the spinner; clearing it from an older one would
+      // drop the skeleton while its request is still in flight.
+      if (!background && seq === graphRequestSeq) loading.value = false
     }
   }
 
@@ -340,51 +477,24 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   // requiring every consumer to remember to watch it, is what keeps the
   // graph from going stale/blank on a workspace switch.
   const projectStore = useProjectStore()
-  watch(() => projectStore.activeWorkspace, (ws) => { void loadGraph(ws) })
+  watch(() => projectStore.activeWorkspace, (ws) => { void ensureGraph(ws) })
 
-  /**
-   * How many recent notes to consider when picking an entry point. Pure
-   * recency picks dead ends: on a real vault the newest note was a
-   * single-link log entry, so the opening view was four nodes and told the
-   * user nothing. Taking the best-connected note out of a recent window keeps
-   * the "where I was working" intent while landing somewhere with structure
-   * around it.
-   */
-  const ROOT_RECENCY_WINDOW = 15
-  /**
-   * Falls back to the biggest hub overall when the server sent no mtimes
-   * (older backend), and to nothing at all for an empty vault.
-   */
-  function defaultLocalRoot(): string | null {
-    if (!nodes.value.length) return null
-    const byRecency = [...nodes.value].sort((a, b) => b.mtime - a.mtime)
-    const window = byRecency[0]?.mtime ? byRecency.slice(0, ROOT_RECENCY_WINDOW) : nodes.value
-    const best = [...window].sort((a, b) => b.degree - a.degree || b.mtime - a.mtime)[0]
-    return best?.id || null
-  }
-  function setScope(next: 'overview' | 'local') {
-    scope.value = next
-    if (next === 'local' && !localRoot.value) localRoot.value = selectedId.value || defaultLocalRoot()
-  }
-  /** Re-root the local view, switching into it if the user was in overview. */
-  function setLocalRoot(id: string) {
-    localRoot.value = id
-    scope.value = 'local'
-  }
-  function setLocalDepth(depth: number) {
-    localDepth.value = Math.max(1, Math.min(4, Math.round(depth)))
-  }
   function setColorMode(mode: 'category' | 'cluster') {
     colorMode.value = mode
   }
   function toggleHideOrphans() {
-    hideOrphans.value = !hideOrphans.value
+    orphanFilter.value = orphanFilter.value === 'hide' ? 'all' : 'hide'
+  }
+  function toggleOnlyOrphans() {
+    orphanFilter.value = orphanFilter.value === 'only' ? 'all' : 'only'
+  }
+  function setOrphanFilter(v: 'all' | 'hide' | 'only') {
+    orphanFilter.value = v
   }
   /** Show only one cluster, the cluster-space equivalent of "only" on a category. */
   function isolateCluster(clusterId: number) {
     const cluster = clusterById.value.get(clusterId)
     if (!cluster) return
-    scope.value = 'overview'
     search.value = ''
     activeCats.clear()
     for (const id of cluster.memberIds) {
@@ -410,10 +520,16 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   function selectNode(id: string | null) {
     selectedId.value = id
   }
-  /** Select a node and ask the canvas to pan/zoom onto it. */
-  function requestFocus(id: string) {
+  /**
+   * Select a node and ask the canvas to pan onto it.
+   *
+   * @param magnify Also zoom in far enough to read the note's title. Callers
+   * that name the note on screen already (a canvas click) pass false.
+   */
+  function requestFocus(id: string, magnify = true) {
     selectedId.value = id
     focusSignal.id = id
+    focusSignal.magnify = magnify
     focusSignal.seq += 1
   }
   function resetPath() {
@@ -440,6 +556,14 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     if (selectedId.value === id) selectedId.value = null
     if (pathStart.value === id) pathStart.value = null
     if (pathEnd.value === id) pathEnd.value = null
+    // The cached snapshot holds the arrays we just replaced; leaving it stale
+    // would resurrect the deleted note on the next visit to this workspace.
+    const snap = graphCache.get(loadedWorkspace.value)
+    if (snap) {
+      snap.nodes = nodes.value
+      snap.edges = edges.value
+      snap.signature = signatureOf(nodes.value, edges.value)
+    }
   }
 
   function handleNodeClick(id: string, shiftKey: boolean) {
@@ -452,22 +576,20 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     // Clicking a node directly on the canvas should feel the same as
     // clicking it from the sidebar or a linked-note link: it becomes
     // selected AND the camera centers on it, not just a highlight in place.
-    // In local scope a click also walks the view to that note, which is what
-    // makes the neighbourhood browsable instead of a dead end.
-    if (scope.value === 'local') localRoot.value = id
-    requestFocus(id)
+    // No magnification, though — the dot was already under the cursor.
+    requestFocus(id, false)
   }
 
   return {
     nodes, edges, loading, loadError, search, activeCats, selectedId, pathStart, pathEnd, focusSignal,
-    hideOrphans, colorMode, scope, localRoot, localDepth,
+    hideOrphans, orphanFilter, colorMode, view,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode, pathIds, pathHint,
-    clusters, clusterById, localIds, orphanNotes, bridgeNotes, recentNotes,
+    clusters, clusterById, orphanNotes, bridgeNotes, recentNotes, staleNotes, ageLabelOf,
     clusterOf, clusterSlotOf, betweennessOf,
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
-    setScope, setLocalRoot, setLocalDepth, setColorMode, toggleHideOrphans, isolateCluster,
-    defaultLocalRoot,
+    setColorMode, toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter, isolateCluster,
     selectNode, requestFocus, resetPath, handleNodeClick, deleteNote,
+    graphIsWarm, markGraphWarm, ensureGraph,
   }
 })

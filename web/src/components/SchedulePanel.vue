@@ -544,7 +544,7 @@
     </div>
 
     <!-- Overview homepage: shown when nothing is selected but automations exist -->
-    <div v-else-if="workspaceSchedules.length || workspaceLoops.length" class="scroll-body overview-body">
+    <div v-else-if="workspaceSchedules.length || workspaceLoops.length" ref="overviewEl" class="scroll-body overview-body">
       <div v-if="workspaceLoops.length" class="ov-card">
         <div class="ov-head">
           <span class="ov-dot"></span>
@@ -695,6 +695,7 @@ import ModelSelector from './ModelSelector.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
 import { isPerWorkspaceRoutine, loopInWorkspace, scheduleInWorkspace, workspaceForLoop } from '../lib/automationWorkspace'
 import { askConfirm } from '../lib/confirm'
+import { writeClipboard } from '../lib/codeCopy'
 
 const props = defineProps<{ showNew?: boolean }>()
 const emit = defineEmits<{ (e: 'created'): void; (e: 'open-sidebar'): void; (e: 'close'): void }>()
@@ -1050,7 +1051,7 @@ const editInheritedModelLabel = computed(() => {
     option => option.value === workspace?.default_provider,
   )?.label || workspace?.default_provider || 'provider'
   const model = workspace?.default_model
-    || (workspace?.default_provider === 'codex' ? '' : projectStore.workspaceAppDefaultModel)
+    || projectStore.workspaceAppDefaultModel
     || store.models?.default
     || ''
   return model ? `Inherit ${provider} / ${model}` : `Inherit ${provider} default`
@@ -1175,20 +1176,20 @@ function contextUnavailable(s: Schedule): boolean {
 }
 
 async function copyPrompt(prompt: string, key: string) {
-  try {
-    await navigator.clipboard.writeText(prompt)
+  const copied = await writeClipboard(prompt)
+  if (copied) {
     copiedPromptKey.value = key
     if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
     copiedPromptTimer = window.setTimeout(() => {
       if (copiedPromptKey.value === key) copiedPromptKey.value = ''
     }, 1800)
-  } catch {
-    copiedPromptKey.value = `error:${key}`
-    if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
-    copiedPromptTimer = window.setTimeout(() => {
-      if (copiedPromptKey.value === `error:${key}`) copiedPromptKey.value = ''
-    }, 1800)
+    return
   }
+  copiedPromptKey.value = `error:${key}`
+  if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
+  copiedPromptTimer = window.setTimeout(() => {
+    if (copiedPromptKey.value === `error:${key}`) copiedPromptKey.value = ''
+  }, 1800)
 }
 
 function promptCopyLabel(key: string): string {
@@ -1420,6 +1421,52 @@ async function onDelete() {
 function onCreated() {
   emit('created')
 }
+
+// Keyboard roaming for the overview lists (Next up / Recent runs / Missed).
+// This mirrors ProjectSidebar's schedule list, but for the main pane's
+// .ov-item links when no single schedule is selected. The sidebar owns the
+// canonical list, so ChatLayout tries the sidebar first and only falls
+// through to here if the sidebar had nothing focused.
+const overviewEl = ref<HTMLElement | null>(null)
+
+function overviewItems(): HTMLElement[] {
+  const root = overviewEl.value
+  if (!root) return []
+  return Array.from(root.querySelectorAll<HTMLElement>('.ov-item'))
+}
+
+function focusOverviewElement(element: HTMLElement) {
+  element.focus()
+  element.scrollIntoView({ block: 'nearest' })
+}
+
+function clampOverview(value: number, lower: number, upper: number): number {
+  return Math.min(upper, Math.max(lower, value))
+}
+
+function onArrow(key: string): boolean {
+  const items = overviewItems()
+  if (!items.length) return false
+  const active = document.activeElement as HTMLElement | null
+  let index = items.indexOf(active as HTMLElement)
+  if (index < 0) {
+    const activeLink = overviewEl.value?.querySelector<HTMLElement>('.ov-item.router-link-active')
+    if (activeLink && items.includes(activeLink)) {
+      index = items.indexOf(activeLink)
+    } else {
+      focusOverviewElement(items[0])
+      return true
+    }
+  }
+  const delta = key === 'ArrowDown' || key === 'ArrowRight' ? 1 : key === 'ArrowUp' || key === 'ArrowLeft' ? -1 : 0
+  if (!delta) return false
+  const nextIndex = clampOverview(index + delta, 0, items.length - 1)
+  if (nextIndex === index) return true
+  focusOverviewElement(items[nextIndex])
+  return true
+}
+
+defineExpose({ onArrow })
 
 function closeSchedule() {
   if (props.showNew) {
@@ -1714,21 +1761,32 @@ function closeSchedule() {
 
 .ov-when--muted { color: var(--fg3); }
 
-/* ── Overview (next up + missed) ───────────────────────────────── */
+/* ── Overview (next up + missed) ─────────────────────────────────
+   Aligned to HomeRecentChats .home-tier language: header is a mono tier
+   label with a bottom rule, rows are .home-chat-item rows with a left rail.
+   The former card box made the overview feel like a different surface from
+   home, despite showing the same kind of list. */
 .overview-body {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: 20px;
 }
 .ov-card {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
 }
 .ov-card--alert {
-  border-color: var(--warning);
-  box-shadow: inset 3px 0 0 var(--warning);
+  border: none;
+  box-shadow: none;
+}
+.ov-card--alert .ov-head {
+  border-bottom-color: color-mix(in srgb, var(--warning) 30%, var(--border));
 }
 .field-info {
   position: relative;
@@ -1785,10 +1843,13 @@ function closeSchedule() {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--fg);
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  margin-bottom: 0;
 }
 .ov-run-all {
   margin-left: auto;
@@ -1813,16 +1874,29 @@ function closeSchedule() {
 .ov-dot--alert { background: var(--warning); }
 .ov-item {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 0;
-  min-height: var(--touch);
+  width: 100%;
   min-width: 0;
-  border-top: 1px solid var(--border);
+  min-height: var(--touch, 44px);
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 0;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: transparent;
   text-decoration: none;
-  color: inherit;
+  color: var(--fg);
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
 }
-.ov-item:hover .ov-title { color: var(--accent); }
+.ov-item:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.ov-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.ov-card--alert .ov-item { border-left-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+.ov-card--alert .ov-item:hover { background: color-mix(in srgb, var(--warning) 7%, transparent); }
+.ov-card--alert .ov-item:focus-visible { outline-color: var(--warning); }
 .ov-when {
   font-size: var(--text-xs);
   font-weight: 700;

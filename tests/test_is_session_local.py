@@ -123,7 +123,6 @@ def test_is_session_local_empty_provider_defaults_to_claude(
     [
         ("opencode", "ses_8aFm2kQx91LpTz"),
         ("pi", "pi-session-1"),
-        ("codex", "0195b3c2-aaaa-bbbb-cccc-123456789abc"),
     ],
 )
 def test_is_session_local_non_claude_providers_are_local(

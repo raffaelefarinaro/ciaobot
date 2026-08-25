@@ -292,7 +292,7 @@ describe('AskUserQuestion keyboard shortcuts', () => {
 
   test('Enter submits a single-select answer once an option is picked', async () => {
     const { wrapper, store } = await mountLayout({ questions: [makeQuestion()] })
-    const sendMessage = vi.spyOn(store, 'sendMessage').mockImplementation(() => {})
+    const sendMessage = vi.spyOn(store, 'sendMessage').mockImplementation(() => true)
 
     // Nothing picked yet: Enter is not the card's key.
     expect(pressKey('Enter').defaultPrevented).toBe(false)
@@ -312,7 +312,7 @@ describe('AskUserQuestion keyboard shortcuts', () => {
 
   test('Enter stays with a focused button and never auto-sends multi-select', async () => {
     const { wrapper, store } = await mountLayout({ questions: [makeQuestion({ multiSelect: true })] })
-    const sendMessage = vi.spyOn(store, 'sendMessage').mockImplementation(() => {})
+    const sendMessage = vi.spyOn(store, 'sendMessage').mockImplementation(() => true)
 
     pressKey('1')
     await nextTick()
@@ -323,7 +323,7 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     wrapper.unmount()
     setActivePinia(createPinia())
     const single = await mountLayout({ questions: [makeQuestion()] })
-    const singleSend = vi.spyOn(single.store, 'sendMessage').mockImplementation(() => {})
+    const singleSend = vi.spyOn(single.store, 'sendMessage').mockImplementation(() => true)
     pressKey('1')
     await nextTick()
     const onButton = pressKey('Enter', optionButtons(single.wrapper)[0].element)

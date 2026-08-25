@@ -1,0 +1,170 @@
+/**
+ * The review queue's filter state.
+ *
+ * It lives in the store because the sidebar renders the controls and the panel
+ * renders the list — the same split the memory map uses. The scope rule is here
+ * for the same reason: the sidebar's chip counts and the list must not be able
+ * to disagree about what is in scope.
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { api } from '../lib/api'
+import { useProposalsStore } from './proposals'
+import type { ProposalRow, ProposalsResponse } from '../lib/types'
+
+vi.mock('../lib/api', () => ({
+  api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
+}))
+
+function row(overrides: Partial<ProposalRow> = {}): ProposalRow {
+  return {
+    id: 'r1',
+    kind: 'memory',
+    text: 'Remember the thing',
+    source: '',
+    workspace: 'personal',
+    path: 'personal/Workspace/Memory-Proposals.md',
+    line: 3,
+    ...overrides,
+  }
+}
+
+describe('proposals store filters', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
+  function seeded() {
+    const store = useProposalsStore()
+    store.rows = [
+      row({ id: 'p-mem' }),
+      row({ id: 'p-skill', kind: 'skill', text: '2026-08-09-defuddle' }),
+      row({ id: 'w-mem', workspace: 'work', text: 'Work thing' }),
+      row({ id: 'w-rehome', workspace: 'work', kind: 'rehome', text: 'Re-home Oliver' }),
+      row({ id: 'global', workspace: '', text: 'Applies everywhere', path: 'Workspace/Install.md' }),
+    ]
+    return store
+  }
+
+  it('scopes to a workspace and keeps install-wide rows', () => {
+    const store = seeded()
+
+    expect(store.scopedRows('personal').map(r => r.id)).toEqual(['p-mem', 'p-skill', 'global'])
+    expect(store.scopedRows('work').map(r => r.id)).toEqual(['w-mem', 'w-rehome', 'global'])
+  })
+
+  it('shows everything when no workspace is active yet', () => {
+    const store = seeded()
+
+    expect(store.scopedRows('')).toHaveLength(5)
+  })
+
+  it('filters by kind within the scope', () => {
+    const store = seeded()
+    store.kindFilter = 'skill'
+
+    expect(store.visibleRows('personal').map(r => r.id)).toEqual(['p-skill'])
+    expect(store.visibleRows('work')).toEqual([])
+  })
+
+  it('searches text and path', () => {
+    const store = seeded()
+    store.search = 'oliver'
+
+    expect(store.visibleRows('work').map(r => r.id)).toEqual(['w-rehome'])
+
+    store.search = 'Workspace/Memory-Proposals'
+    expect(store.visibleRows('personal').map(r => r.id)).toEqual(['p-mem', 'p-skill'])
+  })
+
+  it('counts kinds over the scope, not the filtered list', () => {
+    const store = seeded()
+    store.kindFilter = 'skill'
+
+    // Clicking a chip must not renumber the other chips, or the counts move
+    // under the pointer as you use them.
+    expect(store.kindCounts('personal')).toEqual([
+      { kind: 'memory', count: 2 },
+      { kind: 'skill', count: 1 },
+    ])
+  })
+
+  it('resets both filters together', () => {
+    const store = seeded()
+    store.kindFilter = 'skill'
+    store.search = 'oliver'
+
+    store.resetFilters()
+
+    expect(store.kindFilter).toBe('all')
+    expect(store.search).toBe('')
+    expect(store.visibleRows('personal')).toHaveLength(3)
+  })
+})
+
+describe('post-mutation refresh', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset()
+  })
+
+  it('never reads the accepted row back out of a pre-mutation snapshot', async () => {
+    // A plain fetch() is still in flight when the accept lands. Its refresh
+    // used to be handed that same request back by the in-flight de-dup, so it
+    // observed the list as it was *before* the POST: the accepted row was
+    // written straight back into `rows` and sat in the queue as if nothing had
+    // happened, until something else reloaded the panel.
+    let releaseFirst!: (value: ProposalsResponse) => void
+    const preMutation = new Promise<ProposalsResponse>(r => { releaseFirst = r })
+    vi.mocked(api.get)
+      .mockReturnValueOnce(preMutation as never)
+      .mockResolvedValueOnce({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+
+    const store = useProposalsStore()
+    const reader = store.fetch()
+    const accepting = store.act('p1', 'accept')
+
+    releaseFirst({ rows: [row({ id: 'p1' })] })
+    await reader
+    await accepting
+
+    expect(store.rows).toEqual([])
+    expect(api.get).toHaveBeenCalledTimes(2)
+    expect(store.loading).toBe(false)
+  })
+
+  it('drops a pre-mutation response that lands after the refresh', async () => {
+    // The other half of the same race: bypassing the de-dup is not enough if
+    // the older, pre-mutation GET is still allowed to write `rows` when it
+    // finally arrives — the accepted row would reappear a beat later.
+    let releaseFirst!: (value: ProposalsResponse) => void
+    const preMutation = new Promise<ProposalsResponse>(r => { releaseFirst = r })
+    vi.mocked(api.get)
+      .mockReturnValueOnce(preMutation as never)
+      .mockResolvedValueOnce({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+
+    const store = useProposalsStore()
+    const reader = store.fetch()
+    await store.act('p1', 'accept')
+    expect(store.rows).toEqual([])
+
+    releaseFirst({ rows: [row({ id: 'p1' })] })
+    await reader
+
+    expect(store.rows).toEqual([])
+    expect(store.loading).toBe(false)
+  })
+
+  it('still de-dupes concurrent readers', async () => {
+    // The de-dup is right for two panels mounting at once; only the refresh
+    // that follows a mutation has to bypass it.
+    vi.mocked(api.get).mockResolvedValue({ rows: [row({ id: 'p1' })] } as never)
+
+    const store = useProposalsStore()
+    await Promise.all([store.fetch(), store.fetch()])
+
+    expect(api.get).toHaveBeenCalledTimes(1)
+    expect(store.rows.map(r => r.id)).toEqual(['p1'])
+  })
+})

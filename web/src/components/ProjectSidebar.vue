@@ -31,17 +31,23 @@
               'nav-item--working': isAnyChatWorking
             }"
             title="chats"
-            :aria-label="isAnyChatWorking ? 'chats (assistant is working)' : 'chats'"
+            :aria-label="store.attentionChatCount > 0 ? `chats — ${store.attentionChatCount} need attention` : (isAnyChatWorking ? 'chats (assistant is working)' : 'chats')"
           >
-            <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="14" />
-              <line x1="6" y1="9" x2="14" y2="9" />
-              <line x1="6" y1="13" x2="18" y2="13" />
-              <polyline points="8 18 8 21 11 18" />
-            </svg>
-                      <span class="nav-item-label" aria-hidden="true">chats</span>
+            <span class="nav-item-icon" aria-hidden="true">
+              <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <rect x="3" y="4" width="18" height="14" />
+                <line x1="6" y1="9" x2="14" y2="9" />
+                <line x1="6" y1="13" x2="18" y2="13" />
+                <polyline points="8 18 8 21 11 18" />
+              </svg>
+              <span
+                v-if="store.attentionChatCount > 0"
+                class="nav-item-badge nav-item-badge--count"
+              >{{ store.attentionChatCount }}</span>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">chats</span>
           </router-link>
           <router-link
             to="/schedules"
@@ -53,35 +59,44 @@
             title="automations"
             :aria-label="hasAutomationWarning ? 'automations (attention required)' : 'automations'"
           >
-            <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-              <rect x="3" y="3" width="18" height="18" />
-              <line x1="12" y1="3" x2="12" y2="5" />
-              <line x1="12" y1="19" x2="12" y2="21" />
-              <line x1="3" y1="12" x2="5" y2="12" />
-              <line x1="19" y1="12" x2="21" y2="12" />
-              <polyline points="12 8 12 12 15 14" />
-            </svg>
-                      <span class="nav-item-label" aria-hidden="true">automations</span>
+            <span class="nav-item-icon" aria-hidden="true">
+              <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <rect x="3" y="3" width="18" height="18" />
+                <line x1="12" y1="3" x2="12" y2="5" />
+                <line x1="12" y1="19" x2="12" y2="21" />
+                <line x1="3" y1="12" x2="5" y2="12" />
+                <line x1="19" y1="12" x2="21" y2="12" />
+                <polyline points="12 8 12 12 15 14" />
+              </svg>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">automations</span>
           </router-link>
           <router-link
             to="/memory"
             class="nav-item touch-hit"
-            :class="{ 'nav-item--active': mode === 'memory' }"
+            :class="{ 'nav-item--active': mode === 'memory' || mode === 'proposals' }"
             title="memory"
-            aria-label="memory"
+            :aria-label="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} to review` : 'memory'"
           >
-            <!-- Brain: the only rail icon built from organic curves rather than
-                 rectilinear primitives, so it uses round caps/joins like the
-                 voice icons elsewhere instead of the rail's usual square/miter. -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5h1a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Z" />
-              <path d="M15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5h-1a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" />
-              <line x1="12" y1="6" x2="12" y2="18" />
-            </svg>
-                      <span class="nav-item-label" aria-hidden="true">memory</span>
+            <!-- Book/tray: rectilinear like the rest of the rail, which the
+                 organic-curve brain never was. It also now covers review, since
+                 the proposal queue is a segment of this view rather than its own
+                 rail entry. -->
+            <span class="nav-item-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <path d="M4 4h16v12H4z" />
+                <path d="M4 16h16v4H4z" />
+                <line x1="8" y1="8" x2="16" y2="8" />
+              </svg>
+              <span
+                v-if="proposals.rows.length > 0"
+                class="nav-item-badge nav-item-badge--count"
+              >{{ proposals.rows.length }}</span>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">memory</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/providers, /settings/models, ...) and none of them match
@@ -91,24 +106,29 @@
           <router-link
             to="/settings"
             class="nav-item touch-hit"
-            :class="{ 'nav-item--active': mode === 'settings' }"
-            :title="store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings'"
-            :aria-label="store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings'"
+            :class="{ 'nav-item--active': mode === 'settings', 'nav-item--warning': hasBlockingHousekeeping }"
+            :title="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
+            :aria-label="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
           >
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-              <line x1="4" y1="7" x2="20" y2="7" />
-              <line x1="4" y1="12" x2="20" y2="12" />
-              <line x1="4" y1="17" x2="20" y2="17" />
-              <rect x="14" y="5" width="4" height="4" fill="currentColor" />
-              <rect x="7" y="10" width="4" height="4" fill="currentColor" />
-              <rect x="15" y="15" width="4" height="4" fill="currentColor" />
-            </svg>
-                      <span class="nav-item-label" aria-hidden="true">settings</span>
-            <span v-if="store.packageStatus?.update_available" class="nav-item-badge" aria-hidden="true" />
+            <span class="nav-item-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <line x1="4" y1="7" x2="20" y2="7" />
+                <line x1="4" y1="12" x2="20" y2="12" />
+                <line x1="4" y1="17" x2="20" y2="17" />
+                <rect x="14" y="5" width="4" height="4" fill="currentColor" />
+                <rect x="7" y="10" width="4" height="4" fill="currentColor" />
+                <rect x="15" y="15" width="4" height="4" fill="currentColor" />
+              </svg>
+              <span
+                v-if="settingsNeedsAttention"
+                class="nav-item-badge"
+                :class="{ 'nav-item-badge--warning': hasBlockingHousekeeping }"
+              />
+            </span>
+            <span class="nav-item-label" aria-hidden="true">settings</span>
           </router-link>
-          <NotificationBell class="sidebar-bell" />
         </div>
       </template>
     </div>
@@ -142,10 +162,22 @@
           >{{ missedCountFor(workspace.name) }}</span>
         </button>
       </div>
-      <div class="schedules-list">
-        <div v-if="workspaceSchedules.length === 0 && workspaceLoops.length === 0" class="empty-hint">// no automations in this workspace</div>
+      <div ref="schedulesListEl" class="schedules-list">
+        <template v-if="taskStore.loading">
+          <div class="mm-loading-heading" role="status" aria-live="polite">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading automations…</span>
+          </div>
+          <div aria-hidden="true" class="mm-skeleton-block">
+            <span class="mm-shimmer-line" style="width: 100%; height: 36px; margin-bottom: 8px;"></span>
+            <span class="mm-shimmer-line" style="width: 92%; height: 36px; margin-bottom: 8px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 36px;"></span>
+          </div>
+        </template>
+        <template v-else>
+          <div v-if="workspaceSchedules.length === 0 && workspaceLoops.length === 0" class="empty-hint">// no automations in this workspace</div>
 
-        <template v-if="oneOffSchedules.length">
+          <template v-if="oneOffSchedules.length">
           <div class="schedule-group schedule-group--once">
             <div class="schedule-group-header">
               <span>One-offs <span class="schedule-group-hint">delete after run</span></span>
@@ -267,6 +299,7 @@
             </div>
           </div>
         </template>
+        </template>
       </div>
 
       <div class="sidebar-footer">
@@ -308,13 +341,6 @@
           models
         </router-link>
         <router-link
-          to="/settings/context"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/context' }"
-        >
-          context
-        </router-link>
-        <router-link
           to="/settings/skills"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/skills' }"
@@ -352,7 +378,11 @@
       </div>
     </template>
 
-    <template v-if="!collapsed && mode === 'memory'">
+    <!-- The workspace toggle covers review as well as the graph: scoping the
+         proposal queue is the same act as scoping the map, and the review view
+         had no sidebar at all, so the workspace was buried in a heading per
+         group instead of living where every other page keeps it. -->
+    <template v-if="!collapsed && (mode === 'memory' || mode === 'proposals')">
       <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
         <button
           v-for="workspace in store.workspaceOptions"
@@ -364,30 +394,170 @@
           :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
           @click="store.switchWorkspace(workspace.name, { transition: false })"
         >
-          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
+           <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
+           <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
+           <span
+             v-if="proposals.scopedRows(workspace.name).length > 0"
+             class="badge"
+             :title="`${proposals.scopedRows(workspace.name).length} items to review`"
+             :aria-label="`${proposals.scopedRows(workspace.name).length} items to review`"
+           >{{ proposals.scopedRows(workspace.name).length }}</span>
+         </button>
+      </div>
+
+      <!-- The Graph/List/Review switcher lives here rather than in the pane
+           header: picking what the memory page shows is the same act as
+           scoping it to a workspace, and this keeps every memory control in
+           one column. -->
+      <div class="workspace-toggle view-toggle">
+        <button
+          type="button"
+          :class="{ active: mm.view === 'graph' }"
+          :aria-pressed="mm.view === 'graph'"
+          @click="setMemoryView('graph')"
+        >Graph</button>
+        <button
+          type="button"
+          :class="{ active: mm.view === 'list' }"
+          :aria-pressed="mm.view === 'list'"
+          @click="setMemoryView('list')"
+        >List</button>
+        <button
+          type="button"
+          :class="{ active: mm.view === 'review' }"
+          :aria-pressed="mm.view === 'review'"
+          @click="setMemoryView('review')"
+        >
+          <!-- Scoped, not the global tally: the workspace toggle directly
+               above scopes the queue, so a global count here claimed items the
+               Review list would not show — 12 next to a selected workspace
+               whose list is empty. -->
+          Review<span v-if="reviewScoped" class="view-count">{{ reviewScoped }}</span>
         </button>
       </div>
 
-      <div class="mm-sidebar-scroll">
-        <h3>Vault</h3>
-        <!-- Three tiles, not four: "notes shown" and "total" were separate
-             tiles showing the same number whenever nothing was filtered, so the
-             total moved into the sublabel and the freed slot went to cluster
-             count, which nothing else reported. Orphans left the grid entirely
-             — as a bare number it was not actionable, and it is now a list. -->
-        <div class="mm-stat-grid mm-stat-grid--3">
-          <div class="mm-stat">
-            <div class="n">{{ mm.visibleNodes.length }}</div>
-            <div class="l">of {{ mm.nodes.length }} shown</div>
+      <!-- Review: the same shape as the memory map's sidebar — stats, a search,
+           then chips that both report and filter. The kind filter used to be a
+           segmented control in the panel header while this column sat empty,
+           which put the queue's controls somewhere different from every other
+           memory view's. -->
+      <div v-if="mode === 'proposals'" class="mm-sidebar-scroll">
+        <template v-if="proposals.loading">
+          <h3>Queue</h3>
+          <div class="mm-loading-heading" role="status" aria-live="polite">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading proposals…</span>
           </div>
-          <div class="mm-stat"><div class="n">{{ mm.visibleEdgeCount }}</div><div class="l">links</div></div>
-          <div class="mm-stat"><div class="n">{{ mm.clusters.length }}</div><div class="l">clusters</div></div>
-        </div>
+          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+          </div>
+          <div class="mm-search">
+            <input type="text" placeholder="Search proposals…" autocomplete="off" disabled />
+          </div>
+          <div class="mm-skeleton-block" aria-hidden="true">
+            <span class="mm-shimmer-line" style="width: 40%; margin-bottom: 10px;"></span>
+            <span class="mm-shimmer-line" style="width: 100%; height: 28px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 92%; height: 28px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 28px;"></span>
+          </div>
+        </template>
+        <template v-else>
+          <h3>Queue</h3>
+          <div class="mm-stat-grid mm-stat-grid--3">
+            <div class="mm-stat">
+              <div class="n">{{ reviewVisible }}</div>
+              <div class="l">of {{ reviewScoped }} shown</div>
+            </div>
+            <div class="mm-stat">
+              <div class="n">{{ proposals.selected.size }}</div>
+              <div class="l">selected</div>
+            </div>
+            <div class="mm-stat">
+              <div class="n">{{ reviewElsewhere }}</div>
+              <div class="l">other workspaces</div>
+            </div>
+          </div>
 
-        <div class="mm-search">
-          <input v-model="mm.search" type="text" placeholder="Search notes, tags…" autocomplete="off" />
+          <div class="mm-search">
+            <input
+              v-model="proposals.search"
+              type="text"
+              placeholder="Search proposals…"
+              autocomplete="off"
+            />
+          </div>
+
+        <div class="mm-row-between">
+          <h3>Kinds</h3>
+          <button type="button" class="mm-link" @click="proposals.resetFilters()">reset</button>
         </div>
+        <div class="mm-link-list">
+          <div
+            class="mm-link-item"
+            :class="{ off: proposals.kindFilter !== 'all' }"
+            @click="proposals.kindFilter = 'all'"
+          >
+            <span class="label">all</span>
+            <span class="cnt">{{ reviewScoped }}</span>
+          </div>
+          <div
+            v-for="k in reviewKinds"
+            :key="k.kind"
+            class="mm-link-item"
+            :class="{ off: proposals.kindFilter !== k.kind }"
+            :title="`Show only ${reviewKindLabel(k.kind)} proposals`"
+            @click="proposals.kindFilter = k.kind"
+          >
+            <span class="label">{{ reviewKindLabel(k.kind) }}</span>
+            <span class="cnt">{{ k.count }}</span>
+          </div>
+        </div>
+        </template>
+      </div>
+
+      <div v-if="mode === 'memory'" class="mm-sidebar-scroll">
+        <template v-if="mm.loading">
+          <h3>Vault</h3>
+          <div class="mm-loading-heading" role="status" aria-live="polite">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading vault graph…</span>
+          </div>
+          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+          </div>
+          <div class="mm-search">
+            <input type="text" placeholder="Search notes, tags…" autocomplete="off" disabled />
+          </div>
+          <div class="mm-skeleton-block" aria-hidden="true">
+            <span class="mm-shimmer-line" style="width: 40%; margin-bottom: 10px;"></span>
+            <span class="mm-shimmer-line" style="width: 100%; height: 28px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 92%; height: 28px; margin-bottom: 6px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 28px;"></span>
+          </div>
+        </template>
+        <template v-else>
+          <h3>Vault</h3>
+          <!-- Three tiles, not four: "notes shown" and "total" were separate
+               tiles showing the same number whenever nothing was filtered, so the
+               total moved into the sublabel and the freed slot went to cluster
+               count, which nothing else reported. Orphans left the grid entirely
+               — as a bare number it was not actionable, and it is now a list. -->
+          <div class="mm-stat-grid mm-stat-grid--3">
+            <div class="mm-stat">
+              <div class="n">{{ mm.visibleNodes.length }}</div>
+              <div class="l">of {{ mm.nodes.length }} shown</div>
+            </div>
+            <div class="mm-stat"><div class="n">{{ mm.visibleEdgeCount }}</div><div class="l">links</div></div>
+            <div class="mm-stat"><div class="n">{{ mm.clusters.length }}</div><div class="l">clusters</div></div>
+          </div>
+
+          <div class="mm-search">
+            <input v-model="mm.search" type="text" placeholder="Search notes, tags…" autocomplete="off" />
+          </div>
 
         <div class="mm-row-between">
           <h3>Categories</h3>
@@ -413,21 +583,14 @@
              hue and the palette's residual CVD/contrast warnings are only
              relieved by labelling, so identity must never be colour-alone. -->
         <template v-if="mm.clusters.length">
-          <div class="mm-row-between">
-            <h3>Clusters</h3>
-            <button
-              type="button"
-              class="mm-link"
-              @click="mm.setColorMode(mm.colorMode === 'cluster' ? 'category' : 'cluster')"
-            >{{ mm.colorMode === 'cluster' ? 'colour by type' : 'colour by cluster' }}</button>
-          </div>
+           <h3>Clusters</h3>
           <div class="mm-link-list">
             <div
               v-for="c in mm.clusters"
               :key="c.id"
               class="mm-link-item"
               :title="`${c.size} notes — centre on this cluster`"
-              @click="mm.setLocalRoot(c.memberIds[0])"
+              @click="mm.requestFocus(c.memberIds[0])"
             >
               <span class="dot" :style="{ background: clusterColorFor(c.slot, isLightTheme) }" />
               <span class="label">{{ c.label }}</span>
@@ -474,9 +637,22 @@
         <template v-if="mm.orphanNotes.length">
           <div class="mm-row-between">
             <h3>Unlinked ({{ mm.orphanNotes.length }})</h3>
-            <button type="button" class="mm-link" @click="mm.toggleHideOrphans()">
-              {{ mm.hideOrphans ? 'show in graph' : 'hide in graph' }}
-            </button>
+            <div class="mm-row-actions">
+              <button
+                type="button"
+                class="mm-link"
+                :class="{ 'mm-link--active': mm.orphanFilter === 'only' }"
+                :title="mm.orphanFilter === 'only' ? 'Show all notes in graph' : 'Show only unlinked notes in graph'"
+                @click="mm.toggleOnlyOrphans()"
+              >{{ mm.orphanFilter === 'only' ? 'show all' : 'only' }}</button>
+              <span class="mm-sep" aria-hidden="true">·</span>
+              <button
+                type="button"
+                class="mm-link"
+                :title="mm.orphanFilter === 'hide' ? 'Show unlinked notes in graph' : 'Hide unlinked notes from graph'"
+                @click="mm.toggleHideOrphans()"
+              >{{ mm.orphanFilter === 'hide' ? 'show in graph' : 'hide in graph' }}</button>
+            </div>
           </div>
           <div class="mm-link-list">
             <div
@@ -498,8 +674,42 @@
           >show {{ Math.min(20, mm.orphanNotes.length - orphanLimit) }} more</button>
         </template>
 
-        <!-- Entry points for the local view: the note you last touched is
-             almost always the one you opened the map about. -->
+        <!-- Aging notes: facts nobody has verified within their type's
+             horizon. The actionable counterpart of "Recently written" — the
+             daily curation routine reviews this same list and may resolve an
+             entry, but a failed or disabled run leaves it for the user. -->
+        <template v-if="mm.staleNotes.length">
+          <div class="mm-row-between">
+            <h3>Needs review ({{ mm.staleNotes.length }})</h3>
+          </div>
+          <p class="mm-hint">
+            Daily Memory curation checks these notes too: it re-verifies, updates,
+            corrects, or removes them. They stay here until you or that run
+            resolves them.
+          </p>
+          <div class="mm-link-list">
+            <div
+              v-for="n in mm.staleNotes.slice(0, staleLimit)"
+              :key="n.id"
+              class="mm-link-item"
+              :title="`Unverified for ${n.ageDays ?? '?'} days — click to open it in the map`"
+              @click="mm.requestFocus(n.id)"
+            >
+              <span class="dot mm-dot--stale" />
+              <span class="label">{{ n.title }}</span>
+              <span class="cnt">{{ mm.ageLabelOf(n) }}</span>
+            </div>
+          </div>
+          <button
+            v-if="mm.staleNotes.length > staleLimit"
+            type="button"
+            class="mm-link"
+            @click="staleLimit += 20"
+          >show {{ Math.min(20, mm.staleNotes.length - staleLimit) }} more</button>
+        </template>
+
+        <!-- Entry points into the graph: the note you last touched is almost
+             always the one you opened the map about. -->
         <template v-if="mm.recentNotes.length">
           <h3>Recently written</h3>
           <div class="mm-link-list">
@@ -507,9 +717,9 @@
               v-for="n in mm.recentNotes"
               :key="n.id"
               class="mm-link-item"
-              :class="{ current: mm.localRoot === n.id }"
-              title="Centre the local view here"
-              @click="mm.setLocalRoot(n.id)"
+              :class="{ current: mm.selectedId === n.id }"
+              title="Centre the map here"
+              @click="mm.requestFocus(n.id)"
             >
               <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
               <span class="label">{{ n.title }}</span>
@@ -520,6 +730,7 @@
         <h3>Path finder</h3>
         <p class="mm-hint">{{ mm.pathHint }}</p>
         <button v-if="mm.pathStart || mm.pathEnd" type="button" class="mm-link" @click="mm.resetPath()">clear path</button>
+        </template>
       </div>
     </template>
 
@@ -565,8 +776,20 @@
 
       <!-- Scrollable area for chats/projects -->
       <div class="chats-scroll-area">
-        <!-- Recent chats (max 5) -->
-        <!-- Recent moved to the home-screen "jump back in" grid (HomeRecentChats). -->
+        <template v-if="!store.bootstrapped && store.projects.length === 0">
+          <div class="project-list" role="status" aria-live="polite" aria-label="Loading chats">
+            <div v-for="i in 3" :key="i" class="project-group">
+              <div class="project-header"><span class="mm-shimmer-line" style="width: 46%; height: 11px;"></span></div>
+              <div class="chat-list">
+                <div class="chat-item" style="pointer-events: none;"><span class="mm-shimmer-line" style="width: 68%; height: 10px;"></span></div>
+                <div class="chat-item" style="pointer-events: none;"><span class="mm-shimmer-line" style="width: 58%; height: 10px;"></span></div>
+              </div>
+            </div>
+          </div>
+        </template>
+        <template v-else>
+          <!-- Recent chats (max 5) -->
+          <!-- Recent moved to the home-screen "jump back in" grid (HomeRecentChats). -->
         <div v-if="false" class="recent-section">
           <div class="recent-label">recent</div>
           <div class="recent-items">
@@ -811,6 +1034,7 @@
             </div>
           </div>
         </div>
+        </template>
       </div>
 
       <!-- Add project button + archived-projects entry point -->
@@ -882,15 +1106,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
+import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, categoryColorFor, catKeyFor, clusterColorFor } from '../stores/memoryMap'
+import { useProposalsStore } from '../stores/proposals'
 import { isLightTheme } from '../lib/theme'
-import NotificationBell from './NotificationBell.vue'
 import ChatSignals from './ChatSignals.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
@@ -898,20 +1123,65 @@ import { archiveMenuLabel as menuLabel, archiveConfirmMessage } from '../lib/arc
 import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { askPrompt } from '../lib/prompt'
+import { writeClipboard } from '../lib/codeCopy'
 
-const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' }>()
+const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
 
 const store = useProjectStore()
 const taskStore = useTaskStore()
+const housekeeping = useHousekeepingStore()
 const fileViewer = useFileViewerStore()
 const mm = useMemoryMapStore()
+const proposals = useProposalsStore()
+
+// Review-queue figures for the sidebar. Scoped counts come from the store so
+// they use the same workspace rule as the list — a chip that disagreed with the
+// rows under it would be worse than no chip.
+const reviewScoped = computed(() => proposals.scopedRows(store.activeWorkspace).length)
+const reviewVisible = computed(() => proposals.visibleRows(store.activeWorkspace).length)
+const reviewElsewhere = computed(() => proposals.rows.length - reviewScoped.value)
+const reviewKinds = computed(() => proposals.kindCounts(store.activeWorkspace))
+const hasBlockingHousekeeping = computed(() => housekeeping.actions.some(action => action.blocking))
+const settingsNeedsAttention = computed(() => Boolean(store.packageStatus?.update_available || hasBlockingHousekeeping.value))
+
+onMounted(() => {
+  // These signals are needed by the rail even when the home or review pane has
+  // never been opened. Both store initializers are idempotent.
+  housekeeping.init()
+  void proposals.ensureLoaded()
+})
+
+const REVIEW_KIND_LABELS: Record<string, string> = {
+  memory: 'memory',
+  profile: 'profile',
+  user: 'profile',
+  rehome: 're-home',
+  project: 'project',
+  people: 'people',
+  learnings: 'learnings',
+  review: 'review',
+  skill: 'skill',
+}
+
+function reviewKindLabel(kind: string): string {
+  return REVIEW_KIND_LABELS[kind] ?? kind
+}
 // The unlinked list is the one section that can run to hundreds of entries on a
 // real vault, so it grows on demand rather than pushing every other section off
 // the bottom of the sidebar.
 const orphanLimit = ref(8)
+const staleLimit = ref(8)
 const route = useRoute()
 const router = useRouter()
+
+/** The memory page's Graph/List/Review switcher. Review is the /proposals
+ * route; graph and list are both /memory, so only those two need a push. */
+function setMemoryView(next: 'graph' | 'list' | 'review') {
+  mm.view = next
+  const target = next === 'review' ? '/proposals' : '/memory'
+  if (route.path !== target) void router.push(target)
+}
 
 function promptTitle(prompt: string): string {
   const first = prompt.split('\n')[0].trim()
@@ -957,6 +1227,60 @@ const userLoops = computed(() =>
 const systemLoops = computed(() =>
   workspaceLoops.value.filter(l => l.scope === 'system'),
 )
+
+// ── Keyboard navigation for the schedules list (mirrors HomeRecentChats) ──────
+const schedulesListEl = ref<HTMLElement | null>(null)
+
+function focusableSchedules(): HTMLElement[] {
+  const root = schedulesListEl.value
+  if (!root) return []
+  return Array.from(root.querySelectorAll<HTMLElement>('.schedule-item:not([aria-disabled="true"])'))
+}
+
+function focusScheduleElement(element: HTMLElement) {
+  element.focus()
+  element.scrollIntoView({ block: 'nearest' })
+}
+
+function clamp(value: number, lower: number, upper: number): number {
+  return Math.min(upper, Math.max(lower, value))
+}
+
+function onArrow(key: string): boolean {
+  if (props.collapsed) return false
+  const items = focusableSchedules()
+  if (!items.length) return false
+  const active = document.activeElement as HTMLElement | null
+  let index = items.indexOf(active as HTMLElement)
+  if (index < 0) {
+    // Start from the active route, or the first item. This mirrors the
+    // homepage's anchorLane logic but for a flat list.
+    const activeLink = rootActiveScheduleElement(items)
+    if (activeLink) {
+      index = items.indexOf(activeLink)
+    } else {
+      items[0]?.focus()
+      items[0]?.scrollIntoView({ block: 'nearest' })
+      return true
+    }
+  }
+  const delta = key === 'ArrowDown' || key === 'ArrowRight' ? 1 : key === 'ArrowUp' || key === 'ArrowLeft' ? -1 : 0
+  if (!delta) return false
+  const nextIndex = clamp(index + delta, 0, items.length - 1)
+  if (nextIndex === index) return true
+  focusScheduleElement(items[nextIndex])
+  return true
+}
+
+function rootActiveScheduleElement(items: HTMLElement[]): HTMLElement | null {
+  // The router-link for the current /schedules/:id carries .active (or
+  // .router-link-active). Prefer it so arrows start where the user is.
+  const active = schedulesListEl.value?.querySelector<HTMLElement>('.schedule-item.active')
+  if (active && items.includes(active)) return active
+  return null
+}
+
+defineExpose({ onArrow })
 
 async function selectAutomationWorkspace(workspace: string) {
   if (store.activeWorkspace !== workspace) {
@@ -1362,7 +1686,8 @@ async function doRenameChat() {
 async function copyChatId(chatId: string) {
   closeChatMenus()
   try {
-    await navigator.clipboard.writeText(chatId)
+    const copied = await writeClipboard(chatId)
+    if (!copied) throw new Error('copy failed')
     store.pushToast({
       chat_id: chatId,
       title: 'Chat ID copied',
@@ -1682,7 +2007,7 @@ async function confirmDeleteChat(chatId: string) {
      degrades in both directions: a sidebar dragged out to 500px does not fling the
      icons to the far edge (the strip stops at 200px), and one dragged down to its
      180px minimum packs them back to the --space-1 floor instead of overflowing
-     the rail. The strip is narrower on mobile, where the bell hides - see below. */
+      the rail. The strip is narrower on mobile, where labels hide - see below. */
   /* Sized to content now rather than a fixed strip: the active item carries an
      expanding label, so the row's width depends on which page you are on. */
   flex: 0 1 auto;
@@ -1714,8 +2039,8 @@ async function confirmDeleteChat(chatId: string) {
      pill by insetting that padding on every side: at 4px the highlight landed
      3px *inside* the glyph, clipping the icon instead of padding it, and the
      matching negative margin shrank each item's footprint to 24px. Uniform
-     padding restores the 30px control with a 44px touch target, and matches
-     the bell beside it, which never overrode this. */
+      padding restores the 30px control with a 44px touch target, matching the
+      other rail controls. */
   border-radius: var(--radius-sm);
   position: relative;
   isolation: isolate;
@@ -1724,24 +2049,51 @@ async function confirmDeleteChat(chatId: string) {
   transition: color 120ms var(--ease);
 }
 
+.nav-item-icon {
+  position: relative;
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+}
+
 /* The page you are on names itself, next to its own icon, instead of a separate
    tag elsewhere in the window. Inactive items stay glyph-only, so the row reads
    as one selected item among icons rather than a list of words. Collapsed with
    max-width so it animates, and aria-hidden because .nav-item already carries a
    full aria-label - otherwise the accessible name would read "automations
    automations". */
-/* Mirrors NotificationBell's unread badge — a persistent signal, not a
-   count, so a pulsing dot reads better here than a numeral. */
+/* Persistent system-state signal, not a count: a pulsing dot reads better than
+   a numeral for update and blocking-housekeeping warnings. */
 .nav-item-badge {
   position: absolute;
-  top: 2px;
-  right: 2px;
+  top: -5px;
+  right: -6px;
   width: 8px;
   height: 8px;
   border-radius: 999px;
   background: var(--accent, #4c8bf5);
   box-shadow: 0 0 0 2px var(--bg-elev, #1b1e26);
   animation: nav-item-badge-pulse 2s ease-in-out infinite;
+}
+
+.nav-item-badge--warning {
+  background: var(--warning);
+}
+
+.nav-item-badge--count {
+  width: auto;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  background: var(--error);
+  color: #fff;
+  box-shadow: 0 0 0 2px var(--bg-elev, #1b1e26);
+  font: 600 10px/16px var(--font-mono, monospace);
+  text-align: center;
+  animation: none;
 }
 
 @keyframes nav-item-badge-pulse {
@@ -1779,7 +2131,7 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 /* The row's contents need roughly: toggle (44) + active item with label (~118)
-   + two bare items (88) + bell (44) + gaps (24) = 318. Under that the flex row
+   + three bare items (132) + gaps (24) = 318. Under that the flex row
    shrinks the only thing that can give - the label - and "automations" rendered
    as "automation" jammed against the pill edge. Drop the label instead of
    clipping a word in half; the icon and its tooltip still say what it is.
@@ -1855,38 +2207,6 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--bg3);
 }
 
-.sidebar-bell :deep(.bell-btn) {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  position: relative;
-  isolation: isolate;
-  color: var(--fg2);
-  background: none;
-  border: none;
-  cursor: pointer;
-  transition: color 120ms var(--ease);
-}
-.sidebar-bell :deep(.bell-btn) svg {
-  width: 18px;
-  height: 18px;
-}
-.sidebar-bell :deep(.bell-btn:hover) {
-  color: var(--fg);
-}
-.sidebar-bell :deep(.bell-btn.has-unread) {
-  color: var(--accent);
-}
-.sidebar-bell :deep(.bell-badge) {
-  top: 4px;
-  right: 4px;
-  font-size: calc(10px * var(--font-scale));
-  min-width: 14px;
-  height: 14px;
-}
-
 .workspace-toggle {
   display: flex;
   flex-wrap: wrap;
@@ -1940,6 +2260,24 @@ async function confirmDeleteChat(chatId: string) {
 .workspace-toggle button.active {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 18%, var(--bg3));
+}
+
+/* Pending-proposal count inside the view switcher's Review segment. Same
+   treatment as the workspace shortcut chip: small, bordered, quiet. */
+.view-toggle .view-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg2);
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
 }
 
 /* Keep workspace status markers visually separate from the workspace name,
@@ -2501,11 +2839,17 @@ async function confirmDeleteChat(chatId: string) {
     visibility: hidden;
   }
   .add-chat-btn { opacity: 1; }
-  .sidebar-bell { display: none; }
-  /* Three icons here instead of four (the pane header carries the bell on mobile),
-     so the strip narrows to match. Left at 200px it would space three glyphs
-     40px apart and read as scattered rather than spread. */
   .nav-links { flex-basis: 150px; }
+  /* No containment on the drawer's header. `container-type: inline-size` makes
+     the element its own rasterization root, and here that root sits inside a
+     `position: fixed` layer that the transform above keeps composited - the
+     combination WebKit rasterizes soft, which is why the nav glyphs came out
+     blurry on iPhone while the pills below them stayed sharp. Nothing is lost:
+     the query it feeds only decides whether the active item keeps its label,
+     and the `max-width: 900px` rule above already drops that label at every
+     width this media query covers. The container query stays for the wide
+     window where the sidebar is drag-resizable. */
+  .sidebar-header { container-type: normal; }
 }
 
 /* Schedules list in sidebar (schedules mode) */
@@ -2531,60 +2875,67 @@ async function confirmDeleteChat(chatId: string) {
   flex-direction: column;
   overflow-y: auto;
   padding: 8px 8px 12px;
+  gap: 12px;
 }
 
-/* Grouped schedule sections */
+/* Grouped schedule sections — aligned to HomeRecentChats .home-tier language:
+   tier header is a low, mono, lowercase label with a bottom rule; rows are
+   home-chat-item rows with a left hue rail. The card box was adding a second
+   border and a background the homepage never has, which made the two sidebars
+   read as different systems. */
 .schedule-group {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+  margin-bottom: 0;
   flex-shrink: 0;
 }
-.schedule-group--once {
-  border-left: 2px solid var(--accent);
-}
+.schedule-group--once,
 .schedule-group--system {
-  border-left: 2px solid var(--accent2);
+  border-left: none;
 }
 .schedule-group-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
-  background: var(--bg2);
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
   border-bottom: 1px solid var(--border);
+  color: var(--fg3);
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--fg2);
-  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  background: transparent;
 }
 .schedule-group-hint {
   font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
-  color: var(--fg2);
+  color: var(--fg3);
   opacity: 0.7;
-  font-size: calc(10px * var(--font-scale));
+  font-size: var(--text-xs);
   margin-left: 4px;
 }
 .schedule-group-count {
-  font-size: calc(10px * var(--font-scale));
-  background: var(--bg3);
-  padding: 1px 5px;
-  border-radius: 999px;
-  color: var(--fg2);
-  min-width: 16px;
-  text-align: center;
+  margin-left: auto;
+  font-size: var(--text-xs);
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  color: var(--fg3);
+  min-width: auto;
+  text-align: right;
 }
 .schedule-group-items {
   display: flex;
   flex-direction: column;
-}
-.schedule-group-items .schedule-item {
-  border-radius: 0;
+  gap: 6px;
 }
 .schedule-item--once .schedule-time {
   color: var(--accent, #ff5566);
@@ -2592,39 +2943,72 @@ async function confirmDeleteChat(chatId: string) {
 }
 .schedule-item {
   display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--touch, 44px);
   align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  text-decoration: none;
-  color: var(--fg2);
-  font-size: var(--text-base);
-  cursor: pointer;
-  min-height: var(--touch);
-}
-.schedule-item:hover { background: var(--bg3); color: var(--fg); }
-.schedule-item.active {
-  background: var(--bg3);
+  gap: 8px;
+  padding: 7px 10px;
+  border: 0;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: transparent;
   color: var(--fg);
-  font-weight: 500;
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+.schedule-item:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); color: var(--fg); }
+.schedule-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.schedule-item.active {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+  color: var(--fg);
+  font-weight: 600;
   border-left: 2px solid var(--accent);
-  padding-left: 8px;
+  padding-left: 10px;
 }
 .schedule-item .schedule-time {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  color: var(--fg2);
+  color: var(--fg3);
   flex-shrink: 0;
-  font-size: var(--text-base);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
 }
+.schedule-item.active .schedule-time { color: var(--fg); }
 .schedule-item .schedule-label {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
 }
+.schedule-item.active .schedule-label { color: var(--fg); }
+.schedule-group--system .schedule-item {
+  border-left-color: color-mix(in srgb, var(--accent2) 45%, transparent);
+}
+.schedule-group--system .schedule-item:hover {
+  background: color-mix(in srgb, var(--accent2) 7%, transparent);
+}
+.schedule-group--system .schedule-item.active {
+  background: color-mix(in srgb, var(--accent2) 8%, var(--bg2));
+  border-left-color: var(--accent2);
+}
+.schedule-group--system .schedule-item:focus-visible {
+  outline-color: var(--accent2);
+}
+.schedule-item--missed { border-left-color: var(--warning) !important; }
 .schedule-item--missed .schedule-time { color: var(--warning); }
-.schedule-item--disabled { opacity: 0.5; }
+.schedule-item--disabled { opacity: 0.55; }
 .schedule-item .missed-dot {
   width: 6px;
   height: 6px;
@@ -2691,8 +3075,13 @@ async function confirmDeleteChat(chatId: string) {
   align-items: baseline;
   justify-content: space-between;
   margin-top: var(--space-4);
+  margin-bottom: var(--space-2);
 }
 .mm-row-between h3 { margin: 0; }
+.mm-row-between:first-child { margin-top: 0; }
+.mm-row-actions { display: inline-flex; align-items: baseline; gap: 6px; }
+.mm-sep { color: var(--fg3); font-size: var(--text-xs); }
+.mm-link--active { color: var(--fg); font-weight: 600; }
 .mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
 .mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
 
@@ -2701,6 +3090,42 @@ async function confirmDeleteChat(chatId: string) {
 .mm-stat { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; }
 .mm-stat .n { font-size: var(--text-lg); font-weight: 600; }
 .mm-stat .l { font-size: var(--text-xs); color: var(--fg3); }
+.mm-stat--skeleton { display: flex; flex-direction: column; justify-content: center; gap: 0; min-height: 52px; }
+
+.mm-loading-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-3);
+}
+.mm-shimmer-line {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+}
+.mm-shimmer-line--n { width: 56%; height: 16px; margin-bottom: 8px; }
+.mm-shimmer-line--l { width: 78%; height: 8px; }
+.mm-skeleton-block { margin-top: var(--space-3); }
+@media (prefers-reduced-motion: reduce) {
+  .mm-shimmer-line { animation: title-shimmer-pulse 1.8s ease-in-out infinite; }
+}
+.history-loading-spinner {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: history-loading-spin 0.8s linear infinite;
+}
+@keyframes history-loading-spin {
+  to { transform: rotate(360deg); }
+}
 
 .mm-search { margin-top: var(--space-3); }
 .mm-search input { width: 100%; font-size: var(--text-sm); }
@@ -2728,10 +3153,18 @@ async function confirmDeleteChat(chatId: string) {
 }
 .mm-link-item:hover { background: var(--bg3); }
 .mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+/* Aging note marker: the app warning token, not a category colour — age is
+   not a type, and reusing a hue would lie about what the dot means. */
+.mm-dot--stale { background: var(--warning, #ff9800); }
 .mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
-/* Marks which note the local view is currently centred on, so the recent list
+/* Marks which note the map is currently centred on, so the recent list
    doubles as a "you are here" indicator rather than just a jump list. */
 .mm-link-item.current { background: var(--bg3); color: var(--fg); }
+/* The review queue's kind rows are a filter, so the SELECTED one is the solid
+   one and the rest recede — the inverse of the memory chips, where every chip is
+   on until you switch it off. */
+.mm-link-item.off { opacity: 0.55; }
+.mm-link-item:not(.off) { background: var(--bg3); color: var(--fg); }
 .mm-link-item.current .label { font-weight: 600; }
 </style>
 

@@ -25,6 +25,7 @@ import os
 import posixpath
 import re
 import sys
+import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -168,8 +169,25 @@ class Entry:
     tags: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
     related: list[str] = field(default_factory=list)  # normalized repo-relative paths
+    # Refs that resolved in ANOTHER root, and refs that resolved nowhere. Both
+    # used to be discarded by the resolution loop without a trace, which made a
+    # dangling link and a deliberate cross-workspace link indistinguishable —
+    # from each other and from a note with no links at all. Measured on a real
+    # two-root vault: 14 of 293 `related` refs named another workspace and
+    # vanished, including a person's own other half.
+    #
+    # `related` itself stays scoped to one root on purpose: the graph is rendered
+    # per workspace, so an edge to a node that is not in the graph draws nothing.
+    # Keeping these separate preserves that while making the loss inspectable.
+    related_external: list[str] = field(default_factory=list)
+    related_unresolved: list[str] = field(default_factory=list)
     workspace: str = "personal"
     description: str = ""
+    # Frontmatter ``updated:`` (YYYY-MM-DD): when the note's facts were last
+    # verified, as opposed to when the file was last written. Empty when the
+    # note carries no such key — consumers then fall back to mtime, which
+    # says "touched", not "checked". See ciao.memory_audit for the consumer.
+    updated: str = ""
 
 
 def _is_excluded(rel_path: Path) -> bool:
@@ -368,16 +386,39 @@ def _normalize_related_value(value: str) -> str:
     return value.strip().strip("\"'`")
 
 
-def _build_filename_index(entries: list[Entry]) -> dict[str, list[Path]]:
+def _build_filename_index(
+    entries: list[Entry], path_prefix: Path | None = None
+) -> dict[str, list[Path]]:
+    """Index entries by vault-relative path and by bare stem.
+
+    ``path_prefix`` is what ``Entry.path`` is rendered under. It was hardcoded to
+    ``memory-vault``, which raises the moment a scan renders paths under a
+    per-root prefix, so a caller that knows the prefix has to say so.
+    """
+    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
     idx: dict[str, list[Path]] = defaultdict(list)
     for e in entries:
         # key by vault-relative path without extension
-        rel_from_vault = e.path.relative_to("memory-vault")
+        rel_from_vault = _strip_prefix(e.path, prefix)
         stem_key = str(rel_from_vault.with_suffix(""))
         idx[stem_key].append(e.path)
         # also key by filename stem alone for bare references like "Mo"
         idx[e.path.stem].append(e.path)
     return idx
+
+
+def _strip_prefix(path: Path, prefix: Path) -> Path:
+    """``path`` relative to ``prefix``, or unchanged when it is not under it.
+
+    Total rather than raising: a rendered path and a prefix can legitimately
+    disagree (a caller merging roots, an entry built by hand in a test), and the
+    useful answer there is "leave it alone", not an exception halfway through a
+    vault scan.
+    """
+    try:
+        return path.relative_to(prefix)
+    except ValueError:
+        return path
 
 
 def _resolve_related(ref: str, filename_idx: dict[str, list[Path]]) -> Path | None:
@@ -401,8 +442,28 @@ def _resolve_related(ref: str, filename_idx: dict[str, list[Path]]) -> Path | No
     return None
 
 
-def scan_vault(vault_root: Path | None = None) -> list[Entry]:
+def scan_vault(
+    vault_root: Path | None = None,
+    *,
+    workspace: str = "",
+    path_prefix: Path | None = None,
+) -> list[Entry]:
+    """Scan one vault into entries.
+
+    ``workspace`` stamps every entry instead of inferring the workspace from the
+    first path segment. After the re-rooting a vault belongs to exactly one
+    workspace and its first segment is a FOLDER name, so inference returns
+    things like ``projects`` and any ``?workspace=`` filter drops nearly
+    everything. Pass it whenever the caller knows which root it is reading.
+
+    ``path_prefix`` is what rendered paths are relative to, defaulting to
+    ``memory-vault`` so a single-vault scan is byte-identical to before. A
+    caller merging several roots into one graph must pass a per-root prefix,
+    or two roots holding a note of the same name render the same path and
+    collide — the same defect the search index had.
+    """
     vault_root = (vault_root or default_vault_root()).resolve()
+    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
     entries: list[Entry] = []
     for md_path in sorted(vault_root.rglob("*.md")):
         rel_from_vault = md_path.relative_to(vault_root)
@@ -430,6 +491,7 @@ def scan_vault(vault_root: Path | None = None) -> list[Entry]:
         tags = _coerce_list(fm.get("tags"))
         aliases = _coerce_list(fm.get("aliases"))
         description = (fm.get("description") or "").strip()
+        updated = str(fm.get("updated") or "").strip()
         related_raw = _coerce_list(fm.get("related")) + _coerce_list(fm.get("relatedTo"))
         related_refs = [_normalize_related_value(r) for r in related_raw]
         related_refs = [r for r in related_refs if r]
@@ -441,7 +503,7 @@ def scan_vault(vault_root: Path | None = None) -> list[Entry]:
         # Render as a vault-relative path with a "memory-vault/" prefix so
         # output is identical regardless of the absolute location of vault_root
         # (this also lets tests run against a synthetic vault under tmp_path).
-        repo_rel = Path("memory-vault") / rel_from_vault
+        repo_rel = prefix / rel_from_vault
         entries.append(
             Entry(
                 path=repo_rel,
@@ -450,19 +512,27 @@ def scan_vault(vault_root: Path | None = None) -> list[Entry]:
                 tags=tags,
                 aliases=aliases,
                 related=related_refs,  # resolved below
-                workspace=_workspace_of(rel_from_vault),
+                workspace=workspace or _workspace_of(rel_from_vault),
                 description=description,
+                updated=updated,
             )
         )
 
     # Resolve related refs to actual repo-relative paths.
-    filename_idx = _build_filename_index(entries)
+    filename_idx = _build_filename_index(entries, prefix)
     for e in entries:
         resolved: list[str] = []
+        unresolved: list[str] = []
         seen: set[str] = set()
         for ref in e.related:
             target = _resolve_related(ref, filename_idx)
             if target is None:
+                # Not necessarily broken: in a per-root scan this is every ref
+                # naming another workspace. `scan_targets` sorts the two apart
+                # once it has seen all the roots; a single-vault scan cannot
+                # tell, and says so by leaving it here.
+                if ref not in unresolved:
+                    unresolved.append(ref)
                 continue
             key = str(target)
             if key in seen or target == e.path:
@@ -470,6 +540,7 @@ def scan_vault(vault_root: Path | None = None) -> list[Entry]:
             seen.add(key)
             resolved.append(key)
         e.related = resolved
+        e.related_unresolved = unresolved
 
     return entries
 
@@ -624,7 +695,55 @@ def _strip_all_references(
     return text, changed
 
 
-def strip_references(vault_root: Path, deleted_path: str) -> list[str]:
+def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
+    """Swap staged note rewrites in as one operation, rolling back on failure.
+
+    Phase 2 of `strip_references`. Every new text first lands in a temp file
+    next to its target (same directory, so `os.replace` stays atomic and on
+    the same filesystem), and only then are the targets swapped in. If any
+    stage or swap fails, every already-swapped file is restored from its
+    recorded original in reverse order, leftover temps are removed, and the
+    original error propagates: a raised error means the vault is unchanged.
+    """
+    staged: list[tuple[Path, Path]] = []  # (target, temp) in stage order
+    replaced: list[tuple[Path, str]] = []  # (target, original) already swapped in
+    try:
+        for abs_path, _original, new_text in edits:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                delete=False,
+                dir=abs_path.parent,
+                prefix=f".{abs_path.name}.",
+                suffix=".tmp",
+            ) as handle:
+                handle.write(new_text)
+                temp = Path(handle.name)
+            # A fresh temp file lands at 0600 and os.replace would silently
+            # tighten the rewritten note's permissions; carry the old mode over.
+            try:
+                os.chmod(temp, abs_path.stat().st_mode & 0o7777)
+            except OSError:
+                pass
+            staged.append((abs_path, temp))
+        for (target, temp), (_, original, _new_text) in zip(staged, edits):
+            os.replace(temp, target)
+            replaced.append((target, original))
+    except OSError:
+        for target, original in reversed(replaced):
+            target.write_text(original, encoding="utf-8")
+        for _, temp in staged:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    return [str(abs_path) for abs_path, _, _ in edits]
+
+
+def strip_references(
+    vault_root: Path, deleted_path: str, *, path_prefix: Path | None = None
+) -> list[str]:
     """Remove literal references to `deleted_path` from every note linking to it.
 
     Must run BEFORE the target file is deleted from disk: resolution depends
@@ -635,15 +754,31 @@ def strip_references(vault_root: Path, deleted_path: str) -> list[str]:
     `deleted_path` is the `Entry.path` string form (e.g.
     "memory-vault/work/People/Mo.md"). Returns the repo-relative paths of the
     files actually edited on disk.
+
+    The cleanup is all-or-nothing: rewrites are computed without touching any
+    file, staged to temp files, then swapped in; a failure at any point rolls
+    every already-swapped file back, so on success the caller may safely
+    delete the target, and on failure the vault is exactly as before.
+
+    ``path_prefix`` must be the prefix the CALLER's id was rendered with. After
+    the re-rooting an id reads `<root>/memory-vault/...`, while a bare scan of
+    one vault renders `memory-vault/...`: the two never compared equal, so
+    every reference was left untouched and the note was deleted anyway -
+    dangling `related:` entries and markdown links on every migrated install,
+    reported as `edited_backlinks: []`.
     """
     vault_root = vault_root.resolve()
-    entries = scan_vault(vault_root)
+    prefix = path_prefix or Path("memory-vault")
+    entries = scan_vault(vault_root, path_prefix=path_prefix)
     filename_idx = _build_filename_index(entries)
+    # Phase 1 (pure): compute every rewrite up front, so a bad or unreadable
+    # note aborts the whole cleanup before any other note has been touched.
+    edits: list[tuple[Path, str, str]] = []
     edited: list[str] = []
     for e in entries:
         if str(e.path) == deleted_path or deleted_path not in e.related:
             continue
-        rel_from_vault = e.path.relative_to("memory-vault")
+        rel_from_vault = _strip_prefix(e.path, prefix)
         abs_path = vault_root / rel_from_vault
         try:
             text = abs_path.read_text(encoding="utf-8")
@@ -653,8 +788,10 @@ def strip_references(vault_root: Path, deleted_path: str) -> list[str]:
             text, filename_idx, deleted_path, rel_from_vault
         )
         if file_changed:
-            abs_path.write_text(new_text, encoding="utf-8")
+            edits.append((abs_path, text, new_text))
             edited.append(str(e.path))
+    # Phase 2: stage + swap everything in, or roll back to the original bytes.
+    _commit_staged_edits(edits)
     return edited
 
 
@@ -780,6 +917,7 @@ def format_json(entries: list[Entry], hops: list[int] | None = None) -> str:
             "tags": e.tags,
             "aliases": e.aliases,
             "related": e.related,
+            "updated": e.updated,
         }
         if hop is not None:
             d["hop"] = hop
@@ -866,6 +1004,136 @@ def write_index_file(entries: list[Entry], dest: Path) -> None:
         "For filtered queries run `ciao vault-index --help`.\n\n"
     )
     dest.write_text(header + format_md(entries), encoding="utf-8")
+
+
+def scan_targets(
+    targets: list[tuple[Path, str, Path]],
+) -> tuple[list[Entry], dict[str, Path]]:
+    """Scan several vaults into one entry list, plus rendered-path -> file map.
+
+    Each target is ``(vault root, workspace stamp, rendered path prefix)``.
+    Deliberately one scan per target rather than one walk over a common parent:
+    ``related:`` links resolve inside a single scan, so scanning per root keeps a
+    link from resolving across roots. That is the behaviour the graph already
+    wanted — it drops cross-workspace edges — and here it comes for free instead
+    of needing a filter.
+
+    The map exists because rendered paths are no longer a fixed offset from one
+    vault root, so a caller that needs the real file (to stat it, say) cannot
+    reconstruct it by stripping a prefix.
+    """
+    merged: list[Entry] = []
+    absolute: dict[str, Path] = {}
+    prefixes: dict[str, Path] = {}
+    for vault_root, workspace, prefix in targets:
+        root = Path(vault_root)
+        if not root.is_dir():
+            continue
+        scanned = scan_vault(root, workspace=workspace, path_prefix=prefix)
+        prefixes[workspace] = Path(prefix)
+        for entry in scanned:
+            rendered = str(entry.path)
+            try:
+                tail = entry.path.relative_to(prefix)
+            except ValueError:
+                tail = entry.path
+            absolute[rendered] = root / tail
+        merged.extend(scanned)
+    _resolve_cross_workspace(merged, prefixes)
+    return merged, absolute
+
+
+def _build_workspace_index(
+    entries: list[Entry], prefixes: dict[str, Path]
+) -> dict[str, list[Path]]:
+    """Entries keyed the way a cross-workspace ref spells them.
+
+    A ref names the other half as ``work/People/Ipek-Kahraman-Scandit`` — the
+    workspace, then the path inside that workspace's vault. Neither of
+    ``_build_filename_index``'s keys is that shape: it strips the whole prefix,
+    workspace segment included, because within one root the segment is not part
+    of any ref. So this keys by ``<workspace>/<vault-relative>`` and by
+    ``<workspace>/<stem>``.
+    """
+    idx: dict[str, list[Path]] = defaultdict(list)
+    for e in entries:
+        if not e.workspace:
+            continue
+        inside = _strip_prefix(e.path, prefixes.get(e.workspace, Path("memory-vault")))
+        idx[f"{e.workspace}/{inside.with_suffix('')}"].append(e.path)
+        idx[f"{e.workspace}/{e.path.stem}"].append(e.path)
+    return idx
+
+
+def _resolve_cross_workspace(entries: list[Entry], prefixes: dict[str, Path]) -> None:
+    """Sort each entry's unresolved refs into cross-workspace hits and misses.
+
+    Runs after every root is scanned, which is the earliest point at which the
+    two are distinguishable: inside one root's scan, "names another workspace"
+    and "names nothing" look identical.
+    """
+    if len(prefixes) < 2:
+        return
+    idx = _build_workspace_index(entries, prefixes)
+    workspaces = set(prefixes)
+    owner = {str(e.path): e.workspace for e in entries}
+    for e in entries:
+        if not e.related_unresolved:
+            continue
+        external: list[str] = []
+        still_missing: list[str] = []
+        seen = {*e.related}
+        for ref in e.related_unresolved:
+            target = _resolve_workspace_ref(ref, e.workspace, idx, workspaces)
+            if target is None or str(target) == str(e.path):
+                still_missing.append(ref)
+                continue
+            key = str(target)
+            if key in seen:
+                continue
+            seen.add(key)
+            # A ref can name this root explicitly (`work/projects/x` written
+            # inside work), which the in-root pass also fails to resolve because
+            # its keys omit the workspace segment. That is an ordinary edge that
+            # was being dropped, not a cross-workspace one — it belongs in
+            # `related` so the graph draws it. Seven such refs exist on the live
+            # vault, against seventeen genuinely crossing ones.
+            if owner.get(key, "") == e.workspace:
+                e.related.append(key)
+            else:
+                external.append(key)
+        e.related_external = external
+        e.related_unresolved = still_missing
+
+
+def _resolve_workspace_ref(
+    ref: str,
+    workspace: str,
+    idx: dict[str, list[Path]],
+    workspaces: set[str],
+) -> Path | None:
+    """One ref, resolved against another workspace's notes.
+
+    Two spellings occur. A prefixed ref (``work/People/X``) names its workspace
+    outright. A pre-migration ref is unprefixed (``People/Oliver`` inside the
+    work root), and after the split that can only mean another root — tried
+    against each, and accepted only when exactly one has it, because guessing
+    between two same-named notes is how a link lands on the wrong person.
+    """
+    value = ref.strip()
+    if value.startswith("memory-vault/"):
+        value = value[len("memory-vault/"):]
+    if value.endswith(".md"):
+        value = value[:-3]
+    if not value:
+        return None
+    head = value.split("/", 1)[0]
+    if head in workspaces:
+        hits = idx.get(value)
+        return hits[0] if hits else None
+    others = sorted(name for name in workspaces if name and name != workspace)
+    found = [hit for name in others for hit in idx.get(f"{name}/{value}", [])]
+    return found[0] if len(found) == 1 else None
 
 
 def vocabulary_report(entries: list[Entry]) -> dict[str, Any]:

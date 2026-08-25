@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 import logging
 from pathlib import Path
-from typing import cast
 
 from ciao import provider_registry
 from ciao.config import BridgeConfig
@@ -38,8 +37,15 @@ def capabilities_for(provider: str) -> ProviderCapabilities:
 class ProviderService:
     """Routes requests to a provider and tracks its live operation."""
 
-    def __init__(self, config: BridgeConfig, provider: str = "") -> None:
+    def __init__(
+        self,
+        config: BridgeConfig,
+        provider: str = "",
+        *,
+        agent_root: Path | None = None,
+    ) -> None:
         self._config = config
+        self._agent_root = agent_root
         self._provider: ProviderImpl | None = None
         self._active_handle: ActiveHandle | None = None
         if provider:
@@ -49,11 +55,13 @@ class ProviderService:
         """Create the provider instance on first use based on provider name."""
         if self._provider is None:
             factory = provider_registry.require(provider).factory()
-            self._provider = factory(self._config.workspace_root, config=self._config)
+            # The agent root is data threaded from the caller, not re-derived
+            # here. A caller that supplies none still lands on ``workspace_root``,
+            # which matches ``CiaoConfig.agent_root`` today, so this is a no-op
+            # seam until the re-rooting release flips ``agent_root``.
+            root = self._agent_root if self._agent_root is not None else self._config.workspace_root
+            self._provider = factory(root, config=self._config)
         return self._provider
-
-    def has_active_process(self) -> bool:
-        return self._active_handle is not None
 
     def _register_handle(self, handle: ActiveHandle | None) -> None:
         self._active_handle = handle
@@ -71,11 +79,15 @@ class ProviderService:
         # Native provider guide loaders read CLAUDE.md/AGENTS.md at session
         # start. Remove only entries whose explicit expiry has passed before
         # that happens; memory remains in the guide and is never duplicated
-        # into a provider-specific prompt block.
+        # into a provider-specific prompt block. The guide that loads for this
+        # chat is the one at its agent root, so that is the one pruned.
         try:
-            result = prune_expired_entries(
-                Path(getattr(self._config, "workspace_root", ".")) / "CLAUDE.md"
+            guide_root = (
+                self._agent_root
+                if self._agent_root is not None
+                else Path(getattr(self._config, "workspace_root", "."))
             )
+            result = prune_expired_entries(guide_root / "CLAUDE.md")
             memory_changed = bool(
                 result.get("removed", {}).get("memory", 0)
                 or result.get("removed", {}).get("profile", 0)
@@ -109,16 +121,21 @@ class ProviderService:
             yield event
 
     async def steer(self, request: AgentRequest) -> bool:
-        """Inject a user message into the provider's active turn.
+        """Inject a user message into the provider's active turn (internal).
 
-        Returns True if accepted, False if no active client.
+        Used only by the background-subagent synthesis nudge
+        (``ProjectChatManager._nudge_synthesis_after_subagents``) to resume
+        the parent turn via the between-turns drain. User-facing same-turn
+        steering was removed in 8ede8fab — this remains so the nudge has a
+        ``ProviderService``-level entry point without reaching into
+        ``provider.provider``.
         """
         if self._provider is None:
             return False
         steer = getattr(self._provider, "steer", None)
         if not callable(steer):
             return False
-        return cast(bool, await steer(request))
+        return bool(await steer(request))
 
     @property
     def provider(self) -> ProviderImpl | None:

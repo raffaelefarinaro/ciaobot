@@ -163,6 +163,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "default_model": "",
                 "gws_profile": "personal",
                 "disallowed_tools": None,
+                "allowed_mcp_servers": None,
                 "color": "pink",
             },
             {
@@ -172,6 +173,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "default_model": "opus",
                 "gws_profile": "work",
                 "disallowed_tools": [],
+                "allowed_mcp_servers": None,
                 "color": "pink",
             },
         ],
@@ -179,7 +181,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
         "app_default_model": "opus",
         "provider_options": [
             {"value": "claude", "label": "Anthropic (via Claude Code)"},
-            {"value": "codex", "label": "OpenAI (via Codex)"},
             {"value": "opencode", "label": "opencode"},
         ],
     }

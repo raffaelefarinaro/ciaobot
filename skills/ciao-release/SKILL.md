@@ -5,7 +5,7 @@ description: How to cut a Ciaobot release — the patch/minor/major convention, 
 
 # Ciaobot Release
 
-> Contributor/project skill — lives in the repo's workspace `skills/` folder, **not** `ciao/stock/skills/`. It is for people working *on* Ciaobot and is deliberately not packaged or shipped to end-user installs. `ciao sync-skills` mirrors it into `.claude/skills/` (Claude Code) and `.agents/skills/` (Codex). Don't move it into `ciao/stock/`.
+> Contributor/project skill — lives in the repo's workspace `skills/` folder, **not** `ciao/stock/skills/`. It is for people working *on* Ciaobot and is deliberately not packaged or shipped to end-user installs. `ciao sync-skills` mirrors it into the runtime-discovered `.claude/` and `.agents/` catalogs. Don't move it into `ciao/stock/`.
 
 Authoritative procedure for cutting a Ciaobot release. `develop` is the source line; `main` is publish-only — **merging a release PR into `main` is the trigger** for everything downstream (tag → GitHub release → bundled app assets). You never build artifacts or tag by hand.
 
@@ -79,15 +79,13 @@ Then apply, commit, push, and open a ready-for-review PR into `main`:
 
 ```bash
 env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" \
-  --bump <patch|minor|major> --apply --run-release-evals \
+  --bump <patch|minor|major> --apply \
   --commit --push --create-pr --ready
 ```
 
-The `scripts/prepare-release` wrapper is equivalent (`CIAO_PYTHON=.venv/bin/python scripts/prepare-release --bump … --apply --run-release-evals --create-pr --ready`) but does **not** unset `PYTHONPATH` — see the trap below. Use `--version X.Y.Z` for an explicit version. Defaults: `--source develop` (cuts `release/vX.Y.Z` from `origin/develop`), `--base main`.
+The `scripts/prepare-release` wrapper is equivalent (`CIAO_PYTHON=.venv/bin/python scripts/prepare-release --bump … --apply --create-pr --ready`) but does **not** unset `PYTHONPATH` — see the trap below. Use `--version X.Y.Z` for an explicit version. Defaults: `--source develop` (cuts `release/vX.Y.Z` from `origin/develop`), `--base main`.
 
-What `--apply --run-release-evals` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`, `web/package.json`, `web/package-lock.json`, the five desktop version files (`desktop/package.json`, `desktop/package-lock.json`, `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/Cargo.lock`, `desktop/src-tauri/tauri.conf.json`), and the service-worker cache names in **both** `web/public/sw.js` and `ciao/web/static/sw.js`; refreshes `CHANGELOG.md`; auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the installed `gws` CLI differs from the pin; runs the Claude/Codex release scorecard three times in cold, warm, and restart modes; writes sanitized `release-evidence/vX.Y.Z/{REPORT.md,summary.json,changes.json,rationale.md}`; runs the full check suite; commits `release: prepare vX.Y.Z`; pushes the branch; opens the PR. Correctness failures or incomplete provider coverage stop the release. Performance, context, token, and cache regressions are advisory and appear in the evidence report.
-
-Release evidence is an explicit operator-triggered check owned by this skill. It is not run by CI and is not automatically added to GitHub release notes or assets. Review the generated files in the release PR with an LLM or human reviewer, then attach or publish them manually when appropriate.
+What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`, `web/package.json`, `web/package-lock.json`, the five desktop version files (`desktop/package.json`, `desktop/package-lock.json`, `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/Cargo.lock`, `desktop/src-tauri/tauri.conf.json`), and the service-worker cache names in **both** `web/public/sw.js` and `ciao/web/static/sw.js`; refreshes `CHANGELOG.md`; auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the installed `gws` CLI differs from the pin; runs the full check suite; commits `release: prepare vX.Y.Z`; pushes the branch; opens the PR.
 
 ## Rebuild the PWA last
 
@@ -130,7 +128,12 @@ There is deliberately **no** independent app version: `desktop/package.json` and
 
 ## Known traps
 
-- **Dirty tree → silent downgrade.** `--apply` silently becomes plan-only (exit 0!) if the tree is dirty — even one untracked file. If version files stay unbumped after a "successful" run, re-run with `--allow-dirty`. Always verify `__version__` and the `release: prepare` commit afterward.
+- **Dirty tree → hard failure.** `--apply` refuses on a dirty tree — even one untracked file — with `ReleaseError: working tree is dirty; commit/stash changes or pass --allow-dirty` (`_ensure_clean`, `ciao/release.py:416-422`). It is *not* the silent downgrade to plan-only that earlier versions of this skill described; re-verified 2026-08-24. The check sits *after* the `if not args.apply: return 0` early exit, so a **plan-only pass is safe to run against a dirty tree** — useful for previewing the version and changelog while someone else is mid-edit. Reach for `--allow-dirty` only when you know exactly what is uncommitted: it bakes the tree into the release, and `npm run build` globs the filesystem rather than git, so a concurrent session’s half-finished work ends up inside the shipped wheel. Always verify `__version__` and the `release: prepare` commit afterward.
+- **`--source` prefers `origin/<branch>` over your local branch — deliberately.** `_resolve_source_ref` (`ciao/release.py:424-441`) verifies `origin/<source>` first and falls back to a local ref only when no remote matches, so a local branch that *lags* origin cannot silently cut a stale release. The inverse is the trap: when local `develop` is **ahead** of `origin/develop`, `--source develop` cuts from the remote and silently drops every unpushed commit — the release then ships a fraction of what you reviewed, and the changelog looks plausible because it is generated from whatever did get cut. Either push `develop` first, or pass the **commit SHA** as `--source` (`origin/<sha>` fails to verify, so it falls through to the local ref). Check before cutting:
+
+  ```bash
+  git rev-list --count origin/develop..HEAD   # 0, or pass an explicit SHA
+  ```
 - **Double-bump on failed check.** The tool bumps files *before* running checks. If a check fails, `git checkout -- CHANGELOG.md ciao/__init__.py pyproject.toml web/package.json web/package-lock.json` before re-running, or it double-bumps. Two things a failed run leaves behind that are easy to miss: a **second `## vX.Y.Z` section** stacked on the changelog entry that was already there (`grep -c '^## vX\.Y\.Z' CHANGELOG.md` must be 1), and a **`pyproject.toml` auto-dependency bump with no matching `uv.lock`** — the lock is synced later in the run, so an early failure leaves the two disagreeing and every `uv --frozen` step, including `build-bundled-runtime.sh`, then fails. Revert *before* switching branches: `git checkout <branch>` carries uncommitted changes with you onto the branch you were trying to keep clean.
 - **`PYTHONPATH` / stray egg-info.** Never export `PYTHONPATH=.` before running the release/smoke tools — a leftover `ciao.egg-info/` or `ciaobot.egg-info/` at repo root leaks into the "isolated" smoke venv and the top-level wheel gets skipped, failing the probe with `ModuleNotFoundError: No module named 'ciao'` (tell: a bogus pip conflict naming an ancient pre-rename version). Use `env -u PYTHONPATH …`; `rm -rf ciao.egg-info` (gitignored, regenerates) if you see it.
 - **A stale `build/` resurrects deleted files into the runtime.** Packaging tools do not always prune old build trees, so a removed module or old frontend asset can be copied into a later artifact. Clean generated build directories before release builds and inspect the staged app/runtime contents.
@@ -150,7 +153,21 @@ There is deliberately **no** independent app version: `desktop/package.json` and
   ```
 
   Verify with `node --version && cargo --version` before starting, and clean up per the double-bump trap below after any failed attempt.
-- **`prepare-release`'s checks are weaker than CI's — run `mypy ciao` yourself.** `_run_checks` runs pytest, the web suite and the desktop suite, but not the type check, while `ci.yml`'s `test` job does. So a type error passes every local gate and first appears as a red release PR. v0.8.0 hit exactly this: two `no-any-return` errors in `ciao/transcripts.py` from a commit pushed straight to `develop` (no PR, so CI had never seen it) surfaced only after the release branch was cut and pushed. Run `.venv/bin/mypy ciao` as part of the pre-cut checklist, and treat any commit that reached `develop` without a PR as unreviewed by CI.
+- **`mypy ciao` is in the check suite now — but it cannot see a deleted module.** `_run_checks` runs mypy *first and blocking* (`ciao/release.py:457-466`), deliberately mirroring `ci.yml`'s bare `mypy ciao` step — contrast the adjacent `pip-audit --desc || true`, which is why the suite does not gate on that one. Earlier versions of this skill said to run mypy by hand because `_run_checks` omitted it; that is no longer true, re-verified 2026-08-24. What mypy still will **not** catch: with `ignore_missing_imports`, a leftover `from ciao.providers.<deleted> import …` stays green under both mypy *and* pytest. After removing any `ciao/` module, sweep by importing every module in the package:
+
+  ```bash
+  env -u PYTHONPATH .venv/bin/python -c "
+  import importlib, pkgutil, ciao
+  bad = []
+  for m in pkgutil.walk_packages(ciao.__path__, 'ciao.'):
+      try: importlib.import_module(m.name)
+      except Exception as e: bad.append((m.name, type(e).__name__, str(e)[:120]))
+  print('import errors:', len(bad))
+  for b in bad: print(' ', b)
+  "
+  ```
+
+  Separately, treat any commit that reached `develop` without a PR as unreviewed by CI — that is how v0.8.0's two `no-any-return` errors in `ciao/transcripts.py` first surfaced, as a red release PR after the branch was already cut and pushed.
 - **vitest flake.** vitest can flake with fork-worker timeouts right after the pytest run; re-running `npm run test` cleanly passes.
 - **Frontend/runtime build mismatch.** Rebuild the PWA after the final source change, then assemble the embedded runtime and app from that same checkout. Keep the release smoke test as the final gate.
 - **Confirm which branch you are on before committing.** A long release session can drift: work intended for `develop` lands on `release/vX.Y.Z`, or vice versa. During v0.6.0 the checkout moved to `develop` mid-flight and four commits landed there instead of the release branch, which then needed `git merge develop` to pull them into the release. That is the right shape anyway (features on `develop`, release branch cut from it), so the fix is: check `git branch --show-current`, land features on `develop`, and merge `develop` into the release branch for anything that arrives after the cut. Renaming a local branch does **not** move an open PR's head — you need a new PR.

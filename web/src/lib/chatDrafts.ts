@@ -1,6 +1,6 @@
 const CHAT_DRAFTS_STORAGE_KEY = 'ciao-chat-drafts'
 const CHAT_SENT_PROMPTS_STORAGE_KEY = 'ciao-chat-sent-prompts'
-export const SENT_PROMPT_HISTORY_LIMIT = 50
+const SENT_PROMPT_HISTORY_LIMIT = 50
 // A draft this old is no longer offered for recovery when its chat is gone.
 const ORPHAN_DRAFT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000
 
@@ -25,6 +25,13 @@ function defaultStorage(): DraftStorage | null {
   return localStorage
 }
 
+// NOTE: this read feeds `isEmptyDraft` in stores/projects, which DELETES the
+// chat when it finds nothing. So dropping a stored shape here does not merely
+// fail to restore a draft — it discards the draft and the chat holding it. The
+// object shape landed 2026-08-18, so a legacy entry from any earlier release is
+// still sitting in somebody's localStorage until they reopen that chat. Do not
+// remove the legacy branch until a legacy entry provably cannot exist.
+//
 // Accepts both the current object shape and the legacy plain-string shape
 // (pre-#277: `Record<chatId, string>`). A legacy string is stamped with the
 // current time on read — it gets one fair chance at the orphan-recovery TTL

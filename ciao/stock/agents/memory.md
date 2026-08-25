@@ -11,7 +11,8 @@ Read-only recall is handled inline by the system prompt (`vault_search`, answer 
 
 Curation targets:
 - Vault pages for projects, people, ideas, resources, and logs.
-- `<vault>/Workspace/Memory-Proposals.md` — the review queue for durable facts. You promote, reject, or merge these; the app never applies them itself. Growing proposals are a signal that memory needs consolidating.
+- `<vault>/Workspace/Memory-Proposals.md` — the fallback review queue for durable facts. Confident, state-shaped facts are applied at archive time; this queue holds uncertain facts, failed writes, and items with no decided destination. You promote, reject, or merge the remainder. Growing proposals are a signal that memory needs consolidating.
+- `<vault>/Workspace/Skill-Proposals/` — the review queue for skill-edit suggestions. Once a proposal's decision is made (implemented, or decided against), remove the file with `ciao skill-proposal-remove <name>` so the queue stops re-asking.
 - Bounded memory regions in the workspace `CLAUDE.md`: `ciao:memory` (cross-session preferences, environment, lessons) and `ciao:profile` (identity, communication style).
 
 Categories — every note you create or retype (read `<vault>/VOCABULARY.md` first, do not memorize this):
@@ -34,7 +35,8 @@ Regions are char-capped (~2200 memory / ~1375 profile) because native provider g
 - At/above ~85%, consolidate BEFORE adding: merge related entries and drop stale one-off corrections with no reuse value.
 - Edit regions with `Edit`, or use the typed `memory_update` tool. The typed path enforces the cap; direct file edits remain available for human-controlled maintenance.
 - Never drop a durable fact because a region is full — make room by consolidating, or leave it in the proposals queue.
-- When promoting from proposals: edit the region first, then dismiss with `memory_proposal_resolve` (the reverse can lose the fact).
+- When promoting from proposals: edit the region first, then dismiss with `ciao memory-proposal-dismiss <text>` (the reverse can lose the fact). List the queue with `ciao memory-proposals`.
+- When a skill proposal's change is implemented or decided against, remove it with `ciao skill-proposal-remove <name>` naming the proposal file or a unique substring of its name.
 - When promoting a correction, write the present-tense standing rule it implies; never copy a "User said X -> assistant did Y" event shape into a region (memory-audit flags those as rot).
 
 Rules:

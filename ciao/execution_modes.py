@@ -1,40 +1,6 @@
-"""Bridge-visible execution modes and provider-specific mappings."""
+"""Provider-specific mappings and approval policies."""
 
 from __future__ import annotations
-
-from dataclasses import dataclass
-
-from ciao.models import BridgeMode
-
-
-@dataclass(frozen=True, slots=True)
-class ModeOption:
-    """One selectable execution mode."""
-
-    value: BridgeMode
-    label: str
-    description: str
-
-
-MODE_OPTIONS: list[ModeOption] = [
-    ModeOption("normal", "Normal", "Standard interactive behavior"),
-    ModeOption("plan", "Plan", "Planning or read-only behavior"),
-    ModeOption("auto", "Auto", "Automatic execution with safer defaults"),
-    ModeOption("bypass", "Bypass", "Skip approvals with broadest access"),
-]
-
-
-def normalize_claude_mode(raw: str) -> BridgeMode:
-    """Map Claude CLI permission values into bridge modes."""
-    value = raw.strip()
-    if value == "plan":
-        return "plan"
-    if value == "auto":
-        return "auto"
-    if value == "bypassPermissions":
-        return "bypass"
-    return "normal"
-
 
 # ── Bundled harness skills Ciaobot replaces ──────────────────────────────
 # The CLI ships a bundle of skills and workflows. Some expose surfaces that
@@ -116,18 +82,12 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "context_get",
     "memory_status",
     "memory_update",
-    "memory_proposals_list",
-    "memory_proposal_resolve",
     "vault_search",
     "projects_list",
     "project_get",
-    "project_create",
-    "project_update",
-    "project_restore",
-    "project_files_list",
+    "project",
     "workspaces_list",
     "workspace_create",
-    "workspace_update",
     "chats_list",
     "chat_get",
     "chat_create",
@@ -146,14 +106,10 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     # plain Bash call has to pass.
     "background_run_status",
     "schedules_list",
-    "schedule_preview",
-    "schedule_create",
-    "schedule_update",
+    "schedule",
     "loops_list",
-    "loop_create",
-    "loop_update",
+    "loop",
     "file_surface",
-    "adversarial_review",
 )
 
 

@@ -670,7 +670,15 @@
 
       <!-- PROVIDERS TAB -->
       <template v-if="currentTab === 'providers'">
-        <div v-if="!providerKeysLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <div v-if="!providerKeysLoaded" class="card" role="status" aria-live="polite" aria-label="Loading providers">
+          <div class="mm-loading-heading"><span class="history-loading-spinner" aria-hidden="true"></span><span>Loading providers…</span></div>
+          <div class="mm-skeleton-block" aria-hidden="true">
+            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
+            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
+            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 56px;"></span>
+          </div>
+        </div>
         <template v-else-if="providerKeysError">
           <div class="card"><p class="hint hint--warn">{{ providerKeysError }}</p></div>
         </template>
@@ -843,24 +851,6 @@
                   >
                     <option
                       v-for="option in providerThinkingOptions(section.key)"
-                      :key="option.value"
-                      :value="option.value"
-                    >
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
-                <label class="settings-field">
-                  <span class="ws-label">Default mode</span>
-                  <select
-                    class="routine-select"
-                    :data-provider="section.key"
-                    :value="providerModeSelectorValue(section.key)"
-                    :disabled="routinesSaving"
-                    @change="saveProviderMode(section.key, ($event.target as HTMLSelectElement).value)"
-                  >
-                    <option
-                      v-for="option in providerModeOptions(section.key)"
                       :key="option.value"
                       :value="option.value"
                     >
@@ -1366,114 +1356,6 @@
         </template>
       </template>
 
-      <!-- CONTEXT TAB -->
-      <template v-if="currentTab === 'context'">
-        <div class="card">
-          <div class="settings-card-header settings-card-header--context">
-            <div>
-              <p class="section-title">agent context</p>
-              <p class="hint">
-                How Ciaobot assembles context for every CLI. This guide is independent of the current chat, project, and workspace.
-              </p>
-            </div>
-          </div>
-
-          <div class="skill-list">
-            <template v-for="item in contextAssets" :key="item.id">
-              <details
-                v-if="item.id === 'memory-sources'"
-                class="skill-row instruction-row memory-context-row"
-                :open="workspaceMemoryExpanded"
-                @toggle="workspaceMemoryExpanded = ($event.currentTarget as HTMLDetailsElement).open"
-              >
-                <summary class="skill-main memory-context-summary">
-                  <div class="skill-title-row command-title-row">
-                    <span class="skill-chevron">{{ workspaceMemoryExpanded ? '&#9662;' : '&#9656;' }}</span>
-                    <span class="skill-name">{{ item.title }}</span>
-                  </div>
-                  <p class="skill-description">{{ item.description }}</p>
-                </summary>
-                <div class="skill-detail memory-source-list">
-                  <template v-for="group in workspaceMemoryGroups" :key="group.id">
-                    <p class="memory-source-group-title">{{ group.title }}</p>
-                    <div v-for="memory in group.items" :key="memory.id" class="memory-source">
-                      <span class="memory-source-heading">
-                        <span>{{ memory.title }}</span>
-                        <span class="memory-source-badges">
-                          <span :class="assetOriginClass('builtin')">{{ assetOriginLabel('builtin') }}</span>
-                          <span class="badge badge--muted command-source">{{ memoryInjectionLabel(memory) }}</span>
-                        </span>
-                      </span>
-                      <span class="memory-source-summary-copy">{{ memory.description }}</span>
-                      <p
-                        v-for="sourceFile in memorySourceFiles(memory)"
-                        :key="sourceFile.path"
-                        class="skill-meta memory-source-file"
-                      >
-                        <span class="skill-meta-label">Source file</span>
-                        <button class="inline-path-button" @click.stop="openAssetPath(sourceFile.path)">{{ sourceFile.label }}</button>
-                      </p>
-                    </div>
-                  </template>
-                </div>
-              </details>
-
-              <div
-                v-else
-                class="skill-row instruction-row"
-                :class="{ expanded: isContextExpanded(item) }"
-                :style="{ paddingLeft: `${10 + Math.min(item.level || 0, 4) * 18}px` }"
-                @click="toggleContext(item)"
-              >
-                <div class="skill-main">
-                  <div class="skill-title-row command-title-row">
-                    <span class="skill-chevron">{{ isContextExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
-                    <span class="skill-name">{{ item.title }}</span>
-                    <span class="skill-badges">
-                      <span :class="assetOriginClass(contextOrigin(item))">{{ assetOriginLabel(contextOrigin(item)) }}</span>
-                      <span v-if="item.scope" class="badge badge--muted command-source">{{ item.scope }}</span>
-                    </span>
-                  </div>
-                  <p class="skill-description">{{ item.description }}</p>
-                  <div v-if="isContextExpanded(item)" class="skill-detail">
-                    <p
-                      v-for="sourceFile in contextSourceFiles(item)"
-                      :key="sourceFile.path"
-                      class="skill-meta"
-                    >
-                      <span class="skill-meta-label">Source file</span>
-                      <button class="inline-path-button" @click.stop="openAssetPath(sourceFile.path)">{{ sourceFile.label }}</button>
-                    </p>
-                    <div v-if="item.id === 'cli-instruction-chain'" class="runtime-context-summary">
-                      <p class="hint hint--compact">At chat start, the active CLI discovers the applicable instruction files:</p>
-                      <ul>
-                        <li><strong>Global instructions:</strong> your user-level <code>CLAUDE.md</code>, when present.</li>
-                        <li><strong>Workspace instructions:</strong> the workspace <code>CLAUDE.md</code>. It is the single guide — <code>AGENTS.md</code> is a symlink to it, so Claude Code and Codex read the same file.</li>
-                        <li><strong>Local, override, and nested instructions:</strong> local overrides, imported Markdown files, and more specific instruction files each CLI discovers for the working directory.</li>
-                      </ul>
-                    </div>
-                    <div v-else-if="item.id === 'ciaobot-system-prompt'" class="runtime-context-summary">
-                      <p class="hint hint--compact">
-                        Shared Ciaobot behavior and tool instructions are appended when the chat starts. The memory snapshot is appended next.
-                      </p>
-                    </div>
-                    <div v-else-if="item.id === 'runtime-context-hook'" class="runtime-context-summary">
-                      <p class="hint hint--compact">Every user turn includes:</p>
-                      <ul>
-                        <li><strong>Project context:</strong> the current project's single saved context value, when one is set.</li>
-                        <li><strong>Project document:</strong> a link to its <code>README.md</code> or canonical document, when available.</li>
-                        <li><strong>Runtime:</strong> today's date, workspace/project identifiers, Google profile, and working directory.</li>
-                        <li><strong>Relevant vault context:</strong> entity links matched from the current prompt.</li>
-                        <li><strong>Continuity:</strong> provider handover context when a chat has just switched providers.</li>
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </template>
-            </div>
-        </div>
-      </template>
 
       <!-- SKILLS TAB -->
       <template v-if="currentTab === 'skills'">
@@ -1494,7 +1376,7 @@
           </div>
 
           <p class="hint hint--info skill-scope-note">
-            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock, custom, and GitHub/package skills — see
+             Ciaobot runs chats through Claude Code or opencode. Ciaobot-managed skills are synchronized into both runtimes where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock, custom, and GitHub/package skills — see
             <RouterLink to="/settings/providers">Providers</RouterLink> for what each CLI brings on its own.
           </p>
 
@@ -1652,7 +1534,7 @@
             <div>
               <p class="section-title">subagents</p>
               <p class="hint">
-                Shared subagents available to Claude Code and Codex. Custom definitions are saved in <code>subagents/</code>, mirrored into the vault, and synchronized into each CLI's native format.
+                 Shared subagents available to Claude Code and opencode. Custom definitions are saved in <code>subagents/</code>, mirrored into the vault, and synchronized into each runtime's native format.
               </p>
             </div>
             <button class="btn-small" @click="toggleAddSubagent">
@@ -1752,7 +1634,7 @@
             <div>
               <p class="section-title">commands</p>
               <p class="hint">
-                Shared commands available to Claude Code and Codex. Custom commands are saved in <code>commands/</code>, mirrored into the vault, and exposed to Codex through generated skill wrappers.
+                 Shared commands available to Claude Code and opencode. Custom commands are saved in <code>commands/</code>, mirrored into the vault, and exposed through each runtime's native format.
               </p>
             </div>
             <div class="settings-card-header-actions">
@@ -2159,7 +2041,6 @@ import type {
   McpUsage,
   McpProjectServer,
   McpEnvKey,
-  PromptAsset,
   ProviderConfigSettings,
   RoutineSettings,
   SkillInventory,
@@ -2210,8 +2091,6 @@ const currentTab = computed(() => {
 const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
-const expandedContext = ref<Record<string, boolean>>({})
-const workspaceMemoryExpanded = ref(false)
 
 // MCP Server management state
 const showAddMcpServer = ref(false)
@@ -2611,12 +2490,6 @@ function toggleSubagent(agent: SubagentAsset) {
   const key = `${agent.source}:${agent.name}:${agent.path}`
   expandedSubagents.value[key] = !isSubagentExpanded(agent)
 }
-function isContextExpanded(item: PromptAsset) {
-  return expandedContext.value[item.id] || false
-}
-function toggleContext(item: PromptAsset) {
-  expandedContext.value[item.id] = !isContextExpanded(item)
-}
 function openAssetPath(path: string) {
   if (!path) return
   void fileViewer.open(path)
@@ -2721,7 +2594,7 @@ function serializeModelList(models: string[]): string {
 }
 
 // A panel entry may name the provider that runs it. Anthropic tiers are bare
-// aliases; Codex and opencode entries carry a `<provider>:` prefix, matching
+// aliases; opencode entries carry a `<provider>:` prefix, matching
 // what `ciao/critique.py::_split_provider` dispatches on.
 const critiqueModelSections = computed<ModelSection[]>(() => {
   const options = routines.value?.model_options
@@ -2729,15 +2602,9 @@ const critiqueModelSections = computed<ModelSection[]>(() => {
   const tiers = options.anthropic || []
   const prefixed = (provider: string, models: string[]) =>
     models.filter((m) => tiers.includes(m)).map((m) => `${provider}:${m}`)
-  const codexModels = workspaceModels.value?.codex_models || []
   const opencodeModels = workspaceModels.value?.opencode_models || []
   return [
     { key: 'anthropic', label: 'Anthropic', models: tiers },
-    {
-      key: 'codex',
-      label: 'OpenAI (via Codex)',
-      models: codexModels.length ? prefixed('codex', tiers) : [],
-    },
     {
       key: 'opencode',
       label: 'opencode',
@@ -2772,22 +2639,7 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
       available: true,
     },
   ]
-  // Codex and opencode can serve routines too (see `_run_codex_oneshot` /
-  // `_run_opencode_oneshot`), so offer them once their catalog is non-empty.
-  const codexModels = parseModelList((
-    workspaceModels.value?.codex_models
-    || workspaceModels.value?.provider_models?.codex
-    || []
-  ).join(','))
-  if (codexModels.length) {
-    sections.push({
-      key: 'codex',
-      label: 'OpenAI (via Codex)',
-      options: codexModels,
-      configurable: true,
-      available: true,
-    })
-  }
+  // opencode can serve routines once its catalog is non-empty.
   const opencodeModels = parseModelList((
     workspaceModels.value?.opencode_models
     || workspaceModels.value?.provider_models?.opencode
@@ -2904,60 +2756,10 @@ async function saveProviderDefaultThinking(provider: AliasProviderKey, value: st
   await saveRoutines({ provider_default_thinking: defaults })
 }
 
-// Per-provider default execution mode for new chats. The stored override
-// lives in RoutineSettings.provider_default_modes; a missing entry falls back
-// to the effective default reported by the backend, which is the app-wide
-// mode for every provider. The local fallback below only covers a routines
-// payload that predates provider_default_modes_effective.
-const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
-
-const MODE_LABELS: Record<string, string> = {
-  auto: 'Auto',
-  bypass: 'Bypass',
-  normal: 'Manual',
-  plan: 'Plan',
-}
-
-function providerModeOverride(provider: AliasProviderKey): string {
-  return routines.value?.provider_default_modes?.[provider] || ''
-}
-
-function providerModeEffective(provider: AliasProviderKey): string {
-  return routines.value?.provider_default_modes_effective?.[provider] || 'auto'
-}
-
-function providerModeSelectorValue(provider: AliasProviderKey): string {
-  return providerModeOverride(provider) || DEFAULT_MODE_SELECTION
-}
-
-function providerModeOptions(provider: AliasProviderKey): { value: string; label: string }[] {
-  const effective = providerModeEffective(provider)
-  return [
-    {
-      value: DEFAULT_MODE_SELECTION,
-      label: `Automatic (${MODE_LABELS[effective] || effective})`,
-    },
-    { value: 'auto', label: 'Auto — fewer prompts, classifier approves safe actions' },
-    { value: 'bypass', label: 'Bypass — skip all checks (use in containers only)' },
-    { value: 'normal', label: 'Manual — approve each tool call' },
-    { value: 'plan', label: 'Plan — read-only, propose without acting' },
-  ]
-}
-
-async function saveProviderMode(provider: AliasProviderKey, value: string) {
-  const selected = value === DEFAULT_MODE_SELECTION ? '' : value
-  const modes = JSON.parse(
-    JSON.stringify(routines.value?.provider_default_modes || {}),
-  ) as Record<string, string>
-  if (selected) modes[provider] = selected
-  else delete modes[provider]
-  await saveRoutines({ provider_default_modes: modes })
-}
-
 function serializeRoutineModel(provider: RoutineProviderValue, model: string): string {
   // Runtime-provider models need an explicit qualifier so the backend does not
   // send a global routine override through Claude by default.
-  if (provider === 'codex' || provider === 'opencode') {
+  if (provider === 'opencode') {
     return `${provider}:${model}`
   }
   return model
@@ -2980,7 +2782,7 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; mod
   if (!raw) return { provider: 'automatic', model: '' }
   // 'apfel' is the legacy id from when this shelled out to the apfel CLI.
   if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', model: '' }
-  for (const provider of ['codex', 'opencode'] as const) {
+  for (const provider of ['opencode'] as const) {
     const prefix = `${provider}:`
     if (raw.startsWith(prefix)) {
       return { provider, model: raw.slice(prefix.length) }
@@ -3061,7 +2863,6 @@ function routineModelSummary(key: RoutineModelKey): string {
   }
   if (provider === 'apple') return 'Local (free)'
   const model = routineModelValue(key)
-  if (provider === 'codex') return `OpenAI (via Codex): ${model || 'default'}`
   if (provider === 'opencode') return `opencode: ${model || 'default'}`
   return `${aliasProviderLabel(provider)}: ${model || 'default'}`
 }
@@ -3371,7 +3172,7 @@ async function fetchMcpUsage() {
 
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
-  if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`, {
+  if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'opencode' ? 'opencode' : 'Claude Code'} on this computer?`, {
     title: 'Log out',
     confirmLabel: 'Log out',
     destructive: true,
@@ -3384,7 +3185,7 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
     const result = await api.post<ProviderActionResult>(`/api/settings/providers/${provider}/${action}`)
     if (action === 'connect') {
       providerConnectionResult.value = result.opened
-        ? `Opened ${provider === 'codex' ? 'Codex' : 'Claude Code'} login in Terminal.`
+        ? `Opened ${provider === 'opencode' ? 'opencode' : 'Claude Code'} login in Terminal.`
         : `Run ${result.command} in Terminal.`
     } else if (action === 'logout') {
       providerConnectionResult.value = 'Logged out.'
@@ -3553,139 +3354,6 @@ function mcpServerOrigin(_srv: { name?: string; source?: string }): AssetOrigin 
   return 'custom'
 }
 
-function contextOrigin(item: { editable?: boolean; source?: string; scope?: string }): AssetOrigin {
-  if (item.editable) return 'custom'
-  const source = `${item.source || ''} ${item.scope || ''}`.toLowerCase()
-  if (source.includes('generated') || source.includes('ciaobot') || source.includes('session')) {
-    return 'builtin'
-  }
-  return 'builtin'
-}
-
-function contextGuideAsset(
-  id: string,
-  title: string,
-  description: string,
-  scope: string,
-  source: string,
-  editable: boolean = false,
-): PromptAsset {
-  return { id, title, description, scope, source, path: '', editable, content: '' }
-}
-
-type ContextSourceFile = { label: string; path: string }
-
-function sourceFile(item: PromptAsset, label: string = item.path): ContextSourceFile[] {
-  return item.path ? [{ label, path: item.path }] : []
-}
-
-function contextSourceFiles(item: PromptAsset): ContextSourceFile[] {
-  const inventory = agentAssets.value?.context || []
-  if (item.id === 'cli-instruction-chain') {
-    // AGENTS.md is linked to CLAUDE.md, so a single row covers both guides;
-    // the link opens the canonical CLAUDE.md.
-    const expected = /(?:^|[\\/])CLAUDE\.md$/i
-    const candidates = inventory.filter(candidate =>
-      candidate.scope === 'project' && expected.test(candidate.path),
-    )
-    const preferred = candidates.find(candidate => !candidate.path.replaceAll('\\', '/').includes('/')) || candidates[0]
-    return [{ label: 'CLAUDE.md / AGENTS.md', path: preferred?.path || 'CLAUDE.md' }]
-  }
-  if (item.id === 'ciaobot-system-prompt') {
-    const configured = inventory.find(candidate => candidate.id === 'ciaobot-system-prompt')
-    return configured?.path
-      ? sourceFile(configured)
-      : [{ label: 'ciao/system_prompt.md', path: 'ciao/system_prompt.md' }]
-  }
-  return []
-}
-
-function memorySourceFiles(item: PromptAsset): ContextSourceFile[] {
-  const inventory = agentAssets.value?.context || []
-  if (item.id === 'ciaobot-memory' || item.id === 'ciaobot-user') {
-    const configured = inventory.find(candidate => candidate.id === item.id)
-    return configured ? sourceFile(configured) : []
-  }
-  if (item.id === 'workspace-memory') {
-    return inventory
-      .filter(candidate => candidate.scope === 'vault')
-      .flatMap(candidate => sourceFile(candidate))
-  }
-  return []
-}
-
-const workspaceMemoryAssets = computed<PromptAsset[]>(() => [
-  contextGuideAsset(
-    'ciaobot-memory',
-    'Global remembered facts',
-    'Cross-session facts, conventions, and lessons shared across all workspaces.',
-    'bounded-memory',
-    'session start',
-  ),
-  contextGuideAsset(
-    'ciaobot-user',
-    'Global user profile',
-    'Your identity and response preferences, shared across all workspaces.',
-    'bounded-memory',
-    'session start',
-  ),
-  contextGuideAsset(
-    'workspace-memory',
-    'Workspace notes (MEMORY.md)',
-    'Durable notes from whichever workspace the chat uses. This file is not inserted automatically.',
-    'vault',
-    'on demand',
-  ),
-])
-
-const workspaceMemoryGroups = computed(() => [
-  {
-    id: 'automatic',
-    title: 'Global · included automatically at chat start',
-    items: workspaceMemoryAssets.value.filter(item => item.scope === 'bounded-memory'),
-  },
-  {
-    id: 'available',
-    title: 'Workspace-specific · opened only when relevant',
-    items: workspaceMemoryAssets.value.filter(item => item.scope === 'vault'),
-  },
-].filter(group => group.items.length))
-
-function memoryInjectionLabel(item: PromptAsset): string {
-  return item.source
-}
-
-const contextAssets = computed<PromptAsset[]>(() => [
-  contextGuideAsset(
-    'cli-instruction-chain',
-    'CLI instructions (CLAUDE.md · AGENTS.md)',
-    'The active CLI assembles the applicable global, workspace, override, and imported instruction files. The workspace CLAUDE.md and AGENTS.md are linked, so Claude Code and Codex read the same instructions.',
-    'CLI',
-    'session start',
-    true,
-  ),
-  contextGuideAsset(
-    'ciaobot-system-prompt',
-    'Ciaobot system instructions',
-    'Shared Ciaobot behavior and tool instructions appended when the chat starts.',
-    'Ciaobot',
-    'session start',
-  ),
-  contextGuideAsset(
-    'memory-sources',
-    'Memory sources',
-    'Global session memory is appended at chat start; workspace-specific notes are opened only when relevant.',
-    'Ciaobot',
-    'session start',
-  ),
-  contextGuideAsset(
-    'runtime-context-hook',
-    'Per-turn runtime context hook',
-    'Dynamic project references and runtime metadata added before every user prompt.',
-    'Ciaobot',
-    'each turn',
-  ),
-])
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
 const workspaceHealth = computed<WorkspaceHealthResponse | null>(() => agentAssets.value?.health || null)
@@ -4175,7 +3843,7 @@ function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentM
     if (currentModelValue && !models.includes(currentModelValue)) models.push(currentModelValue)
     return [{ ...section, models }]
   }
-  if (provider === 'codex' || provider === 'opencode') {
+  if (provider === 'opencode') {
     const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === provider)
     if (!section) return []
     const models = [...section.models]
@@ -4241,12 +3909,12 @@ const inspectorEmbeddedTools = computed(() => {
     return mcpStatus.value.tools
   }
   return [
-    'context_get', 'vault_search', 'projects_list', 'project_get', 'project_create',
-    'project_update', 'chats_list', 'chat_get', 'chat_create', 'chat_send',
+    'context_get', 'vault_search', 'projects_list', 'project_get', 'project',
+    'chats_list', 'chat_get', 'chat_create', 'chat_send',
     'chat_continue', 'chat_retry', 'chat_handover', 'chat_archive', 'chat_delete',
-    'schedules_list', 'schedule_create', 'schedule_update', 'schedule_action',
-    'loops_list', 'loop_create', 'loop_update', 'loop_action', 'file_surface',
-    'delegate_spawn', 'delegates_list', 'adversarial_review',
+    'schedules_list', 'schedule', 'schedule_action',
+    'loops_list', 'loop', 'loop_action', 'file_surface',
+    'delegate_spawn', 'delegates_list', 'project_action',
   ]
 })
 
@@ -4918,21 +4586,6 @@ async function doPackageUpdate() {
   justify-content: flex-end;
   flex: 0 0 auto;
 }
-.settings-card-header--context {
-  flex-direction: row;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--space-4);
-}
-.settings-card-header--context > div:first-child {
-  min-width: 0;
-}
-@container (max-width: 640px) {
-  .settings-card-header--context {
-    align-items: stretch;
-    flex-direction: column;
-  }
-}
 .hint--compact {
   margin: 0;
 }
@@ -4957,6 +4610,45 @@ async function doPackageUpdate() {
 .loading {
   color: var(--fg2);
   font-size: var(--text-base);
+}
+
+.mm-loading-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-3);
+}
+.mm-shimmer-line {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+}
+.mm-skeleton-block { margin-top: var(--space-3); }
+.history-loading-spinner {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: history-loading-spin 0.8s linear infinite;
+}
+@keyframes history-loading-spin { to { transform: rotate(360deg); } }
+@keyframes title-shimmer-sweep {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mm-shimmer-line { animation: title-shimmer-pulse 1.8s ease-in-out infinite; }
+  @keyframes title-shimmer-pulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
+  }
 }
 
 .update-list {
@@ -5354,7 +5046,7 @@ a.btn-secondary {
 }
 .routine-voice-icon {
   flex: none;
-  color: var(--fg-muted);
+  color: var(--fg2);
 }
 .routine-detail {
   font-size: var(--text-xs);
@@ -6043,92 +5735,6 @@ a.btn-secondary {
   line-height: 1.45;
   white-space: pre-wrap;
 }
-.skill-row.memory-context-row {
-  display: block;
-}
-.memory-context-row > summary {
-  list-style: none;
-}
-.memory-context-row > summary::-webkit-details-marker {
-  display: none;
-}
-.memory-context-summary {
-  min-height: var(--touch);
-  cursor: pointer;
-}
-.memory-context-row[open] .memory-context-summary .skill-description {
-  display: block;
-  -webkit-line-clamp: unset;
-  overflow: visible;
-}
-.memory-source-list {
-  gap: var(--space-2);
-}
-.memory-source-group-title {
-  margin: var(--space-2) 0 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.memory-source-group-title:first-child {
-  margin-top: 0;
-}
-.memory-source {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg2) 72%, transparent);
-}
-.memory-source-heading {
-  display: flex;
-  min-height: 24px;
-  align-items: flex-start;
-  gap: var(--space-2);
-  color: var(--fg);
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-.memory-source-badges {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  margin-left: auto;
-}
-.memory-source-summary-copy {
-  display: block;
-  margin-top: var(--space-1);
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-weight: 400;
-  line-height: 1.45;
-}
-.memory-source .skill-meta {
-  margin-top: var(--space-2);
-}
-@container (max-width: 640px) {
-  .memory-source-heading {
-    flex-direction: column;
-  }
-  .memory-source-badges {
-    margin-left: 0;
-  }
-}
-.runtime-context-summary ul {
-  margin: var(--space-2) 0 0;
-  padding-left: 20px;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.55;
-}
-.runtime-context-summary li + li {
-  margin-top: var(--space-1);
-}
-.runtime-context-summary strong {
-  color: var(--fg);
-}
 .subsection-title--spaced {
   margin-bottom: var(--space-2);
 }
@@ -6706,14 +6312,14 @@ a.btn-secondary {
   padding: var(--space-3);
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius);
 }
 
 .workspace-connectors-preview {
   grid-column: 1 / -1;
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius);
   padding: var(--space-3);
   margin-top: var(--space-2);
 }
@@ -6800,7 +6406,7 @@ a.btn-secondary {
 .mcp-inspector-panel {
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius);
   padding: var(--space-3);
 }
 
@@ -6890,7 +6496,7 @@ a.btn-secondary {
 .mcp-server-card {
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius);
   padding: var(--space-3);
 }
 
@@ -6910,4 +6516,5 @@ a.btn-secondary {
 .mcp-tag-grid--wide {
   gap: 8px;
 }
+
 </style>

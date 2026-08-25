@@ -21,9 +21,11 @@ EXPECTED_COMMANDS = {
 
 EXPECTED_SYSTEM_SCHEDULES = {
     "system-memory-curation",
-    # The index rebuild is its own routine because it regenerates ONE shared
-    # INDEX.md + VOCABULARY.md, while the hygiene audit it feeds is per-workspace.
-    "system-vault-index",
+    # The index rebuild folded INTO hygiene: after the re-rooting each agent root
+    # owns its own INDEX.md + VOCABULARY.md, so there is no shared artifact left
+    # for a global routine to write. What replaced it is the global half of the
+    # audit, which stays single because its subject is the global runtime dir.
+    "system-install-health",
     "system-workspace-hygiene",
     "system-skill-evolution",
 }

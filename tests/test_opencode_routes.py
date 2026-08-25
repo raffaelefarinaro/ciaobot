@@ -285,6 +285,53 @@ def test_opencode_subagents_read_child_sessions(
     }]
 
 
+def test_opencode_subagents_prefer_live_server_over_ephemeral_spawn(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A chat with a running provider must not pay for `_EphemeralServer`.
+
+    The subagents poll fires every 4s while a turn streams. If the read cache
+    (`_READ_CACHE_TTL`) has already expired, falling through to the
+    classmethod spawns a whole new `opencode serve` process just to answer
+    this poll -- expensive enough, repeated often enough across concurrent
+    chats, to starve the event loop and destabilize the browser's per-chat
+    websocket. When the chat's own server is already live, its connection
+    must be reused instead.
+    """
+    pcm = _manager(tmp_path)
+    chat = _opencode_chat(pcm, "ses_parent")
+
+    live_provider = OpencodeProvider(tmp_path, config=pcm._config)
+    live_provider._client = object()
+    live_provider._process = SimpleNamespace(returncode=None)
+    live_provider._session_id = "ses_parent"
+    monkeypatch.setattr(
+        live_provider,
+        "read_live_collab_tree",
+        AsyncMock(return_value=[{
+            "info": {"id": "ses_child", "parentID": "ses_parent", "title": "Live"},
+            "messages": [],
+        }]),
+    )
+    service = SimpleNamespace(provider=live_provider)
+    pcm._providers[chat.chat_id] = service
+
+    ephemeral_spawn = AsyncMock(side_effect=AssertionError(
+        "must not spawn an ephemeral server while a live one is attached"
+    ))
+    monkeypatch.setattr(OpencodeProvider, "read_collab_tree", ephemeral_spawn)
+
+    response = asyncio.run(chat_subagents(_request(
+        f"/api/chats/{chat.chat_id}/subagents",
+        _app(pcm),
+        chat_id=chat.chat_id,
+    )))
+    rows = json.loads(response.body)
+
+    assert [row["agent_id"] for row in rows] == ["ses_child"]
+    ephemeral_spawn.assert_not_called()
+
+
 def test_opencode_failed_write_renders_as_activity_not_filecard(
     tmp_path: Path, monkeypatch,
 ) -> None:

@@ -186,8 +186,6 @@ def _installed_targets(root: Path, name: str) -> list[str]:
     agents_path = root / ".agents" / "skills" / name / "SKILL.md"
     if claude_path.exists():
         targets.append("claude")
-    if agents_path.exists():
-        targets.append("codex")
     if claude_path.exists() or agents_path.exists():
         targets.append("opencode")
     return targets

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import html
 import http.cookiejar
 import json
-import math
 import os
 import plistlib
 import re
@@ -23,6 +23,7 @@ import urllib.request
 
 from ciao import dev, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
+from ciao.macos_service import default_launch_agents_dir
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -45,7 +46,6 @@ def _restart_exit_code() -> int:
     """
     raw = (
         os.environ.get("CIAO_RESTART_EXIT_CODE", "").strip()
-        or os.environ.get("TELEGRAM_BRIDGE_RESTART_EXIT_CODE", "").strip()
         or "75"
     )
     try:
@@ -399,13 +399,13 @@ def _disable_legacy_menubar_agent(launch_agents_dir: Path | None = None) -> bool
     the user's real launchd domain.
     """
 
-    default_launch_dir = Path.home() / "Library" / "LaunchAgents"
-    launch_dir = (launch_agents_dir or default_launch_dir).expanduser()
+    real_launch_dir = Path.home() / "Library" / "LaunchAgents"
+    launch_dir = (launch_agents_dir or default_launch_agents_dir()).expanduser()
     plist_path = launch_dir / "com.ciao.menubar.plist"
     if not plist_path.exists():
         return False
 
-    if sys.platform == "darwin" and launch_dir == default_launch_dir:
+    if sys.platform == "darwin" and launch_dir == real_launch_dir:
         label = f"gui/{os.getuid()}/com.ciao.menubar"
         try:
             subprocess.run(
@@ -521,6 +521,14 @@ def ensure_vault_git(root: Path) -> None:
     touched at all. Missing git binary is a non-fatal skip.
     """
     root = Path(root).expanduser().resolve()
+    if not root.is_dir():
+        # Nothing to initialise, and nothing to invent. After the re-rooting the
+        # shared vault path is gone and each root holds its own inside the same
+        # install repo, so scaffolding one here would recreate exactly the
+        # directory the migration removed. `_ensure_vault_gitignore` used to try,
+        # and `ciao setup` died on the FileNotFoundError.
+        print(f"vault {root} does not exist; skipping vault git init", file=sys.stderr)
+        return
     if shutil.which("git") is None:
         print("git not found; skipping vault git init", file=sys.stderr)
         return
@@ -757,6 +765,51 @@ def setup_workspace(
     if not runtime_root.is_absolute():
         runtime_root = root / runtime_root
 
+    # A brand-new install is created in the PER-ROOT layout directly, rather than
+    # in the shared one and then migrated. Setup used to scaffold
+    # `memory-vault/personal` plus agent assets at the install root, so every new
+    # user was manufactured into exactly the state the re-rooting exists to fix —
+    # and met a blocking "migrate now" tile on first boot. The migration engine
+    # then had an audience that regenerated itself.
+    #
+    # The receipt is written here, before anything reads `agent_roots_for`, because
+    # it is what makes `agent_root()` answer per-root. Files in the nested layout
+    # with a gate that still says "shared" is the one combination that breaks
+    # everything downstream.
+    fresh_per_root = (
+        registered_vaults is None
+        and vault_mode != "existing"
+        and not setup_selected_vault
+        and not detect_nested_workspaces(vault_path)
+        and not vault_path.exists()
+    )
+    if fresh_per_root:
+        from ciao.workspace_reroot import mark_born_per_root
+
+        vault_path = root / name / vault_path.name
+        written.extend(mark_born_per_root(root, runtime_root, [name]))
+        # The registry has to exist before the asset loop too: `agent_roots_for`
+        # reads the receipt for the gate and the REGISTRY for the names, and with
+        # no registry it falls back to the install root — which is how the first
+        # attempt at this still put `.claude/`, `commands/` and a stock CLAUDE.md
+        # beside the nested vault instead of inside the workspace's own folder.
+        # The later branch is `_write_if_missing`, so this does not fight it.
+        _write_if_missing(
+            root / ".runtime" / "workspaces.json",
+            json.dumps(
+                [{
+                    "name": name,
+                    "vault_root": f"{name}/{vault_path.name}",
+                    "default_provider": default_provider,
+                    # No Google account is linked at scaffold time; the user
+                    # chooses in Settings → Workspaces after setup.
+                    "gws_profile": "",
+                }],
+                indent=2,
+            ) + "\n",
+        )
+        written.append(root / ".runtime" / "workspaces.json")
+
     stock = resources.files("ciao.stock")
     stock_commands = stock.joinpath("commands")
     stock_workspace = stock.joinpath("workspace")
@@ -764,16 +817,39 @@ def setup_workspace(
     # Canonical user-authored asset sources (mirrored into .claude/ by
     # sync-skills). App plumbing, not vault content: pre-creating them keeps
     # the Workspace Health checks warning-free on a fresh or adopted setup.
-    for asset_dir in ("subagents", "commands"):
-        (root / asset_dir).mkdir(parents=True, exist_ok=True)
-    from ciao.sync_skills import _ensure_linked_workspace_guides, _install_stock_agents
+    from ciao.config import agent_roots_for
+    from ciao.sync_skills import (
+        _ensure_linked_workspace_guides,
+        _install_stock_agents,
+        sync_workspace_skills,
+    )
 
-    _install_stock_agents(root)
-    written.append(root / ".claude" / "agents")
-    written.extend(_copy_tree_if_missing(stock_commands, root / "commands"))
-    written.append(root / "commands")
-    written.extend(_copy_tree_if_missing(stock_workspace, root))
-    _ensure_linked_workspace_guides(root)
+    # Agent assets go to the AGENT ROOTS, which is the install root before the
+    # re-rooting and one directory per workspace after it. Scaffolding the
+    # install root unconditionally put a stock CLAUDE.md, stock commands and a
+    # subagents/ directory beside the real per-root ones on every migrated
+    # install — `ciao setup --load-launchd` is what the installer runs, so it
+    # happened on every reinstall.
+    for asset_root, _name in agent_roots_for(root, runtime_root):
+        asset_root.mkdir(parents=True, exist_ok=True)
+        for asset_dir in ("subagents", "commands"):
+            (asset_root / asset_dir).mkdir(parents=True, exist_ok=True)
+        _install_stock_agents(asset_root)
+        written.append(asset_root / ".claude" / "agents")
+        written.extend(_copy_tree_if_missing(stock_commands, asset_root / "commands"))
+        written.append(asset_root / "commands")
+        written.extend(_copy_tree_if_missing(stock_workspace, asset_root))
+        _ensure_linked_workspace_guides(asset_root)
+        # Build the generated catalogs too, so setup leaves a HEALTHY install
+        # rather than one that only becomes healthy after its first boot. Without
+        # this a brand-new install showed nine Workspace Health warnings and an
+        # operator tile about missing assets, on a install where nothing was
+        # wrong — it just had not synced yet. Local only: no upstream refresh, so
+        # setup still does not touch the network.
+        try:
+            sync_workspace_skills(asset_root, refresh_upstream=False)
+        except Exception as exc:  # noqa: BLE001 — a scaffold step, never fatal
+            print(f"skill sync failed for {asset_root}: {exc}", file=sys.stderr)
 
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(
@@ -837,7 +913,9 @@ def setup_workspace(
         # compatibility exception: keep the selected notes in place so the
         # onboarding chat can inspect them before proposing a migration.
         scaffold_vault_path = vault_path
-        if vault_mode != "existing" and not setup_selected_vault:
+        if vault_mode != "existing" and not setup_selected_vault and not fresh_per_root:
+            # `fresh_per_root` already resolved the vault to `<name>/<leaf>`;
+            # appending the name again would give `<name>/<leaf>/<name>`.
             scaffold_vault_path = vault_path / name
         scaffold_vaults.append((name, scaffold_vault_path))
         try:
@@ -897,7 +975,11 @@ def setup_workspace(
                     "      It is reversible: `ciao vault-unmigrate-links --apply`.",
                 )
 
-    launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
+    launch_dir = (
+        Path(launch_agents_dir)
+        if launch_agents_dir is not None
+        else default_launch_agents_dir()
+    )
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
     # The bundled launcher exports its own entrypoint so onboarding does not
     # write the embedded interpreter directly into launchd as ``python run``.
@@ -1181,6 +1263,16 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     from ciao import fts_search
 
     vault_root = _resolve_vault_root(args.vault_root)
+    # Keys are relative to the install root, so one database can hold several
+    # agent roots each with a vault of the same name.
+    key_base = Path(
+        os.environ.get("CIAO_WORKSPACE", "").strip() or vault_root.parent
+    ).expanduser().resolve()
+    # The re-rooting promotes Logs/ out of the vault, so the archive root cannot
+    # be derived from the vault root on a migrated install.
+    from ciao.config import logs_root_for
+
+    logs_root = logs_root_for(key_base, vault_root, key_base / ".runtime")
     db_path = fts_search.get_db_path()
 
     if args.rebuild and db_path.exists():
@@ -1194,8 +1286,8 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     try:
         fts_search.init_db(conn)
         if not args.query:
-            vault_indexed, vault_removed = fts_search.index_vault(conn, vault_root)
-            logs_indexed, logs_removed = fts_search.index_logs(conn, vault_root)
+            vault_indexed, vault_removed = fts_search.index_vault(conn, vault_root, path_base=key_base)
+            logs_indexed, logs_removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
             if vault_indexed or vault_removed or logs_indexed or logs_removed:
                 print(
                     "FTS Index updated: "
@@ -1207,14 +1299,14 @@ def _vault_search_command(args: argparse.Namespace) -> int:
 
         try:
             if args.logs:
-                indexed, removed = fts_search.index_logs(conn, vault_root)
+                indexed, removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
                 if indexed or removed:
                     print(
                         f"Transcripts index: {indexed} indexed, {removed} removed.",
                         file=sys.stderr,
                     )
             else:
-                indexed, removed = fts_search.index_vault(conn, vault_root)
+                indexed, removed = fts_search.index_vault(conn, vault_root, path_base=key_base)
                 if indexed or removed:
                     print(
                         f"Vault index: {indexed} indexed, {removed} removed.",
@@ -1223,10 +1315,29 @@ def _vault_search_command(args: argparse.Namespace) -> int:
         except Exception as exc:  # noqa: BLE001 - search can still use existing index.
             print(f"Incremental indexing error: {exc}", file=sys.stderr)
 
+        # Scope the query to this vault's key prefix. The database is shared and
+        # the migration rebuild deliberately fills it with every re-rooted
+        # workspace's rows, while the prune now preserves sibling roots — so an
+        # unscoped query returned another workspace's note titles and snippets to
+        # whoever ran `ciao vault-search` here. Same filter the control plane's
+        # vault_search applies.
         results = (
-            fts_search.search_logs(conn, args.query, limit=args.limit)
+            fts_search.search_logs(
+                conn,
+                args.query,
+                limit=args.limit,
+                # Same reason the vault query is scoped: the FTS database
+                # deliberately holds rows from every re-rooted root, so an
+                # unscoped search returns another workspace's transcripts.
+                path_prefix=fts_search.logs_key_prefix(logs_root, key_base),
+            )
             if args.logs
-            else fts_search.search_vault(conn, args.query, limit=args.limit)
+            else fts_search.search_vault(
+                conn,
+                args.query,
+                limit=args.limit,
+                path_prefix=fts_search.vault_key_prefix(vault_root, key_base),
+            )
         )
     finally:
         conn.close()
@@ -1237,7 +1348,10 @@ def _vault_search_command(args: argparse.Namespace) -> int:
 
     print(f"### Search Results for: {args.query}\n")
     for result in results:
-        abs_path = vault_root.parent / result["path"]
+        # Keys are relative to `key_base`, not to the vault's parent: on a
+        # re-rooted install those differ by the workspace segment, so joining
+        # against the parent printed a `file://` link that does not exist.
+        abs_path = key_base / result["path"]
         link = f"file://{abs_path.as_posix()}"
         print(f"- **[{result['title']}]({link})** (rank: {result['rank']})")
         if result["snippet"]:
@@ -1355,6 +1469,15 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
                 f"  {change['path']}:{change['line']}  "
                 f"{change['from']} -> {change['to']}"
             )
+    elif summary["failed"]:
+        # "No wikilinks found" would be a flat lie here: wikilinks WERE found,
+        # every note carrying them failed to write, and the failures are printed
+        # to stderr just below. A retry hit exactly this and told the operator
+        # the vault was clean.
+        print(
+            f"Rewrote nothing: every note with wikilinks failed to write "
+            f"({summary['files_scanned']} scanned)."
+        )
     else:
         print(f"No wikilinks found in {summary['files_scanned']} note(s).")
 
@@ -1379,6 +1502,14 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     if args.apply and rewrites:
         print(f"\nReceipt: {summary.get('receipt_path', '')}")
         print("Reverse it exactly with `ciao vault-unmigrate-links --apply`.")
+        if not summary.get("complete", True):
+            # The receipt is real and the undo works, but the migration is not
+            # done. Printing only the success trailer read as "finished".
+            print(
+                "This run did NOT finish: the notes listed under Failed still "
+                "use wikilinks. Fix the cause and re-run — the reverse map "
+                "carries forward, so nothing already converted is lost."
+            )
     elif not args.apply and rewrites:
         print("\nRe-run with --apply to write these changes.")
     return 1 if summary["failed"] else 0
@@ -1480,6 +1611,17 @@ def _vault_rehome_command(args: argparse.Namespace) -> int:
                 f"  {candidate['path']} -> {candidate['destination']}  "
                 f"({candidate['reason']})"
             )
+    elif summary["mechanical"]:
+        # `mechanical` names the notes the run FOUND; `moves` names the ones it
+        # managed to move. When every move failed, printing the clean-vault line
+        # told the operator there was nothing misfiled while stderr listed the
+        # failures — and it named the notes it had just found.
+        print(
+            f"Moved nothing: all {len(summary['mechanical'])} tag-obvious "
+            f"move(s) failed ({summary['notes_scanned']} note(s) scanned):"
+        )
+        for candidate in summary["mechanical"]:
+            print(f"  {candidate['path']} -> {candidate['destination']}")
     else:
         print(f"No tag-obvious misfiled people in {summary['notes_scanned']} note(s).")
 
@@ -1493,18 +1635,35 @@ def _vault_rehome_command(args: argparse.Namespace) -> int:
             print(f"  written to {path}")
 
     if summary["conflicts"]:
-        print("\nSkipped — a note already exists at the destination:", file=sys.stderr)
+        # Each conflict carries its own reason, and there are now two: a note
+        # already at the destination, or two candidates in this run racing for
+        # it. The old fixed header asserted the first and so mis-described the
+        # second - printing the reason is what the `failed` block below does.
+        print("\nSkipped:", file=sys.stderr)
         for candidate in summary["conflicts"]:
-            print(f"  {candidate['path']} -> {candidate['destination']}", file=sys.stderr)
+            print(
+                f"  {candidate['path']} -> {candidate['destination']}: "
+                f"{candidate.get('error') or 'destination unavailable'}",
+                file=sys.stderr,
+            )
 
     if summary["failed"]:
         print("\nFailed:", file=sys.stderr)
         for item in summary["failed"]:
             print(f"  {item['path']}: {item['error']}", file=sys.stderr)
 
-    if args.apply and summary["moves"]:
+    # Keyed on the receipt, not on `moves`: a run whose moves all failed still
+    # wrote one (its rewrites are real and reversible), and saying nothing left
+    # a receipt on disk that the operator had never been told about.
+    if args.apply and summary.get("receipt_path"):
         print(f"\nReceipt: {summary.get('receipt_path', '')}")
         print("Reverse it exactly with `ciao vault-unrehome --apply`.")
+        if not summary.get("complete", True):
+            print(
+                "This run did NOT finish: the notes listed under Failed are "
+                "still misfiled. Fix the cause and re-run — the reverse map "
+                "carries forward, so nothing already done is lost."
+            )
     elif not args.apply and (summary["moves"] or summary["needs_judgement"]):
         print("\nRe-run with --apply to write these changes.")
     return 1 if summary["failed"] or summary["conflicts"] else 0
@@ -1603,6 +1762,23 @@ def _vault_export_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _install_root_for_vault(vault_root: Path) -> Path | None:
+    """The install a vault belongs to, for cross-root link validation.
+
+    Per-root layout puts a vault at ``<install>/<workspace>/memory-vault``, so
+    the install is two levels up — and only when the receipt says this install
+    re-rooted. Guessing on a shared-layout install would excuse links that
+    really do escape the vault.
+    """
+    from ciao.workspace_reroot import read_receipt  # noqa: PLC0415
+
+    candidate = vault_root.parent.parent
+    runtime = candidate / ".runtime"
+    if read_receipt(runtime) is None:
+        return None
+    return candidate
+
+
 def _vault_lint_command(args: argparse.Namespace) -> int:
     from ciao.vault_lint import VaultTraversalError, run_validation
 
@@ -1628,7 +1804,9 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
         )
         return 1
     try:
-        issues = run_validation(vault_root)
+        issues = run_validation(
+            vault_root, install_root=_install_root_for_vault(vault_root)
+        )
     except VaultTraversalError as exc:
         print(f"Vault inspection failed: {exc}", file=sys.stderr)
         return 1
@@ -1682,27 +1860,47 @@ def _os_audit_command(args: argparse.Namespace) -> int:
 
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
+    # An explicit --workspace scopes the whole audit. Consulting the ambient
+    # environment for the runtime and vault roots then lets an absolute
+    # CIAO_RUNTIME_ROOT from the surrounding install escape the directory the
+    # caller named, so the audit silently reports on the wrong workspace: its
+    # registry, its job runs, its migration receipts. Auditing a second
+    # workspace from inside a running Ciaobot chat hits this every time, because
+    # the chat exports CIAO_RUNTIME_ROOT for its own install.
+    explicit_workspace = args.workspace is not None
 
     def resolve_under_workspace(
         explicit: Path | None,
         env_name: str,
         default: str,
     ) -> Path:
-        raw = explicit or os.environ.get(env_name) or default
+        env_raw = None if explicit_workspace else os.environ.get(env_name)
+        raw = explicit or env_raw or default
         path = Path(raw).expanduser()
         if not path.is_absolute():
             path = workspace / path
         return path.resolve()
 
-    vault = resolve_under_workspace(
-        args.vault_root,
-        "CIAO_VAULT_ROOT",
-        "memory-vault",
-    )
     runtime = resolve_under_workspace(
         args.runtime_root,
         "CIAO_RUNTIME_ROOT",
         ".runtime",
+    )
+    # `memory-vault` is the SHARED layout's answer. Post-migration there is no
+    # vault at the install root, so a plain `ciao os-audit` resolved a path that
+    # does not exist and reported `missing_vault_root` — on every correctly
+    # migrated install, permanently. The audit is the release backstop; a
+    # standing false error in it is how real findings stop being read.
+    from ciao.config import agent_roots_for  # noqa: PLC0415
+
+    roots = agent_roots_for(workspace, runtime)
+    default_vault = "memory-vault"
+    if roots and roots[0][1]:
+        default_vault = str(Path(roots[0][1]) / "memory-vault")
+    vault = resolve_under_workspace(
+        args.vault_root,
+        "CIAO_VAULT_ROOT",
+        default_vault,
     )
     from ciao.config import CiaoConfig
 
@@ -1728,6 +1926,7 @@ def _os_audit_command(args: argparse.Namespace) -> int:
         runtime_dir=runtime,
         config=audit_config,
         workspace_name=workspace_name,
+        scope=args.scope,
     )
 
     if args.json:
@@ -1742,13 +1941,198 @@ def _os_audit_command(args: argparse.Namespace) -> int:
     }.get(report["status"], 2)
 
 
+def _workspace_reroot_command(args: argparse.Namespace) -> int:
+    """Plan, rehearse, apply, or undo the per-workspace agent-root migration.
+
+    Planning and rehearsing are read only. Applying refuses outright rather than
+    stopping halfway, because a half-rooted install has no filter over a still
+    prefixed index and would make every entity visible in every session. --undo
+    stays CLI only: reverting the architecture is not a housekeeping button.
+
+    --apply must be run with the app stopped. It moves the vault and writes the
+    chat state file, so a live server would both read a path that no longer
+    exists and overwrite the handover flags from its in-memory copy.
+
+    And the app the operator runs afterwards must ALREADY contain this migration.
+    An engine without ``CiaoConfig.agent_vault_root`` resolves the vault from a
+    relative ``CIAO_VAULT_ROOT`` to ``<install>/memory-vault``, which this
+    migration empties, so it boots with no vault and its skill sync then prunes
+    the links that now dangle. The receipt gating makes the flip atomic for code
+    that HAS it; it cannot help code that predates it. That is why the design
+    runs this from ``sync_workspace_skills`` at upgrade rather than by hand.
+    """
+    from ciao import workspace_reroot
+
+    workspace = Path(args.workspace or os.environ.get("CIAO_WORKSPACE") or ".").expanduser().resolve()
+    runtime = workspace / ".runtime"
+    # An explicit --workspace must win over the environment, the same rule the
+    # os-audit command needed: a running Ciaobot chat exports CIAO_VAULT_ROOT and
+    # CIAO_WORKSPACE for its OWN install, so resolving the vault from the ambient
+    # environment while writing the named install's registry would migrate one
+    # install's layout using another install's vault. Here it merely refused,
+    # because the ambient relative default landed outside the named root — but a
+    # colleague with an absolute CIAO_VAULT_ROOT would have got the dangerous
+    # version of the same mistake.
+    if args.workspace is not None and args.vault_root is None:
+        vault = (workspace / "memory-vault").resolve()
+    else:
+        vault = _resolve_vault_root(args.vault_root)
+    if not vault.is_absolute():
+        vault = (workspace / vault).resolve()
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({
+        **os.environ,
+        "CIAO_WORKSPACE": str(workspace),
+        "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "workspace-reroot",
+    })
+    names = sorted(config.workspace_names())
+
+    if args.undo:
+        result = workspace_reroot.undo(workspace, runtime)
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
+
+    if args.mark_migrated:
+        # For a vault migrated by hand or by a model. The receipt is what
+        # `agent_root` reads, so without it the install keeps resolving the shared
+        # layout while the files sit in the new one — the one combination that
+        # breaks every layout-dependent path. Verified, not asserted: the folders
+        # have to actually be there, or this would tell the app a comforting lie.
+        from ciao.workspace_reroot import mark_born_per_root, read_receipt
+
+        if read_receipt(runtime) is not None:
+            print("Already recorded as migrated; nothing to do.")
+            return 0
+        # Straight off the registry file, the way `agent_roots_for` does: this
+        # command runs before any config exists that would answer per-root.
+        try:
+            entries = json.loads(
+                (runtime / "workspaces.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            entries = []
+        names = [
+            str(e.get("name", "")).strip()
+            for e in entries
+            if isinstance(e, dict) and str(e.get("name", "")).strip()
+        ]
+        if not names:
+            print(
+                f"Refusing: no workspaces registered in {runtime / 'workspaces.json'}.",
+                file=sys.stderr,
+            )
+            return 1
+        missing = [
+            n for n in names
+            if not (workspace / n / vault.name).is_dir()
+        ]
+        if missing:
+            print(
+                "Refusing: these workspaces have no "
+                f"<workspace>/{vault.name} directory yet: {', '.join(missing)}.\n"
+                "Move the vaults first (see docs/VAULT_MIGRATION_PROMPT.md), then "
+                "re-run this.",
+                file=sys.stderr,
+            )
+            return 1
+        written = mark_born_per_root(workspace, runtime, names, origin="hand")
+        for path in written:
+            print(f"Recorded the per-workspace layout: {path}")
+        print("Run `ciao workspace-reroot --repair` next to rebuild the derived files.")
+        return 0
+
+    if args.repair:
+        result = workspace_reroot.repair(workspace, runtime, names)
+        print(json.dumps(result, indent=2))
+        # Exit 1 when something still needs a human: a root with no vault or a
+        # stale .mcp.json is reported rather than guessed, so a script gating on
+        # this must not read it as clean.
+        if result["status"] == "not_rerooted" or result["errors"]:
+            return 1
+        return 1 if result["reported"] else 0
+
+    if args.apply:
+        result = workspace_reroot.apply(
+            workspace, vault, names, runtime, primary=config.primary_workspace()
+        )
+        if result["status"] == "migrated":
+            # The leaf of the vault that was just moved, not a constant: an
+            # install whose CIAO_VAULT_ROOT does not end in `memory-vault` would
+            # otherwise rebuild nothing and report success.
+            leaf = vault.name
+            result["indexes"] = workspace_reroot.rebuild_indexes(
+                workspace, names, vault_name=leaf
+            )
+            result["search"] = workspace_reroot.rebuild_search_index(
+                workspace, names, vault_name=leaf
+            )
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] == "migrated" else 1
+
+    if args.rehearse:
+        print(json.dumps(workspace_reroot.rehearse(workspace, vault, names, runtime), indent=2))
+        return 0
+
+    plan_result = workspace_reroot.plan(workspace, vault, names)
+    primary = config.primary_workspace()
+    triage = workspace_reroot.plan_skills_triage(workspace, primary)
+    guides = workspace_reroot.guide_moves(workspace, primary)
+    payload = plan_result.as_dict()
+    # The dry run is what a person reads before approving, so it has to show
+    # EVERY move the apply would make. Printing only the vault moves understated
+    # it by four on the reference install, which is exactly the kind of gap that
+    # makes a plan untrustworthy.
+    payload["primary"] = primary
+    payload["skills_triage"] = triage.as_dict()
+    payload["guide_moves"] = [
+        {"source": m.source, "destination": m.destination, "workspace": m.workspace}
+        for m in guides
+    ]
+    payload["total_moves"] = len(plan_result.moves) + len(triage.moves) + len(guides)
+    if triage.refusals:
+        payload["refusals"] = [*payload["refusals"], *triage.refusals]
+        payload["refused"] = True
+    print(json.dumps(payload, indent=2))
+    # Exit 1 on a refusal so a script can gate on it, 0 when the plan is clean.
+    return 1 if payload["refused"] else 0
+
+
+def _workspace_census_command(args: argparse.Namespace) -> int:
+    """Survey a vault root and print the reported shapes.
+
+    Read-only by design: this is the survey the per-workspace migration's
+    fixtures must match, not a check. It always exits 0, because an unregistered
+    directory is information the migration needs, not a failure for the caller.
+    """
+    from ciao.workspace_census import format_census, survey_vault
+
+    vault_root = _resolve_vault_root(args.vault_root)
+    census = survey_vault(vault_root)
+
+    if args.json:
+        print(json.dumps(census.as_dict(), indent=2))
+    else:
+        print(format_census(census))
+    return 0
+
+
 def _memory_audit_command(args: argparse.Namespace) -> int:
     """Audit only the bounded-memory regions.
 
     ``os-audit`` covers this too, but it also lints the whole vault, which is
-    far too slow to run from a daily routine. This entry point reads one file.
+    far too slow to run from a daily routine. This entry point reads one guide
+    per registered workspace and reports over-cap per guide, not as one global
+    number that hides which workspace is over budget.
     """
-    from ciao.os_audit import audit_memory, memory_actionable_count
+    from ciao.config import CiaoConfig
+    from ciao.os_audit import (
+        _aggregate_memory_guides,
+        _memory_guide_specs,
+        _scan_memory_guide,
+        _scan_proposals,
+        memory_actionable_count,
+    )
 
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
@@ -1758,11 +2142,63 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         vault = workspace / vault
     vault = vault.resolve()
 
-    report = audit_memory(
-        guide_path=workspace / "CLAUDE.md",
-        vault_root=vault if vault.exists() else None,
-        workspace_dir=workspace,
+    config_source = dict(os.environ)
+    config_source.update({
+        "CIAO_WORKSPACE": str(workspace),
+        "CIAO_VAULT_ROOT": str(vault),
+        # Loading config for a read-only audit must not create a session
+        # secret merely because the CLI was invoked outside the server env.
+        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "memory-audit",
+    })
+    config = CiaoConfig.from_env(config_source)
+
+    specs = _memory_guide_specs(config, workspace)
+    guides = [
+        _scan_memory_guide(
+            guide,
+            workspace=name,
+            workspace_dir=workspace,
+            current=datetime.date.today(),
+            region_limits={"memory": config.memory_char_limit, "profile": config.user_char_limit},
+        )
+        for name, guide in specs
+    ]
+    proposals_count, proposal_files, proposal_errors = _scan_proposals(
+        vault if vault.exists() else None, None, ""
     )
+    report = _aggregate_memory_guides(
+        guides,
+        pending_memory_proposals=proposals_count,
+        proposal_files=proposal_files,
+        errors=proposal_errors,
+    )
+    # Optional vault pass: the regions are cheap and this command exists for
+    # the daily routine, so the vault walk is opt-in rather than default —
+    # the same reason it was split from os-audit in the first place.
+    if args.with_vault:
+        from ciao.memory_audit import find_stale_notes
+        from ciao.vault_index import scan_vault
+
+        try:
+            # The stamp only feeds graph scoping; the staleness detector keys
+            # on type and dates, not workspace.
+            entries = scan_vault(vault, workspace="personal")
+            report["stale_notes"] = find_stale_notes(
+                entries, vault_root=vault, today=datetime.date.today()
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory section
+            report["stale_notes"] = {
+                "stale_notes": [],
+                "notes_checked": 0,
+                "notes_exempt": 0,
+            }
+            report["errors"].append(
+                {
+                    "type": "note_staleness_scan_failed",
+                    "path": str(vault),
+                    "message": f"note staleness scan failed: {exc}",
+                }
+            )
     # Same definition os-audit exits on, so the two commands cannot disagree
     # about whether these regions are clean.
     findings = memory_actionable_count(report)
@@ -1771,7 +2207,14 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         print(json.dumps(report, indent=2))
     else:
         print(f"Bounded memory: {report['memory_entries']} memory / "
-              f"{report['profile_entries']} profile entries")
+              f"{report['profile_entries']} profile entries across "
+              f"{len(guides)} guide(s)")
+        for finding in report["over_cap"]:
+            where = f"[{finding['workspace']}] " if finding.get("workspace") else ""
+            print(
+                f"  {where}{finding['region']} over cap: "
+                f"{finding['used']}/{finding['limit']} chars"
+            )
         print(f"Event-shaped entries: {len(report['event_shaped_entries'])}")
         for finding in report["event_shaped_entries"]:
             print(f"  [{finding['region']}] {finding['entry']}")
@@ -1788,10 +2231,92 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         )
         for finding in report["superseded_state_candidates"]:
             print(f"  [{finding['region']}] {finding['subject']}")
+        stale = report.get("stale_notes") or {}
+        if stale:
+            print(
+                "Notes not verified within their type's horizon (informational): "
+                f"{len(stale.get('stale_notes', []))} of "
+                f"{stale.get('notes_checked', 0)} dated notes"
+            )
+            for finding in stale.get("stale_notes", []):
+                print(
+                    f"  [{finding['type']}] {finding['path']} :: "
+                    f"{finding['age_days']}d since last check "
+                    f"(horizon {finding['threshold_days']}d)"
+                )
 
     if report["marker_errors"] or report["errors"]:
         return 2
     return 1 if findings else 0
+
+
+def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
+    """Shared workspace/vault resolution for the memory-proposal commands."""
+    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    workspace = Path(workspace_raw).expanduser().resolve()
+    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault = Path(vault_raw).expanduser()
+    if not vault.is_absolute():
+        vault = workspace / vault
+    return workspace, vault.resolve()
+
+
+def _memory_proposals_command(args: argparse.Namespace) -> int:
+    """List pending memory proposals in a workspace's review queue.
+
+    Read-only. Each pending proposal bullet is emitted with its kind, text,
+    and optional source. The curation agent lists this queue, decides each
+    item (promote via a region Edit, or dismiss via ``memory-proposal-dismiss``),
+    and thereby keeps memory improving across sessions.
+    """
+    from ciao.memory_proposals import list_proposals
+
+    workspace, vault = _resolve_workspace_and_vault(args)
+    path = vault / "Workspace" / "Memory-Proposals.md"
+    rows = list_proposals(path)
+    if args.json:
+        json.dump(rows, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        if not rows:
+            print("No memory proposals are pending.")
+        for row in rows:
+            tag = f" [{row['source']}]" if row["source"] else ""
+            print(f"- [{row['kind']}] {row['text']}{tag}")
+    return 0
+
+
+def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
+    """Dismiss (delete) one memory proposal from the review queue.
+
+    Removing a proposal is a review decision, never a memory write: promotion
+    into a ``ciao:memory`` / ``ciao:profile`` region is an explicit ``Edit`` of
+    the workspace CLAUDE.md first, then this dismiss removes the resolved item
+    so the queue stops re-asking. TEXT matches one proposal by a unique
+    substring.
+    """
+    from ciao.memory_proposals import dismiss_proposal_by_substring
+
+    workspace, vault = _resolve_workspace_and_vault(args)
+    path = vault / "Workspace" / "Memory-Proposals.md"
+    needle = args.text.strip()
+    if not needle:
+        print("a proposal text or unique substring is required", file=sys.stderr)
+        return 2
+    removed = dismiss_proposal_by_substring(path, needle)
+    if not removed:
+        print(
+            f"No unique memory proposal matched {needle!r} "
+            "(the text may be ambiguous or absent).",
+            file=sys.stderr,
+        )
+        return 1
+    if args.json:
+        json.dump({"removed": True, "text": needle, "workspace": args.workspace or ""}, sys.stdout)
+        sys.stdout.write("\n")
+    else:
+        print(f"Dismissed memory proposal matching {needle!r}.")
+    return 0
 
 
 def _vault_index_command(args: argparse.Namespace) -> int:
@@ -1839,6 +2364,79 @@ def _label_hygiene_command(args: argparse.Namespace) -> int:
     if args.json:
         module_args.append("--json")
     return label_hygiene.main(module_args)
+
+
+def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
+    """Delete a resolved skill proposal from a workspace's review queue.
+
+    The curation schedule reviews ``Workspace/Skill-Proposals/``; once a
+    proposal's decision is made (implemented, or decided against) it is removed
+    here so the queue stops re-asking. NAME matches the file's stem or a unique
+    substring of it.
+    """
+    from ciao.config import CiaoConfig
+
+    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    workspace = Path(workspace_raw).expanduser().resolve()
+    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault = Path(vault_raw).expanduser()
+    if not vault.is_absolute():
+        vault = workspace / vault
+    vault = vault.resolve()
+
+    config_source = dict(os.environ)
+    config_source.update({
+        "CIAO_WORKSPACE": str(workspace),
+        "CIAO_VAULT_ROOT": str(vault),
+        # Deleting a proposal file is a review decision, not a session write;
+        # loading config outside the server env must not mint a session secret.
+        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "skill-proposal-remove",
+    })
+    config = CiaoConfig.from_env(config_source)
+
+    # Which workspace the proposal lives in: the active one, falling back to the
+    # primary, matching skill_evolution's routing so evidence and queue stay
+    # aligned per workspace.
+    name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if config.workspace(name) is None:
+        name = config.primary_workspace()
+    queue = config.workspace_vault_root(name) / "Workspace" / "Skill-Proposals"
+
+    needle = args.name.strip()
+    if not needle:
+        print("a skill proposal name or substring is required", file=sys.stderr)
+        return 2
+
+    if not queue.is_dir():
+        print("No skill proposals are queued.", file=sys.stderr)
+        return 1
+
+    candidates = sorted(p for p in queue.iterdir() if p.is_file() and p.suffix == ".md")
+    matches = [p for p in candidates if needle.casefold() in p.stem.casefold()]
+    if not matches:
+        print(f"No skill proposal matched {needle!r}.", file=sys.stderr)
+        return 1
+    if len(matches) > 1:
+        print(
+            f"The name matched more than one skill proposal; use a longer substring: "
+            + ", ".join(p.stem for p in matches),
+            file=sys.stderr,
+        )
+        return 1
+
+    target = matches[0]
+    try:
+        target.unlink()
+    except OSError as exc:
+        print(f"could not delete {target.name}: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        json.dump({"removed": True, "name": target.stem, "workspace": name}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(f"Removed skill proposal {target.stem} from {name}.")
+    return 0
 
 
 def _skills_list_command(args: argparse.Namespace) -> int:
@@ -2234,7 +2832,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument(
         "--launch-agents-dir",
         type=Path,
-        default=Path.home() / "Library" / "LaunchAgents",
+        default=default_launch_agents_dir(),
         help="Directory where com.ciao.server.plist is written.",
     )
     setup_parser.add_argument(
@@ -2296,7 +2894,7 @@ def build_parser() -> argparse.ArgumentParser:
     auth_parser.add_argument(
         "--device-auth",
         action="store_true",
-        help="Use Codex device authorization (useful on a headless machine).",
+        help="Use provider device authorization when supported.",
     )
     auth_parser.set_defaults(func=_auth_command)
 
@@ -2630,11 +3228,94 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     os_audit_parser.add_argument(
+        "--scope",
+        choices=["all", "workspace", "global"],
+        default="all",
+        help=(
+            "Which half of the report to compute. 'workspace' drops the sections "
+            "whose subject is the global runtime directory (background "
+            "automation, upgrade actions); 'global' drops the ones describing a "
+            "single workspace. The per-workspace hygiene routine passes "
+            "'workspace' so N runs stop reporting the same global findings N "
+            "times."
+        ),
+    )
+    os_audit_parser.add_argument(
         "--json",
         action="store_true",
         help="Output raw JSON audit report.",
     )
     os_audit_parser.set_defaults(func=_os_audit_command)
+
+    reroot_parser = subparsers.add_parser(
+        "workspace-reroot",
+        help="Plan or apply the per-workspace agent-root migration.",
+        description=(
+            "Move each registered workspace's vault into its own agent root. "
+            "Run --apply only from the engine that will SERVE the install, with "
+            "the app stopped: an older engine has no per-root vault resolution "
+            "and boots with no vault at all. "
+            "Prints the plan by default and changes nothing; --rehearse records a "
+            "receipt without moving; --apply performs the migration, moves the "
+            "skill catalog to the primary root with a blank triage sheet, and "
+            "rebuilds each root's index and search database, and flags every open "
+            "chat for a context handover; --repair reconciles "
+            "an already-migrated install back to the registry; --undo restores "
+            "the layout exactly, leaving only the rebuilt per-root index and "
+            "vocabulary behind for git status to report."
+        ),
+    )
+    reroot_parser.add_argument("--workspace", type=Path, default=None, help="Install root.")
+    reroot_parser.add_argument("--vault-root", type=Path, default=None, help="Vault root.")
+    reroot_parser.add_argument("--rehearse", action="store_true", help="Record a survey receipt, move nothing.")
+    reroot_parser.add_argument("--apply", action="store_true", help="Perform the migration.")
+    reroot_parser.add_argument("--undo", action="store_true", help="Reverse a completed migration.")
+    reroot_parser.add_argument(
+        "--repair",
+        action="store_true",
+        help=(
+            "Reconcile the filesystem to the registry after a completed "
+            "migration: missing roots, an unlinked AGENTS.md, un-mirrored "
+            "skills, a prefixed INDEX.md, a search index at moved paths. "
+            "Idempotent. A root with no vault and a stale .mcp.json are reported, "
+            "never guessed, and make it exit 1."
+        ),
+    )
+    reroot_parser.add_argument(
+        "--mark-migrated",
+        action="store_true",
+        help=(
+            "Record that this install is ALREADY in the per-workspace layout, "
+            "without moving anything. For a vault migrated by hand or by a model "
+            "following docs/VAULT_MIGRATION_PROMPT.md: `agent_root` answers "
+            "per-root only when a receipt says so, so without this the install "
+            "keeps resolving the old layout and --repair refuses. Verifies the "
+            "layout is actually in place first and refuses if it is not."
+        ),
+    )
+    reroot_parser.set_defaults(func=_workspace_reroot_command)
+
+    census_parser = subparsers.add_parser(
+        "workspace-census",
+        help="Survey a vault root into migration fixture shapes.",
+        description=(
+            "Read-only census of a vault root: note and non-markdown counts per "
+            "top-level directory, symlinks, max depth, duplicate stems, "
+            "frontmatter-less notes, and registered vs unregistered directories."
+        ),
+    )
+    census_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+    )
+    census_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output raw JSON census report.",
+    )
+    census_parser.set_defaults(func=_workspace_census_command)
 
     memory_audit_parser = subparsers.add_parser(
         "memory-audit",
@@ -2643,9 +3324,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Reads the ciao:memory and ciao:profile regions of the workspace "
             "CLAUDE.md and reports entries that record a chat event instead of "
             "current state, entries citing a path that no longer exists, and "
-            "subjects carrying more than one value. Read-only. Exit 0 when "
-            "clean, 1 when there are findings, 2 when a region could not be "
-            "read."
+            "subjects carrying more than one value. With --with-vault, also "
+            "reports vault notes whose facts have gone unverified past their "
+            "type's horizon. Read-only. Exit 0 when clean, 1 when there are "
+            "findings, 2 when a region could not be read."
         ),
     )
     memory_audit_parser.add_argument(
@@ -2665,7 +3347,113 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Output raw JSON audit report.",
     )
+    memory_audit_parser.add_argument(
+        "--with-vault",
+        action="store_true",
+        help=(
+            "Also age the vault's notes (frontmatter `updated:` or mtime "
+            "against per-type horizons) and report stale ones. Informational: "
+            "they never change the exit code."
+        ),
+    )
     memory_audit_parser.set_defaults(func=_memory_audit_command)
+
+    memory_proposals_parser = subparsers.add_parser(
+        "memory-proposals",
+        help="List pending memory proposals in a workspace's review queue.",
+        description=(
+            "Lists the reviewable memory proposals produced from archived "
+            "chats. Read-only. Each pending bullet is emitted with its kind, "
+            "text, and source. Decide each item (promote via a region Edit, "
+            "or dismiss with `ciao memory-proposal-dismiss <text>`), keeping "
+            "the queue clean so the nightly curator has real signal to work "
+            "with."
+        ),
+    )
+    memory_proposals_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposals_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposals_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured rows as JSON instead of text.",
+    )
+    memory_proposals_parser.set_defaults(func=_memory_proposals_command)
+
+    memory_proposal_dismiss_parser = subparsers.add_parser(
+        "memory-proposal-dismiss",
+        help="Dismiss one memory proposal from the review queue.",
+        description=(
+            "Removes one pending memory proposal from a workspace's queue, "
+            "matched by a unique text substring. Removing is a review "
+            "decision, never a memory write: promote into a bounded region "
+            "with an explicit Edit first, then dismiss here so the queue "
+            "stops re-asking."
+        ),
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "text",
+        help="Proposal text or unique substring to dismiss.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
+
+    skill_proposal_parser = subparsers.add_parser(
+        "skill-proposal-remove",
+        help="Remove a resolved skill proposal from the review queue.",
+        description=(
+            "Deletes one file from a workspace's Workspace/Skill-Proposals/ "
+            "after its decision is made (implemented, or decided against). "
+            "NAME matches the proposal file's stem or a unique substring of it."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "name",
+        help="Skill proposal file stem or unique substring to remove.",
+    )
+    skill_proposal_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    skill_proposal_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    skill_proposal_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    skill_proposal_parser.set_defaults(func=_skill_proposal_remove_command)
 
     chat_parser = subparsers.add_parser(
         "create-chat",
@@ -2796,64 +3584,13 @@ def build_parser() -> argparse.ArgumentParser:
     sync_skills_parser.add_argument("--verbose", action="store_true")
     sync_skills_parser.set_defaults(func=_sync_skills_command)
 
-    eval_parser = subparsers.add_parser(
-        "eval",
-        help="Run agent evaluation scenarios.",
-    )
-    eval_parser.add_argument(
-        "--suite",
-        type=Path,
-        required=True,
-        help="Path to one schema-version-1 JSON eval suite.",
-    )
-    eval_parser.add_argument(
-        "--workspace",
-        type=Path,
-        required=True,
-        help="Source workspace containing the selected targets.",
-    )
-    eval_parser.add_argument(
-        "--filter",
-        help="Case-sensitive scenario-name substring, preserving suite order.",
-    )
-    eval_parser.add_argument(
-        "--provider",
-        choices=list(_runtime_provider_choices()),
-        help="Provider override applied above scenario and suite defaults.",
-    )
-    eval_parser.add_argument(
-        "--model",
-        help="Model override applied above scenario and suite defaults.",
-    )
-    eval_parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("eval-results"),
-        help="Report directory. Defaults to ./eval-results.",
-    )
-    eval_parser.add_argument(
-        "--turn-timeout",
-        type=float,
-        default=300.0,
-        metavar="SECONDS",
-        help="Maximum duration of each live chat turn.",
-    )
-    eval_parser.add_argument(
-        "--startup-timeout",
-        type=float,
-        default=30.0,
-        metavar="SECONDS",
-        help="Maximum duration of each isolated server startup.",
-    )
-    eval_parser.set_defaults(func=_eval_command)
-
     scaffold_parser = subparsers.add_parser(
         "scaffold",
-        help="Scaffold new subagent packages or eval scenarios.",
+        help="Scaffold a new subagent package.",
     )
     scaffold_parser.add_argument(
         "type",
-        choices=["subagent", "eval"],
+        choices=["subagent"],
         help="Type of asset to scaffold.",
     )
     scaffold_parser.add_argument(
@@ -2871,55 +3608,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _eval_command(args: argparse.Namespace) -> int:
-    from ciao.evals import (
-        EvalRunOverrides,
-        EvalReportError,
-        EvalSchemaError,
-        EvalTargetError,
-        run_eval_suite,
-    )
-
-    if (
-        not math.isfinite(args.turn_timeout)
-        or args.turn_timeout <= 0
-        or not math.isfinite(args.startup_timeout)
-        or args.startup_timeout <= 0
-    ):
-        print("Eval timeouts must be greater than zero.", file=sys.stderr)
-        return 2
-    if args.model is not None and not args.model.strip():
-        print("Eval model override must not be empty.", file=sys.stderr)
-        return 2
-    try:
-        run = run_eval_suite(
-            Path(args.suite),
-            Path(args.workspace),
-            Path(args.output),
-            name_filter=args.filter,
-            overrides=EvalRunOverrides(
-                provider=args.provider,
-                model=args.model,
-            ),
-            turn_timeout_s=args.turn_timeout,
-            startup_timeout_s=args.startup_timeout,
-        )
-    except EvalReportError as exc:
-        print(f"Eval execution failed: {exc}", file=sys.stderr)
-        return 1
-    except (EvalSchemaError, EvalTargetError, OSError, ValueError) as exc:
-        print(f"Invalid eval request: {exc}", file=sys.stderr)
-        return 2
-
-    passed_count = sum(record.status == "passed" for record in run.records)
-    print(
-        f"Eval suite {run.suite.name}: "
-        f"{passed_count}/{len(run.records)} scenarios passed."
-    )
-    print(f"Reports: {Path(args.output).expanduser().resolve()}")
-    return run.exit_code
-
-
 def _scaffold_command(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace).resolve()
     target_type = args.type
@@ -2929,118 +3617,9 @@ def _scaffold_command(args: argparse.Namespace) -> int:
         from ciao.subagent_loader import scaffold_subagent
         folder = scaffold_subagent(workspace, name)
         print(f"Scaffolded subagent package at {folder}")
-    elif target_type == "eval":
-        from ciao.evals import scaffold_eval
-        try:
-            target = scaffold_eval(workspace, name)
-        except (FileExistsError, OSError, ValueError) as exc:
-            print(f"Cannot scaffold eval: {exc}", file=sys.stderr)
-            return 2
-        print(f"Scaffolded eval scenario at {target}")
     else:
         print(f"Unknown scaffold target type: {target_type}", file=sys.stderr)
         return 1
-    return 0
-
-
-def _eval_release_command(argv: list[str]) -> int:
-    from ciao.release_evidence import (
-        ReleaseEvidenceError,
-        run_release_evidence,
-    )
-
-    parser = argparse.ArgumentParser(
-        prog="ciao eval release",
-        description="Run the public release-evidence scorecard.",
-    )
-    parser.add_argument("--suite", type=Path, default=Path("evals/release.json"))
-    parser.add_argument("--workspace", type=Path, default=Path("."))
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--baseline", type=Path)
-    parser.add_argument("--from-ref")
-    parser.add_argument("--to-ref", default="HEAD")
-    parser.add_argument("--rationale-file", type=Path)
-    parser.add_argument(
-        "--vault-root",
-        type=Path,
-        help="Explicit opt-in vault to copy into isolated runs; source paths are redacted.",
-    )
-    parser.add_argument(
-        "--mode",
-        action="append",
-        choices=["cold", "warm", "restart"],
-        dest="modes",
-        help="Execution mode; repeat to select multiple modes. Defaults to all.",
-    )
-    parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--startup-timeout", type=float, default=30.0)
-    parser.add_argument(
-        "--allow-incomplete",
-        action="store_true",
-        help="Write evidence and return success even when a provider/scenario fails.",
-    )
-    args = parser.parse_args(argv)
-    rationale = ""
-    if args.rationale_file:
-        try:
-            rationale = args.rationale_file.read_text(encoding="utf-8")
-        except OSError as exc:
-            print(f"Could not read rationale file: {exc}", file=sys.stderr)
-            return 2
-    try:
-        result = run_release_evidence(
-            suite_path=args.suite,
-            workspace=args.workspace,
-            output=args.output,
-            version=args.version,
-            baseline_summary=args.baseline,
-            from_ref=args.from_ref,
-            to_ref=args.to_ref,
-            rationale=rationale,
-            modes=tuple(args.modes or ("cold", "warm", "restart")),
-            repeats=args.repeats,
-            startup_timeout_s=args.startup_timeout,
-            require_complete=not args.allow_incomplete,
-            external_vault=args.vault_root,
-        )
-    except (ReleaseEvidenceError, OSError, ValueError) as exc:
-        print(f"Release evidence failed: {exc}", file=sys.stderr)
-        return 1
-    print(f"Release evidence: {args.output.expanduser().resolve()}")
-    print(f"Scenarios: {len(result.summary.get('groups', []))} aggregate groups")
-    if result.advisory_flags:
-        print("Advisory flags:")
-        for flag in result.advisory_flags:
-            print(f"- {flag}")
-    return 0
-
-
-def _eval_compare_command(argv: list[str]) -> int:
-    from ciao.release_evidence import ReleaseEvidenceError, compare_summary_files
-
-    parser = argparse.ArgumentParser(
-        prog="ciao eval compare",
-        description="Compare two public release-evidence summaries.",
-    )
-    parser.add_argument("--baseline", type=Path, required=True)
-    parser.add_argument("--current", type=Path, required=True)
-    parser.add_argument("--json", action="store_true", dest="as_json")
-    args = parser.parse_args(argv)
-    try:
-        comparison = compare_summary_files(args.baseline, args.current)
-    except (ReleaseEvidenceError, OSError, ValueError) as exc:
-        print(f"Eval comparison failed: {exc}", file=sys.stderr)
-        return 2
-    if args.as_json:
-        print(json.dumps(comparison, indent=2, sort_keys=True))
-    else:
-        flags = comparison.get("flags", [])
-        print(f"Release comparison: {len(flags)} flag(s)")
-        for flag in flags:
-            print(f"- {flag.get('kind')}: {flag.get('key', '')}")
-    # Performance/cache changes are advisory. Malformed input is the only
-    # comparison failure; correctness flags are surfaced for the release PR.
     return 0
 
 
@@ -3055,10 +3634,6 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
-    if argv_list[:2] == ["eval", "release"]:
-        return _eval_release_command(argv_list[2:])
-    if argv_list[:2] == ["eval", "compare"]:
-        return _eval_compare_command(argv_list[2:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

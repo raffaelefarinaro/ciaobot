@@ -12,7 +12,6 @@ beforeEach(() => {
 
 describe('file viewer kind detection', () => {
   test('classifies files by extension', () => {
-    expect(fileViewerKindForPath('memory-vault/Ideas/map.excalidraw')).toBe('excalidraw')
     expect(fileViewerKindForPath('/tmp/readme.md')).toBe('text')
     expect(fileViewerKindForPath('docs/report.pdf')).toBe('pdf')
     expect(fileViewerKindForPath('docs/presentation.pptx')).toBe('pdf')
@@ -102,17 +101,6 @@ describe('html artifacts', () => {
 })
 
 describe('file viewer edit mode', () => {
-  test('starts editing mode for excalidraw diagrams', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"type":"excalidraw","elements":[]}')))
-
-    const store = useFileViewerStore()
-    await store.open('diagram.excalidraw', null, 'chat-1')
-    store.startEditing()
-
-    expect(store.kind).toBe('excalidraw')
-    expect(store.editing).toBe(true)
-  })
-
   test('keeps dirty edits when the same file refreshes in the background', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -169,5 +157,126 @@ describe('file viewer edit mode', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+describe('stale responses', () => {
+  /** A response the test releases by hand, to hold one fetch open. */
+  function gate() {
+    let release!: (value: Response) => void
+    const promise = new Promise<Response>(r => { release = r })
+    return { promise, release }
+  }
+
+  test('reopening the same file discards the earlier pending response', async () => {
+    // The path-only check could not see this: open A, open B, open A again, and
+    // A's FIRST response still matches `path.value`, so it overwrote the newer
+    // one — and saveEdits would then post those stale bytes back over the file.
+    const firstA = gate()
+    let aCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/vault-markdown-paths') {
+        return new Response(JSON.stringify({ paths: [] }), {
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url.includes('a.md')) {
+        aCalls += 1
+        return aCalls === 1 ? firstA.promise : new Response('A SECOND')
+      }
+      return new Response('B CONTENT')
+    }))
+
+    const store = useFileViewerStore()
+    const staleOpen = store.open('notes/a.md')
+    expect(await store.open('notes/b.md')).toBe(true)
+    expect(await store.open('notes/a.md')).toBe(true)
+
+    firstA.release(new Response('A STALE'))
+    await staleOpen
+
+    expect(store.path).toBe('notes/a.md')
+    expect(store.content).toBe('A SECOND')
+  })
+
+  test('a slow file response cannot repaint the file opened after it', async () => {
+    const slowFile = gate()
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/vault-markdown-paths') {
+        return new Response(JSON.stringify({ paths: [] }), {
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url.includes('slow.md')) return slowFile.promise
+      return new Response('FAST CONTENT')
+    }))
+
+    const store = useFileViewerStore()
+    const slowOpen = store.open('notes/slow.md')
+    expect(await store.open('notes/fast.md')).toBe(true)
+
+    slowFile.release(new Response('SLOW CONTENT'))
+    await slowOpen
+
+    expect(store.path).toBe('notes/fast.md')
+    expect(store.content).toBe('FAST CONTENT')
+  })
+
+  /** Opens an artifact, starts its (held) source fetch, then opens a note. */
+  async function abandonedSourceLoad(posted: unknown[]) {
+    const slowSource = gate()
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)))
+        return new Response('{"ok":true}')
+      }
+      if (url.startsWith('/api/file-history')) {
+        return new Response(JSON.stringify({ snapshots: [] }), {
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url === '/api/vault-markdown-paths') {
+        return new Response(JSON.stringify({ paths: [] }), {
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url.includes('dashboard.html')) return slowSource.promise
+      return new Response('NOTE CONTENT')
+    }))
+
+    const store = useFileViewerStore()
+    await store.open('Workspace/dashboard.html', null, 'chat-1')
+    const sourceLoad = store.setHtmlView('code')
+
+    // The user moves on before the artifact's source arrives.
+    expect(await store.open('notes/b.md', null, 'chat-1')).toBe(true)
+
+    slowSource.release(new Response('<h1>ARTIFACT SOURCE</h1>'))
+    await sourceLoad
+    return store
+  }
+
+  test('a slow artifact source cannot repaint the note opened after it', async () => {
+    const store = await abandonedSourceLoad([])
+
+    expect(store.content).toBe('NOTE CONTENT')
+    expect(store.sourceLoaded).toBe(false)
+  })
+
+  test('a stale source can never be saved over the file that is open', async () => {
+    // The damaging half of the race: `content` is exactly what saveEdits POSTs
+    // to `path`, so a stale response landing in `content` writes the
+    // artifact's bytes over the note the user actually has open.
+    const posted: unknown[] = []
+    const store = await abandonedSourceLoad(posted)
+
+    store.startEditing()
+    expect(await store.saveEdits()).toBe(true)
+    expect(posted).toEqual([
+      { chat_id: 'chat-1', path: 'notes/b.md', content: 'NOTE CONTENT' },
+    ])
   })
 })

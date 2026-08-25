@@ -133,22 +133,10 @@
           <span class="bg-agents-dot" aria-hidden="true"></span>
           {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
         </span>
-        <button
-          v-if="chat.mode === 'plan'"
-          type="button"
-          class="plan-mode-chip touch-hit"
-          :disabled="planModeSaving"
-          title="Leave plan mode"
-          aria-label="Leave plan mode"
-          aria-pressed="true"
-          @click.stop="leavePlanMode"
-        >
-          plan
-        </button>
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn touch-hit mobile-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
@@ -158,9 +146,9 @@
             v-if="chat.provider"
             type="button"
             class="model-picker-summary desktop-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel} · ${chipModeLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
-          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ chipModelLabel }} · {{ chipModeLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
+          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ chipModelLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
@@ -173,23 +161,6 @@
             @select="selectModel"
             @close="showModelPicker = false"
           >
-            <template #header>
-              <div class="mode-picker-row">
-                <span class="mode-picker-row__label">Mode</span>
-                <div class="mode-picker-row__chips">
-                  <button
-                    v-for="opt in modePickerOptions"
-                    :key="opt.value"
-                    type="button"
-                    class="mode-row-chip"
-                    :class="{ 'mode-row-chip--active': chat.mode === opt.value }"
-                    :disabled="modeChipSaving"
-                    :title="opt.description"
-                    @click="selectMode(opt.value)"
-                  >{{ opt.label }}</button>
-                </div>
-              </div>
-            </template>
             <template #footer>
               <div
                 v-if="showThinkingLevels"
@@ -310,21 +281,38 @@
     <div class="messages" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
       <Transition name="history-loading">
+        <!-- Placeholder for the transcript, in the transcript's own shape: a
+             right-aligned user bubble, the left-aligned assistant bubbles with
+             their accent edge, and a collapsed Activity row between them, all
+             at the widths and radii the real rows use. The previous version
+             was a single bordered card in the middle of the pane, so the
+             reveal replaced one layout with a completely different one — the
+             skeleton predicted nothing about what was coming. -->
         <div
           v-if="blockingHistoryLoad"
-          class="history-loading-card"
+          class="history-skeleton-stack"
           role="status"
           aria-live="polite"
+          aria-label="Loading conversation"
         >
-          <div class="history-loading-heading">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
+          <div class="history-loading-inline" aria-hidden="true">
+            <span class="history-loading-spinner"></span>
             <span>Loading conversation</span>
           </div>
-          <div class="history-skeleton history-skeleton--user" aria-hidden="true">
+          <div class="skel-msg skel-msg--assistant" aria-hidden="true">
+            <span class="history-skeleton-line history-skeleton-line--long"></span>
+            <span class="history-skeleton-line history-skeleton-line--medium"></span>
+          </div>
+          <div class="skel-msg skel-msg--user" aria-hidden="true">
             <span class="history-skeleton-line history-skeleton-line--wide"></span>
             <span class="history-skeleton-line history-skeleton-line--short"></span>
           </div>
-          <div class="history-skeleton history-skeleton--assistant" aria-hidden="true">
+          <div class="skel-trace" aria-hidden="true">
+            <span class="skel-trace-chevron">&#9656;</span>
+            <span class="history-skeleton-line history-skeleton-line--trace"></span>
+          </div>
+          <div class="skel-msg skel-msg--assistant" aria-hidden="true">
+            <span class="history-skeleton-line history-skeleton-line--long"></span>
             <span class="history-skeleton-line history-skeleton-line--long"></span>
             <span class="history-skeleton-line history-skeleton-line--medium"></span>
             <span class="history-skeleton-line history-skeleton-line--short"></span>
@@ -394,7 +382,17 @@
                   <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
                   <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
                 </button>
-                <div v-if="thinkingExpanded" class="trace-text trace-thinking" v-html="renderMarkdown(step.content)"></div>
+                <div v-if="thinkingExpanded" class="trace-text trace-thinking">
+                  <button
+                    v-if="step.lazy && typeof step.i === 'number'"
+                    type="button"
+                    class="thinking-load"
+                    @click.stop="expandLazyStep(step)"
+                  >
+                    Load full reasoning…
+                  </button>
+                  <div v-else v-html="renderMarkdown(step.content)"></div>
+                </div>
               </div>
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
@@ -946,12 +944,14 @@
         <div class="permission-actions">
           <button
             class="btn-deny"
+            :aria-keyshortcuts="permissionShortcut('deny') || undefined"
             @click="store.respondPermission(chat.chat_id, p.request_id, false, 'User denied')"
-          >Deny</button>
+          ><span v-if="permissionShortcut('deny')" class="permission-key" aria-hidden="true">{{ permissionShortcut('deny') }}</span>Deny</button>
           <button
             class="btn-approve"
+            :aria-keyshortcuts="permissionShortcut('approve') || undefined"
             @click="store.respondPermission(chat.chat_id, p.request_id, true)"
-          >Approve</button>
+          ><span v-if="permissionShortcut('approve')" class="permission-key" aria-hidden="true">{{ permissionShortcut('approve') }}</span>Approve</button>
         </div>
       </div>
     </div>
@@ -1233,16 +1233,8 @@ import { archiveActionLabel as archiveLabel, archiveConfirmMessage } from '../li
 import AppIcon, { type AppIconName } from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
-import {
-  CODEX_FABLE_LEVEL,
-  CODEX_FABLE_PSEUDO_MODEL,
-  CODEX_FABLE_REAL_MODEL,
-  isFableSelection,
-  selectableThinkingLevels,
-  selectedModelEntry,
-} from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
-import { handleCodeCopyClick } from '../lib/codeCopy'
+import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
@@ -1252,6 +1244,7 @@ import {
   cleanCommentSelection,
   commentTextMatches,
   commentTextOccurrenceIndex,
+  escapeCssAttrValue,
   highlightCommentText,
 } from '../lib/commentHighlight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
@@ -1264,11 +1257,6 @@ import {
 } from '../composables/useMentionPicker'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
-import {
-  clearPlanReturnMode,
-  rememberPlanReturnMode,
-  restorePlanReturnMode,
-} from '../lib/planCommand'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 
@@ -1583,102 +1571,6 @@ const archiveTidyFailed = computed(() => postprocessFailed(archivePostprocess.va
 watch(() => chat.value.provider, () => {
   void loadSlashCommands()
 })
-const planModeSaving = ref(false)
-
-async function togglePlanMode(
-  action: 'enter' | 'exit',
-  originChatId = chat.value.chat_id,
-  returnMode = chat.value.mode,
-): Promise<boolean> {
-  if (planModeSaving.value || chat.value.archived) return false
-  const targetMode = action === 'enter' ? 'plan' : restorePlanReturnMode(originChatId)
-  if (action === 'enter') rememberPlanReturnMode(originChatId, returnMode)
-  planModeSaving.value = true
-  try {
-    await store.updateChat(originChatId, { mode: targetMode })
-    if (action === 'exit') clearPlanReturnMode(originChatId)
-    return true
-  } catch (e) {
-    if (action === 'enter') clearPlanReturnMode(originChatId)
-    store.pushErrorToast('Could not change plan mode', errorMessage(e, 'Could not change plan mode'))
-    return false
-  } finally {
-    planModeSaving.value = false
-  }
-}
-
-function leavePlanMode(): void {
-  void togglePlanMode('exit')
-}
-
-// Mode row, rendered inside the model picker popover's header slot (see
-// ``modePickerOptions`` usage in the template). Plan has its own chip above
-// because leaving plan mid-session has different UX implications (the chat
-// returns to the previous mode, not a chosen one) and its own disabled state
-// while toggling.
-//
-// The four modes here mirror ``BridgeMode`` in ciao.models. We treat
-// ``"normal"`` as the SDK's default ("Manual" in Claude Code terms): every
-// tool call prompts. ``"auto"`` is the classifier-backed mode that auto-
-// approves most calls and only escalates risky ones — the mode Sebastien
-// was asking about. ``"bypass"`` is ``bypassPermissions``: every tool runs
-// without a prompt, use only in containers.
-//
-// ``modeChipSaving`` is intentionally separate from ``planModeSaving`` so a
-// stuck plan switch doesn't lock the row — they're independent paths.
-
-const MODE_PICKER_OPTIONS: ReadonlyArray<{ value: string; label: string; description: string }> = [
-  { value: 'auto', label: 'Auto', description: 'Fewer prompts, classifier approves safe actions' },
-  { value: 'bypass', label: 'Bypass', description: 'Skip all checks (use in containers only)' },
-  { value: 'normal', label: 'Manual', description: 'Approve each tool call' },
-  { value: 'plan', label: 'Plan', description: 'Read-only — propose, do not act' },
-]
-// opencode has no native "auto" concept — only default-mostly-ask and
-// --auto (allow everything not explicitly denied). Ciaobot's Auto tier for
-// it is a synthetic middle ground (ciao/providers/opencode.py:519,
-// auto_approves_permission): edits are allowed outright, but shell stays
-// gated behind a read-only classifier. The generic description above reads
-// like CLI-auto parity, which it isn't — say so for this provider so Bypass
-// (opencode's real --auto equivalent) isn't a surprise.
-const OPENCODE_AUTO_DESCRIPTION = 'Fewer prompts; shell commands still ask unless read-only'
-const modePickerOptions = computed(() => {
-  if (chat.value?.provider !== 'opencode') return MODE_PICKER_OPTIONS
-  return MODE_PICKER_OPTIONS.map(opt =>
-    opt.value === 'auto' ? { ...opt, description: OPENCODE_AUTO_DESCRIPTION } : opt,
-  )
-})
-
-const modeChipSaving = ref(false)
-
-async function selectMode(target: string): Promise<void> {
-  if (modeChipSaving.value || chat.value.archived) return
-  if (target === chat.value.mode) {
-    showModelPicker.value = false
-    return
-  }
-  // Route plan mode through the existing togglePlanMode path so the
-  // rememberPlanReturnMode bookkeeping still applies when leaving a mode
-  // that the user might want to come back to.
-  if (target === 'plan') {
-    showModelPicker.value = false
-    void togglePlanMode('enter')
-    return
-  }
-  // Leaving plan for any other mode: clear the stored return-to mode so
-  // a later plan entry doesn't snap back to a stale value.
-  if (chat.value.mode === 'plan') {
-    clearPlanReturnMode(chat.value.chat_id)
-  }
-  modeChipSaving.value = true
-  try {
-    await store.updateChat(chat.value.chat_id, { mode: target })
-    showModelPicker.value = false
-  } catch (e) {
-    store.pushErrorToast('Could not change mode', errorMessage(e, 'Could not change mode'))
-  } finally {
-    modeChipSaving.value = false
-  }
-}
 
 // Inline editing state for queued messages. Keyed by queue entry id.
 const editingQueueId = ref<string | null>(null)
@@ -2181,7 +2073,6 @@ type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
   { key: 'claude', label: 'Claude', provider: 'claude' },
-  { key: 'codex', label: 'Codex', provider: 'codex' },
   { key: 'opencode', label: 'opencode', provider: 'opencode' },
 ]
 
@@ -2189,7 +2080,6 @@ const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = 
 // the runner is Claude Code), so the two vocabularies need one hop between them.
 const SECTION_BY_BUCKET: Record<BucketKey, string> = {
   claude: 'anthropic',
-  codex: 'codex',
   opencode: 'opencode',
 }
 
@@ -2239,6 +2129,32 @@ function checkScroll() {
   const threshold = 4
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
   onChatScrollReanchor()
+  // Paginated history: near the top of a windowed timeline, pull the older
+  // page in. The store's loadingOlder flag debounces repeat fires.
+  if (el.scrollTop <= 80) {
+    const chatId = store.activeChatId
+    if (chatId && store.canLoadOlder(chatId) && !store.isLoadingOlder(chatId)) {
+      void loadOlderAnchored()
+    }
+  }
+}
+
+// Prepend an older history page while keeping the viewport anchored to the
+// rows the user is looking at: compensate for the height the prepend adds.
+async function loadOlderAnchored() {
+  const el = messagesEl.value
+  const chatId = store.activeChatId
+  if (!el || !chatId) return
+  const prevHeight = el.scrollHeight
+  await store.loadOlderMessages(chatId)
+  await nextTick()
+  if (messagesEl.value === el) el.scrollTop += el.scrollHeight - prevHeight
+}
+
+function expandLazyStep(step: { i?: number }): void {
+  const chatId = store.activeChatId
+  if (!chatId || typeof step.i !== 'number') return
+  void store.expandMessagePart(chatId, step.i)
 }
 
 function scrollToBottom() {
@@ -2246,6 +2162,53 @@ function scrollToBottom() {
     messagesEl.value.scrollTop = messagesEl.value.scrollHeight
   }
   isNearBottom.value = true
+}
+
+// ---------- opening a chat lands at the bottom ----------
+// Setting scrollTop once when a chat opens is not enough, which is why a chat
+// used to appear scrolled to the top and then travel down on its own a moment
+// later. The height of the transcript keeps changing for a few hundred
+// milliseconds after its rows first paint — the history fetch resolves after
+// the skeleton has already been measured, images and avatars load, the
+// subagent fetch adds trace blocks, the composer resizes — and each of those
+// growths leaves the viewport where it was, i.e. at the top. The
+// stick-to-bottom watcher only catches up on the *next* change, so the
+// correction was always visible as a scroll.
+//
+// Pinning the scroll to the bottom on every frame for a short window after
+// the open makes the first frame the user sees the bottom, and keeps it there
+// while the height settles. It costs one rAF per frame for well under a
+// second, and only while a chat is being opened.
+const OPEN_PIN_MS = 700
+let pinUntil = 0
+let pinRafId = 0
+
+function pinToBottom(ms = OPEN_PIN_MS) {
+  pinUntil = performance.now() + ms
+  if (pinRafId) return
+  const step = () => {
+    pinRafId = 0
+    const el = messagesEl.value
+    if (!el) {
+      pinUntil = 0
+      return
+    }
+    el.scrollTop = el.scrollHeight
+    isNearBottom.value = true
+    if (performance.now() < pinUntil) pinRafId = requestAnimationFrame(step)
+    else checkScroll()
+  }
+  pinRafId = requestAnimationFrame(step)
+}
+
+/** The user scrolling during the settle window wins immediately — a pin that
+ * fought a deliberate scroll would be worse than the jump it removes. */
+function releasePin() {
+  pinUntil = 0
+  if (pinRafId) {
+    cancelAnimationFrame(pinRafId)
+    pinRafId = 0
+  }
 }
 
 // Scroll after layout when we're already following the tail. Call checkScroll
@@ -2263,10 +2226,8 @@ const pendingApprovals = computed(() => {
 })
 
 // The backend's `message` field is almost always the templated
-// "Approve use of {tool_name}?" (see permission_gate.py / codex.py), which
-// just repeats the tool-name badge shown right next to it. Only surface it
-// when it actually carries something the badge doesn't (e.g. Codex's
-// model-supplied `reason` string).
+// "Approve use of {tool_name}?", which just repeats the tool-name badge shown
+// right next to it. Only surface it when it carries something else.
 function permissionReason(p: { tool_name: string; message: string }) {
   return p.message && p.message !== `Approve use of ${p.tool_name}?` ? p.message : ''
 }
@@ -2373,6 +2334,33 @@ function questionOptionShortcut(qi: number, oi: number): string {
   return String(oi + 1)
 }
 
+// 1 and 2 approve/deny the first pending permission card, matching the
+// question-picker digits. Keys are shown on the buttons so the hint can never
+// claim a key that does nothing; the badge is drawn from the same function.
+function permissionShortcut(action: 'approve' | 'deny'): string {
+  if (!pendingApprovals.value.length) return ''
+  return action === 'approve' ? '2' : '1'
+}
+
+// Digit handling for the pending permission card. ChatLayout offers digits to
+// the question card first (handleQuestionShortcut), so when a permission and a
+// question are both up, the question wins the keys; otherwise the permission
+// card gets 1 (deny) / 2 (approve) on the first card. Returning true means
+// "eaten" and the layout preventDefaults.
+function handlePermissionShortcut(e: KeyboardEvent): boolean {
+  if (!pendingApprovals.value.length) return false
+  const first = pendingApprovals.value[0]
+  if (e.key === '1') {
+    store.respondPermission(chat.value.chat_id, first.request_id, false, 'User denied')
+    return true
+  }
+  if (e.key === '2') {
+    store.respondPermission(chat.value.chat_id, first.request_id, true)
+    return true
+  }
+  return false
+}
+
 // Keyboard handling for the open question card. ChatLayout owns the single
 // window keydown listener (onUnreservedKeydown) and offers the key here first,
 // the same way it offers arrows to the home grid; returning true means "eaten",
@@ -2463,7 +2451,7 @@ function submitQuestionAnswers() {
   }
   const text = lines.join('\n')
   // sendMessage clears activeQuestions for this chat automatically.
-  store.sendMessage(chat.value.chat_id, text, 'queue')
+  store.sendMessage(chat.value.chat_id, text)
 }
 
 function dismissQuestions() {
@@ -2555,7 +2543,7 @@ const activeBucket = computed<BucketKey>(() => {
 const chatModelSections = computed(() => {
   const baseSections = sectionsFromModelsResponse(modelsResponse.value)
   // Name the Anthropic section for its vendor so it reads as a peer of the
-  // Codex and opencode sections rather than as "the default".
+  // opencode section rather than as "the default".
   return baseSections.map(section => {
     if (section.key === 'anthropic') {
       return { ...section, label: 'Claude (Anthropic)' }
@@ -2586,9 +2574,6 @@ const activeModelHighlights = computed(() => {
   if (!c) return []
   const model = activeModelId.value
   if (!model) return []
-  if (isFableSelection(model, c.thinking_level)) {
-    return [CODEX_FABLE_PSEUDO_MODEL]
-  }
   return [model]
 })
 
@@ -2602,23 +2587,20 @@ const bucketLocked = computed(() => {
   return Boolean(c.session_id) || store.activeMessages.length > 0
 })
 
-// Thinking levels are provider-native (claude → SDK effort, codex → reasoning
-// effort from the model catalog), so they key off the provider — narrowed per
-// model when the catalog reports levels — not the bucket.
+// Thinking levels are provider-native and may be narrowed per model when the
+// catalog reports levels.
 const filteredThinkingLevels = computed(() => {
   const model = chat.value?.model || ''
   const modelLevels = modelsResponse.value?.model_reasoning_levels?.[model]
   const levels = modelLevels?.length
     ? modelLevels
     : thinkingLevels.value[activeProvider.value] || []
-  return selectableThinkingLevels(model, levels)
+  return levels
 })
 
-// Fable is a model choice, not a thinking level, so the chips have nothing to
-// offer while it is selected.
 const showThinkingLevels = computed(() => {
   if (!filteredThinkingLevels.value.length) return false
-  return !isFableSelection(chat.value?.model, chat.value?.thinking_level)
+  return true
 })
 
 // Thinking level for the header chip. An empty thinking_level means the user
@@ -2633,14 +2615,9 @@ const chipThinkingLabel = computed(() => {
   return level && level !== 'auto' ? `think:${level}` : ''
 })
 
-// The permission mode (auto/bypass/manual/plan) decides whether tool calls
-// run silently or raise approval cards, so the chip names it next to the
-// model instead of leaving it discoverable only inside the picker.
-const chipModeLabel = computed(() => chat.value?.mode || 'auto')
-
 // The provider is already the chip's first segment, so a model id that
-// repeats it as a prefix ("opencode/deepseek-...") wastes the width budget
-// that now also carries the mode segment. The tooltip keeps the full id.
+// repeats it as a prefix ("opencode/deepseek-...") wastes the width budget.
+// The tooltip keeps the full id.
 const chipModelLabel = computed(() => {
   const model = activeModelId.value || ''
   const provider = chat.value?.provider || ''
@@ -2994,7 +2971,7 @@ function findBubbleForComment(root: HTMLElement, c: { id: string; selection: str
   }
 
   if (c.messageId) {
-    const escapedId = c.messageId.replace(/"/g, '\\"')
+    const escapedId = escapeCssAttrValue(c.messageId)
     const byId = root.querySelector(`.message[data-msg-id="${escapedId}"]`) as HTMLElement | null
     if (byId) return byId
   }
@@ -3189,6 +3166,11 @@ onMounted(async () => {
   await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
+  // Any hands-on scroll gesture releases the open-time bottom pin.
+  messagesEl.value?.addEventListener('wheel', releasePin, { passive: true })
+  messagesEl.value?.addEventListener('touchmove', releasePin, { passive: true })
+  // Covers a scrollbar drag, which produces scroll events but no wheel.
+  messagesEl.value?.addEventListener('pointerdown', releasePin, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
     messagesResizeObserver = new ResizeObserver(() => {
       stickToBottomIfNeeded()
@@ -3200,7 +3182,7 @@ onMounted(async () => {
     autoResize()
     if (messagesEl.value) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-      checkScroll()
+      pinToBottom()
     }
   })
 })
@@ -3220,6 +3202,10 @@ onBeforeUnmount(() => {
     document.removeEventListener('selectionchange', onChatSelectionChange)
   }
   messagesEl.value?.removeEventListener('scroll', checkScroll)
+  messagesEl.value?.removeEventListener('wheel', releasePin)
+  messagesEl.value?.removeEventListener('touchmove', releasePin)
+  messagesEl.value?.removeEventListener('pointerdown', releasePin)
+  releasePin()
   messagesResizeObserver?.disconnect()
   messagesResizeObserver = null
   if (clockTimer) { clearInterval(clockTimer); clockTimer = null }
@@ -3270,15 +3256,12 @@ function activityLines(content: string): string[] {
 async function copyMessageText(text: string, key: string): Promise<void> {
   const trimmed = text.trim()
   if (!trimmed) return
-  try {
-    await navigator.clipboard.writeText(trimmed)
-    copiedMessageKey.value = key
-    setTimeout(() => {
-      if (copiedMessageKey.value === key) copiedMessageKey.value = null
-    }, 1500)
-  } catch {
-    // Clipboard can be unavailable in older standalone PWA contexts.
-  }
+  const copied = await writeClipboard(trimmed)
+  if (!copied) return
+  copiedMessageKey.value = key
+  setTimeout(() => {
+    if (copiedMessageKey.value === key) copiedMessageKey.value = null
+  }, 1500)
 }
 
 async function forkConversation(message: ChatMessage, key: string): Promise<void> {
@@ -3779,11 +3762,19 @@ watch(() => store.activeChatId, () => {
   dockExpanded.value = false
   contextExpanded.value = false
   nextTick(() => {
-    if (messagesEl.value) {
-      messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-      checkScroll()
-    }
+    if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+    // Hold the bottom while the incoming transcript's height settles, rather
+    // than measuring it once against whatever was on screen at this instant
+    // (usually the loading skeleton).
+    pinToBottom()
   })
+})
+
+// The transcript replacing the loading skeleton is the moment the real height
+// arrives, and it happens after the switch above has already scrolled. Pin
+// again from there so the reveal itself lands at the bottom.
+watch(blockingHistoryLoad, (loading, wasLoading) => {
+  if (!loading && wasLoading) nextTick(() => pinToBottom())
 })
 
 // Auto-scroll only when the user is already near the bottom.
@@ -3852,7 +3843,11 @@ function handleKeydown(e: KeyboardEvent) {
       // Claim the key: Esc now closes the chat even while typing, so without
       // this the same press would dismiss the picker AND close the chat.
       e.stopPropagation()
-      inputText.value = ''
+      // Dismiss the picker only — never the draft. The trigger is caret-local
+      // now, so the picker opens mid-message ("…and then run /rev"): clearing
+      // inputText here wiped the whole message, and the draft-sync watcher
+      // persisted the empty string, so it could not be recovered.
+      dismissSlashCommandPicker()
       return
     }
     if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey)) {
@@ -3926,9 +3921,13 @@ function send() {
   // When any comments exist and there is no typed text, sendMessage builds
   // the composed content from the comment blocks, so we pass an empty string
   // here. The user sees the actual content in their bubble, not a placeholder.
-  store.sendMessage(chat.value.chat_id, sendText, 'queue')
-  writeChatDraft(chat.value.chat_id, '')
-  inputText.value = ''
+  const sent = store.sendMessage(chat.value.chat_id, sendText, undefined, () => {
+    writeChatDraft(chat.value.chat_id, '')
+    inputText.value = ''
+  })
+  // If the send was deferred (chat WS is down), keep the text in the composer
+  // and draft so the user doesn't lose it when the page updates/reloads.
+  if (!sent) return
   // Sending implies following the reply: jump to the bottom even if the
   // user had scrolled up, so their bubble and the response are in view.
   // Double nextTick + rAF: the user bubble and streaming row render after
@@ -3975,7 +3974,6 @@ function retryFromError(errorIdx: number) {
   store.sendMessage(
     chat.value.chat_id,
     prior.text,
-    'queue',
     { composed: prior.text, imageRefs: prior.images.length ? prior.images : undefined, fileComments: [], chatComments: [] },
   )
 }
@@ -4037,7 +4035,6 @@ function tierAlias(model: string): TierAlias | null {
 function canonicalTier(model: string): string {
   const alias = tierAlias(model)
   if (alias) return alias
-  if (model === CODEX_FABLE_PSEUDO_MODEL) return model
   return model
 }
 
@@ -4055,7 +4052,6 @@ function routingProviderLabel(bucket: string | undefined, provider: string): str
   const lower = routingBucketLabel(bucket, provider)
   if (!lower) return ''
   if (lower === 'anthropic') return 'Anthropic'
-  if (lower === 'codex') return 'Codex'
   // Lower-case on purpose: that is how opencode brands itself.
   if (lower === 'opencode') return 'opencode'
   if (lower === 'claude') return 'Claude'
@@ -4071,8 +4067,6 @@ function bucketLabel(bucket: BucketKey): string {
 // the catalog has not reported yet.
 function bucketForSelectedModel(model: string): BucketKey {
   const response = modelsResponse.value
-  if ((response?.codex_models || []).includes(model)) return 'codex'
-  if (model === CODEX_FABLE_PSEUDO_MODEL) return 'codex'
   if ((response?.opencode_models || []).includes(model)) return 'opencode'
   if (model.includes('/')) return 'opencode'
   return 'claude'
@@ -4087,29 +4081,18 @@ async function selectModel(value: string | string[], sectionKey = '') {
   }
   const sectionBucket: Partial<Record<string, BucketKey>> = {
     anthropic: 'claude',
-    codex: 'codex',
     opencode: 'opencode',
   }
   // Picking from the Anthropic section is an explicit handover to Claude Code,
   // never a tier change on whichever provider is active. To change tier while
   // staying on a provider, pick that provider's own model instead.
   const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
-  // A fable chat stores the real model, so comparing raw ids would make
-  // "fable -> the plain model" look like re-picking what is already selected
-  // and return without doing anything.
-  const wasFablePseudo = isFableSelection(chat.value.model, chat.value.thinking_level)
-  const currentEntry = selectedModelEntry(
-    chat.value.model,
-    chat.value.thinking_level,
-    canonicalTier(chat.value.model),
-  )
+  const currentEntry = canonicalTier(chat.value.model)
   const sameModelAndRoute = canonicalTier(model) === currentEntry && targetBucket === activeBucket.value
   if (sameModelAndRoute) {
     showModelPicker.value = false
     return
   }
-  const isFablePseudo = model === CODEX_FABLE_PSEUDO_MODEL
-  const realModel = isFablePseudo ? CODEX_FABLE_REAL_MODEL : model
   // A handover is needed exactly when the provider changes: each runs its own
   // CLI with its own session, so the new one has never seen this chat.
   const targetRoute = targetBucket
@@ -4120,24 +4103,15 @@ async function selectModel(value: string | string[], sectionKey = '') {
     thinking_level?: string
   } = {
     provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
-    model: realModel,
+    model,
   }
-  if (isFablePseudo) {
-    updates.thinking_level = CODEX_FABLE_LEVEL
-  } else if (wasFablePseudo) {
-    // Leaving fable for a real entry: `ultra` was the pseudo-model's encoding,
-    // not a level the user chose, and the real model does support it, so the
-    // check below would keep it and land straight back on fable. Back to auto.
+  const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
+  if (
+    chat.value.thinking_level
+    && targetLevels
+    && !targetLevels.includes(chat.value.thinking_level)
+  ) {
     updates.thinking_level = ''
-  } else {
-    const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
-    if (
-      chat.value.thinking_level
-      && targetLevels
-      && !targetLevels.includes(chat.value.thinking_level)
-    ) {
-      updates.thinking_level = ''
-    }
   }
   if (bucketLocked.value && targetRoute !== currentRoute) {
     const ok = await askConfirm(
@@ -4489,7 +4463,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut })
+defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut })
 </script>
 
 <style scoped>
@@ -4811,33 +4785,83 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   margin-top: auto;
 }
 
-.history-loading-card {
-  width: min(100%, 620px);
-  margin: auto 0 8px;
-  padding: 14px 16px 16px;
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--bg2) 82%, transparent);
+/* The stack sits where the transcript sits: bottom-pinned, full width, same
+   8px row gap as .messages-content, so the rows the skeleton draws are in the
+   place the real rows will occupy. */
+.history-skeleton-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: auto;
   animation: history-loading-enter 220ms ease-out both;
 }
 
-.history-loading-heading,
+/* Geometry copied from .message.user / .message.assistant deliberately: the
+   whole point is that the placeholder occupies the same box as the row that
+   replaces it. */
+.skel-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 14px;
+  min-width: 0;
+}
+
+.skel-msg--assistant {
+  align-self: flex-start;
+  width: 100%;
+  margin-right: 48px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 4px 14px 14px 14px;
+}
+
+.skel-msg--user {
+  align-self: flex-end;
+  width: 62%;
+  margin-left: 48px;
+  background: color-mix(in srgb, var(--accent2) 12%, var(--bg3));
+  border: 1px solid var(--border-strong);
+  border-radius: 14px 14px 2px 14px;
+}
+
+:root.theme-light .skel-msg--user {
+  background: color-mix(in srgb, var(--accent2) 8%, var(--bg3));
+  border-color: var(--border);
+}
+
+/* Matches a collapsed trace row: dashed, 98% wide, accent2 edge. */
+.skel-trace {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 98%;
+  padding: 9px 12px;
+  border: 1px dashed var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--accent2) 45%, transparent);
+  border-radius: var(--radius);
+  opacity: 0.85;
+}
+
+.skel-trace-chevron {
+  color: var(--fg3);
+  font-size: 9px;
+  line-height: 1;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .skel-msg--assistant { margin-right: 32px; }
+  .skel-msg--user { margin-left: 32px; }
+}
+
 .history-loading-inline {
   display: flex;
   align-items: center;
-  gap: 9px;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-}
-
-.history-loading-heading {
-  margin-bottom: 14px;
-  color: var(--fg);
-  font-weight: 600;
-}
-
-.history-loading-inline {
   align-self: center;
+  gap: 9px;
   padding: 4px 10px 2px;
   color: var(--fg3);
   font-size: var(--text-xs);
@@ -4853,26 +4877,6 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   animation: history-loading-spin 0.8s linear infinite;
 }
 
-.history-skeleton {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 78%;
-  padding: 12px 14px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--bg3) 70%, transparent);
-}
-
-.history-skeleton + .history-skeleton {
-  width: 88%;
-  margin-top: 10px;
-}
-
-.history-skeleton--user {
-  margin-left: auto;
-  border-radius: 14px 14px 2px 14px;
-}
-
 .history-skeleton-line {
   display: block;
   height: 10px;
@@ -4886,6 +4890,7 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
 .history-skeleton-line--long { width: 92%; }
 .history-skeleton-line--medium { width: 68%; }
 .history-skeleton-line--short { width: 42%; }
+.history-skeleton-line--trace { width: 96px; height: 9px; }
 
 .history-loading-enter-active,
 .history-loading-leave-active {
@@ -4913,12 +4918,12 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .history-loading-card,
+  .history-skeleton-stack,
   .history-loading-spinner,
   .history-skeleton-line {
     animation: none;
   }
-  .history-loading-card { opacity: 0.9; }
+  .history-skeleton-stack { opacity: 0.9; }
 }
 
 .message-wrap {
@@ -5398,6 +5403,21 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   opacity: 0.85;
 }
 
+.thinking-load {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 4px 10px;
+  border-radius: 8px;
+}
+
+.thinking-load:hover {
+  color: var(--fg);
+}
+
 .thinking-toggle:hover { color: var(--fg); }
 .thinking-toggle:focus-visible {
   outline: 2px solid var(--accent);
@@ -5735,90 +5755,6 @@ details[open] > .activity-summary::before {
   animation: bg-agents-pulse 1.6s ease-in-out infinite;
 }
 
-.plan-mode-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: content-box;
-  min-width: 30px;
-  min-height: 30px;
-  padding: 7px 10px;
-  margin: -7px;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 120ms var(--ease), color 120ms var(--ease), transform 120ms var(--ease);
-}
-
-.plan-mode-chip::before {
-  inset: 7px;
-  border: 1px solid var(--accent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-}
-
-.plan-mode-chip:hover { background: transparent; }
-.plan-mode-chip:hover::before { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-.plan-mode-chip:active { transform: scale(0.96); }
-.plan-mode-chip:disabled { opacity: 0.55; cursor: wait; transform: none; }
-
-/* Mode row, rendered in the model picker popover's header slot. Mirrors
-   .thinking-levels below it in the footer slot: same label treatment, same
-   pill-chip row, so the popover reads as one cohesive "chat behavior"
-   picker instead of two different widgets glued together. */
-.mode-picker-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.mode-picker-row__label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--fg2);
-}
-
-.mode-picker-row__chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.mode-row-chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-elev);
-  color: var(--fg);
-  font: inherit;
-  font-size: 11px;
-  line-height: 1.4;
-  cursor: pointer;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
-}
-
-.mode-row-chip:hover {
-  background: var(--bg3);
-}
-
-.mode-row-chip--active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: white;
-}
-
-.mode-row-chip:disabled { opacity: 0.55; cursor: wait; }
-
 @keyframes bg-agents-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
@@ -6121,7 +6057,7 @@ details[open] > .activity-summary::before {
   font-weight: 500;
 }
 .tokens-group :deep(.context-pct) {
-  color: var(--fg-muted);
+  color: var(--fg2);
   font-weight: 500;
 }
 
@@ -6400,7 +6336,7 @@ details[open] > .activity-summary::before {
   cursor: pointer;
 }
 .commands-picker-row.active {
-  background: var(--hover, rgba(128, 128, 128, 0.12));
+  background: var(--bg3);
 }
 .commands-picker-head {
   display: flex;
@@ -6423,7 +6359,7 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
 }
 .commands-picker-hint {
-  color: var(--muted, #888);
+  color: var(--fg3);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85em;
   min-width: 0;
@@ -6431,7 +6367,7 @@ details[open] > .activity-summary::before {
   text-overflow: ellipsis;
 }
 .commands-picker-desc {
-  color: var(--muted, #888);
+  color: var(--fg3);
   font-size: 0.85em;
   line-height: 1.35;
   display: -webkit-box;
@@ -6999,16 +6935,35 @@ details[open] > .activity-summary::before {
 }
 
 .btn-approve, .btn-deny {
-  min-height: 32px;
-  padding: 0 14px;
+  min-height: 36px;
+  padding: 8px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   cursor: pointer;
   font-family: var(--font);
-  font-size: 13px;
+  font-size: var(--text-sm);
   font-weight: 600;
-  transition: background 120ms var(--ease), transform 120ms var(--ease);
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), transform 120ms var(--ease);
 }
+/* Keyboard chip on the permission buttons, mirroring the question-option key
+   hint. Low-emphasis so it reads as a shortcut, not as part of the label. */
+.permission-key {
+  display: inline-block;
+  min-width: 16px;
+  margin-right: 6px;
+  padding: 0 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--fg2);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  opacity: 0.75;
+}
+.btn-approve .permission-key { color: rgba(255, 255, 255, 0.85); }
 .btn-approve {
   background: var(--accent);
   color: white;
@@ -7206,7 +7161,7 @@ details[open] > .activity-summary::before {
 .picker-hint {
   margin: 6px 0 0;
   font-size: 11px;
-  color: var(--fg-muted, var(--fg));
+  color: var(--fg2);
   opacity: 0.7;
 }
 
@@ -7320,7 +7275,7 @@ details[open] > .activity-summary::before {
   font-size: var(--text-sm);
   font-weight: 600;
   color: white;
-  background: var(--danger, #e06c75);
+  background: var(--error);
   border: none;
   border-radius: 999px;
   cursor: pointer;
@@ -7340,19 +7295,22 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 4px;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: 8px 16px;
+  border-radius: var(--radius);
   border: 1px solid var(--border);
   background: transparent;
   color: var(--fg);
   cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease);
 }
-.btn-sm:hover { background: var(--bg2, rgba(255, 255, 255, 0.04)); }
+.btn-sm:hover { background: var(--bg3); border-color: var(--fg2); }
 .btn-sm.primary {
-  background: var(--accent, #60a5fa);
-  border-color: var(--accent, #60a5fa);
-  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
 }
 .btn-sm.primary:disabled {
   opacity: 0.5;

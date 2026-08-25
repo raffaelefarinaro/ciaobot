@@ -105,7 +105,6 @@ def _runtime_dir() -> Path:
         return _runtime_dir_override
     raw = (
         os.environ.get("CIAO_RUNTIME_ROOT")
-        or os.environ.get("TELEGRAM_BRIDGE_RUNTIME_ROOT")
         or ".runtime"
     )
     return Path(raw).resolve()
@@ -192,8 +191,9 @@ REGISTRY: tuple[JobSpec, ...] = (
     JobSpec("memory_proposals", "Memory proposals", "content",
             "Proposes durable facts from a session's insights.", False, True,
             trigger=(
-                "After session insights. The daily system-memory-curation "
-                "schedule then promotes them."
+                "After session insights; confident facts are applied at "
+                "archive time. The daily system-memory-curation schedule "
+                "processes the uncertain or failed remainder."
             ),
             schedule_id="system-memory-curation",
             step_of="insights",
@@ -216,10 +216,13 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Commits and pulls the workspace on server startup.", False, False,
             trigger="On server startup."),
     JobSpec("vault_index", "Vault index refresh", "system",
-            "Regenerates memory-vault/INDEX.md and VOCABULARY.md from frontmatter.",
+            "Regenerates each agent root's INDEX.md and VOCABULARY.md from frontmatter.",
             False, False,
-            trigger="On server startup, and weekly via system-vault-index.",
-            schedule_id="system-vault-index"),
+            # The dedicated weekly routine is gone: the index is a per-root
+            # artifact after the re-rooting, so rebuilding it belongs inside the
+            # per-workspace hygiene pass rather than in one global run.
+            trigger="On server startup, and weekly inside system-workspace-hygiene.",
+            schedule_id="system-workspace-hygiene"),
     JobSpec("skills_update", "Skills update", "system",
             "Updates installed agent skills.", False, False,
             trigger="On server startup."),

@@ -70,7 +70,7 @@ def _is_transient_git_pull_error(stderr: str) -> bool:
     return any(marker in lower for marker in _TRANSIENT_GIT_PULL_MARKERS)
 
 
-def _allowed_roots(config, for_write: bool = False) -> list[Path]:
+def _allowed_roots(config) -> list[Path]:
     """Resolve the anchor/search roots for the viewer endpoints.
 
     The primary workspace root always comes first: relative paths anchor
@@ -81,7 +81,6 @@ def _allowed_roots(config, for_write: bool = False) -> list[Path]:
     These roots are NO LONGER a security boundary — the viewer serves any
     file on disk regardless of where it lives (see ``_resolve_workspace_path``).
     They only control relative-path anchoring and fuzzy-match search scope.
-    ``for_write`` is retained for call-site compatibility and has no effect.
     """
     roots: list[Path] = [config.workspace_root.resolve()]
     vault_root = getattr(config, "vault_root", None)

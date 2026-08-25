@@ -15,7 +15,7 @@
 
 import { viewportHeight, viewportWidth } from './viewport'
 
-export const ANCHOR_PAD = 8
+const ANCHOR_PAD = 8
 
 /** Clamp a top offset so a `reserve`-tall popover stays fully on screen. */
 export function clampAnchorTop(

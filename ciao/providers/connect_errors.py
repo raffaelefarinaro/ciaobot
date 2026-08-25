@@ -5,14 +5,13 @@ that text is what the operator sees in a failed ``schedule_dispatch`` job run.
 A name-resolution or connect failure arrives as a generic string like
 ``API Error: Unable to connect to API (ENOTFOUND)`` with no host and no error
 category, so the operator can't tell which endpoint failed to resolve (the
-Anthropic API, a provider's own gateway, the Codex
-binary) or whether it was DNS, a refused connection, a timeout, or auth.
+Anthropic API or a provider's own gateway) or whether it was DNS, a refused
+connection, a timeout, or auth.
 
 The helpers here annotate the string with both the failing host and a short
 category, so the recorded error identifies the endpoint and the failure
-class. Shared across providers (Claude CLI routing covers Anthropic /
-Claude Code; the Codex provider annotates its own results) so every
-provider a schedule can dispatch through surfaces the same context. See
+class. Shared across providers so every provider a schedule can dispatch
+through surfaces the same context. See
 issue #178 (extending the Claude-only fix from #162 to all schedule
 providers and adding error classification).
 """

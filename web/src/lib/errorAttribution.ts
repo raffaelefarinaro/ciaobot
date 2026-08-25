@@ -1,4 +1,4 @@
-export type ErrorAttributionKind = 'timeout' | 'blocked' | 'remote-http' | 'provider' | 'unknown'
+type ErrorAttributionKind = 'timeout' | 'blocked' | 'remote-http' | 'provider' | 'unknown'
 
 export interface ErrorAttribution {
   kind: ErrorAttributionKind

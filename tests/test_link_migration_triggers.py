@@ -62,6 +62,21 @@ def test_notice_stops_once_a_receipt_exists(tmp_path: Path) -> None:
     assert "unmigrated_vault_links" not in {n["type"] for n in result["notices"]}
 
 
+def test_notice_keeps_asking_after_a_partial_migration(tmp_path: Path) -> None:
+    """A run that could not write every note left wikilinks behind, so the notice
+    is still the truth. Reading its receipt as "converted" is what let a
+    half-finished migration go quiet on every surface at once."""
+    v = _vault(tmp_path)
+    rt = tmp_path / ".runtime"
+    write_receipt(rt, {
+        "vault_root": str(v),
+        "rewrites": [{"path": "other.md", "offset": 0, "from": "x", "to": "y"}],
+        "failed": [{"path": "personal/a.md", "error": "Permission denied"}],
+    })
+    result = audit_upgrade_notices(_cfg(v), runtime_dir=rt)
+    assert "unmigrated_vault_links" in {n["type"] for n in result["notices"]}
+
+
 def test_no_runtime_dir_means_no_notice(tmp_path: Path) -> None:
     """Programmatic callers that pass no runtime root cannot check the receipt,
     so they must not guess the vault is unmigrated."""

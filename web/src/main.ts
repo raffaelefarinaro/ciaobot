@@ -50,10 +50,6 @@ try {
   // Ignore localStorage restrictions
 }
 
-// Set Excalidraw asset path to host fonts locally (loaded from /fonts)
-const excalidrawGlobals = window as unknown as { EXCALIDRAW_ASSET_PATH: string }
-excalidrawGlobals.EXCALIDRAW_ASSET_PATH = '/'
-
 const app = createApp(App)
 app.use(createPinia())
 app.use(router)

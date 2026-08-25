@@ -132,7 +132,7 @@ async def test_watch_subagent_completion_emits_ready_events(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root: session_path,
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
     )
 
     async def fake_sleep(seconds: float) -> None:
@@ -198,7 +198,7 @@ async def test_watch_subagent_completion_nudges_parent_synthesis(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root: session_path,
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
     )
 
     async def fake_sleep(seconds: float) -> None:
@@ -299,7 +299,7 @@ async def test_watch_subagent_completion_holds_nudge_when_parent_asked_a_questio
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root: session_path,
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
     )
 
     async def fake_sleep(seconds: float) -> None:
@@ -376,7 +376,7 @@ async def test_watch_subagent_completion_clears_on_idle_agent_transcript(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root: session_path,
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
     )
 
     def finish_agent() -> None:
@@ -444,7 +444,7 @@ async def test_watch_subagent_completion_publishes_zero_when_it_gives_up(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root: session_path,
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
     )
 
     # Second tick: the session file is gone (session reset, workspace moved).

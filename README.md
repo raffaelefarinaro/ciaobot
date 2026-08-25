@@ -4,7 +4,7 @@
   <img src="docs/hero.png" alt="Ciaobot mascot saying Ciao!" width="100%">
 </p>
 
-Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspace whose memory is a plain-markdown vault you own outright. Chats, projects, files, schedules, and memory live in one interface, backed by whichever model you choose (Claude Code, OpenAI Codex, and others).
+Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspace whose memory is a plain-markdown vault you own outright. Chats, projects, files, schedules, and memory live in one interface, backed by whichever model you choose (Claude Code, opencode, and others).
 
 ## Install
 
@@ -50,7 +50,7 @@ Then open `http://localhost:8443` and follow the setup wizard:
 
 - **Workspace folder** (default `~/ciaobot`) — your second brain (`memory-vault/`) plus app config and runtime state. Sync this folder (GitHub, Drive, iCloud, …) so your vault follows you across machines.
 - **Dashboard password** — Ciaobot is password-protected by default: this is what you type to open it, and what another device needs to connect as a client. Change it later in Settings → PWA password.
-- **Model provider** — Claude Code, Codex, or another configured backend.
+- **Model provider** — Claude Code, opencode, or another configured backend.
 
 The wizard writes config, initializes the workspace as a git repo (with a
 `.gitignore` for secrets and runtime state), and keeps the bundled engine
@@ -66,7 +66,7 @@ Ciaobot started from the limits of Claude Cowork. Cowork is genuinely good at *d
 
 Ciaobot is the other bet — differences that are structural, not features:
 
-- **Any model, local or cloud.** Claude Code for Anthropic, Codex for OpenAI, and opencode for everything else — including models running on your own hardware. The second brain outlives any single model.
+- **Any model, local or cloud.** Claude Code for Anthropic and opencode for everything else — including models running on your own hardware. The second brain outlives any single model.
 - **Your machine's own power.** Voice is already wired to work on-device: dictation and read-aloud run on your computer (Apple Silicon) with no cloud round-trip needed.
 - **Accrual, not storage.** A memory system, baked in, that curates itself and compounds into *you* over time — not a pile of past sessions.
 - **Yours to keep.** That memory is plain markdown in a git repo you own outright — portable, and useful even if this app disappears.
@@ -86,7 +86,7 @@ Ciaobot is built for **knowledge work, not software development**: brainstorming
 
 ## The idea
 
-Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://github.com/anthropics/claude-code), [OpenAI Codex](https://developers.openai.com/codex/cli/), or [opencode](https://opencode.ai) in the background, on the bet that the vendors' own CLIs are the best-maintained agent harnesses available — they keep the model communication, tool use, and agentic loop optimized so this project doesn't have to. Ciaobot stays in control of the three things that matter to me:
+Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://github.com/anthropics/claude-code) or [opencode](https://opencode.ai) in the background, on the bet that the vendors' own CLIs are the best-maintained agent harnesses available — they keep the model communication, tool use, and agentic loop optimized so this project doesn't have to. Ciaobot stays in control of the three things that matter to me:
 
 1. **The context** — deciding exactly what memory, notes, and project state the agent is fed each turn.
 2. **One interface** — the same UI regardless of which project or provider you're talking to.
@@ -101,8 +101,8 @@ What that looks like in practice:
 - **Skills, subagents, and commands** — packaged defaults, extensible from Settings or workspace files (see [What ships by default](#what-ships-by-default)).
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
 - **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app app updates. On macOS, `Ciaobot.app` owns the window, menu bar, native notifications, and desktop updates while the bundled engine runs as a background service.
-- **Provider choice** — Claude Code, Codex, or opencode with your existing login, plus on-device models for lighter tasks (see [Providers](#providers)).
-- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, delegates, schedules, loops, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
+- **Provider choice** — Claude Code or opencode with your existing login, plus on-device models for lighter tasks (see [Providers](#providers)).
+- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and opencode processes operate Ciaobot memory, vault, projects, chats, delegates, schedules, loops, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
 
@@ -110,11 +110,11 @@ Pick a workspace folder, choose a provider, and work — Ciaobot is the interfac
 
 Ciaobot keeps memory in layers so the agent can recall what matters without stuffing every prompt. **Settings → Context** shows what the agent actually loads.
 
-- **Short agent memory** (fenced `ciao:memory` / `ciao:profile` regions in workspace `CLAUDE.md`) — a small, capped scratchpad the model maintains for you: preferences, conventions, lessons, and profile. Updated with Edit or `/remember`; a snapshot is injected at the start of each Claude/Codex chat. Add `[expires: YYYY-MM-DD]` to a temporary entry to keep it active through that date. It is hidden from later snapshots, but still uses stored character budget until daily memory curation removes it. These regions are git-tracked with the workspace.
+- **Short agent memory** (fenced `ciao:memory` / `ciao:profile` regions in workspace `CLAUDE.md`) — a small, capped scratchpad the model maintains for you: preferences, conventions, lessons, and profile. Updated with Edit or `/remember`; a snapshot is injected at the start of each Claude or opencode chat. Add `[expires: YYYY-MM-DD]` to a temporary entry to keep it active through that date. It is hidden from later snapshots, but still uses stored character budget until daily memory curation removes it. These regions are git-tracked with the workspace.
 - **Your vault** (`memory-vault/`, or a separate vault root per sidebar workspace) — durable markdown you own: people, projects, ideas. Browse it in Obsidian or any editor; it stays useful even without Ciaobot.
-- **One behavior file for the install** — `<workspace>/CLAUDE.md` (and `AGENTS.md` for Codex) applies to every chat.
+- **One behavior file for the install** — `<workspace>/CLAUDE.md`, linked as `AGENTS.md` for shared runtime discovery, applies to every chat.
 
-When your message mentions a name that appears in the vault index, the agent gets a quiet hint — “this probably means `People/Emma`” — so it opens the right note without you repeating context. And when a chat is archived, a pipeline turns it into durable knowledge: session insights are extracted, memory proposals are drafted, and daily/weekly curation runs update vault pages. Existing-folder onboarding also starts with an initial inventory and curation chat; it preserves the source notes, reorganizes only clear classifications, and reports ambiguous material. Nothing is promoted into long-term memory without review, and Ciaobot never discards or rewrites an existing notes folder during onboarding. Track the background steps under **Settings → Automation**, and see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
+When your message mentions a name that appears in the vault index, the agent gets a quiet hint — “this probably means `People/Emma`” — so it opens the right note without you repeating context. And when a chat is archived, a pipeline turns it into durable knowledge: session insights are extracted, memory proposals are drafted, and daily/weekly curation runs update vault pages. Existing-folder onboarding also starts with an initial inventory and curation chat; it preserves the source notes, reorganizes only clear classifications, and reports ambiguous material. Confident facts are filed to their destination automatically (regions, project docs, people notes, Learnings) and unsure ones wait in the proposals queue for review, and Ciaobot never discards or rewrites an existing notes folder during onboarding. Track the background steps under **Settings → Automation**, and see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
 
 ## Features
 
@@ -143,7 +143,7 @@ When your message mentions a name that appears in the vault index, the agent get
 **Memory, vault, and insight extraction**
 
 - Layered memory: a capped agent memory and user profile injected at chat start, plus a plain-markdown vault you own (Obsidian-compatible, syncable via GitHub/Drive/iCloud).
-- Archiving a chat runs an extraction pipeline: session insights and trajectories are captured, memory proposals are drafted, and project canonical docs are updated — nothing is promoted into long-term memory without review.
+- Archiving a chat runs an extraction pipeline: session insights and trajectories are captured, each durable fact is routed to its destination — bounded regions, the project's canonical doc, people notes, `Workspace/Learnings.md` — with confident facts applied automatically and unsure ones queued for review.
 - Daily and weekly curation routines keep vault pages and `Workspace/Learnings.md` current.
 - Vault-index hints: mention a name the index knows and the agent is quietly pointed at the right note.
 
@@ -162,9 +162,9 @@ When your message mentions a name that appears in the vault index, the agent get
 
 **Providers and models**
 
-- Claude Code, OpenAI Codex, or opencode with the subscription login you already have. Anything else — Ollama, OpenRouter, a local OpenAI-compatible server — is reached by configuring it in opencode, which Ciaobot picks up automatically.
+- Claude Code or opencode with the login you already have. Anything else — Ollama, OpenRouter, a local OpenAI-compatible server — is reached by configuring it in opencode, which Ciaobot picks up automatically.
 - Claude shell commands stay attached to the active turn until they return a result. Background subagents remain asynchronous and visible in the chat while they run.
-- Per-provider default model, thinking level, and execution mode for new chats (Settings → Models); background tasks (titles, insights) routable to a cheaper model per provider or to an on-device model (Apple Intelligence, no install required).
+- Per-provider default model and thinking level for new chats (Settings → Models); execution mode is fixed at auto, so safe reads and edits run silently while destructive operations ask for approval. Background tasks (titles, insights) routable to a cheaper model per provider or to an on-device model (Apple Intelligence, no install required).
 - Image-capability pre-flight: when a turn carries images and the selected model can't see them, the chat pauses and offers same-backend vision models to switch to, instead of failing mid-turn or silently dropping the images.
 
 **Google Workspace**
@@ -207,7 +207,7 @@ Recurring schedules that ship enabled ([ciao/stock/schedules.json](ciao/stock/sc
 
 | Routine | Cadence | What it does |
 |---|---|---|
-| Memory curation | Daily | Reviews recent archived chats, memory proposals, and learnings; updates vault pages and `Workspace/Learnings.md`. Removes bounded-memory entries after a valid `[expires: YYYY-MM-DD]` date and reports malformed expiration tags without guessing. Then runs `ciao memory-audit --json` and repairs rot in the always-loaded regions: entries that record a chat event instead of a current value move to `Workspace/Learnings.md`, entries citing a path that no longer exists get corrected or dropped, and a subject holding two competing values gets collapsed to the current one. |
+| Memory curation | Daily | Processes uncertain or failed memory items left after archive-time auto-filing, re-checks aging vault notes, and updates vault pages and `Workspace/Learnings.md`. A note remains in Memory → Needs review until you or this routine resolves it; a failed or disabled run can leave it there. Removes bounded-memory entries after a valid `[expires: YYYY-MM-DD]` date and reports malformed expiration tags without guessing. Then runs `ciao memory-audit --json` and repairs rot in the always-loaded regions: entries that record a chat event instead of a current value move to `Workspace/Learnings.md`, entries citing a path that no longer exists get corrected or dropped, and a subject holding two competing values gets collapsed to the current one. |
 | Workspace hygiene | Weekly (Sun) | Regenerates the vault index with `ciao vault-index --write`, then runs `ciao os-audit --json`. It can repair low-risk link and index drift, then verifies the remaining findings. |
 | Skill evolution | Weekly (Sun) | Drafts skill-improvement proposals from recent usage; never applies them automatically. |
 
@@ -218,7 +218,6 @@ Your own schedules live alongside these in the workspace (`.runtime/schedules.js
 Use the access you already have:
 
 - **Claude Code** — CLI-managed Claude subscription or Anthropic Console authentication.
-- **OpenAI Codex** — `codex login`, including eligible ChatGPT subscription accounts.
 - **opencode** — the open-source agent CLI, bring-your-own model provider (`opencode auth login` or the config you already have). This is the path to everything Anthropic and OpenAI do not serve: Ollama, OpenRouter, or any OpenAI-compatible endpoint. Configure it in opencode and its models appear in Ciaobot's pickers automatically — Ciaobot reads whatever opencode reports as connected.
 - **On-device models** — for lightweight tasks where available: chat titles via Apple's on-device Foundation Model, dictation and read-aloud via the built-in macOS speech frameworks. All of it ships with macOS; none of it needs installing.
 
@@ -235,7 +234,7 @@ I'm sharing it because the patterns may be useful to you. Ideas, bug reports, di
 | Doc | What's in it |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design: repo and workspace layout, chat pipeline, memory, schedules, providers. |
-| [docs/MCP.md](docs/MCP.md) | Embedded MCP architecture, security, complete tool catalog, Claude/Codex process configuration, and paired evaluation. |
+| [docs/MCP.md](docs/MCP.md) | Embedded MCP architecture, security, complete tool catalog, and provider process configuration. |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Git checkout, dev workflow, testing, change guidelines. |
 | [INTEGRATIONS.md](INTEGRATIONS.md) | Env vars, OAuth, MCP connectors, server runtime knobs. |
 | [PWA_API.md](PWA_API.md) | API endpoints, auth flow, state paths, agent recipes. |
@@ -252,4 +251,4 @@ Naming note: the user-facing product is **Ciaobot**. The CLI is installed as bot
 
 ## Built on
 
-Ciaobot is glue around a lot of excellent open tools — Claude Code, the Claude Agent SDK, Codex CLI, Starlette, Vue, and more. See [docs/CREDITS.md](docs/CREDITS.md) for the full list.
+Ciaobot is glue around a lot of excellent open tools — Claude Code, the Claude Agent SDK, opencode, Starlette, Vue, and more. See [docs/CREDITS.md](docs/CREDITS.md) for the full list.

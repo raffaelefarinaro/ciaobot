@@ -92,8 +92,7 @@ def _provider_command_dir(workspace_root: Path, provider: str) -> Path | None:
     """Native command directory a provider's own CLI loads, if it has one.
 
     Claude reads ``.claude/commands/`` (already the canonical Ciaobot source),
-    opencode reads ``.opencode/commands/``, and Codex has no documented project
-    command contract — Ciaobot expands canonical commands itself before dispatch.
+    and opencode reads ``.opencode/commands/``.
     """
     target = provider.strip().lower()
     if target == "opencode":
@@ -114,7 +113,7 @@ def list_provider_command_entries(workspace_root: Path, provider: str) -> list[C
 def list_skill_entries(workspace_root: Path, provider: str = "") -> list[Command]:
     """Return skills installed for a provider in the slash-picker shape.
 
-    Skills are not commands on disk, but Claude and Codex both expose
+    Skills are not commands on disk, but Claude and opencode both expose
     provider-installed skills as user-invocable slash entries. Keep the
     picker limited to the target that can actually load the skill.
     """
@@ -208,43 +207,6 @@ def list_picker_entries(workspace_root: Path, provider: str) -> tuple[list[Comma
         seen.add(key)
         skills.append(skill)
     return commands, sorted(skills, key=lambda item: item.name.casefold())
-
-
-def expand_slash_command(prompt: str, workspace_root: Path) -> str | None:
-    """Expand a Ciaobot command for providers without native project commands.
-
-    Returns ``None`` when the prompt is not a known ``/command``. The marker
-    keeps the original input recoverable when Codex thread history is rendered
-    back into the PWA.
-    """
-    stripped = prompt.lstrip()
-    match = re.match(r"^/([A-Za-z0-9._-]+)(?:\s+([\s\S]*))?$", stripped)
-    if match is None:
-        return None
-    name = match.group(1)
-    command = next(
-        (item for item in list_commands(workspace_root) if item.name == name),
-        None,
-    )
-    if command is None:
-        return None
-    try:
-        template = Path(command.path).read_text(encoding="utf-8")
-    except OSError:
-        return None
-    template = _FRONTMATTER_RE.sub("", template, count=1).strip()
-    arguments = (match.group(2) or "").strip()
-    rendered = template.replace("$ARGUMENTS", arguments)
-    import json
-
-    return (
-        "[CIAO_COMMAND_BEGIN]\n"
-        f"command=/{name}\n"
-        f"user_input_json={json.dumps(prompt, ensure_ascii=False)}\n"
-        "[CIAO_COMMAND_INSTRUCTIONS]\n"
-        f"{rendered}\n"
-        "[CIAO_COMMAND_END]"
-    )
 
 
 def _workspace_root(request: Request) -> Path:

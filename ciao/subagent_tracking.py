@@ -178,18 +178,30 @@ class SessionSubagentState:
         )
 
 
-def find_parent_session_file(session_id: str, workspace_root: Path | str) -> Path | None:
+def find_parent_session_file(
+    session_id: str,
+    workspace_root: Path | str,
+    *,
+    agent_root: Path | str | None = None,
+) -> Path | None:
     """Locate the parent session JSONL for ``session_id`` on this machine."""
     if not session_id:
         return None
     try:
         from ciao.transcripts import _claude_projects_dir
 
-        preferred = _claude_projects_dir(Path(workspace_root)) / f"{session_id}.jsonl"
+        root = agent_root if agent_root is not None else workspace_root
+        preferred = _claude_projects_dir(Path(root)) / f"{session_id}.jsonl"
         if preferred.exists():
             return preferred
     except Exception:  # noqa: BLE001 — fall through to the glob scan
         pass
+    # The glob scan stays for every caller, with or without an agent root.
+    # It is the safety net for the exact failure this phase guards against: the
+    # projects dir is a slug of the cwd, so a session recorded under a different
+    # cwd is only findable this way. Isolating roots from each other is correct
+    # once agent_root actually differs per workspace, and wrong before then,
+    # because today it would remove the net while the hazard is still live.
     projects_root = Path.home() / ".claude" / "projects"
     try:
         for path in projects_root.glob(f"*/{session_id}.jsonl"):

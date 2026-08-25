@@ -34,10 +34,6 @@ class StateStore:
         self._default_mode = default_mode
         self.bot_state, self._contexts = self._load()
 
-    def reload(self) -> None:
-        """Refresh in-memory state from disk."""
-        self.bot_state, self._contexts = self._load()
-
     # ── Context access ────────────────────────────────────────────────────
 
     def get_context(self, ctx: ChatContext) -> ContextState:
@@ -57,12 +53,6 @@ class StateStore:
 
         return self._contexts.get(ctx.key)
 
-    def peek_session_id(self, ctx: ChatContext) -> str:
-        """Return a saved session id without manufacturing a missing context."""
-
-        state = self.peek_context(ctx)
-        return state.session.session_id if state is not None else ""
-
     def delete_context(self, ctx: ChatContext) -> bool:
         """Remove persisted state for a conversation that was explicitly deleted."""
 
@@ -78,18 +68,8 @@ class StateStore:
         cs.active_model = model
         self.save()
 
-    def set_last_effective_model(self, model: str, ctx: ChatContext) -> None:
-        self.get_context(ctx).last_effective_model = model
-        self.save()
-
-    def get_selected_model(self, ctx: ChatContext) -> str:
-        return self.get_context(ctx).active_model
-
     def get_mode(self, ctx: ChatContext) -> BridgeMode:
         return self.get_context(ctx).mode
-
-    def get_session_id(self, ctx: ChatContext) -> str:
-        return self.get_context(ctx).session.session_id
 
     def update_session(self, session_id: str | None, ctx: ChatContext) -> None:
         if session_id:
@@ -121,10 +101,6 @@ class StateStore:
 
     def add_cost(self, cost_usd: float) -> None:
         self.bot_state.cost += cost_usd
-        self.save()
-
-    def reset_costs(self) -> None:
-        self.bot_state.cost = 0.0
         self.save()
 
     # ── Persistence ───────────────────────────────────────────────────────

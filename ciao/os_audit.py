@@ -14,21 +14,26 @@ import logging
 import os
 import re
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
-from ciao.memory_audit import audit_entries
-from ciao.memory_injector import expiration_tag_error, is_entry_expired
+from ciao.memory_audit import audit_entries, find_stale_notes
 from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
     DEFAULT_USER_CHAR_LIMIT,
     MAX_ENTRY_CHARS,
     REGIONS,
     contains_invisible_unicode,
+    expiration_tag_error,
+    is_entry_expired,
     read_region,
     region_usage,
     strip_region_blocks,
 )
+# Proposal kinds and bullet shape are owned by ciao.proposal_kinds; re-export
+# here so this counter stays in sync with the control plane and the web layer.
+from ciao.proposal_kinds import BULLET_RE
 from ciao.vault_lint import (
     _markdown_source_paths,
     run_validation as run_vault_validation,
@@ -38,7 +43,6 @@ logger = logging.getLogger(__name__)
 
 SKILL_MAX_BYTES = 15 * 1024
 
-_PROPOSAL_BULLET_RE = re.compile(r"^\s*-\s*\[(?:memory|user|profile)\]\s+\S", re.IGNORECASE)
 _RULE_BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 _RULE_NEGATION_RE = re.compile(
     r"\b(?:never|(?:do|does|must|should|can|cannot)\s+not|don't|doesn't|mustn't|shouldn't|can't)\b",
@@ -167,7 +171,7 @@ def audit_skills(workspace_dir: Path) -> dict[str, Any]:
                 )
                 continue
             if is_directory and not child.name.startswith("."):
-                # Canonical skills win, followed by Claude and Codex projections.
+                # Canonical skills win, followed by provider projections.
                 skill_dirs.setdefault(child.name, child)
 
     for name, skill_dir in sorted(skill_dirs.items()):
@@ -474,6 +478,23 @@ def _proposal_paths(
     )
 
 
+def _memory_guide_specs(config: Any, workspace_dir: Path | None) -> list[tuple[str, Path]]:
+    """(workspace name, guide path) pairs the audit must cover.
+
+    One entry per registered workspace, resolved through ``agent_root`` so a
+    future re-rooting install reports each guide separately. Over-cap and rot
+    findings are then attributable to the workspace that owns them. Without a
+    registry (``config`` is None) the caller's own workspace root is the one
+    guide; its name is empty, meaning "the operating workspace".
+    """
+    if config is not None and getattr(config, "workspaces", None):
+        return [
+            (name, Path(config.agent_root(name)) / "CLAUDE.md")
+            for name in config.workspaces
+        ]
+    return [("", (workspace_dir or Path.cwd()) / "CLAUDE.md")]
+
+
 def audit_memory(
     *,
     guide_path: Path | None = None,
@@ -500,6 +521,104 @@ def audit_memory(
     current = today or datetime.date.today()
     region_limits = {"memory": memory_char_limit, "profile": user_char_limit}
 
+    scan = _scan_memory_guide(
+        guide,
+        workspace="",
+        workspace_dir=workspace,
+        current=current,
+        region_limits=region_limits,
+    )
+
+    proposals_count, proposal_files, proposal_errors = _scan_proposals(
+        vault_root, proposal_paths, workspace_name
+    )
+
+    return {
+        "memory_entries": len(scan["memory_entries"]),
+        "profile_entries": len(scan["profile_entries"]),
+        "expired_memory_entries": len(scan["expired_memory"]),
+        "expired_profile_entries": len(scan["expired_profile"]),
+        "invalid_expiration_entries": len(scan["invalid_expirations"]),
+        "invalid_expirations": scan["invalid_expirations"],
+        "over_cap": scan["over_cap"],
+        "oversize_entries": scan["oversize_entries"],
+        "duplicate_entries": scan["duplicate_entries"],
+        "invisible_unicode": scan["invisible_unicode"],
+        "marker_errors": scan["marker_errors"],
+        "pending_memory_proposals": proposals_count,
+        "proposal_files": proposal_files,
+        **scan["rot"],
+        "errors": proposal_errors,
+    }
+
+
+def _scan_proposals(
+    vault_root: Path | None,
+    proposal_paths: list[Path] | None,
+    workspace_name: str,
+) -> tuple[int, list[dict[str, Any]], list[dict[str, str]]]:
+    """Count pending proposal bullets and surface queue discovery errors.
+
+    Proposal queues are workspace-scoped, not per guide, so the scan is shared
+    by the single-guide ``audit_memory`` and the per-guide aggregate. Returns
+    ``(pending_count, proposal_files, errors)``.
+    """
+    proposals_count = 0
+    proposal_files: list[dict[str, Any]] = []
+    proposal_errors: list[dict[str, str]] = []
+    if vault_root is not None:
+        if proposal_paths is None:
+            paths, discovery_errors = _proposal_paths(vault_root, workspace_name)
+            proposal_errors.extend(discovery_errors)
+        else:
+            paths = proposal_paths
+        for path in dict.fromkeys(paths):
+            if not path.exists():
+                continue
+            if not path.is_file():
+                proposal_errors.append(
+                    _diagnostic(
+                        "invalid_proposal_file",
+                        path,
+                        "memory proposal path is not a file",
+                    )
+                )
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                proposal_errors.append(
+                    _diagnostic(
+                        "unreadable_proposal_file",
+                        path,
+                        f"failed to read memory proposals: {exc}",
+                    )
+                )
+                continue
+            pending = sum(
+                1 for line in content.splitlines() if BULLET_RE.match(line)
+            )
+            proposals_count += pending
+            proposal_files.append({"path": str(path), "pending": pending})
+    return proposals_count, proposal_files, proposal_errors
+
+
+def _scan_memory_guide(
+    guide: Path,
+    *,
+    workspace: str,
+    workspace_dir: Path | None,
+    current: datetime.date,
+    region_limits: dict[str, int],
+) -> dict[str, Any]:
+    """Scan one guide's fenced regions into a raw per-guide result.
+
+    Kept separate from :func:`audit_memory` so :func:`run_os_audit` can run it
+    once per registered workspace guide and aggregate, while the standalone
+    ``ciao memory-audit`` keeps the flat single-guide shape. The workspace name
+    (empty for the operating workspace) is carried on the guide so findings can
+    be attributed to the workspace that owns them.
+    """
     region_entries: dict[str, list[str]] = {}
     expired_by_region: dict[str, list[str]] = {}
     marker_errors: list[dict[str, str]] = []
@@ -551,56 +670,108 @@ def audit_memory(
                     }
                 )
 
-    mem_entries = region_entries["memory"]
-    profile_entries = region_entries["profile"]
-    expired_mem = expired_by_region["memory"]
-    expired_profile = expired_by_region["profile"]
-
-    proposals_count = 0
-    proposal_files: list[dict[str, Any]] = []
-    proposal_errors: list[dict[str, str]] = []
-    if vault_root is not None:
-        if proposal_paths is None:
-            paths, discovery_errors = _proposal_paths(vault_root, workspace_name)
-            proposal_errors.extend(discovery_errors)
-        else:
-            paths = proposal_paths
-        for path in dict.fromkeys(paths):
-            if not path.exists():
-                continue
-            if not path.is_file():
-                proposal_errors.append(
-                    _diagnostic(
-                        "invalid_proposal_file",
-                        path,
-                        "memory proposal path is not a file",
-                    )
-                )
-                continue
-            try:
-                content = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                proposal_errors.append(
-                    _diagnostic(
-                        "unreadable_proposal_file",
-                        path,
-                        f"failed to read memory proposals: {exc}",
-                    )
-                )
-                continue
-            pending = sum(
-                1 for line in content.splitlines() if _PROPOSAL_BULLET_RE.match(line)
-            )
-            proposals_count += pending
-            proposal_files.append({"path": str(path), "pending": pending})
-
-    rot = audit_entries(region_entries, workspace_dir=workspace)
+    rot = audit_entries(region_entries, workspace_dir=workspace_dir or guide.parent)
 
     return {
-        "memory_entries": len(mem_entries),
-        "profile_entries": len(profile_entries),
-        "expired_memory_entries": len(expired_mem),
-        "expired_profile_entries": len(expired_profile),
+        "workspace": workspace,
+        "memory_entries": region_entries["memory"],
+        "profile_entries": region_entries["profile"],
+        "expired_memory": expired_by_region["memory"],
+        "expired_profile": expired_by_region["profile"],
+        "invalid_expirations": invalid_expirations,
+        "over_cap": over_cap,
+        "oversize_entries": oversize_entries,
+        "duplicate_entries": duplicate_entries,
+        "invisible_unicode": invisible_unicode,
+        "marker_errors": marker_errors,
+        "rot": rot,
+    }
+
+
+def _scan_note_staleness(
+    vault_root: Path,
+    workspace_name: str,
+    current: datetime.date,
+) -> dict[str, Any]:
+    """Age the workspace's own notes, for the memory-hygiene section.
+
+    A separate pass from ``_vault_audit`` because it needs parsed frontmatter
+    (``updated:``) rather than lint findings; ``scan_vault`` is the same walk
+    the index rebuild already does routinely. Failures degrade to an empty
+    result with a scan error, never to "checked and clean".
+    """
+    empty: dict[str, Any] = {
+        "stale_notes": [],
+        "notes_checked": 0,
+        "notes_exempt": 0,
+        "errors": [],
+    }
+    if not vault_root.is_dir():
+        return empty
+    try:
+        from ciao.vault_index import scan_vault
+
+        entries = scan_vault(vault_root, workspace=workspace_name or "personal")
+    except Exception as exc:  # noqa: BLE001 — advisory section
+        logger.exception("OS audit: note staleness scan failed")
+        return {
+            **empty,
+            "errors": [
+                _diagnostic(
+                    "note_staleness_scan_failed",
+                    vault_root,
+                    f"note staleness scan failed: {exc}",
+                )
+            ],
+        }
+    result = find_stale_notes(entries, vault_root=vault_root, today=current)
+    result["errors"] = []
+    return result
+
+
+def _aggregate_memory_guides(
+    guides: list[dict[str, Any]],
+    *,
+    pending_memory_proposals: int,
+    proposal_files: list[dict[str, Any]],
+    errors: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Fold per-guide scans and the workspace proposal queue into one report.
+
+    Each guide keeps its own workspace name and over-cap findings, so the
+    operator is told which workspace is over budget rather than a single global
+    figure (a 139% ciao:memory in one workspace is invisible behind a "you are
+    over budget" total). The top-level keys keep the historical flat shape so
+    count readers (``memory_actionable_count``) still work, while ``guides``
+    carries the per-workspace detail including the region rot lists.
+    """
+    over_cap: list[dict[str, Any]] = []
+    oversize_entries: list[dict[str, Any]] = []
+    duplicate_entries: list[dict[str, Any]] = []
+    invisible_unicode: list[dict[str, Any]] = []
+    marker_errors: list[dict[str, str]] = []
+    invalid_expirations: list[dict[str, str]] = []
+    event_shaped: list[dict[str, Any]] = []
+    stale_paths: list[dict[str, Any]] = []
+    superseded: list[dict[str, Any]] = []
+    for guide in guides:
+        workspace = guide["workspace"]
+        over_cap.extend(_tag_workspace(entry, workspace) for entry in guide["over_cap"])
+        oversize_entries.extend(guide["oversize_entries"])
+        duplicate_entries.extend(guide["duplicate_entries"])
+        invisible_unicode.extend(guide["invisible_unicode"])
+        marker_errors.extend(guide["marker_errors"])
+        invalid_expirations.extend(guide["invalid_expirations"])
+        event_shaped.extend(guide["rot"]["event_shaped_entries"])
+        stale_paths.extend(guide["rot"]["stale_path_entries"])
+        superseded.extend(guide["rot"]["superseded_state_candidates"])
+
+    return {
+        "guides": guides,
+        "memory_entries": sum(len(g["memory_entries"]) for g in guides),
+        "profile_entries": sum(len(g["profile_entries"]) for g in guides),
+        "expired_memory_entries": sum(len(g["expired_memory"]) for g in guides),
+        "expired_profile_entries": sum(len(g["expired_profile"]) for g in guides),
         "invalid_expiration_entries": len(invalid_expirations),
         "invalid_expirations": invalid_expirations,
         "over_cap": over_cap,
@@ -608,11 +779,22 @@ def audit_memory(
         "duplicate_entries": duplicate_entries,
         "invisible_unicode": invisible_unicode,
         "marker_errors": marker_errors,
-        "pending_memory_proposals": proposals_count,
+        "event_shaped_entries": event_shaped,
+        "stale_path_entries": stale_paths,
+        "superseded_state_candidates": superseded,
+        "paths_checked": sum(g["rot"]["paths_checked"] for g in guides),
+        "paths_unverifiable": sum(g["rot"]["paths_unverifiable"] for g in guides),
+        "pending_memory_proposals": pending_memory_proposals,
         "proposal_files": proposal_files,
-        **rot,
-        "errors": proposal_errors,
+        "errors": errors,
     }
+
+
+def _tag_workspace(finding: dict[str, Any], workspace: str) -> dict[str, Any]:
+    """Stamp a finding dict with the workspace that owns it, if not already."""
+    if workspace:
+        finding.setdefault("workspace", workspace)
+    return finding
 
 
 def _record_timestamp(record: dict[str, Any]) -> str:
@@ -803,7 +985,53 @@ def audit_job_runs(
     }
 
 
-def _vault_audit(vault_root: Path) -> dict[str, Any]:
+def _search_index_audit(install_root: Path, workspaces: Sequence[str]) -> dict[str, Any]:
+    """Whether the full-text index still describes the vault on disk.
+
+    The audit checked notes, links, guides, regions and skills, but never the
+    search index — so a missing or stale index passed clean. That matters most for
+    the case the audit is the ONLY backstop: a vault reorganised by hand (or by a
+    model following a prompt) moves notes without rebuilding the index, and
+    nothing then reports that search is silently answering from the old paths.
+
+    Two findings, both cheap and read-only: the index is absent when notes exist,
+    and rows pointing at paths that no longer resolve. `ciao workspace-reroot
+    --repair` rebuilds it.
+    """
+    out: dict[str, Any] = {
+        "missing": False,
+        "stale_rows": [],
+        "transcripts_unindexed": 0,
+        "errors": [],
+    }
+    try:
+        from ciao.fts_search import get_db_path
+        from ciao.workspace_reroot import (
+            stale_search_rows,
+            unindexed_transcript_archive,
+        )
+    except ImportError as exc:  # noqa: BLE001 — advisory section
+        out["errors"].append({"type": "search_index_unavailable", "detail": str(exc)})
+        return out
+
+    root = Path(install_root)
+    try:
+        has_notes = any(
+            (root / name).is_dir() and any((root / name).rglob("*.md"))
+            for name in workspaces
+        ) if workspaces else False
+        db = get_db_path()
+        if not db.exists():
+            out["missing"] = bool(has_notes)
+            return out
+        out["stale_rows"] = stale_search_rows(root)
+        out["transcripts_unindexed"] = unindexed_transcript_archive(root)
+    except OSError as exc:
+        out["errors"].append({"type": "search_index_unreadable", "detail": str(exc)})
+    return out
+
+
+def _vault_audit(vault_root: Path, install_root: Path | None = None) -> dict[str, Any]:
     if not vault_root.is_dir():
         return {
             "orphans": [],
@@ -825,7 +1053,7 @@ def _vault_audit(vault_root: Path) -> dict[str, Any]:
                         f"failed to read vault markdown: {exc}",
                     )
                 )
-        result = run_vault_validation(vault_root)
+        result = run_vault_validation(vault_root, install_root=install_root)
     except Exception as exc:  # noqa: BLE001
         logger.exception("OS audit: vault validation failed")
         return {
@@ -914,8 +1142,8 @@ def audit_upgrade_notices(
     # The vault still speaks the retired link dialect. Surfaced, never applied:
     # rewriting a user's own notes is not a decision an upgrade makes on their
     # behalf, and this is the notice that makes the choice visible instead of
-    # leaving it in a release note nobody re-reads. Because notices count toward
-    # `actionable_count`, the weekly hygiene routine reports it too.
+    # leaving it in a release note nobody re-reads. Notices are pending actions
+    # the weekly hygiene routine surfaces without turning the audit red.
     if runtime_dir is not None:
         try:
             from ciao.vault_migrate_links import has_unmigrated_links, read_receipt
@@ -943,6 +1171,50 @@ def audit_upgrade_notices(
         except Exception:  # noqa: BLE001 — advisory section, never fail the audit
             logger.exception("upgrade notices: link-dialect check failed")
 
+    # Person notes filed into the wrong workspace by the per-workspace curation
+    # bug. Surfaced, never applied, and detected from the receipt's presence
+    # only: `plan_rehome` walks every person note, and this routine runs on every
+    # app open, so a vault walk here is exactly the cost the receipt check exists
+    # to avoid. It can never auto-apply either: the judgement bucket is non-empty
+    # by construction, and a note with no workspace-naming tag has no single
+    # correct destination. A pending action like the link notice, never a defect.
+    # With one registered workspace every candidate comes back with an empty
+    # target and destination: `detect_misfiled_people` still buckets an untagged
+    # note as needs_judgement, but there is no counterpart to move it to, so the
+    # migration has nothing to do. Firing here would tell a fresh install its
+    # people are misfiled and offer no move, and an unactionable tile is how
+    # operators learn to ignore the whole strip.
+    if runtime_dir is not None and len(names) > 1:
+        try:
+            from ciao.vault_rehome import read_receipt
+
+            # `read_receipt` reports only a COMPLETED re-home: a missing status
+            # counts as complete (receipts predating the field record finished
+            # work, and gating on `status == "migrated"` made this notice a
+            # permanent false positive on exactly the installs that had done
+            # it), while an explicitly PARTIAL receipt does not. That second
+            # half is why this moved off `peek_receipt`: a run that half
+            # finished used to silence the notice as thoroughly as a completed
+            # one, so the operator was never told work remained.
+            if read_receipt(runtime_dir) is None:
+                notices.append({
+                    "type": "unrehomed_people",
+                    "workspace": "",
+                    "detail": (
+                        "Person notes may be filed in the wrong workspace, and "
+                        "none have been re-homed yet. A preview lists the "
+                        "candidates without moving anything."
+                    ),
+                    "remedy": (
+                        "Preview with `ciao vault-rehome` (dry-run by default), "
+                        "then apply with `ciao vault-rehome --apply`. Every move "
+                        "and link rewrite is recorded, so `ciao vault-unrehome "
+                        "--apply` restores the notes and their references."
+                    ),
+                })
+        except Exception:  # noqa: BLE001 — advisory section, never fail the audit
+            logger.warning("upgrade notices: person re-home check failed")
+
     return {"notices": notices, "notices_found": len(notices), "errors": errors}
 
 
@@ -958,7 +1230,9 @@ def memory_actionable_count(memory_result: dict[str, Any]) -> int:
 
     `superseded_state_candidates` is deliberately excluded: it is a judgement
     the user may decline, and a finding that can never be cleared would hold
-    the audit at needs_attention until people stop reading it.
+    the audit at needs_attention until people stop reading it. `stale_notes`
+    is excluded for the same reason — age is evidence for review, not a
+    defect; the daily curation routine consumes it.
     """
     # int() because memory_result is dict[str, Any]: the counts are ints at
     # runtime, but the sum is Any to the type checker.
@@ -979,6 +1253,55 @@ def memory_actionable_count(memory_result: dict[str, Any]) -> int:
     )
 
 
+# D2/P10.8. Which sections describe ONE workspace and which describe the whole
+# install. Measured on the reference install rather than assumed: with two
+# workspaces registered, six of the seven sections come back byte-identical,
+# because today one vault, one skill catalog and one CLAUDE.md are shared. The
+# re-rooting makes the first four genuinely per-root; these two never become
+# per-root, because their subject is the global runtime directory.
+GLOBAL_SECTIONS: tuple[str, ...] = ("job_runs_audit", "upgrade_notices")
+WORKSPACE_SECTIONS: tuple[str, ...] = (
+    "vault_hygiene",
+    "skill_audit",
+    "rule_audit",
+    "memory_hygiene",
+)
+AUDIT_SCOPES: tuple[str, ...] = ("all", "workspace", "global")
+
+
+def _audit_roots(
+    config: Any | None,
+    workspace_name: str,
+    workspace: Path,
+    vault: Path,
+) -> tuple[Path, Path]:
+    """The (agent root, notes vault) the per-workspace sections must read.
+
+    Falls back to the caller's own paths whenever there is no registry or no
+    named workspace, which is every programmatic and whole-install caller. So
+    the unscoped report is byte-for-byte what it was before this split; only a
+    run that names a workspace narrows.
+
+    ``workspace_vault_root`` is deliberate over ``agent_vault_root``: this is the
+    workspace's NOTES, which are a subtree of the shared vault before the
+    re-rooting and a whole vault after it. Before this change a named run still
+    audited the entire shared vault, so a personal hygiene chat reported every
+    defect in the work notes as its own.
+    """
+    if config is None or not workspace_name:
+        return workspace, vault
+    root, notes = workspace, vault
+    try:
+        root = Path(config.agent_root(workspace_name)).expanduser().resolve()
+    except (AttributeError, ValueError, OSError):
+        root = workspace
+    try:
+        notes = Path(config.workspace_vault_root(workspace_name)).expanduser().resolve()
+    except (AttributeError, ValueError, OSError, KeyError):
+        notes = vault
+    return root, notes
+
+
 def run_os_audit(
     workspace_dir: Path | None = None,
     vault_root: Path | None = None,
@@ -988,42 +1311,125 @@ def run_os_audit(
     today: datetime.date | None = None,
     config: Any | None = None,
     workspace_name: str = "",
+    scope: str = "all",
 ) -> dict[str, Any]:
-    """Execute a complete AI OS audit pass.
+    """Execute an AI OS audit pass over one scope.
 
     ``workspace_name`` scopes the per-workspace evidence (that workspace's
-    ``MEMORY.md`` and proposal queue) to one logical workspace. The hygiene
-    routine runs once per workspace and reports into that workspace's chat, so
-    an unscoped audit would surface another workspace's findings there.
+    notes, skills, guide and proposal queue) to one logical workspace. The
+    hygiene routine runs once per workspace and reports into that workspace's
+    chat, so an unscoped audit would surface another workspace's findings there.
+
+    ``scope`` selects which half of the report to compute. ``"workspace"`` drops
+    the sections whose subject is the global runtime directory, and ``"global"``
+    drops the ones that describe a single workspace. Both halves keep
+    ``setup_audit``: it is a precondition check on the roots that half reads, not
+    a finding, and a report that cannot say whether its roots were readable is
+    not a report.
+
+    The split exists because the hygiene routine is ``per_workspace: true``, so
+    on the reference install it reports the same global job-run and upgrade
+    findings once per workspace. N identical findings read as N problems.
 
     ``config`` is optional for programmatic callers. The CLI and PWA both pass
     the live registry so upgrade notices are consistent across surfaces.
     """
+    if scope not in AUDIT_SCOPES:
+        raise ValueError(f"scope must be one of {AUDIT_SCOPES}, got {scope!r}")
     workspace = (workspace_dir or Path.cwd()).expanduser().resolve()
     vault = (vault_root or (workspace / "memory-vault")).expanduser().resolve()
     runtime = (runtime_dir or (workspace / ".runtime")).expanduser().resolve()
-    guide_path = workspace / "CLAUDE.md"
     memory_char_limit = getattr(config, "memory_char_limit", DEFAULT_MEMORY_CHAR_LIMIT)
     user_char_limit = getattr(config, "user_char_limit", DEFAULT_USER_CHAR_LIMIT)
+    want_workspace = scope in {"all", "workspace"}
+    want_global = scope in {"all", "global"}
+    root, notes = _audit_roots(config, workspace_name, workspace, vault)
 
-    setup_result = audit_setup(workspace, vault, runtime)
-    vault_result = _vault_audit(vault)
-    skill_result = audit_skills(workspace)
-    rule_result = audit_rules(
-        workspace, vault_root=vault, config=config, workspace_name=workspace_name
+    # The precondition check covers the roots this scope actually reads, so a
+    # workspace-scoped run reports an unreadable agent root rather than
+    # vouching for the install root it never touched.
+    setup_result = audit_setup(
+        root if want_workspace else workspace,
+        notes if want_workspace else vault,
+        runtime,
     )
-    memory_result = audit_memory(
-        guide_path=guide_path,
-        vault_root=vault,
-        proposal_paths=proposal_paths,
-        today=today,
-        memory_char_limit=memory_char_limit,
-        user_char_limit=user_char_limit,
-        workspace_dir=workspace,
-        workspace_name=workspace_name,
+    empty_errors: dict[str, Any] = {"errors": []}
+    vault_result = (
+        _vault_audit(notes, workspace) if want_workspace else {**empty_errors}
     )
-    job_result = audit_job_runs(workspace, runtime_dir=runtime)
-    upgrade_result = audit_upgrade_notices(config, runtime_dir=runtime)
+    # Install-wide, like the other global sections: one search database serves
+    # every root, so reporting it per workspace would say the same thing N times.
+    search_result = (
+        _search_index_audit(workspace, list(getattr(config, "workspace_names", lambda: [])()))
+        if want_global
+        else {
+            "missing": False,
+            "stale_rows": [],
+            "transcripts_unindexed": 0,
+            "errors": [],
+        }
+    )
+    skill_result = (
+        audit_skills(root) if want_workspace else {**empty_errors, "issues": []}
+    )
+    rule_result = (
+        audit_rules(root, vault_root=notes, config=config, workspace_name=workspace_name)
+        if want_workspace
+        else {**empty_errors, "rule_clashes_found": 0}
+    )
+    if want_workspace:
+        pending_memory_proposals, proposal_files, proposal_errors = _scan_proposals(
+            notes, proposal_paths, workspace_name
+        )
+        current = today or datetime.date.today()
+        region_limits = {"memory": memory_char_limit, "profile": user_char_limit}
+        # One guide when a workspace is named, every registered guide otherwise.
+        # Reporting all N guides inside a per-workspace run is the same N-times
+        # duplication as the global sections, one level down.
+        specs = [
+            (name, guide)
+            for name, guide in _memory_guide_specs(config, root)
+            if not workspace_name or name == workspace_name
+        ] or [(workspace_name, root / "CLAUDE.md")]
+        guides = [
+            _scan_memory_guide(
+                guide,
+                workspace=name,
+                workspace_dir=root,
+                current=current,
+                region_limits=region_limits,
+            )
+            for name, guide in specs
+        ]
+        memory_result = _aggregate_memory_guides(
+            guides,
+            pending_memory_proposals=pending_memory_proposals,
+            proposal_files=proposal_files,
+            errors=proposal_errors,
+        )
+        # Vault-note aging joins the same section: it is memory rot, just on
+        # the on-demand surface instead of the always-loaded one. Informational
+        # like superseded-state candidates — age is evidence for the curation
+        # routine, not a defect that holds the audit red.
+        stale = _scan_note_staleness(notes, workspace_name, current)
+        memory_result.update(
+            {k: v for k, v in stale.items() if k != "errors"}
+        )
+        memory_result["errors"].extend(stale["errors"])
+    else:
+        memory_result = _aggregate_memory_guides(
+            [], pending_memory_proposals=0, proposal_files=[], errors=[]
+        )
+    job_result = (
+        audit_job_runs(workspace, runtime_dir=runtime)
+        if want_global
+        else {**empty_errors, "failed_runs": 0}
+    )
+    upgrade_result = (
+        audit_upgrade_notices(config, runtime_dir=runtime)
+        if want_global
+        else {**empty_errors, "notices_found": 0, "notices": []}
+    )
 
     collected_errors = [
         *setup_result["errors"],
@@ -1055,7 +1461,12 @@ def run_os_audit(
         if key not in seen_errors:
             seen_errors.add(key)
             scan_errors.append(error)
-    actionable_count = (
+    # A defect is a state the operator must act on; a pending action is an
+    # optional one they may decline (an upgrade notice). Only defects raise the
+    # status: a notice that can never be cleared would otherwise hold the audit
+    # at needs_attention forever. This is the same split `memory_actionable_count`
+    # makes, and mirrors it at the top level.
+    defect_count = (
         len(setup_result["issues"])
         + len(vault_result.get("orphans", []))
         + len(vault_result.get("duplicates", []))
@@ -1065,10 +1476,18 @@ def run_os_audit(
         + rule_result["rule_clashes_found"]
         + memory_actionable_count(memory_result)
         + job_result["failed_runs"]
-        + upgrade_result["notices_found"]
+        # A search index that is absent or points at moved notes is a defect the
+        # operator can act on (`--repair` rebuilds it), so it counts. Left out of
+        # the count it would render in the report and never change `status`, which
+        # is the same as not reporting it for anyone reading the summary.
+        + (1 if search_result.get("missing") else 0)
+        + (1 if search_result.get("stale_rows") else 0)
+        + (1 if search_result.get("transcripts_unindexed") else 0)
     )
+    pending_action_count = upgrade_result["notices_found"]
+    has_pending_actions = pending_action_count > 0
     total_errors = len(scan_errors)
-    total_issues = actionable_count + total_errors
+    total_issues = defect_count + total_errors
     if total_errors:
         status = "error"
     elif total_issues:
@@ -1076,13 +1495,18 @@ def run_os_audit(
     else:
         status = "healthy"
 
-    return {
+    report = {
         "status": status,
+        "scope": scope,
         "total_issues": total_issues,
+        "defect_count": defect_count,
+        "pending_action_count": pending_action_count,
+        "has_pending_actions": has_pending_actions,
         "total_errors": total_errors,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "setup_audit": setup_result,
         "vault_hygiene": vault_result,
+        "search_index": search_result,
         "skill_audit": skill_result,
         "rule_audit": rule_result,
         "memory_hygiene": memory_result,
@@ -1090,6 +1514,15 @@ def run_os_audit(
         "upgrade_notices": upgrade_result,
         "scan_errors": scan_errors,
     }
+    # A section outside this scope is REMOVED, not zeroed. An empty section
+    # reads as "checked and clean", which is a claim this run never made.
+    if not want_workspace:
+        for section in WORKSPACE_SECTIONS:
+            report.pop(section, None)
+    if not want_global:
+        for section in GLOBAL_SECTIONS:
+            report.pop(section, None)
+    return report
 
 
 def format_audit_markdown(report: dict[str, Any]) -> str:
@@ -1107,125 +1540,199 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
             f"**Scan Errors**: {report['total_errors']}"
         ),
         f"**Timestamp**: {report['timestamp']}",
+    ]
+    # Section numbers are stable identifiers, so a narrowed report has gaps in
+    # them. Naming the scope is what makes a gap read as "not in scope" rather
+    # than "missing".
+    report_scope = str(report.get("scope") or "all")
+    if report_scope != "all":
+        lines.append(
+            f"**Scope**: {report_scope} — only the sections describing "
+            + ("this workspace" if report_scope == "workspace" else "the whole install")
+            + " are included."
+        )
+    # A pending action is optional and does not raise the status, so it must be
+    # visible on its own rather than folded into "Total Issues".
+    if report.get("has_pending_actions"):
+        lines.append(
+            f"**Pending actions**: {report['pending_action_count']} upgrade "
+            "action(s) you may decline; see Upgrade Actions below."
+        )
+    lines.extend([
         "",
         "## 1. Setup",
         f"- Workspace: `{report['setup_audit']['workspace_root']}`",
         f"- Vault: `{report['setup_audit']['vault_root']}`",
         f"- Runtime: `{report['setup_audit']['runtime_root']}`",
         f"- Setup findings: {len(report['setup_audit']['issues'])}",
-        "",
-        "## 2. Vault & Knowledge Hygiene",
-        f"- Frontmatter errors: {len(report['vault_hygiene'].get('frontmatter_errors', []))}",
-        f"- Broken Markdown links: {len(report['vault_hygiene'].get('broken_markdown_links', []))}",
-        f"- Orphaned notes: {len(report['vault_hygiene'].get('orphans', []))}",
-        f"- Duplicate stems: {len(report['vault_hygiene'].get('duplicates', []))}",
-        "",
-        "## 3. Skill Budget & Quality",
-        f"- Logical skills scanned: {report['skill_audit']['total_skills']}",
-        f"- Skills over 15 KiB: {report['skill_audit']['over_budget_count']}",
-        f"- Missing SKILL.md: {report['skill_audit']['missing_skill_md_count']}",
-    ]
-    for issue in report["skill_audit"]["issues"]:
-        lines.append(f"  - ⚠️ {issue['message']}")
-
-    lines.extend(
-        [
+    ])
+    if "vault_hygiene" in report:
+        lines.extend([
             "",
-            "## 4. Rule Conflicts & Overlaps",
-            f"- Potential conflicts: {report['rule_audit']['rule_clashes_found']}",
-            (
-                "- Informational exact overlaps: "
-                f"{report['rule_audit']['rule_overlaps_found']}"
-            ),
-        ]
-    )
-    for clash in report["rule_audit"]["clashes"][:5]:
-        lines.append(f"  - ⚠️ Opposite rules for `{clash['signature']}`:")
-        for source in clash["sources"]:
-            lines.append(f"    - {source}")
-
-    memory = report["memory_hygiene"]
-    lines.extend(
-        [
+            "## 2. Vault & Knowledge Hygiene",
+            f"- Frontmatter errors: {len(report['vault_hygiene'].get('frontmatter_errors', []))}",
+            f"- Broken Markdown links: {len(report['vault_hygiene'].get('broken_markdown_links', []))}",
+            f"- Orphaned notes: {len(report['vault_hygiene'].get('orphans', []))}",
+            f"- Duplicate stems: {len(report['vault_hygiene'].get('duplicates', []))}",
+        ])
+    if "skill_audit" in report:
+        lines.extend([
             "",
-            "## 5. Memory & Context Hygiene",
-            (
-                f"- Memory entries: {memory['memory_entries']} "
-                f"(expired: {memory['expired_memory_entries']})"
-            ),
-            (
-                f"- User profile entries: {memory['profile_entries']} "
-                f"(expired: {memory['expired_profile_entries']})"
-            ),
-            f"- Invalid expiration tags: {memory['invalid_expiration_entries']}",
-            f"- Regions over cap: {len(memory['over_cap'])}",
-            f"- Oversize entries: {len(memory['oversize_entries'])}",
-            f"- Duplicate entries: {len(memory['duplicate_entries'])}",
-            f"- Invisible Unicode entries: {len(memory['invisible_unicode'])}",
-            f"- Region marker errors: {len(memory['marker_errors'])}",
-            f"- Pending memory proposals: {memory['pending_memory_proposals']}",
-            (
-                "- Event-shaped entries (belong in a log): "
-                f"{len(memory.get('event_shaped_entries', []))}"
-            ),
-            (
-                f"- Entries citing a missing path: "
-                f"{len(memory.get('stale_path_entries', []))} "
-                f"({memory.get('paths_checked', 0)} paths checked, "
-                f"{memory.get('paths_unverifiable', 0)} not verifiable here)"
-            ),
-            (
-                "- Informational superseded-state candidates: "
-                f"{len(memory.get('superseded_state_candidates', []))}"
-            ),
-        ]
-    )
-    for finding in memory.get("event_shaped_entries", [])[:5]:
-        lines.append(
-            f"  - ⚠️ [{finding['region']}] reads as a chat event "
-            f"({', '.join(finding['markers'])}): {finding['entry']}"
-        )
-    for finding in memory.get("stale_path_entries", [])[:5]:
-        lines.append(
-            f"  - ⚠️ [{finding['region']}] missing `{finding['path']}`: "
-            f"{finding['entry']}"
-        )
-    for finding in memory.get("superseded_state_candidates", [])[:5]:
-        lines.append(
-            f"  - ℹ️ [{finding['region']}] {len(finding['entries'])} entries about "
-            f"`{finding['subject']}`; check whether one supersedes the other"
-        )
+            "## 3. Skill Budget & Quality",
+            f"- Logical skills scanned: {report['skill_audit']['total_skills']}",
+            f"- Skills over 15 KiB: {report['skill_audit']['over_budget_count']}",
+            f"- Missing SKILL.md: {report['skill_audit']['missing_skill_md_count']}",
+        ])
+        for issue in report["skill_audit"]["issues"]:
+            lines.append(f"  - ⚠️ {issue['message']}")
 
-    lines.extend(
-        [
-            "",
-            "## 6. Background Automation",
-            (
-                "- Unresolved latest job failures: "
-                f"{report['job_runs_audit']['failed_runs']}/"
-                f"{report['job_runs_audit']['latest_jobs']}"
-            ),
-        ]
-    )
-    for failure in report["job_runs_audit"]["recent_failures"]:
-        lines.append(
-            f"  - 🔴 [{failure.get('job')} at {failure.get('ts')}]: "
-            f"{failure.get('error')}"
+    if "rule_audit" in report:
+        lines.extend(
+            [
+                "",
+                "## 4. Rule Conflicts & Overlaps",
+                f"- Potential conflicts: {report['rule_audit']['rule_clashes_found']}",
+                (
+                    "- Informational exact overlaps: "
+                    f"{report['rule_audit']['rule_overlaps_found']}"
+                ),
+            ]
         )
+        for clash in report["rule_audit"]["clashes"][:5]:
+            lines.append(f"  - ⚠️ Opposite rules for `{clash['signature']}`:")
+            for source in clash["sources"]:
+                lines.append(f"    - {source}")
+
+    memory = report.get("memory_hygiene") or {}
+    if "memory_hygiene" in report:
+        lines.extend(
+            [
+                "",
+                "## 5. Memory & Context Hygiene",
+                (
+                    f"- Memory entries: {memory['memory_entries']} "
+                    f"(expired: {memory['expired_memory_entries']})"
+                ),
+                (
+                    f"- User profile entries: {memory['profile_entries']} "
+                    f"(expired: {memory['expired_profile_entries']})"
+                ),
+                f"- Invalid expiration tags: {memory['invalid_expiration_entries']}",
+                f"- Regions over cap: {len(memory['over_cap'])}",
+                f"- Oversize entries: {len(memory['oversize_entries'])}",
+                f"- Duplicate entries: {len(memory['duplicate_entries'])}",
+                f"- Invisible Unicode entries: {len(memory['invisible_unicode'])}",
+                f"- Region marker errors: {len(memory['marker_errors'])}",
+                f"- Pending memory proposals: {memory['pending_memory_proposals']}",
+                (
+                    "- Event-shaped entries (belong in a log): "
+                    f"{len(memory.get('event_shaped_entries', []))}"
+                ),
+                (
+                    f"- Entries citing a missing path: "
+                    f"{len(memory.get('stale_path_entries', []))} "
+                    f"({memory.get('paths_checked', 0)} paths checked, "
+                    f"{memory.get('paths_unverifiable', 0)} not verifiable here)"
+                ),
+                (
+                    "- Informational superseded-state candidates: "
+                    f"{len(memory.get('superseded_state_candidates', []))}"
+                ),
+                (
+                    "- Notes not verified within their type's horizon "
+                    "(informational): "
+                    f"{len(memory.get('stale_notes', []))} of "
+                    f"{memory.get('notes_checked', 0)} dated notes"
+                ),
+            ]
+        )
+        # Over-cap is actionable only when the workspace is named: a global total
+        # hides which guide is over budget. `over_cap` entries carry the owning
+        # workspace (empty = the operating workspace).
+        for finding in memory.get("over_cap", [])[:10]:
+            where = f"[{finding['workspace']}] " if finding.get("workspace") else ""
+            lines.append(
+                f"  - ⚠️ {where}{finding['region']} over cap: "
+                f"{finding['used']}/{finding['limit']} chars"
+            )
+        for finding in memory.get("event_shaped_entries", [])[:5]:
+            lines.append(
+                f"  - ⚠️ [{finding['region']}] reads as a chat event "
+                f"({', '.join(finding['markers'])}): {finding['entry']}"
+            )
+        for finding in memory.get("stale_path_entries", [])[:5]:
+            lines.append(
+                f"  - ⚠️ [{finding['region']}] missing `{finding['path']}`: "
+                f"{finding['entry']}"
+            )
+        for finding in memory.get("superseded_state_candidates", [])[:5]:
+            lines.append(
+                f"  - ℹ️ [{finding['region']}] {len(finding['entries'])} entries about "
+                f"`{finding['subject']}`; check whether one supersedes the other"
+            )
+        for finding in memory.get("stale_notes", [])[:8]:
+            lines.append(
+                f"  - ℹ️ [{finding['type']}] `{finding['path']}` unverified for "
+                f"{finding['age_days']}d (horizon {finding['threshold_days']}d, "
+                f"last checked {finding['last_verified']} via {finding['source']})"
+            )
+
+    if "job_runs_audit" in report:
+        lines.extend(
+            [
+                "",
+                "## 6. Background Automation",
+                (
+                    "- Unresolved latest job failures: "
+                    f"{report['job_runs_audit']['failed_runs']}/"
+                    f"{report['job_runs_audit']['latest_jobs']}"
+                ),
+            ]
+        )
+        for failure in report["job_runs_audit"]["recent_failures"]:
+            lines.append(
+                f"  - 🔴 [{failure.get('job')} at {failure.get('ts')}]: "
+                f"{failure.get('error')}"
+            )
+
+    if "search_index" in report:
+        # Counted in `defect_count` since it landed, but never rendered: an
+        # install whose only defect was the search index reported "Total Issues:
+        # 1" above a report with every section empty, and `--repair` - the fix -
+        # went unmentioned. A defect that changes `status` has to be legible.
+        search = report["search_index"]
+        stale = search.get("stale_rows") or []
+        unindexed = int(search.get("transcripts_unindexed") or 0)
+        if search.get("missing") or stale or unindexed:
+            lines.extend(["", "## 7. Search Index"])
+            if search.get("missing"):
+                lines.append("- ⚠️ No search index; `--repair` rebuilds it")
+            if stale:
+                lines.append(
+                    f"- ⚠️ {len(stale)} indexed row(s) point at notes that moved"
+                )
+                for row in stale[:10]:
+                    lines.append(f"  - {row}")
+                if len(stale) > 10:
+                    lines.append(f"  - … {len(stale) - 10} more")
+            if unindexed:
+                lines.append(f"- ⚠️ {unindexed} transcript archive(s) unindexed")
 
     notices = report.get("upgrade_notices", {}).get("notices", [])
     if notices:
-        lines.extend(["", "## Upgrade Actions"])
+        # Not a finding: these are optional actions a user may decline, so they
+        # render as pending work with an information icon, not as a ⚠️ defect.
+        lines.extend(["", "## Upgrade Actions (optional)"])
         for notice in notices:
             # A vault-wide notice has no workspace, and rendering the label
             # unconditionally printed a bare `****:` in front of it.
             scope = str(notice.get("workspace") or "").strip()
             prefix = f"**{scope}**: " if scope else ""
-            lines.append(f"- ⚠️ {prefix}{notice['detail']}")
+            lines.append(f"- ℹ️ {prefix}{notice['detail']}")
             # The remedy is prose containing its own backticked commands, so
             # wrapping the whole sentence in backticks nested them and broke the
             # code spans it already had.
-            lines.append(f"  - Fix: {notice['remedy']}")
+            lines.append(f"  - Suggested: {notice['remedy']}")
 
     if report["scan_errors"]:
         lines.extend(["", "## Scan Errors"])

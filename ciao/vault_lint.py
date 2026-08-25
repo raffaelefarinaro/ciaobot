@@ -407,13 +407,63 @@ def _markdown_destinations_in(text: str):
         yield _unescape_markdown_destination(target)
 
 
+def _lands_in_install(
+    vault_root: Path, lexical: Path, install_root: Path | None
+) -> bool:
+    """Whether a vault-escaping link stays inside the install, judged on paths.
+
+    Purely lexical, so it can be asked before deciding to touch the filesystem.
+    The vault's own position under the install supplies the missing prefix:
+    ``personal/memory-vault`` + ``../../work/memory-vault/People/X.md`` is
+    ``work/memory-vault/People/X.md``, which has no leading ``..`` and is
+    therefore still this install.
+    """
+    if install_root is None:
+        return False
+    try:
+        prefix = Path(vault_root).resolve().relative_to(Path(install_root).resolve())
+    except ValueError:
+        return False
+    combined = Path(os.path.normpath((prefix / lexical).as_posix()))
+    return combined != Path("..") and Path("..") not in combined.parents
+
+
+def _resolves_inside_install(resolved: Path, install_root: Path | None) -> bool:
+    """Whether an already-resolved path still sits inside the install.
+
+    The resolved-path companion to :func:`_lands_in_install`, for a link that
+    does not escape the vault lexically but still resolves outside it - a
+    symlinked vault, or a sibling root reached through one. ``resolved`` is
+    already absolute, so containment is a straight prefix check; a link that
+    leaves the install altogether stays an error.
+    """
+    if install_root is None:
+        return False
+    try:
+        resolved.relative_to(Path(install_root).resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def _markdown_link_error(
     *,
     vault_root: Path,
     file: _VaultFile,
     target: str,
     valid_paths: set[str],
+    install_root: Path | None = None,
 ) -> dict[str, str] | None:
+    """One flagged link, or None.
+
+    ``install_root`` makes cross-root links legal. After the re-rooting a note
+    in ``personal/memory-vault`` that links a colleague in
+    ``work/memory-vault`` MUST leave its own vault — that is the layout, not a
+    defect. Judged lexically, every such link came back ``outside_vault``, so a
+    correctly migrated vault carried a permanent count of "broken" links that
+    all resolved. A link is still an error when it escapes the whole install or
+    lands on nothing.
+    """
     if not target or "<" in target or ">" in target:
         return None
     if target.startswith(("//", "/", "#")):
@@ -442,6 +492,19 @@ def _markdown_link_error(
         os.path.normpath((file.relative.parent / decoded_path).as_posix())
     )
     if lexical == Path("..") or Path("..") in lexical.parents:
+        # Containment is decided lexically, before any filesystem probe: a
+        # sibling-root link must be allowed WITHOUT statting paths outside the
+        # vault, because whether an outside file exists must never change what
+        # the linter reports (`test_outside_target_presence_does_not_change_
+        # sanitized_finding`). Only a target that stays inside the install is
+        # probed, and only then to confirm it is real.
+        if _lands_in_install(vault_root, lexical, install_root):
+            candidate = (file.path.parent / decoded_path)
+            try:
+                if candidate.resolve(strict=False).is_file():
+                    return None
+            except (OSError, RuntimeError, ValueError):
+                pass
         return {
             "source": file.relative.as_posix(),
             "target": target,
@@ -462,6 +525,11 @@ def _markdown_link_error(
     try:
         relative = resolved.relative_to(root)
     except ValueError:
+        # Inside the install is not enough on its own: the lexical branch above
+        # probes the target before clearing it, and a cross-root link to a file
+        # that does not exist is still a broken link.
+        if _resolves_inside_install(resolved, install_root) and resolved.is_file():
+            return None
         return {
             "source": file.relative.as_posix(),
             "target": target,
@@ -486,7 +554,7 @@ def _is_non_local_decoded_path(path: str) -> bool:
     return windows_path.is_absolute() or bool(windows_path.root)
 
 
-def run_validation(vault_root: Path) -> dict:
+def run_validation(vault_root: Path, *, install_root: Path | None = None) -> dict:
     """Read-only scan for four vault health result lists.
 
     The returned keys are ``orphans``, ``duplicates``, ``frontmatter_errors``,
@@ -604,6 +672,7 @@ def run_validation(vault_root: Path) -> dict:
                 file=file,
                 target=target,
                 valid_paths=valid_paths,
+                install_root=install_root,
             )
             if error is not None:
                 issues["broken_markdown_links"].append(error)

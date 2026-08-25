@@ -6,9 +6,9 @@ one vault was ever curated and every work contact was filed under
 `personal/People/`.
 
 A routine is fanned out only when its inputs *and* write targets are partitioned
-per workspace (curation). Routines whose subject is a shared artifact — one
-`INDEX.md`, one global skill catalog — stay single, because N runs would rebuild
-the same thing N times.
+per workspace (curation, hygiene). Routines whose subject is shared — the global
+runtime directory, one skill catalog — stay single, because N runs would redo the
+same work and report one problem N times.
 
 The set is derived on every read, not persisted: `list_entries` drops runtime
 rows with `scope == "system"`, so it cannot be extended by writing to
@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+import pytest
 
 from ciao.job_runs import automation_summary
 from ciao.schedules import (
@@ -71,17 +73,21 @@ def test_curation_becomes_one_entry_per_workspace(tmp_path: Path) -> None:
 
 
 def test_global_routines_stay_single(tmp_path: Path) -> None:
-    """Only routines whose subject is a shared artifact stay single.
+    """Only routines whose subject is shared stay single.
 
-    `system-vault-index` regenerates one INDEX.md + VOCABULARY.md for the whole
-    vault; `system-skill-evolution` reasons about one global skill catalog. N runs
-    of either would redo identical work.
+    `system-install-health` reports the audit sections whose subject is the
+    global runtime directory — job failures and pending upgrade actions — which
+    are identical in every workspace; `system-skill-evolution` reasons about one
+    skill catalog, which stays one until the re-rooting has run and the user has
+    triaged it. N runs of either would redo identical work, and for
+    install-health it would also report one problem as N.
     """
     ids = _ids(_store(tmp_path, "personal", "work"))
 
-    assert ids.count("system-vault-index") == 1
+    assert ids.count("system-install-health") == 1
     assert ids.count("system-skill-evolution") == 1
-    assert not any(item.startswith("system-vault-index@") for item in ids)
+    assert not any(item.startswith("system-install-health@") for item in ids)
+    assert not any(item.startswith("system-skill-evolution@") for item in ids)
 
 
 def test_hygiene_is_fanned_out_per_workspace(tmp_path: Path) -> None:
@@ -154,6 +160,75 @@ def test_per_workspace_enable_is_independent(tmp_path: Path) -> None:
     assert rows["system-memory-curation@personal"].enabled is True
 
 
+def test_a_disabled_routine_stays_disabled_after_the_fan_out(tmp_path: Path) -> None:
+    """The upgrade path.
+
+    The overlay used to be keyed by the bare definition id; the fan-out changed
+    the key to `<base>@<workspace>` with no migration, so on the first read after
+    an upgrade the new key held nothing and the packaged `enabled: true` won — a
+    routine the user had deliberately switched off started running again, in
+    every workspace.
+    """
+    _write_state(tmp_path, {"system-memory-curation": {"enabled": False}})
+
+    rows = {
+        entry.schedule_id: entry
+        for entry in _store(tmp_path, "personal", "work").list_entries()
+    }
+
+    assert rows["system-memory-curation@personal"].enabled is False
+    assert rows["system-memory-curation@work"].enabled is False
+
+
+def test_a_migrated_row_outranks_the_pre_fan_out_key(tmp_path: Path) -> None:
+    """The legacy key is only a fallback: a row that already has its own state
+    keeps it, so re-enabling one workspace's row is not undone by the old value.
+    """
+    _write_state(
+        tmp_path,
+        {
+            "system-memory-curation": {"enabled": False},
+            "system-memory-curation@work": {"enabled": True},
+        },
+    )
+
+    rows = {
+        entry.schedule_id: entry
+        for entry in _store(tmp_path, "personal", "work").list_entries()
+    }
+
+    assert rows["system-memory-curation@work"].enabled is True
+    assert rows["system-memory-curation@personal"].enabled is False
+
+
+def test_the_legacy_overlay_carries_the_last_run_forward(tmp_path: Path) -> None:
+    """The rest of the overlay migrates too, so the upgrade does not also replay
+    a missed occurrence in every workspace at once."""
+    _write_state(
+        tmp_path,
+        {"system-memory-curation": {"enabled": True, "last_triggered_on": "2026-08-19"}},
+    )
+
+    rows = {
+        entry.schedule_id: entry
+        for entry in _store(tmp_path, "personal", "work").list_entries()
+    }
+
+    assert rows["system-memory-curation@work"].last_triggered_on == "2026-08-19"
+
+
+def test_a_single_routine_still_reads_its_own_key(tmp_path: Path) -> None:
+    """The fallback must not make an un-fanned routine read some other key."""
+    _write_state(tmp_path, {"system-install-health": {"enabled": False}})
+
+    rows = {
+        entry.schedule_id: entry
+        for entry in _store(tmp_path, "personal", "work").list_entries()
+    }
+
+    assert rows["system-install-health"].enabled is False
+
+
 def test_a_stale_workspace_in_the_overlay_no_longer_shadows_the_definition(
     tmp_path: Path,
 ) -> None:
@@ -211,6 +286,85 @@ def test_replace_round_trips_a_fanned_out_row(tmp_path: Path) -> None:
     )
     assert sibling is not None
     assert sibling.last_triggered_on == ""
+
+
+def test_replace_refuses_to_move_a_fanned_out_row(tmp_path: Path) -> None:
+    """The update APIs reported a move the identity cannot represent.
+
+    `workspace` is an allowed system-schedule change and `replace` persisted it,
+    but `_system_entries` drops it again for a fanned-out row because the
+    workspace comes from the id suffix. So the caller got a payload naming
+    `personal` and the next read said `work`: a move confirmed to a caller that
+    never happened. The refusal has to name the reason, since "it moved, then it
+    didn't" is not something the caller can diagnose.
+    """
+    store = _store(tmp_path, "personal", "work")
+    entry = store.get("system-memory-curation@work")
+    assert entry is not None
+    entry.workspace = "personal"
+
+    with pytest.raises(ValueError) as excinfo:
+        store.replace(entry)
+
+    message = str(excinfo.value)
+    assert "system-memory-curation@work" in message
+    assert "once per workspace" in message
+    # Nothing was written, so the row is not left half-moved either.
+    assert not (tmp_path / "system_schedules_state.json").exists()
+    reloaded = _store(tmp_path, "personal", "work").get("system-memory-curation@work")
+    assert reloaded is not None
+    assert reloaded.workspace == "work"
+
+
+def test_replace_refuses_a_blank_workspace_on_a_fanned_out_row(
+    tmp_path: Path,
+) -> None:
+    """The PATCH route blanks an unrecognised workspace name rather than
+    rejecting it, so "" arrives here as a move too — and it would be ignored the
+    same way."""
+    store = _store(tmp_path, "personal", "work")
+    entry = store.get("system-memory-curation@work")
+    assert entry is not None
+    entry.workspace = ""
+
+    with pytest.raises(ValueError):
+        store.replace(entry)
+
+
+def test_a_case_only_workspace_difference_is_not_a_move(tmp_path: Path) -> None:
+    """The control plane lower-cases its target workspace before saving, so a
+    registry name with capitals would otherwise make every enable toggle on that
+    row fail."""
+    store = _store(tmp_path, "personal", "Work")
+    entry = store.get("system-memory-curation@Work")
+    assert entry is not None
+    entry.workspace = "work"
+    entry.enabled = False
+
+    store.replace(entry)
+
+    reloaded = _store(tmp_path, "personal", "Work").get("system-memory-curation@Work")
+    assert reloaded is not None
+    assert reloaded.enabled is False
+    assert reloaded.workspace == "Work"
+
+
+def test_a_single_routine_can_still_be_moved_between_workspaces(
+    tmp_path: Path,
+) -> None:
+    """The workspace is identity only for a fanned-out row. `system-install-health`
+    has one row for a shared subject, so pointing it at a workspace is a real
+    setting and must keep working."""
+    store = _store(tmp_path, "personal", "work")
+    entry = store.get("system-install-health")
+    assert entry is not None
+    entry.workspace = "work"
+
+    store.replace(entry)
+
+    reloaded = _store(tmp_path, "personal", "work").get("system-install-health")
+    assert reloaded is not None
+    assert reloaded.workspace == "work"
 
 
 # ---- consumers of the literal ids -----------------------------------------

@@ -38,12 +38,14 @@ from ciao.providers.opencode import (
     mode_settings,
     opencode_collab_tree_counts,
     opencode_default_model,
+    resolve_opencode_binary,
     _session_handover_text,
     split_model,
     unresolved_placeholders,
     usage_payload,
     workspace_config_placeholder_problems,
 )
+from ciao.execution_modes import MCP_SERVER_NAME
 
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
 
@@ -53,11 +55,6 @@ def _provider(tmp_path: Path) -> OpencodeProvider:
 
 
 # ── capabilities ────────────────────────────────────────────────────────
-
-
-def test_steer_is_unsupported():
-    """opencode has no API to inject into a running turn (see the plan doc)."""
-    assert OpencodeProvider.capabilities.steer is False
 
 
 def test_quota_is_unsupported():
@@ -73,7 +70,7 @@ def test_background_subagents_are_supported():
 
 @pytest.mark.asyncio
 async def test_steer_never_sends_a_second_prompt(tmp_path):
-    """Returning False keeps the message in ProviderService's next-turn queue.
+    """Returning False keeps the message in the next-turn queue.
 
     Sending a second prompt instead would either queue it out of order or
     abort the active turn; neither is steering.
@@ -198,12 +195,16 @@ def test_bypass_allows_everything_and_normal_asks():
     assert "edit" not in _actions("normal")
 
 
-def test_auto_allows_edits_but_still_gates_shell():
-    """Auto mode applies edits automatically; bash stays behind the wildcard."""
+def test_auto_allows_everything_but_keeps_shell_and_destructive_mcp_gated():
+    """Auto's permissive default allows every tool outright; only bash and the
+    destructive control-plane tools stay behind an ask so their events reach
+    the classifier/operator."""
     actions = _actions("auto")
-    assert actions["edit"] == "allow"
-    assert actions["*"] == "ask"
-    assert "bash" not in actions
+    assert actions["*"] == "allow"
+    assert actions["bash"] == "ask"
+    assert "edit" not in actions
+    assert actions[f"{MCP_SERVER_NAME}_chat_delete"] == "ask"
+    assert actions[f"{MCP_SERVER_NAME}_background_run_start"] == "ask"
 
 
 def test_plan_mode_is_read_only():
@@ -909,23 +910,23 @@ async def test_bypass_mode_approves_without_a_card(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_approves_a_read_only_bash_command(tmp_path, caplog):
-    provider, client = _armed_provider(tmp_path, "auto")
-    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
-        events = _convert(provider, "permission.asked", LIVE_PERMISSION)
-    assert events == []
-    await _drain_tasks()
-    # "once", never "always": the "always" reply whitelists opencode's
-    # suggested pattern for the session, which could over-approve.
-    assert client.calls == [("/permission/per_live1/reply", {"reply": "once"})]
-    # Each decision is auditable in the log.
-    logged = [record.getMessage() for record in caplog.records]
-    assert any("auto-approved bash" in line and "echo approved-ok" in line for line in logged)
-
-
-def test_auto_mode_surfaces_an_unsafe_bash_command(tmp_path):
+async def test_auto_mode_approves_any_non_destructive_bash_command(tmp_path, caplog):
+    """The permissive auto default allows any non-destructive shell command,
+    not just read-only ones."""
     provider, client = _armed_provider(tmp_path, "auto")
     payload = {**LIVE_PERMISSION, "metadata": {"command": "git status && git push"}}
+    with caplog.at_level("INFO", logger="ciao.providers.opencode"):
+        events = _convert(provider, "permission.asked", payload)
+    assert events == []
+    await _drain_tasks()
+    assert client.calls == [("/permission/per_live1/reply", {"reply": "once"})]
+    logged = [record.getMessage() for record in caplog.records]
+    assert any("auto-approved bash" in line and "git push" in line for line in logged)
+
+
+def test_auto_mode_surfaces_a_destructive_bash_command(tmp_path):
+    provider, client = _armed_provider(tmp_path, "auto")
+    payload = {**LIVE_PERMISSION, "metadata": {"command": "rm -rf /tmp/cache"}}
     events = _convert(provider, "permission.asked", payload)
     assert isinstance(events[0], PermissionRequestEvent)
     assert "per_live1" in provider._permission_requests
@@ -955,10 +956,9 @@ async def test_auto_mode_approves_a_read_only_tool_from_a_stale_ruleset(tmp_path
     assert client.calls == [("/permission/perm_ls/reply", {"reply": "once"})]
 
 
-def test_auto_mode_still_surfaces_non_read_only_tools(tmp_path):
-    """`edit` is allowed by a fresh auto ruleset, but an *ask* for it (stale
-    session, or an opencode judgment call) is not verifiably read-only, so it
-    keeps the card."""
+def test_auto_mode_surfaces_a_non_read_only_tool_ask(tmp_path):
+    """A stale session can still raise an *ask* for an already-allowed tool; a
+    non-read-only tool ask is not auto-approved, so it keeps the card."""
     provider, client = _armed_provider(tmp_path, "auto")
     events = _convert(
         provider,
@@ -1261,9 +1261,9 @@ class _FakeEventStream:
     def raise_for_status(self) -> None:
         return None
 
-    async def aiter_lines(self):
+    async def aiter_bytes(self):
         for line in self._lines:
-            yield line
+            yield line.encode("utf-8")
 
     async def __aenter__(self):
         return self
@@ -1303,7 +1303,7 @@ async def _run_fixture_turn(provider, monkeypatch, name: str, session_id: str):
     from ciao.models import AgentRequest
 
     lines = [
-        f"data: {line}"
+        f"data: {line}\n\n"
         for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
@@ -1343,7 +1343,7 @@ async def test_current_mode_is_set_before_session_setup(tmp_path, monkeypatch):
     """A resumed session must classify setup-time permission events by this turn."""
     provider = _provider(tmp_path)
     lines = [
-        f"data: {line}"
+        f"data: {line}\n\n"
         for line in (FIXTURES / "turn_with_tool.jsonl").read_text(
             encoding="utf-8"
         ).splitlines()
@@ -1489,6 +1489,78 @@ async def test_database_lock_during_startup_retries_after_contention(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
+    """A live-but-wedged server must be treated like the SQLite lock it is.
+
+    ``opencode serve`` staying up but never answering 200 means it is blocked
+    on startup (shared database migration). That is the same recoverable
+    contention as ``database is locked``, so ``_ensure_server`` must retry
+    rather than failing the classifier run outright.
+    """
+    provider = _provider(tmp_path)
+    attempts: list[int] = []
+    delays: list[float] = []
+
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = None
+            self.stderr = None
+
+        def terminate(self):
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*_args, **_kwargs):
+        attempts.append(len(attempts) + 1)
+        return FakeProcess()
+
+    async def fake_health():
+        if len(attempts) == 1:
+            raise TimeoutError("opencode serve did not become healthy: server stayed alive but never answered /global/health")
+
+    async def fake_sleep(delay: float):
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
+    )
+    monkeypatch.setattr("ciao.providers.opencode._free_port", lambda: 43123)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("ciao.providers.opencode.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(provider, "_await_health", fake_health)
+
+    async def noop(*_args):
+        return None
+
+    monkeypatch.setattr(provider, "_verify_contract", noop)
+    monkeypatch.setattr(provider, "_register_control_plane", noop)
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+
+    await provider._ensure_server(Request())  # type: ignore[arg-type]
+
+    assert attempts == [1, 2]
+    assert delays == [0.25]
+    await provider.disconnect()
+
+
+def test_health_failure_reason_says_what_the_poll_saw():
+    """A wedged server must not trail a bare empty ``: `` in the error."""
+    from ciao.providers.opencode import _health_failure_reason
+
+    assert _health_failure_reason(503, None) == "health returned HTTP 503"
+    assert _health_failure_reason(None, ConnectionRefusedError("refused")) == "refused"
+    assert (
+        _health_failure_reason(None, None)
+        == "server stayed alive but never answered /global/health"
+    )
+
+
+@pytest.mark.asyncio
 async def test_missing_binary_names_the_override_env_var(tmp_path, monkeypatch):
     provider = _provider(tmp_path)
     monkeypatch.setattr(
@@ -1612,8 +1684,7 @@ def test_live_fixture_carries_no_credentials(tmp_path):
 def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     """The PWA gates its UI on `providers[].capabilities`, not on provider ids.
 
-    In particular the composer's "this queues rather than steers" note keys off
-    `steer`, so the flag has to survive the round trip to the API.
+    Capabilities survive the round trip to the /api/models payload.
     """
     import asyncio
     from types import SimpleNamespace
@@ -1622,7 +1693,6 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     from starlette.requests import Request
 
     from ciao.config import CiaoConfig
-    from ciao.providers.codex import CodexProvider
     from ciao.web.routes_api import list_models
 
     config = CiaoConfig(
@@ -1631,7 +1701,6 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
     )
-    monkeypatch.setattr(CodexProvider, "model_catalog", AsyncMock(return_value=[]))
     monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[
         {"model": "opencode/big-pickle", "label": "Big Pickle (opencode)"},
     ]))
@@ -1645,9 +1714,6 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     payload = json.loads(asyncio.run(list_models(_request())).body)
 
     by_id = {item["id"]: item for item in payload["providers"]}
-    assert by_id["opencode"]["capabilities"]["steer"] is False
-    assert by_id["claude"]["capabilities"]["steer"] is True
-    assert by_id["codex"]["capabilities"]["steer"] is True
     assert by_id["opencode"]["capabilities"]["background_subagents"] is True
     assert by_id["opencode"]["short_label"] == "opencode"
     assert payload["opencode_models"] == ["opencode/big-pickle"]
@@ -1658,7 +1724,6 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
     assert OpencodeProvider.model_catalog.await_args.kwargs["force"] is False
     asyncio.run(list_models(_request(b"refresh=1")))
     assert OpencodeProvider.model_catalog.await_args.kwargs["force"] is True
-    assert CodexProvider.model_catalog.await_args.kwargs["force"] is True
 
 
 # ── credential reporting ────────────────────────────────────────────────
@@ -1732,12 +1797,11 @@ def test_dynamic_catalog_providers_skip_the_configured_model_check():
     serves its own catalog, so `opencode/hy3-free` was rejected with
     "Unknown model ... (configured models: opus, sonnet, haiku, ...)". The
     exemption is keyed on the `dynamic_models` capability so it covers any
-    such provider, not just Codex by name.
+    any such provider, not just one hard-coded provider name.
     """
     from ciao.provider_service import capabilities_for
 
     assert capabilities_for("opencode").dynamic_models is True
-    assert capabilities_for("codex").dynamic_models is True
     # Claude's catalog is configured, so it must stay validated.
     assert capabilities_for("claude").dynamic_models is False
     # An unknown provider must not be waved through.
@@ -1878,10 +1942,9 @@ async def test_an_empty_catalog_is_cached_only_briefly(tmp_path, monkeypatch):
 async def test_the_control_plane_mcp_is_attached_with_a_literal_token(tmp_path):
     """Ciaobot's own MCP must reach the chat, or opencode has no memory/vault.
 
-    Two things are pinned. First that it is registered at all: Claude gets it
-    via `options.mcp_servers` and Codex via `-c mcp_servers.ciaobot.*`, and
-    opencode initially got neither, so those chats silently had no control
-    plane. Second that the token is literal: opencode's `{env:VAR}`
+    The registration is pinned because opencode initially got no control plane,
+    so those chats silently had no memory/vault tools. The token must also be
+    literal: opencode's `{env:VAR}`
     interpolation is a config-file feature and is NOT applied to configs
     registered through the API — the placeholder went out verbatim and the
     control plane would have rejected it.
@@ -1976,30 +2039,24 @@ def test_control_plane_tools_do_not_prompt_outside_plan_mode():
             for rule in mode_settings(mode)[1]
             if rule["action"] == "allow"
         }
-        assert f"{MCP_SERVER_NAME}_project_files_list" in allowed, mode
+        assert f"{MCP_SERVER_NAME}_project" in allowed, mode
         assert f"{MCP_SERVER_NAME}_chat_send" in allowed, mode
 
 
 def test_destructive_control_plane_tools_still_prompt():
-    """The allow list is enumerated, not globbed. A `ciaobot_*` rule would also
-    wave through the deletes and lifecycle actions deliberately kept out of
-    AUTO_APPROVED_MCP_TOOLS."""
+    """In the permissive auto default the wildcard is allow, so the destructive
+    control-plane tools must be pinned to `ask` explicitly (a later, more
+    specific rule wins) to keep surfacing an approval card."""
     from ciao.execution_modes import MCP_SERVER_NAME
 
-    allowed = {
-        rule["permission"]
-        for rule in mode_settings("auto")[1]
-        if rule["action"] == "allow"
-    }
+    actions = _actions("auto")
+    assert actions["*"] == "allow"
     for destructive in (
-        "chat_delete", "project_delete", "chat_stop",
-        "schedule_action", "loop_action", "project_complete",
+        "chat_delete", "project_action", "chat_stop",
+        "schedule_action", "loop_action",
         "background_run_start", "background_run_cancel",
     ):
-        assert f"{MCP_SERVER_NAME}_{destructive}" not in allowed, destructive
-    # And no wildcard snuck in that would cover them.
-    assert not any(r["permission"].endswith("*") and r["action"] == "allow"
-                   for r in mode_settings("auto")[1])
+        assert actions[f"{MCP_SERVER_NAME}_{destructive}"] == "ask", destructive
 
 
 def test_plan_mode_grants_no_control_plane_allowance():
@@ -2067,9 +2124,11 @@ def test_an_empty_argument_map_summarizes_to_nothing():
 
 
 def test_permission_events_match_the_house_convention(tmp_path):
-    """Claude and Codex both emit `system` with "Approve use of X?". A different
-    type plus a restated "opencode wants to use bash" rendered as an extra
-    transcript line beside the approval card."""
+    """opencode permission events use the shared approval-card convention.
+
+    A different type plus a restated "opencode wants to use bash" rendered as
+    an extra transcript line beside the approval card.
+    """
     provider = _provider(tmp_path)
     provider._current_mode = "normal"
     events = _convert(provider, "permission.asked", LIVE_PERMISSION)
@@ -2228,3 +2287,27 @@ async def test_resolve_model_passes_through_unqualified_ids(
 
     provider = _provider(tmp_path)
     assert await provider._resolve_model(_Client(), requested) == expected
+
+
+def test_extra_env_overlay_does_not_hide_an_exported_override(tmp_path, monkeypatch):
+    """`extra_env` is an overlay, not a replacement environment.
+
+    `_ensure_server` passes `AgentRequest.extra_env`, which never carries
+    `CIAO_OPENCODE_BIN`; reading only that overlay made the documented
+    override dead on every chat turn while the error still named it.
+    """
+    binary = tmp_path / "opencode"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CIAO_OPENCODE_BIN", str(binary))
+
+    # An unrelated per-request overlay must not mask the exported override.
+    assert resolve_opencode_binary({"OPENCODE_CONFIG": "/x"}) == str(binary.resolve())
+    # No overlay at all still reads the process environment.
+    assert resolve_opencode_binary(None) == str(binary.resolve())
+
+    # A per-request override still wins over the exported one.
+    other = tmp_path / "opencode-req"
+    other.write_text("#!/bin/sh\n")
+    assert resolve_opencode_binary(
+        {"CIAO_OPENCODE_BIN": str(other)}
+    ) == str(other.resolve())

@@ -1,19 +1,19 @@
 """Descriptors for the runtime agent providers Ciaobot can run.
 
 A *runtime provider* is a CLI or SDK that executes a whole agentic turn:
-``claude``, ``codex``, and ``opencode``. Every model Ciaobot can run belongs to
+``claude`` and ``opencode``. Every model Ciaobot can run belongs to
 one of them, and each authenticates itself -- there is no separate notion of a
 model-routing backend layered underneath.
 
 This module is the single enumeration of that set. It deliberately holds only
 data plus dotted import paths, and imports nothing from the rest of the app, so
-that ``config``, ``cli``, ``setup_status``, ``upgrade``, and the web layer can
+that ``config``, ``cli``, ``setup_status``, and the web layer can
 all read it without an import cycle and without pulling a provider SDK into
 processes that never start a turn.
 
 ``ciao/provider_service.py`` resolves the factories and owns the live provider
 instance; everything that merely needs to *enumerate* or *label* providers
-should read from here instead of repeating a ``{"claude", "codex"}`` literal.
+should read from here instead of repeating a provider-id literal.
 """
 
 from __future__ import annotations
@@ -52,9 +52,6 @@ class ProviderDescriptor:
     # **unused) -> dict``; see ``ciao/setup_status.py``. Empty means the
     # provider contributes no Settings connection row.
     status_probe_path: str = ""
-    # ``module:attr`` for ``async () -> UpgradeResult``. Empty means the
-    # provider's CLI is not upgraded by ``ciao upgrade``.
-    upgrade_path: str = ""
     # Name of the ``CiaoConfig`` attribute holding this provider's operator
     # default-model setting (a dataclass with a ``default_model`` field).
     # Empty means the provider has no operator-settable default model.
@@ -105,12 +102,6 @@ class ProviderDescriptor:
         probe = getattr(import_module(module_name), attr)
         return dict(probe(env, **context))
 
-    def upgrade_callable(self):
-        """Return this provider's CLI upgrade coroutine function."""
-        module_name, _, attr = self.upgrade_path.partition(":")
-        return getattr(import_module(module_name), attr)
-
-
 _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
     ProviderDescriptor(
         id="claude",
@@ -121,25 +112,8 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         auth_command_path="ciao.providers.claude:auth_command",
         system_skills_path="ciao.setup_status:discover_claude_system_skills",
         status_probe_path="ciao.setup_status:claude_status_probe",
-        upgrade_path="ciao.upgrade:upgrade_claude_code",
         thinking_levels=("low", "medium", "high", "xhigh", "max"),
         default_model_config_key="claude_default_model",
-    ),
-    ProviderDescriptor(
-        id="codex",
-        label="OpenAI (via Codex)",
-        short_label="Codex",
-        cli_label="OpenAI Codex",
-        factory_path="ciao.providers.codex:CodexProvider",
-        auth_command_path="ciao.providers.codex:auth_command",
-        system_skills_path="ciao.providers.codex:codex_system_skills",
-        status_probe_path="ciao.setup_status:codex_status_probe",
-        upgrade_path="ciao.upgrade:upgrade_codex",
-        default_model_settings_attr="codex",
-        # The model catalog is authoritative and the API narrows this per
-        # model. This union is the validation fallback when discovery is
-        # unavailable.
-        thinking_levels=("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
     ),
     ProviderDescriptor(
         id="opencode",
@@ -150,7 +124,6 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         auth_command_path="ciao.providers.opencode:auth_command",
         system_skills_path="ciao.providers.opencode:opencode_system_skills",
         status_probe_path="ciao.setup_status:opencode_status_probe",
-        upgrade_path="ciao.upgrade:upgrade_opencode",
         default_model_settings_attr="opencode",
         # opencode calls reasoning effort a model `variant`. The catalog is
         # authoritative and narrows this per model; the union is the validation

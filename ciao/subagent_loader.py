@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from ciao.web.commands import _FRONTMATTER_RE, _parse_frontmatter
 
@@ -98,35 +96,6 @@ def parse_subagent_folder(folder: Path) -> SubagentManifest | None:
         tools=sorted(tools),
         resources=sorted(resources, key=lambda p: p.name),
     )
-
-
-def discover_subagents(workspace: Path) -> dict[str, SubagentManifest]:
-    """Discover all subagents in `<workspace>/subagents/`.
-
-    Folder-based subagents take precedence over single-file subagents with the
-    same name stem.
-    """
-    subagents_dir = workspace / "subagents"
-    if not subagents_dir.is_dir():
-        return {}
-
-    manifests: dict[str, SubagentManifest] = {}
-
-    # 1. Discover single-file subagents
-    for item in sorted(subagents_dir.iterdir(), key=lambda p: p.name):
-        if item.is_file() and item.suffix == ".md":
-            manifest = parse_subagent_file(item)
-            if manifest:
-                manifests[manifest.name] = manifest
-
-    # 2. Discover folder-based subagents (shadowing single files if duplicate name)
-    for item in sorted(subagents_dir.iterdir(), key=lambda p: p.name):
-        if item.is_dir() and not item.name.startswith("."):
-            manifest = parse_subagent_folder(item)
-            if manifest:
-                manifests[manifest.name] = manifest
-
-    return manifests
 
 
 def scaffold_subagent(workspace: Path, name: str) -> Path:

@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rail notification badges — before / after</title>
+<style>
+  :root {
+    --bg: #1a1a2e; --surface: #1f2240; --hi: #2a2e54; --elev: #23264a;
+    --fg: #e8e8f0; --fg2: #b4b4c4; --fg3: #7a7a90;
+    --border: #2e3258; --accent: #ff4d6d; --error: #f44336;
+    --warn: #ff9800; --ok: #4caf50;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    --mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f4f4fa; --surface: #ffffff; --hi: #e6e8f4; --elev: #ffffff;
+      --fg: #1a1a2e; --fg2: #5f607d; --fg3: #8a8ba0;
+      --border: #d2d4e3; --accent: #d81b60;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); }
+  h1 { font-size: 16px; letter-spacing: -0.02em; margin: 0 0 2px; }
+  .sub { color: var(--fg2); font-size: 12px; font-family: var(--mono); margin: 0 0 14px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
+  .seg button { appearance: none; border: none; background: transparent; color: var(--fg2); font: 600 12px var(--mono);
+    padding: 8px 16px; cursor: pointer; }
+  .seg button.on { background: var(--accent); color: #fff; }
+  h2 { font-size: 12px; font-family: var(--mono); letter-spacing: .5px; text-transform: uppercase; color: var(--fg2); margin: 22px 0 8px; }
+
+  /* ---- phone-frame mock ---- */
+  .frame { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 10px; display: flex; gap: 12px; align-items: stretch; }
+  .rail { display: flex; flex-direction: column; gap: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 6px; }
+  .ritem { position: relative; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
+    color: var(--fg2); border-radius: 10px; border: none; background: transparent; }
+  .ritem.active { color: var(--accent); background: var(--hi); box-shadow: inset 2px 0 0 var(--accent); }
+  .ritem.working svg { color: var(--ok); }
+  .pill { position: absolute; top: 3px; right: 3px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
+    background: var(--error); color: #fff; font: 600 10px/16px var(--mono); text-align: center; }
+  .dot { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 999px; background: var(--accent); }
+  .pane { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .pane-tag { font: 600 11px var(--mono); color: var(--fg3); letter-spacing: .5px; }
+
+  /* ---- workspace toggle ---- */
+  .wtoggle { display: flex; flex-direction: column; gap: 6px; }
+  .wbtn { display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 10px; color: var(--fg); font-size: 13px; }
+  .wbtn.active { border-color: var(--accent); }
+  .wkey { font: 600 10px var(--mono); color: var(--fg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; }
+  .wname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wdot { width: 8px; height: 8px; border-radius: 999px; background: var(--accent); flex: none; }
+  .wcount { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--error); color: #fff;
+    font: 600 11px/18px var(--mono); text-align: center; flex: none; }
+  .wmissed { background: var(--warn); }
+
+  /* ---- annotations ---- */
+  .tag { display: inline-block; font: 600 10px var(--mono); letter-spacing: .4px; border-radius: 4px; padding: 2px 6px; margin-left: 8px; vertical-align: 1px; }
+  .tag.new { background: var(--accent); color: #fff; }
+  .tag.kept { border: 1px solid var(--border); color: var(--fg3); }
+  .tag.moved { border: 1px dashed var(--accent); color: var(--accent); }
+  .notes { margin: 14px 0 0; padding: 12px; background: var(--elev); border: 1px solid var(--border); border-radius: 10px; }
+  .notes li { margin: 6px 0 6px 16px; font-size: 13px; color: var(--fg2); }
+  .notes code { font: 600 11px var(--mono); color: var(--fg); background: var(--hi); border-radius: 4px; padding: 1px 5px; }
+  .inbox { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+  .inbox-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 5px 2px; }
+  .tier { font: 600 11px var(--mono); letter-spacing: .5px; text-transform: uppercase; color: var(--fg2); }
+  .tier b { color: var(--accent); }
+  .quiet-btn { font: 600 11px var(--mono); color: var(--fg3); border: none; background: none; padding: 2px 4px; border-radius: 4px; }
+  .hidden { display: none !important; }
+  .legend { font-size: 12px; color: var(--fg3); font-family: var(--mono); margin-top: 10px; }
+</style>
+</head>
+<body>
+  <h1>Rail badges — attention signals move onto destination icons</h1>
+  <p class="sub">docs/plans/RAIL_NOTIFICATION_BADGES_PLAN.md · illustrative counts · D-01…D-04</p>
+
+  <div class="seg" role="tablist" aria-label="State">
+    <button id="b" type="button">Before</button>
+    <button id="a" type="button" class="on">After</button>
+  </div>
+
+  <!-- ================= RAIL ================= -->
+  <h2>Collapsed nav rail</h2>
+  <div class="frame" id="mock">
+    <div class="rail" aria-hidden="true">
+      <span class="ritem active" title="chats">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"><rect x="3" y="4" width="18" height="14"/><line x1="6" y1="9" x2="14" y2="9"/><line x1="6" y1="13" x2="18" y2="13"/><polyline points="8 18 8 21 11 18"/></svg>
+        <span class="pill only-after">3</span>
+      </span>
+      <span class="ritem working" title="automations — warning tint kept">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"><rect x="3" y="3" width="18" height="18"/><line x1="12" y1="3" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="21"/><line x1="3" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="21" y2="12"/><polyline points="12 8 12 12 15 14"/></svg>
+      </span>
+      <span class="ritem" title="memory">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"><path d="M4 4h16v12H4z"/><path d="M4 16h16v4H4z"/><line x1="8" y1="8" x2="16" y2="8"/></svg>
+        <span class="pill only-after">5</span>
+      </span>
+      <span class="ritem" title="settings — update dot kept">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><rect x="14" y="5" width="4" height="4" fill="currentColor"/><rect x="7" y="10" width="4" height="4" fill="currentColor"/><rect x="15" y="15" width="4" height="4" fill="currentColor"/></svg>
+        <span class="dot"></span>
+      </span>
+      <span class="ritem only-before" title="notifications bell — removed after">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span class="pill">3</span>
+      </span>
+    </div>
+    <div class="pane">
+      <span class="pane-tag" id="panetag">home</span>
+      <div class="inbox">
+        <div class="inbox-row"><span class="tier">needs you <b>1</b></span><button class="quiet-btn only-after" type="button">mark all read</button></div>
+        <div class="inbox-row"><span class="tier">working <b>1</b></span></div>
+        <div class="inbox-row"><span class="tier">unread <b>2</b></span></div>
+      </div>
+      <span class="legend">The home screen stays the inbox. “Mark all read” moves here from the bell panel <span class="tag moved">moved</span><span class="only-before tag kept">was in bell panel</span></span>
+    </div>
+  </div>
+
+  <!-- ================= WORKSPACE TOGGLES ================= -->
+  <h2>Workspace toggle, per section <span class="tag new">chats count new on memory</span></h2>
+  <div id="sections">
+    <p class="sub" style="margin-bottom:8px">chats / project — unchanged <span class="tag kept">existing</span></p>
+    <div class="wtoggle">
+      <div class="wbtn"><span class="wkey">⌘1</span><span class="wname">personal</span><span class="wdot" title="needs your answer"></span><span class="wcount">2</span></div>
+      <div class="wbtn active"><span class="wkey">⌘2</span><span class="wname">work</span></div>
+    </div>
+
+    <p class="sub" style="margin:16px 0 8px">automations — missed runs, unchanged <span class="tag kept">existing</span></p>
+    <div class="wtoggle">
+      <div class="wbtn"><span class="wkey">⌘1</span><span class="wname">personal</span><span class="wcount wmissed">1</span></div>
+      <div class="wbtn active"><span class="wkey">⌘2</span><span class="wname">work</span></div>
+    </div>
+
+    <p class="sub" style="margin:16px 0 8px">memory / review — proposals per workspace <span class="tag new">new · D-04 scopedRows(ws)</span></p>
+    <div class="wtoggle" id="memtoggle">
+      <div class="wbtn"><span class="wkey">⌘1</span><span class="wname">personal</span><span class="wcount wrev">3</span></div>
+      <div class="wbtn active"><span class="wkey">⌘2</span><span class="wname">work</span><span class="wcount wrev">2</span></div>
+    </div>
+  </div>
+
+  <ul class="notes">
+    <li>Rail pills are <b>global</b> totals across workspaces <span class="tag kept">D-01</span>: chats = non-archived chats with needs-input or unread (<code>attentionChats</code>, new store computed); memory = queued proposals (<code>proposals.rows.length</code>).</li>
+    <li>Workspace-toggle counts are <b>scoped to the section</b>, matching what that page shows.</li>
+    <li>aria: “chats — N need attention”, “memory — N to review”, “N to review” per tile. Count is never the only signal — labels carry it.</li>
+    <li>Bell component deleted from rail and header; title-bar <code>(n)</code> prefix and toasts keep covering mobile/background tabs.</li>
+  </ul>
+
+<script>
+  const b = document.getElementById('b'), a = document.getElementById('a'), mock = document.getElementById('mock');
+  function setMode(after) {
+    mock.classList.toggle('after', after);
+    document.querySelectorAll('.only-after').forEach(el => el.classList.toggle('hidden', !after));
+    document.querySelectorAll('.only-before').forEach(el => el.classList.toggle('hidden', after));
+    document.querySelectorAll('.wrev').forEach(el => el.classList.toggle('hidden', !after));
+    b.classList.toggle('on', !after); a.classList.toggle('on', after);
+  }
+  b.addEventListener('click', () => setMode(false));
+  a.addEventListener('click', () => setMode(true));
+  setMode(true);
+</script>
+</body>
+</html>
