@@ -651,6 +651,10 @@ export interface GwsIntegrationProfile {
   token_valid: boolean | null
   token_error: string
   needs_relogin: boolean
+  // Whether the OAuth client accepts the random-port loopback redirect used by
+  // the one-click sign-in flow (false for web-type clients, which need an
+  // exact authorized redirect URI and therefore the manual paste flow).
+  loopback_eligible: boolean
 }
 
 export interface GwsIntegrationSettings {
