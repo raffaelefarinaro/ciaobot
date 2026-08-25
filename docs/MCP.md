@@ -175,7 +175,9 @@ fails if a new tool is added without placing it on one side of that line.
 `background_run_start` is the one tool in the catalog whose annotation is not
 about reversibility. It executes a command, and an auto-approved
 arbitrary-command tool would be a strictly wider hole than the `Bash` call it
-wraps, since a Bash call in Auto mode still passes the SDK classifier. Issue
+wraps, since a Bash call in Auto mode still resolves through opencode's
+`permission.asked` gate (reviewed by the operator, or by the
+`opencode-auto-permissions` plugin when the user opts into it). Issue
 #282 proposed `_WRITE` while describing it as "Auto-mode approval required";
 in this codebase `_DESTRUCTIVE` is the annotation that actually delivers that.
 Only the read half (`background_run_status`) is auto-approved.

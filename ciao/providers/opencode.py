@@ -63,7 +63,6 @@ from ciao.providers.base import (
 )
 from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
 from ciao.providers._sse import SSEDecoder
-from ciao.providers.safe_commands import is_destructive_command
 from ciao.tool_path import resolve_tool
 
 logger = logging.getLogger(__name__)
@@ -181,9 +180,9 @@ _MODE_AGENTS: dict[str, str] = {
 # Resolution is last-match-wins, so the wildcard goes first and the specific
 # grants follow. ``auto`` is the permissive default: every tool is allowed
 # outright except ``bash`` and Ciaobot's destructive control-plane tools,
-# which stay on the wildcard so ``_permission_event`` can classify each call
-# (see ``auto_approves_permission``). Every other mode keeps its old
-# narrower ruleset for compatibility.
+# which stay ``ask`` so each call reaches ``_permission_event`` and is judged
+# by the operator or, when installed, the ``opencode-auto-permissions``
+# reviewer plugin. Every other mode keeps its own ruleset.
 _READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
 
 # Ciaobot's control-plane mutations that must keep prompting even in the
@@ -215,13 +214,13 @@ def _rules(*entries: tuple[str, str]) -> list[dict[str, str]]:
 
 
 def _permissive_auto_rules() -> list[dict[str, str]]:
-    """The auto-mode ruleset: allow everything except removals.
+    """The auto-mode ruleset: allow routine work, ask for shell + destructive MCP.
 
-    A leading wildcard ``allow`` makes opencode run without an approval card
-    for almost every tool. ``bash`` and the destructive control-plane tools
-    are pinned to ``ask`` so their permission events reach
-    ``_permission_event``, where ``auto_approves_permission`` lets safe
-    commands through and surfaces only destructive ones to the operator.
+    A leading wildcard ``allow`` lets almost every tool run without an
+    approval card. ``bash`` stays ``ask`` so each shell command is reviewed —
+    by the operator (a Ciaobot approval card) or, when the user opts into the
+    ``opencode-auto-permissions`` plugin, by its reviewer model. The
+    destructive control-plane tools stay ``ask`` unconditionally.
     """
     return _rules(
         ("*", "allow"),
@@ -656,40 +655,6 @@ def _session_handover_text(payload: object) -> str:
     return "\n\n".join(lines)
 
 
-def auto_approves_permission(mode: BridgeMode, permission: str, command: str) -> bool:
-    """Whether a surfaced permission request is answerable without the operator.
-
-    A session's permission ruleset is fixed at creation and `PATCH` does not
-    apply (see ``_ensure_session``); mode changes rotate the session before the
-    prompt runs. In the permissive auto default the ruleset already allows
-    every tool, so the only permission events that surface are ``bash`` and the
-    destructive control-plane tools. Deciding here, on the *current* mode of
-    the turn, is what makes Auto automatic: bypass approves everything, auto
-    approves any non-destructive bash command, and every other mode (or a
-    command the classifier cannot verify) still puts a card in front of the
-    operator.
-    """
-    if mode == "bypass":
-        return True
-    if mode != "auto":
-        return False
-    if permission == "bash":
-        # A command we cannot see cannot be verified as non-destructive, so it
-        # keeps the card rather than being waved through blind.
-        #
-        # This is a DENYLIST, and a denylist fails open: a destructive form the
-        # classifier has not been taught is auto-approved, with the operator's
-        # full filesystem and credential access and no card. `is_destructive_command`
-        # covers path-qualified verbs, prefix wrappers, `xargs`, shells carrying
-        # `-c` payloads, opaque shells (`curl … | sh`), command substitution,
-        # subshells and inline interpreter code - every bypass found so far -
-        # but "so far" is the operative phrase. An allowlist would fail closed
-        # instead; keeping auto frictionless was chosen over that, so any new
-        # destructive form belongs in the classifier and its tests.
-        return bool(command) and not is_destructive_command(command)
-    return permission in _READ_ONLY_TOOLS
-
-
 def split_model(model: str) -> tuple[str, str]:
     """Split ``providerID/modelID`` into its parts.
 
@@ -794,10 +759,6 @@ class OpencodeProvider(BaseSDKProvider):
         self._session_id: str = ""
         self._session_handover_context: str = ""
         self._permission_requests: dict[str, _PendingRequest] = {}
-        # Auto-approval reply tasks. asyncio holds tasks only weakly, so a
-        # fire-and-forget task can be garbage-collected before the reply is
-        # posted; the set keeps each alive until its done-callback removes it.
-        self._auto_approve_tasks: set[asyncio.Task[None]] = set()
         self._question_requests: dict[str, _PendingRequest] = {}
         self._tool_calls: dict[str, str] = {}
         self._mcp_token: str = ""
@@ -1347,21 +1308,6 @@ class OpencodeProvider(BaseSDKProvider):
             logger.debug("opencode permission reply failed", exc_info=True)
             return False
 
-    async def _auto_approve(self, pending: _PendingRequest) -> None:
-        """Approve a request the mode has already decided, without a card.
-
-        Replies "once" rather than "always": "always" whitelists opencode's
-        suggested pattern for the rest of the session, which could over-approve
-        (e.g. `git *` from one `git status`). Each request is re-judged.
-        """
-        replied = await self._reply_permission(pending, "once")
-        if replied:
-            self._permission_requests.pop(pending.request_id, None)
-        else:
-            logger.warning(
-                "opencode auto-approval reply failed for %s", pending.request_id
-            )
-
     async def _deliver_permission_reply(
         self, pending: _PendingRequest, reply: str
     ) -> None:
@@ -1766,12 +1712,8 @@ class OpencodeProvider(BaseSDKProvider):
         # v1 names the tool in `permission`; v2 names it in `action`.
         tool_name = str(props.get("permission") or props.get("action") or "").strip()
         detail = ""
-        command = ""
         metadata = props.get("metadata")
         if isinstance(metadata, Mapping):
-            raw_command = metadata.get("command")
-            if isinstance(raw_command, str):
-                command = raw_command.strip()
             for key in ("command", "filePath", "path", "url", "pattern"):
                 value = metadata.get(key)
                 if isinstance(value, str) and value.strip():
@@ -1793,23 +1735,12 @@ class OpencodeProvider(BaseSDKProvider):
             tool_use_id=call_id,
         )
         label = tool_name or "a tool"
-        # Without a client the approval could not be posted, so fall through
-        # to the card (only reachable in tests and teardown races).
-        if self._client is not None and auto_approves_permission(
-            self._current_mode, tool_name, command
-        ):
-            logger.info(
-                "opencode auto-approved %s in %s mode: %s",
-                label, self._current_mode, detail or "(no detail)",
-            )
-            # Registered until the reply lands so the disconnect sweep can
-            # still reject it if the turn is torn down first; _auto_approve
-            # removes the entry once opencode has an answer.
-            self._permission_requests[request_id] = pending
-            task = asyncio.create_task(self._auto_approve(pending))
-            self._auto_approve_tasks.add(task)
-            task.add_done_callback(self._auto_approve_tasks.discard)
-            return []
+        # A permission event means the session ruleset resolved the action to
+        # ``ask`` — a shell command or a destructive control-plane tool in the
+        # permissive auto default, or any mutation in the narrower modes. There
+        # is no local classifier: the ``opencode-auto-permissions`` plugin
+        # answers these with a reviewer model when the user opts into it;
+        # otherwise the operator approves or denies the card.
         self._permission_requests[request_id] = pending
         return [PermissionRequestEvent(
             # `system`, and "Approve use of X?", to match the Claude

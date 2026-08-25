@@ -794,6 +794,21 @@
               <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
             </div>
 
+            <p
+              v-if="providerKeys.connections?.opencode"
+              class="hint provider-auto-mode-hint"
+            >
+              To get a Claude-Code-style automatic approval classifier in opencode chats,
+              install the <code>opencode-auto-permissions</code> plugin from a terminal:
+              <code>opencode plugin -g opencode-auto-permissions</code>. It reviews each
+              permission request with your session's model instead of showing an approval
+              card. See <a
+                href="https://opencode.ai/docs/permissions/#auto-mode"
+                target="_blank"
+                rel="noopener noreferrer"
+              >opencode permissions docs ↗</a>.
+            </p>
+
             <div v-for="(meta, key) in providerKeys.service_keys" :key="key" class="credential-row">
               <div class="setting-row-main setting-row-main--inline">
                 <div class="routine-info">
