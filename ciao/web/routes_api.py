@@ -36,6 +36,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import proposal_kinds
+from ciao import proposal_outcomes
 from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
@@ -5029,6 +5030,11 @@ async def list_automation(request: Request) -> JSONResponse:
     run, recent history, and aggregate stats. Scheduled jobs whose schedule is
     not installed here are omitted — nothing would ever trigger them.
     Read-only.
+
+    ``?include=outcomes`` answers ``{"jobs": [...], "proposal_outcomes":
+    {...}}`` instead of the bare list, adding the memory-proposal
+    promoted-vs-dismissed tally the page renders next to the job stats. The
+    default stays a bare list so existing consumers keep working unchanged.
     """
     from ciao import job_runs
 
@@ -5039,7 +5045,13 @@ async def list_automation(request: Request) -> JSONResponse:
     except Exception:  # noqa: BLE001 — no schedule manager: filter nothing
         installed = None
 
-    return JSONResponse(job_runs.automation_summary(installed_schedules=installed))
+    summary = job_runs.automation_summary(installed_schedules=installed)
+    if request.query_params.get("include", "") != "outcomes":
+        return JSONResponse(summary)
+    return JSONResponse({
+        "jobs": summary,
+        "proposal_outcomes": proposal_outcomes.tally_cached(),
+    })
 
 
 async def trigger_backfill_insights(request: Request) -> JSONResponse:
@@ -7320,9 +7332,15 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                 section_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
                 keep.append(raw_line)
                 continue
-            if proposal_kinds.parse_bullet(raw_line) is not None and section_date is not None and section_date < cutoff:
+            bullet = proposal_kinds.parse_bullet(raw_line)
+            if bullet is not None and section_date is not None and section_date < cutoff:
                 removed += 1
                 changed = True
+                # A swept row is a dismissal decision like any other; one
+                # event per row keeps the tally honest about bulk cleanup.
+                proposal_outcomes.record(
+                    kind=bullet.kind, action="dismissed", workspace=workspace, via="pwa",
+                )
                 continue
             keep.append(raw_line)
         if changed:
@@ -7354,6 +7372,10 @@ async def proposals_batch(request: Request) -> JSONResponse:
     resolved, error = _resolve_batch(config, ids)
     if error or resolved is None:
         return JSONResponse({"error": error}, status_code=404)
+    # Kept unfiltered: the outcome events at the end need every id the batch
+    # set out to resolve, including rows handled (or refused) above the
+    # grouping, so a lookup survives the reassignments below.
+    requested = list(resolved)
 
     # Re-home rows are MOVES, so they are handled before the queue-file grouping
     # too, and one at a time: each move rewrites references across both vaults, so
@@ -7499,6 +7521,22 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 results.append(result)
             else:
                 results.append({"id": row["id"], "action": "dismiss", "dismissed": True})
+
+    # One outcome event per row that actually left the queue. A result with
+    # ``dismissed`` false is an unresolved decision (a failed write, a refused
+    # promotion) and records nothing — the tally measures decisions, not
+    # attempts.
+    by_pid = {ctx["row"]["id"]: ctx for ctx in requested}
+    for result in results:
+        if not result.get("dismissed"):
+            continue
+        ctx = by_pid.get(str(result.get("id") or ""))
+        proposal_outcomes.record(
+            kind=str(ctx["row"].get("kind", "")) if ctx else "",
+            action="promoted" if action == "accept" else "dismissed",
+            workspace=str(ctx["workspace"]) if ctx else "",
+            via="pwa",
+        )
     return JSONResponse({"ok": True, "action": action, "results": results})
 
 
@@ -7666,6 +7704,9 @@ async def proposal_action(request: Request) -> JSONResponse:
         outcome = _dismiss_skill_proposal(ctx)
         if not outcome.get("ok"):
             return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
+        proposal_outcomes.record(
+            kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",
+        )
         return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
 
     promoted: dict[str, Any] = {}
@@ -7758,7 +7799,13 @@ async def proposal_action(request: Request) -> JSONResponse:
             result["promoted"] = False
             result["destination"] = row.get("rehome", {}).get("destination", "")
             result["justified"] = row.get("rehome", {}).get("justified", False)
+        proposal_outcomes.record(
+            kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
+        )
         return JSONResponse({"ok": True, "result": result})
+    proposal_outcomes.record(
+        kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",
+    )
     return JSONResponse({"ok": True, "result": {"id": pid, "action": "dismiss", "dismissed": True}})
 
 

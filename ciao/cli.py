@@ -2295,7 +2295,8 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     so the queue stops re-asking. TEXT matches one proposal by a unique
     substring.
     """
-    from ciao.memory_proposals import dismiss_proposal_by_substring
+    from ciao import proposal_outcomes
+    from ciao.memory_proposals import remove_proposal_by_substring
 
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
@@ -2303,14 +2304,20 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     if not needle:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
-    removed = dismiss_proposal_by_substring(path, needle)
-    if not removed:
+    kind = remove_proposal_by_substring(path, needle)
+    if kind is None:
         print(
             f"No unique memory proposal matched {needle!r} "
             "(the text may be ambiguous or absent).",
             file=sys.stderr,
         )
         return 1
+    proposal_outcomes.record(
+        kind=kind,
+        action="dismissed",
+        workspace=str(args.workspace) if args.workspace else "",
+        via="agent",
+    )
     if args.json:
         json.dump({"removed": True, "text": needle, "workspace": args.workspace or ""}, sys.stdout)
         sys.stdout.write("\n")

@@ -29,6 +29,12 @@
           {{ headline }}
         </p>
 
+        <!-- Whether memory extraction is useful, not only whether it ran:
+             proposals promoted vs dismissed, over time. -->
+        <p v-if="proposalsLine" class="automation-proposals" :title="proposalsTitle">
+          {{ proposalsLine }}
+        </p>
+
         <!-- Failing first: the only rows that need a decision. -->
         <section v-if="groups.attention.length" class="automation-group">
           <p class="automation-group-title automation-group-title--warn">Needs attention</p>
@@ -102,7 +108,7 @@ import {
 } from '../../lib/automationView'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
-import type { AutomationProcess, RoutineSettings } from '../../lib/types'
+import type { AutomationProcess, ProposalOutcomes, RoutineSettings } from '../../lib/types'
 import AutomationRow from './AutomationRow.vue'
 
 // The automation data and the job-telemetry read helpers live in SettingsView,
@@ -114,6 +120,9 @@ const props = defineProps<{
   automationLoaded: boolean
   automationError: string
   fetchAutomation: () => Promise<void>
+  // Promoted-vs-dismissed memory-proposal tally, or null when the server does
+  // not serve it yet (or nothing has been resolved at all).
+  proposalOutcomes?: ProposalOutcomes | null
   notifySaved: (body: string, title?: string) => void
   // The failure channel. `alert` cannot be used: it shows nothing at all in the
   // desktop webview, so a failed run looked like a button that did nothing.
@@ -131,6 +140,30 @@ const projectStore = useProjectStore()
 
 const groups = computed(() => groupAutomations(props.automationItems))
 const headline = computed(() => automationHeadline(props.automationItems))
+
+// One compact pipeline-health line beside the job stats. Hidden until at least
+// one decision exists: "0 promoted · 0 dismissed" on a fresh install reads as
+// breakage, not as an empty ledger.
+const proposalsLine = computed(() => {
+  const outcomes = props.proposalOutcomes
+  if (!outcomes || (!outcomes.promoted && !outcomes.dismissed)) return ''
+  const recent = (outcomes.recent_30d?.promoted ?? 0) + (outcomes.recent_30d?.dismissed ?? 0)
+  return (
+    `Memory proposals: ${outcomes.promoted} promoted · ` +
+    `${outcomes.dismissed} dismissed (${recent} in last 30 days)`
+  )
+})
+
+// The per-workspace split rides on the title attribute — real data, no second
+// row of UI to maintain.
+const proposalsTitle = computed(() => {
+  const entries = Object.entries(props.proposalOutcomes?.by_workspace ?? {})
+  if (!entries.length) return ''
+  return entries
+    .map(([workspace, counts]) =>
+      `${workspace || 'shared'}: ${counts.promoted} promoted · ${counts.dismissed} dismissed`)
+    .join('\n')
+})
 
 const retryModelOptions = computed(() =>
   buildRetryModelOptions(props.providerModels, props.providerLabels),
@@ -271,6 +304,11 @@ async function runJob(item: AutomationProcess, model: string) {
 
 .automation-headline--warn {
   color: var(--warning);
+}
+
+.automation-proposals {
+  margin: 0;
+  font-size: var(--text-sm);
 }
 
 .automation-group {

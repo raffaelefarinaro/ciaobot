@@ -833,6 +833,30 @@ export interface AutomationStats {
   last_error: { error: string; ts: string } | null
 }
 
+export interface ProposalOutcomeCounts {
+  promoted: number
+  dismissed: number
+}
+
+// Memory-proposal resolutions (promoted vs dismissed), the honest health
+// measure for the extraction pipeline. Served by GET /api/automation with
+// `?include=outcomes`, next to the job stats it sits beside in Settings →
+// Automation.
+export interface ProposalOutcomes {
+  promoted: number
+  dismissed: number
+  by_workspace: Record<string, ProposalOutcomeCounts>
+  recent_30d: ProposalOutcomeCounts
+}
+
+// GET /api/automation answers `?include=outcomes` with this envelope instead
+// of the bare job list; older servers ignore the hint and still answer with
+// the array.
+export interface AutomationPayload {
+  jobs: AutomationProcess[]
+  proposal_outcomes?: ProposalOutcomes
+}
+
 export interface AutomationProcess {
   job: string
   label: string
