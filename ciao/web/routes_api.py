@@ -7326,6 +7326,9 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
         keep = []
         section_date = None
         changed = False
+        # Swept rows are collected and recorded only AFTER the rewrite lands:
+        # a failed write must not leave phantom dismissals in the tally.
+        swept_kinds: list[str] = []
         for raw_line in lines:
             m = _SECTION_DATE_RE.match(raw_line)
             if m:
@@ -7336,15 +7339,15 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
             if bullet is not None and section_date is not None and section_date < cutoff:
                 removed += 1
                 changed = True
-                # A swept row is a dismissal decision like any other; one
-                # event per row keeps the tally honest about bulk cleanup.
-                proposal_outcomes.record(
-                    kind=bullet.kind, action="dismissed", workspace=workspace, via="pwa",
-                )
+                swept_kinds.append(bullet.kind)
                 continue
             keep.append(raw_line)
         if changed:
             queue.write_text("\n".join(keep).rstrip() + "\n", encoding="utf-8")
+            for kind in swept_kinds:
+                proposal_outcomes.record(
+                    kind=kind, action="dismissed", workspace=workspace, via="pwa",
+                )
     return JSONResponse({"ok": True, "removed": removed})
 
 

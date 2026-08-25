@@ -2314,24 +2314,32 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         return 1
     # Pin the outcome log to the same .runtime the server uses before
     # recording: a CLI run from an arbitrary cwd must not scatter events into
-    # a .runtime beside the shell. Default is this workspace's own .runtime,
-    # matching the --runtime-root help on the audit/receipt commands.
+    # a .runtime beside the shell. Precedence: explicit --runtime-root, then
+    # CIAO_RUNTIME_ROOT, then this workspace's own .runtime.
     proposal_outcomes.configure(
         _resolve_runtime_root(
-            args.runtime_root if args.runtime_root else workspace / ".runtime"
+            args.runtime_root
+            or os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
+            or workspace / ".runtime"
         )
     )
+    # The curator files a fact first and dismisses second, so that flow is a
+    # PROMOTION; only a bare rejection is a dismissal. The logical workspace
+    # name rides in CIAO_ACTIVE_WORKSPACE on scheduled runs (same convention
+    # as os-audit --workspace-name); a manual run without it lands in the
+    # shared bucket rather than recording a filesystem path as a name.
     proposal_outcomes.record(
         kind=kind,
-        action="dismissed",
-        workspace=str(args.workspace) if args.workspace else "",
+        action="promoted" if args.promoted else "dismissed",
+        workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
         via="agent",
     )
     if args.json:
         json.dump({"removed": True, "text": needle, "workspace": args.workspace or ""}, sys.stdout)
         sys.stdout.write("\n")
     else:
-        print(f"Dismissed memory proposal matching {needle!r}.")
+        verb = "Promoted" if args.promoted else "Dismissed"
+        print(f"{verb} memory proposal matching {needle!r}.")
     return 0
 
 
@@ -3436,6 +3444,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--promoted",
+        action="store_true",
+        help=(
+            "The fact was already filed into its destination (the "
+            "promote-then-dismiss flow); record the outcome as promoted "
+            "instead of dismissed."
+        ),
     )
     memory_proposal_dismiss_parser.add_argument(
         "--runtime-root",

@@ -186,6 +186,7 @@ def test_cli_dismiss_records_an_agent_outcome(tmp_path: Path, monkeypatch) -> No
         "# Memory Proposals\n\n- [memory] durable lesson  _(from: Decisions)_\n",
         encoding="utf-8",
     )
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
 
     rc = cli.main([
         "memory-proposal-dismiss",
@@ -204,7 +205,10 @@ def test_cli_dismiss_records_an_agent_outcome(tmp_path: Path, monkeypatch) -> No
     assert len(events) == 1
     assert events[0]["action"] == "dismissed"
     assert events[0]["kind"] == "memory"
-    assert events[0]["workspace"] == str(tmp_path)
+    # The logical workspace name from CIAO_ACTIVE_WORKSPACE, never the
+    # filesystem path the command was pointed at.
+    assert events[0]["workspace"] == "work"
+    assert events[0]["via"] == "agent"
 
     # --runtime-root overrides the default explicitly.
     rc2 = cli.main([
@@ -216,7 +220,61 @@ def test_cli_dismiss_records_an_agent_outcome(tmp_path: Path, monkeypatch) -> No
     ])
     assert rc2 != 0  # the row is gone, so the second dismiss finds no match
     assert (tmp_path / "custom-runtime" / po.PROPOSAL_OUTCOMES_NAME).exists() is False
-    assert events[0]["via"] == "agent"
+
+
+def test_cli_promote_then_dismiss_records_a_promotion(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The curator files the fact first and drops the row second; that flow is
+    a promotion, and only a bare rejection counts as dismissed."""
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [learnings] reuse the retry helper\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+
+    rc = cli.main([
+        "memory-proposal-dismiss",
+        "--promoted",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "retry helper",
+    ])
+
+    assert rc == 0
+    log = tmp_path / ".runtime" / po.PROPOSAL_OUTCOMES_NAME
+    events = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+    assert len(events) == 1
+    assert events[0]["action"] == "promoted"
+
+
+def test_cli_runtime_root_prefers_the_environment(tmp_path: Path, monkeypatch) -> None:
+    """An install pointing CIAO_RUNTIME_ROOT elsewhere keeps agent outcomes in
+    that same runtime, even without an explicit --runtime-root."""
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("# Memory Proposals\n\n- [memory] keep it simple\n", encoding="utf-8")
+    custom = tmp_path / "elsewhere"
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(custom))
+
+    rc = cli.main([
+        "memory-proposal-dismiss",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "keep it simple",
+    ])
+
+    assert rc == 0
+    assert (custom / po.PROPOSAL_OUTCOMES_NAME).is_file()
+    assert not (tmp_path / ".runtime" / po.PROPOSAL_OUTCOMES_NAME).exists()
 
 
 def test_a_refused_cli_dismiss_records_nothing(tmp_path: Path) -> None:
