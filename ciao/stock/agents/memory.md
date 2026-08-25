@@ -13,7 +13,7 @@ Curation targets:
 - Vault pages for projects, people, ideas, resources, and logs.
 - `<vault>/Workspace/Memory-Proposals.md` — the fallback review queue for durable facts. Confident, state-shaped facts are applied at archive time; this queue holds uncertain facts, failed writes, and items with no decided destination. You promote, reject, or merge the remainder. Growing proposals are a signal that memory needs consolidating.
 - `<vault>/Workspace/Skill-Proposals/` — the review queue for skill-edit suggestions. Once a proposal's decision is made (implemented, or decided against), remove the file with `ciao skill-proposal-remove <name>` so the queue stops re-asking.
-- Bounded memory regions in the workspace `CLAUDE.md`: `ciao:memory` (cross-session preferences, environment, lessons) and `ciao:profile` (identity, communication style).
+- Bounded memory regions in this workspace's own `CLAUDE.md` (each agent root holds its own): `ciao:memory` (cross-session preferences, environment, lessons) and `ciao:profile` (identity, communication style).
 
 Categories — every note you create or retype (read `<vault>/VOCABULARY.md` first, do not memorize this):
 - `type:` comes from the **canonical list** in `VOCABULARY.md`. It is a closed set; `ciao vault-lint` reports anything else as `unknown_type`. Never invent a type. If nothing fits, use the closest canonical value and raise the gap as a proposal rather than coining a synonym — that is how a vault ends up with `doc` beside `document`.
@@ -23,7 +23,7 @@ Categories — every note you create or retype (read `<vault>/VOCABULARY.md` fir
 Routing — where a durable fact belongs (decide by scope, not convenience):
 - **A person** → `<vault>/People/` for the workspace named in `<ciao-context>`, not "the" `People/`. A work contact belongs in the work vault even when you first met them in a personal chat. Workspaces are separate and there is no shared people folder: if someone spans both, file them where you deal with them most and let the other workspace's notes refer to that project instead.
 - **A specific project** → that project's canonical vault doc (and its `log.md` if present), NOT a memory region. Rule of thumb: if a fact names a project, it is not a bounded-memory fact.
-- **Cross-project preferences / environment / lessons** → the `ciao:memory` region. Only facts that are true regardless of which project is open.
+- **Cross-project preferences / environment / lessons** → the `ciao:memory` region, promoted by the user. Only facts that are true regardless of which project is open. An unattended curation run never writes the regions — it queues these in `Workspace/Memory-Proposals.md` instead; promote directly only when the user asked for it.
 - **Who the user is** (identity, role, communication and style preferences) → the `ciao:profile` region, and durable identity notes also on `People/User.md`. Never project or task facts.
 - **Reusable how-to knowledge that spans projects** → `<vault>/Workspace/Learnings.md`.
 - **Standing operating directives** ("always/never do X") → the `CLAUDE.md` body OUTSIDE the fenced regions, plus `CIAO_CUSTOMIZATION.md`. Regions hold remembered facts; the body holds instructions. If you find a remembered fact misfiled in the body, move it into `ciao:memory`; leave genuine directives in place; when unsure, propose the move.

@@ -893,25 +893,31 @@ def test_system_routines_ship_descriptions_and_set(tmp_path: Path) -> None:
         assert entry.description, f"{entry.schedule_id} missing a description"
 
 
-def test_curation_checks_the_guide_path_before_writing_a_region(tmp_path: Path) -> None:
-    """The routine runs on installs in BOTH layouts, so it must check, not assume.
+def test_curation_never_writes_a_bounded_region(tmp_path: Path) -> None:
+    """Per-workspace curation runs must not write the bounded regions.
 
-    Before the re-rooting one `CLAUDE.md` serves every workspace, and a
-    per-workspace run promoting into its regions leaks that workspace's facts
-    into all the others. After it, the regions belong to that root alone and
-    refusing to write them would strand every cross-project fact in the queue
-    forever. A static prompt cannot know which install it is on, so it is told to
-    read the guide path from `memory_status` and decide from that.
+    Each run already targets its own workspace's vault and its own agent-root
+    guide, so the old leak argument ("one CLAUDE.md serves every workspace") no
+    longer holds — but an unattended promotion would still rewrite what every
+    session of that workspace loads with nobody reviewing the judgement, so
+    cross-project facts stay queued for the user either way.
     """
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")
     assert entry is not None
     prompt = entry.prompt
+    # Option B: no region writes from this routine, in either layout.
+    assert "Do not edit the bounded" in prompt
     assert "memory_status" in prompt
     assert "agent root" in prompt
-    assert "shared install root" in prompt
-    # It must not state either layout as a fact.
-    assert "one `CLAUDE.md` is shared by every workspace, so" not in prompt
+    assert (
+        "Leave cross-project facts in the proposals queue for the user to promote"
+        in prompt
+    )
+    # No layout conditional survives: neither layout may be written.
+    assert "you may promote" not in prompt
+    assert "shared install root" not in prompt
+    assert "one `CLAUDE.md` serves every workspace" not in prompt
 
 
 def test_workspace_hygiene_runs_structured_os_audit(tmp_path: Path) -> None:

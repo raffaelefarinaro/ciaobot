@@ -176,6 +176,20 @@ word once meant two different things.
   resolves to `workspace_root` for every workspace, so it is a seam and not yet a
   distinct directory. The re-rooting release makes it a real subdirectory.
 
+`handover` is pinned for the same reason — two unrelated things share the word:
+
+- **Provider handover** moves one chat to a different provider, carrying its
+  recent turns into a fresh provider session (`ChatInfo.handover_messages`,
+  `handover_context_pending`). That flag is a persisted state key and cannot be
+  renamed; the workspace re-rooting reuses it to mark chats whose old provider
+  session was stranded by the move (`workspace_reroot.flag_stranded_sessions`),
+  which is stranded-session context carry-over, not device handover.
+- **Device handover** switches this machine between the multi-device host and
+  client roles (`ciao/node_state.py`, `/api/node/handover`; legacy
+  `active`/`standby` values persist as accepted aliases of `host`/`client`).
+
+No state is shared between the two.
+
 ## Workspace layout
 
 The app repo above is the installable package. A `workspace_root` is a separate directory (created by `ciao setup`, never committed to this repo) that holds the user's data and per-instance state: one root folder containing the vault (`memory-vault/` by default) alongside `commands/`, `subagents/`, `skills/`, `.runtime/`, and config. A fresh first logical workspace and every workspace created later in Settings are user-named folders under that configured vault root (`<vault>/<workspace-name>/`); Settings never accepts a filesystem path for them or follows a named-folder symlink outside the vault. Setup can preserve an existing notes folder in place, and upgrade compatibility can temporarily pin any older nonstandard vault root. The AI OS audit reports each nonstandard root with a Ciaobot-chat migration prompt so the model can inspect conflicts, back up the source, update the registry, and restart into the standard nested layout without moving data silently. Setup ensures the `workspace_root` is a git repository: if the chosen folder is not already inside one, it runs `git init -b main`, writes a `.gitignore` guarding `.env`, `.runtime/`, `.claude/`, and `*.log`, and makes an initial commit; pre-existing repos are left untouched apart from appending any missing `.gitignore` guards. The vault may also point elsewhere (`CIAO_VAULT_ROOT`, e.g. an existing notes folder): in that case setup initializes that folder as its own git repository (`git init -b main`, a minimal `.gitignore` for `.DS_Store` and `.obsidian/workspace*`, and an initial commit); a vault nested inside the `workspace_root` repo — the default layout — is never double-initialized.
