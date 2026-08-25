@@ -7792,8 +7792,12 @@ async def proposal_action(request: Request) -> JSONResponse:
 
     queue = Path(ctx["path"])
     lines = queue.read_text(encoding="utf-8").splitlines()
-    _remove_bullet_line(lines, ctx["line"], str(ctx["row"].get("raw") or ""))
-    queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    # A concurrent request or the CLI may have removed this bullet first; the
+    # loser must not rewrite the file around the winner's deletion, and only
+    # the request that actually removed the row records its outcome.
+    removed_ours = _remove_bullet_line(lines, ctx["line"], str(ctx["row"].get("raw") or ""))
+    if removed_ours:
+        queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])
@@ -7814,13 +7818,15 @@ async def proposal_action(request: Request) -> JSONResponse:
             result["promoted"] = False
             result["destination"] = row.get("rehome", {}).get("destination", "")
             result["justified"] = row.get("rehome", {}).get("justified", False)
-        proposal_outcomes.record(
-            kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
-        )
+        if removed_ours:
+            proposal_outcomes.record(
+                kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
+            )
         return JSONResponse({"ok": True, "result": result})
-    proposal_outcomes.record(
-        kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",
-    )
+    if removed_ours:
+        proposal_outcomes.record(
+            kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",
+        )
     return JSONResponse({"ok": True, "result": {"id": pid, "action": "dismiss", "dismissed": True}})
 
 

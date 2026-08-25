@@ -960,6 +960,28 @@ def test_a_batch_rehome_accept_is_recorded_once(tmp_path: Path) -> None:
     assert [(e["kind"], e["action"]) for e in events] == [("rehome", "promoted")]
 
 
+def test_an_accept_that_loses_the_bullet_race_records_nothing(tmp_path: Path, monkeypatch) -> None:
+    """A concurrent resolver (another request, or the CLI) removes the bullet
+    between this request's scan and its write: ``_remove_bullet_line`` matches
+    nothing. The loser must not rewrite the queue around the winner's deletion
+    — and must not record an outcome for a decision it did not carry out."""
+    from ciao.web import routes_api
+
+    config = _config(tmp_path)
+    _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory")
+
+    monkeypatch.setattr(routes_api, "_remove_bullet_line", lambda *a, **k: False)
+    response = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert response.status_code == 200
+    # The queue was left as the winner wrote it, and the loser recorded nothing.
+    queue_path = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    assert "- [memory] Remember the thing" in queue_path.read_text()
+    assert _outcome_events(tmp_path) == []
+
+
 # ---- concurrent queue rewrites ---------------------------------------------
 
 
