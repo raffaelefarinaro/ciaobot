@@ -222,7 +222,7 @@ def _workspace_root(request: Request) -> Path:
     config = request.app.state.config
     workspace = request.query_params.get("workspace", "") or config.primary_workspace()
     if workspace and config.workspace(workspace):
-        return config.agent_root(workspace)
+        return Path(config.agent_root(workspace))
     return Path(config.workspace_root)
 
 
