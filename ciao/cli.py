@@ -2312,6 +2312,15 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    # Pin the outcome log to the same .runtime the server uses before
+    # recording: a CLI run from an arbitrary cwd must not scatter events into
+    # a .runtime beside the shell. Default is this workspace's own .runtime,
+    # matching the --runtime-root help on the audit/receipt commands.
+    proposal_outcomes.configure(
+        _resolve_runtime_root(
+            args.runtime_root if args.runtime_root else workspace / ".runtime"
+        )
+    )
     proposal_outcomes.record(
         kind=kind,
         action="dismissed",
@@ -3427,6 +3436,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help="Runtime root for the outcome log. Defaults to CIAO_RUNTIME_ROOT or <workspace>/.runtime.",
     )
     memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
 

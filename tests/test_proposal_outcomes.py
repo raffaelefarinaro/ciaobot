@@ -195,11 +195,27 @@ def test_cli_dismiss_records_an_agent_outcome(tmp_path: Path, monkeypatch) -> No
     ])
 
     assert rc == 0
-    events = _read_events(tmp_path)
+    # The CLI records into the workspace's own .runtime, not the fixture's
+    # override: a dismissal from an arbitrary cwd must land where the server
+    # tallies it.
+    log = tmp_path / ".runtime" / po.PROPOSAL_OUTCOMES_NAME
+    assert log.is_file()
+    events = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
     assert len(events) == 1
     assert events[0]["action"] == "dismissed"
     assert events[0]["kind"] == "memory"
     assert events[0]["workspace"] == str(tmp_path)
+
+    # --runtime-root overrides the default explicitly.
+    rc2 = cli.main([
+        "memory-proposal-dismiss",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "--runtime-root", str(tmp_path / "custom-runtime"),
+        "durable lesson",
+    ])
+    assert rc2 != 0  # the row is gone, so the second dismiss finds no match
+    assert (tmp_path / "custom-runtime" / po.PROPOSAL_OUTCOMES_NAME).exists() is False
     assert events[0]["via"] == "agent"
 
 
