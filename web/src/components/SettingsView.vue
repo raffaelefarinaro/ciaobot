@@ -3251,6 +3251,10 @@ async function handleClientSecretUpload(event: Event, profileName: string) {
 
 async function startGwsAuth(profileName: string) {
   gwsSavingProfile.value = profileName
+  // A prior one-click failure (e.g. the remote-browser guard) leaves an error
+  // that would otherwise win over the manual-flow box and hide it.
+  delete gwsReloginError.value[profileName]
+  delete gwsReloginPending.value[profileName]
   try {
     const res = await api.post<{ auth_url: string }>('/api/integrations/gws/auth-url', {
       profile: profileName,
