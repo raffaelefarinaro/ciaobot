@@ -3079,13 +3079,14 @@ function gwsReloginHelpUrl(): string {
 
 // The loopback re-login listener binds to the *engine's* 127.0.0.1, so the
 // consent redirect only reaches it when the browser is on the engine host
-// (localhost). From a phone, LAN browser, or client-mode node the popup's
-// redirect would target the client's own loopback and never arrive — those
-// users must use the manual paste flow instead.
+// (localhost) and the integration API is not proxied to a remote host. From a
+// phone, LAN browser, or client-mode node the popup's redirect would target
+// the client's own loopback and never arrive — those users must use the
+// manual paste flow instead.
 function gwsOnEngineHost(): boolean {
-  if (inDesktopApp) return true
+  if (inDesktopApp && !isNodeClient.value) return true
   const host = window.location.hostname
-  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]'
+  return !isNodeClient.value && (host === 'localhost' || host === '127.0.0.1' || host === '[::1]')
 }
 
 async function gwsReloginStart(profileName: string) {
@@ -3122,6 +3123,16 @@ async function gwsReloginStart(profileName: string) {
   }
 }
 
+function gwsClearRelogin(profileName: string) {
+  delete gwsReloginPending.value[profileName]
+  delete gwsReloginError.value[profileName]
+  // The fallback auth URL belongs to a now-finished loopback session; clearing
+  // it keeps the card out of a stale manual-flow state and un-hides the
+  // authenticated controls on success.
+  delete gwsAuthUrls.value[profileName]
+  delete gwsRedirectUrls.value[profileName]
+}
+
 function gwsPollRelogin(profileName: string) {
   if (gwsReloginTimer) return
   gwsReloginTimer = setInterval(async () => {
@@ -3141,30 +3152,30 @@ function gwsPollRelogin(profileName: string) {
           `/api/integrations/gws/relogin/status?profile=${encodeURIComponent(name)}`,
         )
         if (status.status === 'completed') {
-          delete gwsReloginPending.value[name]
-          delete gwsReloginError.value[name]
+          gwsClearRelogin(name)
           await fetchGwsIntegration()
           notifySaved('Google account connected.')
         } else if (status.status === 'error' || status.status === 'none') {
-          delete gwsReloginPending.value[name]
-          gwsReloginError.value[name] =
+          const msg =
             status.error ||
             (status.status === 'none'
               ? 'The sign-in timed out before you finished it. Try again.'
               : 'The sign-in failed.')
+          gwsClearRelogin(name)
+          gwsReloginError.value[name] = msg
           await fetchGwsIntegration()
         }
       } catch (e) {
-        delete gwsReloginPending.value[name]
-        gwsReloginError.value[name] = errorMessage(e, 'Could not check the sign-in status.')
+        const msg = errorMessage(e, 'Could not check the sign-in status.')
+        gwsClearRelogin(name)
+        gwsReloginError.value[name] = msg
       }
     }
   }, 2000)
 }
 
 function gwsReloginCancel(profileName: string) {
-  delete gwsReloginPending.value[profileName]
-  delete gwsReloginError.value[profileName]
+  gwsClearRelogin(profileName)
   api.post('/api/integrations/gws/relogin/cancel', { profile: profileName }).catch(() => {})
 }
 
