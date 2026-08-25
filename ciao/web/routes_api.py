@@ -7376,10 +7376,6 @@ async def proposals_batch(request: Request) -> JSONResponse:
     resolved, error = _resolve_batch(config, ids)
     if error or resolved is None:
         return JSONResponse({"error": error}, status_code=404)
-    # Kept unfiltered: the outcome events at the end need every id the batch
-    # set out to resolve, including rows handled (or refused) above the
-    # grouping, so a lookup survives the reassignments below.
-    requested = list(resolved)
 
     # Re-home rows are MOVES, so they are handled before the queue-file grouping
     # too, and one at a time: each move rewrites references across both vaults, so
@@ -7458,6 +7454,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
     # loser reports success to the client (the row is gone either way) but
     # records no outcome - the winner already did.
     self_request_removed: set[str] = set()
+    recorded: set[str] = set()
 
     for path, entry in by_file.items():
         queue = Path(path)
@@ -7504,6 +7501,27 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 removed_here.add(row["id"])
         queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         self_request_removed.update(removed_here)
+        # Record THIS queue's outcomes immediately after its rewrite lands: a
+        # later file failing to persist must not take already-persisted
+        # resolutions out of the tally — their ids are gone, so a retry can
+        # never re-record them. Rows whose bullet this request did not remove
+        # (a concurrent resolver won) record nothing; the winner already did.
+        for row in entry["rows"]:
+            pid = row["id"]
+            if pid not in removed_here or pid in recorded:
+                continue
+            recorded.add(pid)
+            if not proposal_outcomes.is_extraction_kind(row["kind"]):
+                # Not recorded: this ledger measures the MEMORY extraction
+                # pipeline. Skill proposals come from skill evolution and
+                # rehome rows from vault hygiene.
+                continue
+            proposal_outcomes.record(
+                kind=row["kind"],
+                action="promoted" if action == "accept" else "dismissed",
+                workspace=entry["workspace"],
+                via="pwa",
+            )
         for row in entry["rows"]:
             if action == "accept":
                 accept = proposal_kinds.accept_for(row["kind"])
@@ -7534,38 +7552,6 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 results.append(result)
             else:
                 results.append({"id": row["id"], "action": "dismiss", "dismissed": True})
-
-    # One outcome event per row that actually left the queue. A result with
-    # ``dismissed`` false is an unresolved decision (a failed write, a refused
-    # promotion) and records nothing — the tally measures decisions, not
-    # attempts.
-    by_pid = {ctx["row"]["id"]: ctx for ctx in requested}
-    recorded: set[str] = set()
-    for result in results:
-        if not result.get("dismissed"):
-            continue
-        pid = str(result.get("id") or "")
-        # A successful batch rehome appears twice (its move result above the
-        # grouping AND its bullet-drop result inside it); one decision, one
-        # event.
-        if pid in recorded:
-            continue
-        if pid not in self_request_removed:
-            continue
-        recorded.add(pid)
-        row_ctx = by_pid.get(pid)
-        kind = str(row_ctx["row"].get("kind", "")) if row_ctx else ""
-        if not proposal_outcomes.is_extraction_kind(kind):
-            # Not recorded: this ledger measures the MEMORY extraction
-            # pipeline. Skill proposals come from skill evolution and rehome
-            # rows from vault hygiene (vault_rehome judgement cases).
-            continue
-        proposal_outcomes.record(
-            kind=kind,
-            action="promoted" if action == "accept" else "dismissed",
-            workspace=str(row_ctx["workspace"]) if row_ctx else "",
-            via="pwa",
-        )
     return JSONResponse({"ok": True, "action": action, "results": results})
 
 
