@@ -2739,22 +2739,66 @@ export const useProjectStore = defineStore('projects', () => {
             if (typeof row.i === 'number') posByIndex.set(row.i, pos)
           })
           const merged = local.slice()
+          // Where the un-indexed live tail begins: everything the client
+          // rendered from streaming events (optimistic user bubble, activity
+          // groups, the final answer) sits after the last server-indexed row.
+          let tailStart = merged.length
+          for (let p = merged.length - 1; p >= 0; p--) {
+            if (typeof merged[p].i === 'number') {
+              tailStart = p + 1
+              break
+            }
+          }
+          const sameRow = (row: ChatMessage, item: ChatMessage) =>
+            row.role === item.role
+            && row.content === item.content
+            && (row.tool_name || '') === (item.tool_name || '')
           for (const item of windowRows) {
             const abs = item.i
             if (typeof abs !== 'number') continue
             const pos = posByIndex.get(abs)
             if (pos !== undefined) {
               merged[pos] = item
-            } else if (abs >= cachedEnd) {
-              // Beyond the cached extent: genuinely new tail rows, appended in
-              // the window's own ascending order (after any un-indexed local
-              // rows, which are older than anything arriving now).
-              posByIndex.set(abs, merged.length)
-              merged.push(item)
+              continue
             }
-            // An index below cachedEnd that we don't hold is a hole in the
-            // cache (loadOlderMessages fills those); skip it rather than
-            // appending it out of order at the tail.
+            if (abs < cachedEnd) {
+              // An index below cachedEnd that we don't hold is a hole in the
+              // cache (loadOlderMessages fills those); skip it rather than
+              // appending it out of order at the tail.
+              continue
+            }
+            // A server row the cache holds only as an un-indexed live copy
+            // (optimistic user bubble, streamed activity group or final
+            // answer) must REPLACE that copy, not land next to it. A refresh
+            // while the turn was live (WS reconnect, chat switch back, the
+            // post-result reconcile) otherwise appended the server copy of
+            // the whole turn — the reported "double message", on the user
+            // bubble first and then on the Activity group + answer. Scan the
+            // live tail in order so server rows pair with their own turn's
+            // copies; identical texts pair one-to-one, so a genuine repeat
+            // send keeps both copies countable.
+            let reconciled = false
+            for (let p = tailStart; p < merged.length; p++) {
+              const row = merged[p]
+              if (typeof row.i === 'number') continue
+              if (!sameRow(row, item)) continue
+              // The live copy is the richer one for streamed turns (usage,
+              // phase, duration); the server row contributes only its index.
+              // A user bubble is the exception: the server owns the canonical
+              // turn_index/sent_at, so merge onto the server row.
+              merged[p] = item.role === 'user'
+                ? mergeMessageFields(item, row)
+                : { ...row, i: item.i }
+              posByIndex.set(abs, p)
+              reconciled = true
+              break
+            }
+            if (reconciled) continue
+            // Beyond the cached extent: genuinely new tail rows, appended in
+            // the window's own ascending order (after any un-indexed local
+            // rows, which are older than anything arriving now).
+            posByIndex.set(abs, merged.length)
+            merged.push(item)
           }
           messages.value[chatId] = merged
         }

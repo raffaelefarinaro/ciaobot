@@ -4023,6 +4023,155 @@ describe('envelope history window', () => {
       'one', 'local activity', 'two',
     ])
   })
+
+  test('mid-turn refresh reconciles the live user bubble instead of appending the server copy', async () => {
+    // Repro: a send renders an optimistic bubble, the echo upgrades it with a
+    // turn_index, and a refresh lands mid-turn (WS reconnect, chat switch
+    // back). The server session already holds the user row, the window is
+    // truncated to it by the streaming guard, and the index merge appended
+    // that copy below the live one — the same user turn rendered twice.
+    const store = useProjectStore()
+    const chatId = 'chat-echo-dup'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 4,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    // Live turn: optimistic bubble, then the echo upgrade.
+    store.messages[chatId].push({
+      role: 'user',
+      content: 'follow up',
+      timestamp: '2026-08-25T09:23:00Z',
+    })
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'follow up',
+        turn_index: 1,
+        sent_at: '2026-08-25T09:23:00Z',
+      }),
+    })
+    expect(store.messages[chatId].filter(m => m.content === 'follow up').length).toBe(1)
+
+    // Mid-turn refresh: the session file already holds the user turn, and the
+    // streaming guard truncates the window to end at it.
+    store.projectStreaming[chatId] = true
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'follow up'), role: 'user', turn_index: 1, sent_at: '2026-08-25T09:23:00Z' },
+      { ...row(3, 'Read file.md'), role: 'system', tool_name: '_activity' },
+    ]))
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'follow up',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].i).toBe(2)
+    expect(userMsgs[0].turn_index).toBe(1)
+    // The bubble stays ahead of the live trace, not appended after it.
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'prior question', 'prior reply', 'follow up',
+    ])
+  })
+
+  test('settled-turn refresh reconciles the whole live turn instead of appending its server copy', async () => {
+    // Repro: a turn streams live (user bubble, activity group, final answer
+    // with usage) and the post-result refresh lands once the events socket
+    // already cleared projectStreaming, so nothing truncates the window. The
+    // index merge appended every server row of that turn below the live
+    // copies — the answer rendered twice, each under its own Activity group.
+    const store = useProjectStore()
+    const chatId = 'chat-turn-dup'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 5,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    // The turn renders live: optimistic bubble, streamed activity group, and
+    // the final answer bubble carrying result-event metadata.
+    store.messages[chatId].push(
+      { role: 'user', content: 'do the thing', timestamp: '2026-08-25T09:24:00Z', turn_index: 1 },
+      { role: 'system', content: '⚙️ Read notes.md', timestamp: '2026-08-25T09:24:10Z', tool_name: '_activity' },
+      {
+        role: 'assistant',
+        content: 'Done — the thing is done.',
+        timestamp: '2026-08-25T09:24:55Z',
+        phase: 'final_answer',
+        usage: { input_tokens: '4', output_tokens: '3513' },
+        effective_model: 'claude-opus-5',
+        duration_ms: 55000,
+      },
+    )
+
+    // Settled refresh: projectStreaming already cleared, so the window holds
+    // the full turn with server indices and no usage.
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'do the thing'), role: 'user', turn_index: 1, sent_at: '2026-08-25T09:24:00Z' },
+      { ...row(3, '⚙️ Read notes.md'), role: 'system', tool_name: '_activity' },
+      row(4, 'Done — the thing is done.'),
+    ]))
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'prior question', 'prior reply', 'do the thing', '⚙️ Read notes.md', 'Done — the thing is done.',
+    ])
+    // The surviving answer is the live copy: result metadata survives the
+    // reconcile, only the server index is adopted.
+    const answer = store.messages[chatId][4]
+    expect(answer.i).toBe(4)
+    expect(answer.phase).toBe('final_answer')
+    expect(answer.usage).toEqual({ input_tokens: '4', output_tokens: '3513' })
+    expect(answer.effective_model).toBe('claude-opus-5')
+  })
 })
 
 describe('older history pages', () => {
