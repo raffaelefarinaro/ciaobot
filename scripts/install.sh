@@ -440,6 +440,20 @@ if [ "$no_start" -eq 0 ]; then
         sleep 1
     done
     launchctl kickstart "gui/$uid/Ciaobot" >/dev/null 2>&1 || true
+    # The engine agent was booted out before the bundle swap, and only
+    # `setup --load-launchd` re-registers it — which runs only when a workspace
+    # was recovered. The app re-registers it itself as a further fallback, but
+    # the guarantee belongs here: an updated install must not leave the engine
+    # unloaded, and a missing registration is verifiable without any engine
+    # binary at all.
+    if [ -f "$plist" ] && ! launchctl print "gui/$uid/com.ciao.server" >/dev/null 2>&1; then
+        launchctl enable "gui/$uid/com.ciao.server" >/dev/null 2>&1 || true
+        launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1 || true
+        launchctl kickstart -k "gui/$uid/com.ciao.server" >/dev/null 2>&1 || true
+        if ! launchctl print "gui/$uid/com.ciao.server" >/dev/null 2>&1; then
+            echo "Ciaobot installer: the engine LaunchAgent did not load; open Ciaobot to start the engine" >&2
+        fi
+    fi
     installer_done
 else
     installer_step 96 "leaving the app stopped (--no-start)"
