@@ -2413,3 +2413,83 @@ def test_a_fresh_install_receipt_says_born(tmp_path: Path) -> None:
     receipt = read_receipt(runtime)
     assert receipt["origin"] == "born"
     assert receipt["born_per_root"] is True
+
+
+# -- engine retirement: the startup gate is a no-op once migrated -------------
+
+
+class _MigratedOnlyConfig:
+    """A config that answers ONLY what locating a receipt needs.
+
+    Any other attribute access raises, so a pass proves the migration gate read
+    the receipt instead of falling back into registry or vault-path work.
+    """
+
+    def __init__(self, install_root: Path, runtime_root: Path) -> None:
+        self.workspace_root = install_root
+        self.state_path = runtime_root / "state.json"
+
+    def __getattr__(self, name: str):  # noqa: ANN204 - test double
+        raise AssertionError(
+            f"migrate_if_needed touched config.{name} on a migrated install"
+        )
+
+
+def test_migrate_if_needed_is_a_receipt_read_noop_once_migrated(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Retirement posture: on a migrated (or born-per-root) install the startup
+    auto-migration must cost one receipt file read and nothing else.
+
+    The whole point of keeping `workspace_reroot.py` while retiring its engine is
+    that an all-migrated install never pays for planning or rehearsal again — and
+    never depends on registry or vault-path resolution being healthy to skip it.
+    """
+    from ciao.workspace_reroot import mark_born_per_root
+
+    def _must_not_run(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the migration ran on an all-migrated install")
+
+    install = tmp_path / "install"
+    install.mkdir()
+    runtime = install / ".runtime"
+    mark_born_per_root(install, runtime, ["personal"])
+    before = _tree_hashes(tmp_path)
+    for name in ("apply", "rehearse", "plan"):
+        monkeypatch.setattr(workspace_reroot, name, _must_not_run)
+
+    result = workspace_reroot.migrate_if_needed(_MigratedOnlyConfig(install, runtime))
+
+    assert result == {"status": "already_migrated"}
+    assert _tree_hashes(tmp_path) == before
+
+
+def test_an_unmigrated_install_still_runs_the_real_migration(tmp_path: Path) -> None:
+    """The cheap gate must not become a lockout: a shared-layout install with no
+    migrated receipt still gets the full plan-and-apply path."""
+    from types import SimpleNamespace
+
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(
+        runtime,
+        [
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "work", "vault_root": "memory-vault/work"},
+        ],
+    )
+    config = SimpleNamespace(
+        workspace_root=install,
+        state_path=runtime / "state.json",
+        vault_root=vault,
+        workspace_names=lambda: ["personal", "work"],
+        primary_workspace=lambda: "personal",
+    )
+
+    result = workspace_reroot.migrate_if_needed(config)
+
+    assert result["status"] == "migrated", result.get("refusals")
+    assert not (install / "memory-vault").exists()
+    assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
+    assert (install / "work" / "memory-vault" / "People" / "Peter.md").is_file()
+    # The next start is the no-op.
+    assert workspace_reroot.migrate_if_needed(config) == {"status": "already_migrated"}

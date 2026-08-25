@@ -883,6 +883,14 @@ class ChatInfo:
     handover_messages: list[dict] = field(default_factory=list)
     # True until the first post-handover turn successfully seeds the new
     # provider with `handover_messages` inside the hidden Ciaobot context block.
+    #
+    # Naming note: "handover" here is PROVIDER-session context carry-over — set
+    # by provider switches, forks/continues, and by the workspace re-rooting
+    # (`workspace_reroot.flag_stranded_sessions`) for chats whose old session
+    # was stranded by the move. It has nothing to do with the multi-device
+    # host/client role handover in `ciao/node_state.py`; only the word collides.
+    # The key is persisted in `.runtime/web_projects.json`, so it cannot be
+    # renamed without breaking existing installs.
     handover_context_pending: bool = False
     # Stable routing facts are sent once per provider session. A changed
     # project/workspace digest or a new provider session re-sends them.
