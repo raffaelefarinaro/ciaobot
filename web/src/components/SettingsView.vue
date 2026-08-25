@@ -1103,16 +1103,26 @@
                         <li>Install <code>gws</code> (button below or <code>npm install -g @googleworkspace/cli</code>).</li>
                         <li>Add the account below and give it a short name.</li>
                         <li>
-                          In
-                          <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console &rarr; Credentials</a>,
-                          create an OAuth client (Desktop app, or Web app with redirect URI <code>http://localhost</code>).
+                          Click <strong>Sign in with Google</strong> on the account card and approve access in the browser
+                          tab that opens. It connects automatically (no copy-paste).
                         </li>
-                        <li>Download the JSON file Google gives you (often named like <code>client_secret_….json</code>).</li>
-                        <li>Upload it below as <code>client_secret.json</code>, then click <strong>Connect Google Account</strong>.</li>
                       </ol>
+                      <p><strong>Alternative setups</strong></p>
+                      <ul class="field-info-steps">
+                        <li>
+                          <strong>gcloud (no console needed):</strong> install the
+                          <a href="https://cloud.google.com/sdk/docs/install" target="_blank" rel="noopener noreferrer">gcloud CLI</a>,
+                          authenticate once, then run
+                          <code>scripts/gws-profile.sh &lt;profile&gt; auth setup</code>. Ciaobot auto-detects the account.
+                        </li>
+                        <li>
+                          <strong>Bring your own client:</strong> in
+                          <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console &rarr; Credentials</a>
+                          create an OAuth client (Desktop app), download the JSON, and upload it as <code>client_secret.json</code>.
+                        </li>
+                      </ul>
                       <p>
                         Enable the APIs you need in your GCP project (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks).
-                        Terminal alternative: <code>scripts/gws-profile.sh &lt;profile&gt; auth login --full</code>.
                       </p>
                     </div>
                   </details>
@@ -1256,10 +1266,15 @@
                     <!-- State 1: Needs client_secret.json -->
                     <template v-if="!profile.client_secret_present">
                       <p class="gws-action-hint">
-                        Upload your OAuth <code>client_secret.json</code> to start (see the ⓘ button above for Google Cloud setup steps).
+                        First, create an OAuth client. Easiest: run
+                        <code>scripts/gws-profile.sh {{ profile.name }} auth setup</code>
+                        in a terminal with the
+                        <a :href="gwsReloginHelpUrl()" target="_blank" rel="noopener noreferrer">gcloud CLI</a>
+                        installed — it creates the client for you. Or upload one you made in
+                        <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console</a>.
                       </p>
                       <label class="btn-small file-upload-btn">
-                        Choose JSON file
+                        Upload client_secret.json
                         <input
                           type="file"
                           accept=".json"
@@ -1272,13 +1287,20 @@
 
                     <!-- State 2: Ready to authenticate -->
                     <template v-else-if="!profile.configured">
-                      <div v-if="!gwsAuthUrls[profile.name]" class="gws-btn-group">
+                      <div v-if="!gwsAuthUrls[profile.name] && !gwsReloginPending[profile.name]" class="gws-btn-group">
                         <button
                           class="btn-primary btn-small"
-                          @click="startGwsAuth(profile.name)"
                           :disabled="gwsSavingProfile === profile.name"
+                          @click="gwsReloginStart(profile.name)"
                         >
-                          Connect Google Account
+                          Sign in with Google
+                        </button>
+                        <button
+                          class="btn-small"
+                          :disabled="gwsSavingProfile === profile.name"
+                          @click="startGwsAuth(profile.name)"
+                        >
+                          Manual connect (paste code)
                         </button>
                         <button
                           class="btn-small btn-danger"
@@ -1288,7 +1310,12 @@
                           Remove OAuth Client
                         </button>
                       </div>
-                      <div v-else class="gws-auth-flow-box">
+                      <p v-if="gwsReloginPending[profile.name]" class="gws-action-hint">
+                        Sign-in in progress: complete it in the browser tab that opened. It will connect automatically.
+                        <button class="btn-small" @click="gwsReloginCancel(profile.name)">Cancel</button>
+                      </p>
+                      <p v-else-if="gwsReloginError[profile.name]" class="gws-action-hint hint--warn">{{ gwsReloginError[profile.name] }}</p>
+                      <div v-else-if="gwsAuthUrls[profile.name]" class="gws-auth-flow-box">
                         <p class="gws-flow-step">
                           1. Follow the Google auth flow. If the browser did not open, click here:
                           <a :href="gwsAuthUrls[profile.name]" target="_blank" class="gws-auth-link">Open authorization page</a>
@@ -1327,10 +1354,17 @@
                     <template v-else>
                       <p v-if="profile.needs_relogin" class="gws-action-hint hint--warn">
                         This login has expired or been revoked<span v-if="profile.token_error"> ({{ profile.token_error }})</span>.
-                        Re-authenticate: click <strong>Disconnect Account</strong> then <strong>Connect Google Account</strong>,
-                        or ask the assistant to re-login (it uses the server-managed re-login endpoint).
+                        Sign back in to restore Gmail, Calendar, Drive, and scheduled Google tasks.
                       </p>
-                      <div class="gws-btn-group">
+                      <div v-if="!gwsAuthUrls[profile.name] && !gwsReloginPending[profile.name]" class="gws-btn-group">
+                        <button
+                          v-if="profile.needs_relogin"
+                          class="btn-primary btn-small"
+                          :disabled="gwsSavingProfile === profile.name"
+                          @click="gwsReloginStart(profile.name)"
+                        >
+                          Re-authenticate
+                        </button>
                         <button
                           class="btn-small btn-danger"
                           @click="disconnectGwsProfile(profile.name, false)"
@@ -1347,6 +1381,11 @@
                           Remove Client & Credentials
                         </button>
                       </div>
+                      <p v-if="gwsReloginPending[profile.name]" class="gws-action-hint">
+                        Re-authentication in progress: complete it in the browser tab that opened. It will connect automatically.
+                        <button class="btn-small" @click="gwsReloginCancel(profile.name)">Cancel</button>
+                      </p>
+                      <p v-else-if="gwsReloginError[profile.name]" class="gws-action-hint hint--warn">{{ gwsReloginError[profile.name] }}</p>
                     </template>
                   </div>
                 </div>
@@ -2012,7 +2051,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
@@ -3013,6 +3052,84 @@ async function installGws() {
 const gwsSavingProfile = ref<string | null>(null)
 const gwsAuthUrls = ref<Record<string, string>>({})
 const gwsRedirectUrls = ref<Record<string, string>>({})
+
+// One-click "Sign in with Google" loopback flow (issue #145). Tracks, per
+// profile, whether a server-managed re-login is pending so the Settings card
+// can poll `relogin/status` until it completes instead of copy-pasting a
+// redirect URL. Mirrors the manual JSON-upload flow as the power-user path.
+const gwsReloginPending = ref<Record<string, boolean>>({})
+const gwsReloginError = ref<Record<string, string>>({})
+let gwsReloginTimer: ReturnType<typeof setInterval> | null = null
+
+function gwsReloginHelpUrl(): string {
+  return 'https://cloud.google.com/sdk/docs/install'
+}
+
+async function gwsReloginStart(profileName: string) {
+  gwsReloginError.value[profileName] = ''
+  gwsSavingProfile.value = profileName
+  try {
+    const res = await api.post<{ auth_url: string }>('/api/integrations/gws/relogin/start', {
+      profile: profileName,
+    })
+    gwsReloginPending.value[profileName] = true
+    window.open(res.auth_url, '_blank')
+    gwsPollRelogin(profileName)
+  } catch (e) {
+    gwsReloginError.value[profileName] = errorMessage(e, 'Could not start the sign-in flow.')
+  } finally {
+    gwsSavingProfile.value = null
+  }
+}
+
+function gwsPollRelogin(profileName: string) {
+  if (gwsReloginTimer) return
+  gwsReloginTimer = setInterval(async () => {
+    const pending = Object.entries(gwsReloginPending.value)
+      .filter(([, p]) => p)
+      .map(([name]) => name)
+    if (!pending.length) {
+      if (gwsReloginTimer) {
+        clearInterval(gwsReloginTimer)
+        gwsReloginTimer = null
+      }
+      return
+    }
+    for (const name of pending) {
+      try {
+        const status = await api.get<{ status: string; email?: string; error?: string }>(
+          `/api/integrations/gws/relogin/status?profile=${encodeURIComponent(name)}`,
+        )
+        if (status.status === 'completed') {
+          delete gwsReloginPending.value[name]
+          delete gwsReloginError.value[name]
+          await fetchGwsIntegration()
+          notifySaved('Google account connected.')
+        } else if (status.status === 'error') {
+          delete gwsReloginPending.value[name]
+          gwsReloginError.value[name] = status.error || 'The sign-in failed.'
+          await fetchGwsIntegration()
+        }
+      } catch (e) {
+        delete gwsReloginPending.value[name]
+        gwsReloginError.value[name] = errorMessage(e, 'Could not check the sign-in status.')
+      }
+    }
+  }, 2000)
+}
+
+function gwsReloginCancel(profileName: string) {
+  delete gwsReloginPending.value[profileName]
+  delete gwsReloginError.value[profileName]
+  api.post('/api/integrations/gws/relogin/cancel', { profile: profileName }).catch(() => {})
+}
+
+onUnmounted(() => {
+  if (gwsReloginTimer) {
+    clearInterval(gwsReloginTimer)
+    gwsReloginTimer = null
+  }
+})
 
 async function handleClientSecretUpload(event: Event, profileName: string) {
   const target = event.target as HTMLInputElement
