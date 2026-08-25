@@ -28,7 +28,8 @@ import json
 import logging
 import os
 import time
-from datetime import UTC, datetime, timedelta
+from contextlib import contextmanager
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -91,26 +92,67 @@ def record(
 
     An unknown ``action`` is refused rather than written: the aggregator can
     only fold the two decisions it knows, and a third spelling would silently
-    vanish from every count while claiming to be recorded.
+    vanish from every count while claiming to be recorded. The append and the
+    size-triggered rotation share an inter-process lock, so a rotation can
+    never rewrite away an event another process appended between its read and
+    its write.
     """
     if action not in ACTIONS:
         logger.debug("Refusing to record proposal outcome with action %r", action)
         return
     try:
-        path = _log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "ts": datetime.now(UTC).isoformat(),
-            "workspace": str(workspace or ""),
-            "kind": str(kind or ""),
-            "action": action,
-            "via": str(via or ""),
-        }
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        _trim_if_large(path)
+        with _writer_lock():
+            path = _log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "ts": datetime.now(UTC).isoformat(),
+                "workspace": str(workspace or ""),
+                "kind": str(kind or ""),
+                "action": action,
+                "via": str(via or ""),
+            }
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            _trim_if_large(path)
     except Exception:  # noqa: BLE001 — recording must never break a resolution
         logger.debug("Failed to record proposal outcome", exc_info=True)
+
+
+try:  # pragma: no cover - platform selection
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX degrades to unlocked
+    fcntl = None  # type: ignore[assignment]
+
+_LOCK_NAME = "proposal_outcomes.lock"
+
+
+@contextmanager
+def _writer_lock(exclusive: bool = True):
+    """Serialize writers against each other across processes.
+
+    Every mutation (append + trim + sidecar update) runs under the exclusive
+    lock; :func:`tally` reads under a shared one. On platforms without
+    ``fcntl`` this degrades to unlocked behaviour — same-process callers were
+    already serialized by the event loop.
+    """
+    if fcntl is None:
+        yield
+        return
+    lock_path = _runtime_dir() / _LOCK_NAME
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = lock_path.open("a")
+    except Exception:  # noqa: BLE001 — locking is an optimization, not a gate
+        yield
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
 
 
 def _trim_if_large(path: Path) -> None:
@@ -132,16 +174,35 @@ def _trim_if_large(path: Path) -> None:
 
 _TOTALS_NAME = "proposal_outcomes_totals.json"
 
+# Day-bucket keys live here so a rotation that drops events younger than
+# :data:`RECENT_DAYS` keeps contributing to ``recent_30d``; buckets older than
+# the window are pruned on write.
+_RECENT_KEEP_DAYS = RECENT_DAYS + 1
+
 
 def _totals_path() -> Path:
     return _runtime_dir() / _TOTALS_NAME
 
 
 def _empty_totals() -> dict[str, Any]:
-    return {"promoted": 0, "dismissed": 0, "by_workspace": {}}
+    return {"promoted": 0, "dismissed": 0, "by_workspace": {}, "days": {}}
 
 
-def _read_totals() -> dict[str, Any]:
+def _prune_days(days: dict[str, Any], reference: datetime) -> dict[str, Any]:
+    cutoff_day = (reference - timedelta(days=_RECENT_KEEP_DAYS)).date()
+    kept: dict[str, Any] = {}
+    for day, counts in days.items():
+        try:
+            day_date = date.fromisoformat(str(day))
+        except ValueError:
+            continue
+        if day_date >= cutoff_day and isinstance(counts, dict):
+            kept[str(day)] = counts
+    return kept
+
+
+def _read_totals(reference: datetime | None = None) -> dict[str, Any]:
+    reference = reference or datetime.now(UTC)
     try:
         raw = _totals_path().read_text(encoding="utf-8")
         data = json.loads(raw)
@@ -164,16 +225,32 @@ def _read_totals() -> dict[str, Any]:
             for action in ACTIONS:
                 value = counts.get(action)
                 bucket[action] = value if isinstance(value, int) and value >= 0 else 0
+    days = data.get("days")
+    if isinstance(days, dict):
+        totals["days"] = _prune_days(days, reference)
     return totals
 
 
-def _absorb_dropped_into_totals(dropped_lines: list[str]) -> None:
+def _event_day(raw: Any, reference: datetime) -> str | None:
+    """The UTC calendar day of an event's timestamp, for the day buckets."""
+    parsed = _parsed_ts(raw)
+    if parsed is None:
+        return None
+    return parsed.astimezone(UTC).date().isoformat()
+
+
+def _absorb_dropped_into_totals(
+    dropped_lines: list[str], reference: datetime | None = None
+) -> None:
     """Fold the lines a rotation is about to drop into the sidecar totals.
 
-    Best-effort and idempotent per line set: it runs only inside the trim,
-    immediately before the file is rewritten without those lines.
+    Best-effort: it runs only inside the trim, immediately before the file is
+    rewritten without those lines, and under the same lock as every writer.
+    Lifetime counts and the recent-window day buckets are both carried, so a
+    rotation cannot make history — recent or total — disappear.
     """
-    totals = _read_totals()
+    reference = reference or datetime.now(UTC)
+    totals = _read_totals(reference)
     for line in dropped_lines:
         try:
             event = json.loads(line)
@@ -188,6 +265,11 @@ def _absorb_dropped_into_totals(dropped_lines: list[str]) -> None:
             workspace, {"promoted": 0, "dismissed": 0}
         )
         bucket[action] += 1  # type: ignore[literal-required]
+        day = _event_day(event.get("ts"), reference)
+        if day is not None:
+            day_bucket = totals["days"].setdefault(day, {"promoted": 0, "dismissed": 0})
+            day_bucket[action] += 1  # type: ignore[literal-required]
+    totals["days"] = _prune_days(totals["days"], reference)
     tmp = _totals_path().with_suffix(".json.tmp")
     tmp.write_text(json.dumps(totals, ensure_ascii=False), encoding="utf-8")
     tmp.replace(_totals_path())
@@ -199,9 +281,10 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
     Returns ``{"promoted": n, "dismissed": m, "by_workspace": {name:
     {"promoted": n, "dismissed": m}}, "recent_30d": {"promoted": n,
     "dismissed": m}}``. Lifetime totals are the rotation sidecar plus whatever
-    is still in the log, so trimming never makes history disappear;
-    ``recent_30d`` is derived from the live file only (a 30-day window always
-    is). Malformed lines are skipped, never fatal; an event
+    is still in the log, so trimming never makes history disappear, and
+    ``recent_30d`` adds the sidecar's per-day buckets — a rotation that drops
+    still-recent events cannot make the 30-day count fall either.
+    Malformed lines are skipped, never fatal; an event
     with an unreadable timestamp still counts in the totals, just not in the
     30-day window. Never raises: a broken log degrades to zeros rather than
     failing the page that reads it.
@@ -209,9 +292,9 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
     reference = now or datetime.now(UTC)
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=UTC)
-    cutoff = reference - timedelta(days=RECENT_DAYS)
+    cutoff_day = (reference - timedelta(days=RECENT_DAYS)).date()
 
-    totals = _read_totals()
+    totals = _read_totals(reference)
     by_workspace: dict[str, dict[str, int]] = {
         name: dict(counts) for name, counts in totals["by_workspace"].items()
     }
@@ -220,31 +303,49 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
     def bucket(name: str) -> dict[str, int]:
         return by_workspace.setdefault(name, {"promoted": 0, "dismissed": 0})
 
+    lines: list[str] = []
     try:
-        path = _log_path()
-        if path.exists():
-            with path.open("r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    action = event.get("action")
-                    if action not in ACTIONS:
-                        continue
-                    workspace = str(event.get("workspace") or "")
-                    totals[action] += 1  # type: ignore[literal-required]
-                    bucket(workspace)[action] += 1  # type: ignore[literal-required]
-                    ts = _parsed_ts(event.get("ts"))
-                    if ts is not None and ts >= cutoff:
-                        recent[action] += 1  # type: ignore[literal-required]
+        with _writer_lock(exclusive=False):
+            path = _log_path()
+            if path.exists():
+                with path.open("r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
     except Exception:  # noqa: BLE001 — a broken log is zeros, not a failed page
         logger.debug("Failed to tally proposal outcomes", exc_info=True)
+        lines = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        action = event.get("action")
+        if action not in ACTIONS:
+            continue
+        workspace = str(event.get("workspace") or "")
+        totals[action] += 1  # type: ignore[literal-required]
+        bucket(workspace)[action] += 1  # type: ignore[literal-required]
+        # Live-file rows keep full timestamp precision; only ROTATED events
+        # fall back to day granularity (they live in undated-per-event
+        # buckets).
+        ts = _parsed_ts(event.get("ts"))
+        if ts is not None and ts.astimezone(UTC) >= reference - timedelta(days=RECENT_DAYS):
+            recent[action] += 1  # type: ignore[literal-required]
+
+    # Recent events carried by the rotation sidecar count toward the window
+    # too; buckets older than the window were pruned when the sidecar was
+    # written.
+    for day, counts in totals.get("days", {}).items():
+        if date.fromisoformat(str(day)) >= cutoff_day:
+            for action in ACTIONS:
+                value = counts.get(action)
+                if isinstance(value, int) and value > 0:
+                    recent[action] += value
 
     return {
         "promoted": totals["promoted"],

@@ -412,3 +412,48 @@ def test_cli_dismiss_of_a_rehome_row_records_nothing(
 
     assert rc == 0
     assert not (tmp_path / ".runtime" / po.PROPOSAL_OUTCOMES_NAME).exists()
+
+
+def test_rotation_keeps_still_recent_events_in_the_30d_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A trim that drops events younger than the window must not make the
+    30-day count fall: the sidecar carries per-day buckets that tally() adds
+    back."""
+    monkeypatch.setattr(po, "MAX_BYTES", 4 * 1024)
+    fresh = datetime.now(UTC).isoformat()
+    with po._log_path().open("w", encoding="utf-8") as f:
+        # 2000 recent promoted events + one recent dismissal; the trim drops
+        # the oldest promoted lines.
+        for _ in range(po.KEEP_LINES):
+            f.write(json.dumps({
+                "ts": fresh, "workspace": "personal",
+                "kind": "memory", "action": "promoted", "via": "pwa",
+            }) + "\n")
+        f.write(json.dumps({
+            "ts": fresh, "workspace": "work",
+            "kind": "learnings", "action": "dismissed", "via": "pwa",
+        }) + "\n")
+        f.write(json.dumps({
+            "ts": (datetime.now(UTC) - timedelta(days=90)).isoformat(),
+            "workspace": "personal",
+            "kind": "memory", "action": "promoted", "via": "pwa",
+        }) + "\n")
+
+    report = po.tally()
+
+    assert report["promoted"] == po.KEEP_LINES + 1
+    assert report["dismissed"] == 1
+    assert report["recent_30d"]["promoted"] == po.KEEP_LINES
+    assert report["recent_30d"]["dismissed"] == 1
+
+
+def test_record_works_without_fcntl(tmp_path: Path, monkeypatch) -> None:
+    """On platforms without fcntl the lock degrades to unlocked behaviour and
+    recording keeps working."""
+    monkeypatch.setattr(po, "fcntl", None)
+
+    po.record("memory", "promoted", workspace="personal")
+
+    report = po.tally()
+    assert report["promoted"] == 1
