@@ -1471,10 +1471,16 @@ fn start_engine_if_needed(app: AppHandle, runtime: RuntimeConfig) {
     }
     thread::spawn(move || {
         let Some(binary) = service::resolve_ciao(env::var("PATH").ok().as_deref()) else {
-            tray_log(
-                &app,
-                "engine start FAILED: the ciao executable was not found",
-            );
+            // The running bundle has no resolvable engine (a repo-built
+            // `target/release/bundle` app, for one), but the server plist on
+            // disk still names the installed engine. Re-register it through
+            // launchd instead of giving up — giving up left the splash stuck
+            // on "Waiting for the engine" for the whole session.
+            match service::bootstrap_existing_service(&runtime.server_plist) {
+                Ok(()) => tray_log(&app, "engine start: re-registered the existing LaunchAgent"),
+                Err(error) => tray_log(&app, &format!("engine start FAILED: {error}")),
+            }
+            let _ = refresh_tray(&app);
             return;
         };
         // Same reason as the bootstrap path: without this, an engine that fails
